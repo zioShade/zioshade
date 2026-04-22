@@ -161,8 +161,11 @@ const Parser = struct {
             return self.parseStructDecl();
         }
 
-        const qualifier = self.tryQualifier();
+        var qualifier = self.tryQualifier();
         const layout = try self.tryLayout();
+        if (layout != null) {
+            qualifier = self.tryQualifier() orelse qualifier;
+        }
         const ty = self.tryType() orelse return error.UnexpectedToken;
         const name_tok = self.current();
         if (name_tok.tag != .identifier) return error.UnexpectedToken;
@@ -472,17 +475,17 @@ const Parser = struct {
             .kw_discard => {
                 const tok = self.advance();
                 _ = try self.expect(.semicolon);
-                return .{ .tag = .discard_stmt, .loc = self.nodeLoc(tok) };
+                return .{ .tag = .discard_stmt, .loc = self.nodeLoc(tok), .data = .{} };
             },
             .kw_break => {
                 const tok = self.advance();
                 _ = try self.expect(.semicolon);
-                return .{ .tag = .break_stmt, .loc = self.nodeLoc(tok) };
+                return .{ .tag = .break_stmt, .loc = self.nodeLoc(tok), .data = .{} };
             },
             .kw_continue => {
                 const tok = self.advance();
                 _ = try self.expect(.semicolon);
-                return .{ .tag = .continue_stmt, .loc = self.nodeLoc(tok) };
+                return .{ .tag = .continue_stmt, .loc = self.nodeLoc(tok), .data = .{} };
             },
             else => self.parseExprStmt(),
         };
@@ -606,7 +609,7 @@ const Parser = struct {
         const tok = self.advance(); // 'return'
         if (self.current().tag == .semicolon) {
             _ = self.advance();
-            return .{ .tag = .return_stmt, .loc = self.nodeLoc(tok) };
+            return .{ .tag = .return_stmt, .loc = self.nodeLoc(tok), .data = .{} };
         }
         const expr = try self.parseExpression();
         _ = try self.expect(.semicolon);
@@ -1045,7 +1048,7 @@ const Parser = struct {
             },
             else => {
                 _ = self.advance();
-                return .{ .tag = .identifier, .loc = self.nodeLoc(tok) };
+                return .{ .tag = .identifier, .loc = self.nodeLoc(tok), .data = .{} };
             },
         }
     }

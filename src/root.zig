@@ -6,6 +6,7 @@ pub const ast = @import("ast.zig");
 pub const ir = @import("ir.zig");
 pub const spirv = @import("spirv.zig");
 pub const parser = @import("parser.zig");
+pub const semantic = @import("semantic.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -68,6 +69,17 @@ pub fn compileToSPIRVWithDiagnostics(
 ) Error![]const u32 {
     _ = diagnostics;
     return compileToSPIRV(alloc, source, options);
+}
+
+test {
+    _ = diagnostic;
+    _ = lexer;
+    _ = preprocessor;
+    _ = ast;
+    _ = ir;
+    _ = spirv;
+    _ = parser;
+    _ = semantic;
 }
 
 test "stub compiles" {

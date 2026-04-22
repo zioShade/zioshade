@@ -107,7 +107,7 @@ pub const Type = union(enum) {
     sampler2d,
     sampler_cube,
     named: []const u8,
-    array: struct { base: Type, size: u32 },
+    array: struct { base: *const Type, size: u32 },
 
     pub fn scalarSize(self: Type) u32 {
         return switch (self) {
@@ -181,7 +181,7 @@ pub const Type = union(enum) {
             .mat2x2, .mat2x3, .mat2x4,
             .mat3x2, .mat3x3, .mat3x4,
             .mat4x2, .mat4x3, .mat4x4 => .float,
-            .array => |a| a.base,
+            .array => |a| a.base.*,
             else => self,
         };
     }
