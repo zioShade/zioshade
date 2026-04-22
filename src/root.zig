@@ -4,6 +4,7 @@ pub const lexer = @import("lexer.zig");
 pub const preprocessor = @import("preprocessor.zig");
 pub const ast = @import("ast.zig");
 pub const ir = @import("ir.zig");
+pub const spirv = @import("spirv.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -49,11 +50,11 @@ pub fn compileToSPIRV(
 /// Cross-compile SPIR-V binary to GLSL source.
 pub fn spirvToGLSL(
     alloc: std.mem.Allocator,
-    spirv: []const u32,
+    spirv_words: []const u32,
     options: CrossCompileOptions,
 ) Error![:0]const u8 {
     _ = alloc;
-    _ = spirv;
+    _ = spirv_words;
     _ = options;
     return error.CodegenFailed;
 }
