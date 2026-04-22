@@ -143,6 +143,163 @@ const Codegen = struct {
         }
     }
 
+    fn ensureType(self: *Codegen, ty: ast.Type) error{OutOfMemory}!u32 {
+        if (self.type_cache.get(ty)) |id| return id;
+        const id = self.allocId();
+        try self.type_cache.put(self.alloc, ty, id);
+        switch (ty) {
+            .void => {
+                try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.TypeVoid)));
+                try self.emitWord(id);
+            },
+            .bool => {
+                try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.TypeBool)));
+                try self.emitWord(id);
+            },
+            .int => {
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeInt)));
+                try self.emitWord(id);
+                try self.emitWord(32); // bit width
+                try self.emitWord(1); // signed
+            },
+            .uint => {
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeInt)));
+                try self.emitWord(id);
+                try self.emitWord(32);
+                try self.emitWord(0); // unsigned
+            },
+            .float => {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeFloat)));
+                try self.emitWord(id);
+                try self.emitWord(32);
+            },
+            .double => {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeFloat)));
+                try self.emitWord(id);
+                try self.emitWord(64);
+            },
+            .vec2, .vec3, .vec4,
+            .ivec2, .ivec3, .ivec4,
+            .bvec2, .bvec3, .bvec4,
+            .uvec2, .uvec3, .uvec4 => {
+                const elem_type = try self.ensureType(ty.elementType());
+                const count = ty.numComponents();
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeVector)));
+                try self.emitWord(id);
+                try self.emitWord(elem_type);
+                try self.emitWord(count);
+            },
+            .mat2, .mat3, .mat4,
+            .mat2x2, .mat2x3, .mat2x4,
+            .mat3x2, .mat3x3, .mat3x4,
+            .mat4x2, .mat4x3, .mat4x4 => {
+                const col_type = try self.ensureType(switch (ty) {
+                    .mat2, .mat2x2 => ast.Type.vec2,
+                    .mat2x3 => ast.Type.vec3,
+                    .mat2x4 => ast.Type.vec4,
+                    .mat3x2 => ast.Type.vec2,
+                    .mat3, .mat3x3 => ast.Type.vec3,
+                    .mat3x4 => ast.Type.vec4,
+                    .mat4x2 => ast.Type.vec2,
+                    .mat4x3 => ast.Type.vec3,
+                    .mat4, .mat4x4 => ast.Type.vec4,
+                    else => unreachable,
+                });
+                const num_cols = ty.numComponents() / switch (ty) {
+                    .mat2, .mat2x2 => 2,
+                    .mat2x3 => 3,
+                    .mat2x4 => 4,
+                    .mat3x2 => 2,
+                    .mat3, .mat3x3 => 3,
+                    .mat3x4 => 4,
+                    .mat4x2 => 2,
+                    .mat4x3 => 3,
+                    .mat4, .mat4x4 => 4,
+                    else => unreachable,
+                };
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeMatrix)));
+                try self.emitWord(id);
+                try self.emitWord(col_type);
+                try self.emitWord(num_cols);
+            },
+            .sampler2d => {
+                const float_id = try self.ensureType(.float);
+                const image_id = self.allocId();
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(image_id);
+                try self.emitWord(float_id);
+                try self.emitWord(1); // Dim = 2D
+                try self.emitWord(0); // Not depth
+                try self.emitWord(0); // Not arrayed
+                try self.emitWord(1); // Is multisampled
+                try self.emitWord(1); // Sampled = 1 (yes)
+                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitWord(id);
+                try self.emitWord(image_id);
+            },
+            .sampler_cube => {
+                const float_id = try self.ensureType(.float);
+                const image_id = self.allocId();
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(image_id);
+                try self.emitWord(float_id);
+                try self.emitWord(3); // Dim = Cube
+                try self.emitWord(0);
+                try self.emitWord(0);
+                try self.emitWord(1);
+                try self.emitWord(1);
+                try self.emitWord(0);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitWord(id);
+                try self.emitWord(image_id);
+            },
+            .named => |name| {
+                const td = self.module.types.get(name) orelse return id;
+                var member_ids = std.ArrayList(u32).init(self.alloc);
+                defer member_ids.deinit();
+                for (td.members) |member| {
+                    try member_ids.append(try self.ensureType(member.ty));
+                }
+                const word_count: u16 = 2 + @as(u16, @intCast(member_ids.items.len));
+                try self.emitWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.TypeStruct)));
+                try self.emitWord(id);
+                for (member_ids.items) |mid| {
+                    try self.emitWord(mid);
+                }
+            },
+            .array => |arr| {
+                const base_id = try self.ensureType(arr.base.*);
+                const const_id = try self.emitIntConstant(arr.size);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeArray)));
+                try self.emitWord(id);
+                try self.emitWord(base_id);
+                try self.emitWord(const_id);
+            },
+        }
+        return id;
+    }
+
+    fn ensurePointerType(self: *Codegen, base_type: ast.Type, storage_class: ir.SPIRVStorageClass) error{OutOfMemory}!u32 {
+        const base_id = try self.ensureType(base_type);
+        const ptr_id = self.allocId();
+        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
+        try self.emitWord(ptr_id);
+        try self.emitWord(@intFromEnum(storage_class));
+        try self.emitWord(base_id);
+        return ptr_id;
+    }
+
+    fn emitIntConstant(self: *Codegen, val: u32) error{OutOfMemory}!u32 {
+        const int_type_id = try self.ensureType(.uint);
+        const const_id = self.allocId();
+        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+        try self.emitWord(int_type_id);
+        try self.emitWord(const_id);
+        try self.emitWord(val);
+        return const_id;
+    }
+
     // Stub methods — implemented in subsequent tasks
     fn emitNames(self: *Codegen) !void {
         _ = self;
@@ -151,7 +308,15 @@ const Codegen = struct {
         _ = self;
     }
     fn emitTypesAndConstants(self: *Codegen) !void {
-        _ = self;
+        for (self.module.globals) |global| {
+            _ = try self.ensureType(global.ty);
+        }
+        for (self.module.functions) |func| {
+            _ = try self.ensureType(func.return_type);
+            for (func.params) |param| {
+                _ = try self.ensureType(param.ty);
+            }
+        }
     }
     fn emitGlobals(self: *Codegen) !void {
         _ = self;
