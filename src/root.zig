@@ -5,6 +5,7 @@ pub const preprocessor = @import("preprocessor.zig");
 pub const ast = @import("ast.zig");
 pub const ir = @import("ir.zig");
 pub const spirv = @import("spirv.zig");
+pub const parser = @import("parser.zig");
 
 pub const Error = error{
     OutOfMemory,
