@@ -109,7 +109,6 @@ const Codegen = struct {
             .fragment => .Fragment,
             .compute => .GLCompute,
             .geometry => .Geometry,
-            else => .Fragment,
         };
         const entry = self.findEntryPoint() orelse return;
         const entry_id = if (entry.result_id != 0) entry.result_id else self.allocId();
@@ -120,7 +119,7 @@ const Codegen = struct {
         try self.emitWord(entry_id);
         try self.emitStringLiteral(name);
 
-        if (stage == 1) { // fragment
+        if (stage == .fragment) {
             try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
             try self.emitWord(entry_id);
             try self.emitWord(@intFromEnum(spirv.ExecutionMode.OriginUpperLeft));
@@ -676,7 +675,7 @@ test "codegen: header encoding" {
     var module = try semantic.analyze(alloc, &root);
     defer module.deinit();
 
-    const result = try generate(alloc, &module, 1, 5); // fragment=1, @"1.5"=5
+    const result = try generate(alloc, &module, .fragment, .@"1.5");
     defer alloc.free(result);
 
     try std.testing.expectEqual(@as(u32, spirv.MAGIC), result[0]);
@@ -696,7 +695,7 @@ test "codegen: capabilities emitted" {
     var module = try semantic.analyze(alloc, &root);
     defer module.deinit();
 
-    const result = try generate(alloc, &module, 1, 5); // fragment=1, @"1.5"=5
+    const result = try generate(alloc, &module, .fragment, .@"1.5");
     defer alloc.free(result);
 
     // Word 5 should be OpCapability header (word_count=2, opcode=17)
