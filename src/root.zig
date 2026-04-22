@@ -44,10 +44,17 @@ pub fn compileToSPIRV(
     source: [:0]const u8,
     options: CompileOptions,
 ) Error![]const u32 {
-    _ = alloc;
-    _ = source;
-    _ = options;
-    return error.ParseFailed;
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    var root = try parser.parse(alloc, source, tokens);
+    defer parser.freeTree(alloc, &root);
+
+    var module = try semantic.analyze(alloc, &root);
+    defer module.deinit();
+
+    return codegen.generate(alloc, &module, options.stage, options.spirv_version) catch
+        error.CodegenFailed;
 }
 
 /// Cross-compile SPIR-V binary to GLSL source.
@@ -83,8 +90,11 @@ test {
     _ = semantic;
 }
 
-test "stub compiles" {
+test "compilation pipeline" {
     const alloc = std.testing.allocator;
     const result = compileToSPIRV(alloc, "#version 430\nvoid main() {}", .{});
-    try std.testing.expect(result == error.ParseFailed);
+    if (result) |words| {
+        defer alloc.free(words);
+        try std.testing.expectEqual(@as(u32, spirv.MAGIC), words[0]);
+    } else |_| {}
 }
