@@ -1,0 +1,218 @@
+const std = @import("std");
+
+pub const Root = struct {
+    version: ?u32,
+    body: []const Node,
+    alloc: std.mem.Allocator,
+
+    pub fn deinit(self: *Root) void {
+        self.alloc.free(self.body);
+    }
+};
+
+pub const Node = struct {
+    tag: Tag,
+    loc: Loc,
+    data: Data,
+
+    pub const Loc = struct {
+        line: u32,
+        column: u32,
+    };
+
+    pub const Tag = enum {
+        precision_decl,
+        var_decl,
+        var_decl_multi,
+        uniform_decl,
+        uniform_block,
+        in_decl,
+        out_decl,
+        layout_decl,
+        struct_decl,
+        function_decl,
+        function_prototype,
+        block,
+        if_stmt,
+        for_stmt,
+        while_stmt,
+        do_while_stmt,
+        return_stmt,
+        discard_stmt,
+        break_stmt,
+        continue_stmt,
+        expr_stmt,
+        int_literal,
+        uint_literal,
+        float_literal,
+        bool_literal,
+        identifier,
+        index_access,
+        member_access,
+        swizzle_access,
+        func_call,
+        type_constructor,
+        unary_op,
+        binary_op,
+        ternary_op,
+        assign_op,
+        compound_assign,
+        post_increment,
+        post_decrement,
+        pre_increment,
+        pre_decrement,
+        group,
+    };
+
+    pub const Data = struct {
+        op: ?Op = null,
+        int_val: i64 = 0,
+        float_val: f64 = 0,
+        name: []const u8 = "",
+        ty: ?Type = null,
+        children: []const Node = &.{},
+        qualifier: ?Qualifier = null,
+        layout: ?Layout = null,
+        members: []const StructMember = &.{},
+        params: []const FunctionParam = &.{},
+    };
+};
+
+pub const Op = enum {
+    add, sub, mul, div, mod,
+    eq, neq, lt, gt, lte, gte,
+    logical_and, logical_or, logical_not,
+    bit_and, bit_or, bit_xor, bit_not,
+    lshift, rshift,
+    assign,
+    add_assign, sub_assign, mul_assign, div_assign, mod_assign,
+    and_assign, or_assign, xor_assign, lshift_assign, rshift_assign,
+};
+
+pub const Type = union(enum) {
+    void,
+    bool,
+    int,
+    uint,
+    float,
+    double,
+    vec2, vec3, vec4,
+    ivec2, ivec3, ivec4,
+    bvec2, bvec3, bvec4,
+    uvec2, uvec3, uvec4,
+    mat2, mat3, mat4,
+    mat2x2, mat2x3, mat2x4,
+    mat3x2, mat3x3, mat3x4,
+    mat4x2, mat4x3, mat4x4,
+    sampler2d,
+    sampler_cube,
+    named: []const u8,
+    array: struct { base: Type, size: u32 },
+
+    pub fn scalarSize(self: Type) u32 {
+        return switch (self) {
+            .bool => 1,
+            .int, .uint => 4,
+            .float => 4,
+            .double => 8,
+            .void, .sampler2d, .sampler_cube, .named, .array => 0,
+            else => 4,
+        };
+    }
+
+    pub fn numComponents(self: Type) u32 {
+        return switch (self) {
+            .void => 0,
+            .bool, .int, .uint, .float, .double => 1,
+            .vec2, .ivec2, .bvec2, .uvec2 => 2,
+            .vec3, .ivec3, .bvec3, .uvec3 => 3,
+            .vec4, .ivec4, .bvec4, .uvec4 => 4,
+            .mat2, .mat2x2 => 4,
+            .mat3, .mat3x3 => 9,
+            .mat4, .mat4x4 => 16,
+            .mat2x3 => 6, .mat2x4 => 8,
+            .mat3x2 => 6, .mat3x4 => 12,
+            .mat4x2 => 8, .mat4x3 => 12,
+            .sampler2d, .sampler_cube, .named, .array => 0,
+        };
+    }
+
+    pub fn isScalar(self: Type) bool {
+        return switch (self) {
+            .bool, .int, .uint, .float, .double => true,
+            else => false,
+        };
+    }
+
+    pub fn isVector(self: Type) bool {
+        return switch (self) {
+            .vec2, .vec3, .vec4,
+            .ivec2, .ivec3, .ivec4,
+            .bvec2, .bvec3, .bvec4,
+            .uvec2, .uvec3, .uvec4 => true,
+            else => false,
+        };
+    }
+
+    pub fn isMatrix(self: Type) bool {
+        return switch (self) {
+            .mat2, .mat3, .mat4,
+            .mat2x2, .mat2x3, .mat2x4,
+            .mat3x2, .mat3x3, .mat3x4,
+            .mat4x2, .mat4x3, .mat4x4 => true,
+            else => false,
+        };
+    }
+
+    pub fn isSampler(self: Type) bool {
+        return switch (self) {
+            .sampler2d, .sampler_cube => true,
+            else => false,
+        };
+    }
+
+    pub fn elementType(self: Type) Type {
+        return switch (self) {
+            .vec2, .vec3, .vec4 => .float,
+            .ivec2, .ivec3, .ivec4 => .int,
+            .bvec2, .bvec3, .bvec4 => .bool,
+            .uvec2, .uvec3, .uvec4 => .uint,
+            .mat2, .mat3, .mat4,
+            .mat2x2, .mat2x3, .mat2x4,
+            .mat3x2, .mat3x3, .mat3x4,
+            .mat4x2, .mat4x3, .mat4x4 => .float,
+            .array => |a| a.base,
+            else => self,
+        };
+    }
+};
+
+pub const Qualifier = packed struct {
+    is_const: bool = false,
+    is_in: bool = false,
+    is_out: bool = false,
+    is_uniform: bool = false,
+    is_inout: bool = false,
+};
+
+pub const Layout = struct {
+    location: ?u32 = null,
+    binding: ?u32 = null,
+    set: ?u32 = null,
+    std140: bool = false,
+    std430: bool = false,
+    push_constant: bool = false,
+};
+
+pub const StructMember = struct {
+    name: []const u8,
+    ty: Type,
+    qualifier: ?Qualifier = null,
+    layout: ?Layout = null,
+};
+
+pub const FunctionParam = struct {
+    name: []const u8,
+    ty: Type,
+    qualifier: ?Qualifier = null,
+};
