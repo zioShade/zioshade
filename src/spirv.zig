@@ -43,25 +43,25 @@ pub const Op = enum(u16) {
     VectorShuffle = 79,
     CompositeConstruct = 80,
     CompositeExtract = 81,
+    SampledImage = 86,
+    ImageSampleImplicitLod = 87,
+    ImageFetch = 95,
+    ConvertFToS = 110,
+    ConvertSToF = 111,
+    Bitcast = 124,
     SNegate = 126,
     FNegate = 127,
     IAdd = 128,
-    ISub = 129,
-    IMul = 130,
-    SDiv = 131,
-    UDiv = 132,
-    SRem = 133,
-    URem = 134,
-    FAdd = 137,
-    FSub = 138,
-    FMul = 139,
-    FDiv = 140,
-    FRem = 141,
-    ConvertFToU = 109,
-    ConvertFToS = 110,
-    ConvertUToF = 111,
-    ConvertSToF = 112,
-    Bitcast = 124,
+    FAdd = 129,
+    ISub = 130,
+    FMul = 131,
+    IMul = 132,
+    UDiv = 134,
+    SDiv = 135,
+    FDiv = 136,
+    UMod = 137,
+    SRem = 138,
+    FRem = 140,
     VectorTimesScalar = 142,
     MatrixTimesScalar = 143,
     VectorTimesMatrix = 144,
@@ -69,31 +69,41 @@ pub const Op = enum(u16) {
     MatrixTimesMatrix = 146,
     OuterProduct = 147,
     Dot = 148,
-    Transpose = 149,
-    LogicalNot = 154,
-    LogicalAnd = 155,
-    LogicalOr = 156,
-    IEqual = 161,
-    INotEqual = 162,
-    SLessThan = 163,
-    ULessThan = 164,
-    SGreaterThan = 165,
-    UGreaterThan = 166,
-    SLessThanEqual = 167,
-    ULessThanEqual = 168,
-    SGreaterThanEqual = 169,
+    LogicalOr = 166,
+    LogicalAnd = 167,
+    LogicalNot = 168,
     Select = 169,
-    FOrdEqual = 178,
-    FOrdNotEqual = 180,
-    FOrdLessThan = 182,
-    FOrdGreaterThan = 184,
-    FOrdLessThanEqual = 186,
-    FOrdGreaterThanEqual = 188,
-    ImageSampleImplicitLod = 87,
-    ImageFetch = 95,
+    IEqual = 170,
+    INotEqual = 171,
+    UGreaterThan = 172,
+    SGreaterThan = 173,
+    UGreaterThanEqual = 174,
+    SGreaterThanEqual = 175,
+    ULessThan = 176,
+    SLessThan = 177,
+    ULessThanEqual = 178,
+    SLessThanEqual = 179,
+    FOrdEqual = 180,
+    FOrdNotEqual = 182,
+    FOrdLessThan = 184,
+    FOrdGreaterThan = 186,
+    FOrdLessThanEqual = 188,
+    FOrdGreaterThanEqual = 190,
+    ShiftRightLogical = 194,
+    ShiftRightArithmetic = 195,
+    ShiftLeftLogical = 196,
+    BitwiseOr = 197,
+    BitwiseXor = 198,
+    BitwiseAnd = 199,
+    Not = 200,
+    LoopMerge = 246,
+    SelectionMerge = 247,
     Label = 248,
-    Return = 57,
-    Branch = 57,
+    Branch = 249,
+    BranchConditional = 250,
+    Kill = 252,
+    Return = 253,
+    ReturnValue = 254,
     _,
 };
 
@@ -112,15 +122,47 @@ pub const BuiltIn = enum(u32) {
     _,
 };
 
+pub const ExecutionModel = enum(u32) {
+    Vertex = 0,
+    TessellationControl = 1,
+    TessellationEvaluation = 2,
+    Geometry = 3,
+    Fragment = 4,
+    GLCompute = 5,
+    _,
+};
+
+pub const StorageClass = enum(u32) {
+    UniformConstant = 0,
+    Input = 1,
+    Uniform = 2,
+    Output = 3,
+    Workgroup = 4,
+    CrossWorkgroup = 5,
+    Private = 6,
+    Function = 7,
+    Generic = 8,
+    PushConstant = 9,
+    StorageBuffer = 12,
+    _,
+};
+
 pub const Decoration = enum(u32) {
     block = 2,
     row_major = 3,
+    built_in = 11,
     array_stride = 6,
     matrix_stride = 7,
     location = 30,
     binding = 33,
     descriptor_set = 34,
     offset = 35,
+    _,
+};
+
+pub const ExecutionMode = enum(u32) {
+    OriginUpperLeft = 7,
+    LocalSize = 17,
     _,
 };
 
@@ -196,4 +238,14 @@ test "magic number" {
 
 test "version encoding" {
     try std.testing.expectEqual(@as(u32, 0x00010500), encodeVersion(1, 5, 0));
+}
+
+test "opcode values match SPIR-V spec" {
+    try std.testing.expectEqual(@as(u16, 249), @intFromEnum(Op.Branch));
+    try std.testing.expectEqual(@as(u16, 253), @intFromEnum(Op.Return));
+    try std.testing.expectEqual(@as(u16, 254), @intFromEnum(Op.ReturnValue));
+    try std.testing.expectEqual(@as(u16, 57), @intFromEnum(Op.FunctionCall));
+    try std.testing.expectEqual(@as(u16, 128), @intFromEnum(Op.IAdd));
+    try std.testing.expectEqual(@as(u16, 169), @intFromEnum(Op.Select));
+    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(Op.Not));
 }
