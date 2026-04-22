@@ -300,13 +300,52 @@ const Codegen = struct {
         return const_id;
     }
 
-    // Stub methods — implemented in subsequent tasks
     fn emitNames(self: *Codegen) !void {
-        _ = self;
+        for (self.module.globals) |global| {
+            try self.emitName(global.result_id, global.name);
+        }
+        for (self.module.functions) |func| {
+            try self.emitName(func.result_id, func.name);
+        }
     }
+
+    fn emitName(self: *Codegen, id: u32, name: []const u8) !void {
+        const word_count: u16 = 2 + @as(u16, @intCast(std.math.divCeil(usize, name.len + 1, 4) catch unreachable));
+        try self.emitWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.Name)));
+        try self.emitWord(id);
+        try self.emitStringLiteral(name);
+    }
+
     fn emitDecorations(self: *Codegen) !void {
-        _ = self;
+        for (self.module.globals) |global| {
+            if (global.layout) |layout| {
+                if (layout.location) |loc| {
+                    try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.location), loc);
+                }
+                if (layout.binding) |binding| {
+                    try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.binding), binding);
+                }
+                if (layout.set) |set| {
+                    try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.descriptor_set), set);
+                }
+            }
+            if (std.mem.eql(u8, global.name, "gl_FragCoord")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.frag_coord));
+            }
+            if (std.mem.eql(u8, global.name, "gl_FragColor")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.frag_color));
+            }
+        }
     }
+
+    fn emitDecorate(self: *Codegen, target_id: u32, decoration: u32, extra: u32) !void {
+        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Decorate)));
+        try self.emitWord(target_id);
+        try self.emitWord(decoration);
+        try self.emitWord(extra);
+    }
+
+    // Stub methods — implemented in subsequent tasks
     fn emitTypesAndConstants(self: *Codegen) !void {
         for (self.module.globals) |global| {
             _ = try self.ensureType(global.ty);
