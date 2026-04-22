@@ -1,5 +1,6 @@
 const std = @import("std");
 pub const diagnostic = @import("diagnostic.zig");
+pub const lexer = @import("lexer.zig");
 
 pub const Error = error{
     OutOfMemory,
