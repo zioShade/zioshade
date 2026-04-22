@@ -7,6 +7,7 @@ pub const ir = @import("ir.zig");
 pub const spirv = @import("spirv.zig");
 pub const parser = @import("parser.zig");
 pub const semantic = @import("semantic.zig");
+pub const codegen = @import("codegen.zig");
 
 pub const Error = error{
     OutOfMemory,
