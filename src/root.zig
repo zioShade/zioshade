@@ -44,16 +44,18 @@ pub fn compileToSPIRV(
     source: [:0]const u8,
     options: CompileOptions,
 ) Error![]const u32 {
-    const tokens = try lexer.tokenize(alloc, source);
+    const tokens = lexer.tokenize(alloc, source) catch return error.LexFailed;
     defer alloc.free(tokens);
 
-    var root = try parser.parse(alloc, source, tokens);
-    defer parser.freeTree(alloc, &root);
+    var root_node = parser.parse(alloc, source, tokens) catch return error.ParseFailed;
+    defer parser.freeTree(alloc, &root_node);
 
-    var module = try semantic.analyze(alloc, &root);
+    var module = semantic.analyze(alloc, &root_node) catch return error.SemanticFailed;
     defer module.deinit();
 
-    return codegen.generate(alloc, &module, options.stage, options.spirv_version) catch
+    const stage: u32 = @intFromEnum(options.stage);
+    const spirv_ver: u32 = @intFromEnum(options.spirv_version);
+    return codegen.generate(alloc, &module, stage, spirv_ver) catch
         error.CodegenFailed;
 }
 
@@ -97,4 +99,32 @@ test "compilation pipeline" {
         defer alloc.free(words);
         try std.testing.expectEqual(@as(u32, spirv.MAGIC), words[0]);
     } else |_| {}
+}
+
+test "compile minimal fragment shader" {
+    const alloc = std.testing.allocator;
+    const result = compileToSPIRV(alloc, "#version 430\nvoid main() {}", .{});
+    if (result) |words| {
+        defer alloc.free(words);
+        try std.testing.expect(words.len >= 5);
+        try std.testing.expectEqual(@as(u32, spirv.MAGIC), words[0]);
+    } else |_| {
+        try std.testing.expect(false);
+    }
+}
+
+test "compile shader with uniforms" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\#version 430
+        \\uniform vec4 color;
+        \\void main() {}
+    ;
+    const result = compileToSPIRV(alloc, source, .{});
+    if (result) |words| {
+        defer alloc.free(words);
+        try std.testing.expect(words.len >= 5);
+    } else |_| {
+        try std.testing.expect(false);
+    }
 }
