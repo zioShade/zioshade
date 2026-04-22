@@ -2,19 +2,22 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const ir = @import("ir.zig");
 const spirv = @import("spirv.zig");
+const lexer = @import("lexer.zig");
+const parser = @import("parser.zig");
+const semantic = @import("semantic.zig");
 
 pub fn generate(
     alloc: std.mem.Allocator,
     module: *const ir.Module,
-    stage: enum { vertex, fragment, compute, geometry },
-    spirv_version: enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" },
+    stage: u32,
+    spirv_version: u32,
 ) error{OutOfMemory, CodegenFailed}![]const u32 {
     var cg = Codegen{
         .alloc = alloc,
         .module = module,
-        .words = std.ArrayList(u32).init(alloc),
+        .words = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .next_id = 1,
-        .type_cache = .empty,
+        .emitted_types = .{},
         .glsl_std_450_id = 0,
     };
     defer cg.deinit();
@@ -33,7 +36,7 @@ pub fn generate(
     // Patch header bound field
     cg.words.items[3] = cg.next_id;
 
-    return cg.words.toOwnedSlice();
+    return cg.words.toOwnedSlice(alloc);
 }
 
 const Codegen = struct {
@@ -41,12 +44,12 @@ const Codegen = struct {
     module: *const ir.Module,
     words: std.ArrayList(u32),
     next_id: u32,
-    type_cache: std.AutoHashMapUnmanaged(ast.Type, u32),
+    emitted_types: std.AutoHashMapUnmanaged(u32, void), // type_id -> void (set of emitted types)
     glsl_std_450_id: u32,
 
     fn deinit(self: *Codegen) void {
-        self.type_cache.deinit(self.alloc);
-        self.words.deinit();
+        self.emitted_types.deinit(self.alloc);
+        self.words.deinit(self.alloc);
     }
 
     fn allocId(self: *Codegen) u32 {
@@ -56,18 +59,19 @@ const Codegen = struct {
     }
 
     fn emitWord(self: *Codegen, word: u32) !void {
-        try self.words.append(word);
+        try self.words.append(self.alloc, word);
     }
 
-    fn emitHeader(self: *Codegen, version: anytype) !void {
+    fn emitHeader(self: *Codegen, version: u32) !void {
         const version_word: u32 = switch (version) {
-            .@"1.0" => spirv.encodeVersion(1, 0, 0),
-            .@"1.1" => spirv.encodeVersion(1, 1, 0),
-            .@"1.2" => spirv.encodeVersion(1, 2, 0),
-            .@"1.3" => spirv.encodeVersion(1, 3, 0),
-            .@"1.4" => spirv.encodeVersion(1, 4, 0),
-            .@"1.5" => spirv.encodeVersion(1, 5, 0),
-            .@"1.6" => spirv.encodeVersion(1, 6, 0),
+            0 => spirv.encodeVersion(1, 0, 0), // @"1.0"
+            1 => spirv.encodeVersion(1, 1, 0), // @"1.1"
+            2 => spirv.encodeVersion(1, 2, 0), // @"1.2"
+            3 => spirv.encodeVersion(1, 3, 0), // @"1.3"
+            4 => spirv.encodeVersion(1, 4, 0), // @"1.4"
+            5 => spirv.encodeVersion(1, 5, 0), // @"1.5"
+            6 => spirv.encodeVersion(1, 6, 0), // @"1.6"
+            else => spirv.encodeVersion(1, 5, 0),
         };
         try self.emitWord(spirv.MAGIC);
         try self.emitWord(version_word);
@@ -97,12 +101,13 @@ const Codegen = struct {
         try self.emitWord(1); // GLSL450
     }
 
-    fn emitEntryPoint(self: *Codegen, stage: anytype) !void {
+    fn emitEntryPoint(self: *Codegen, stage: u32) !void {
         const exec_model: spirv.ExecutionModel = switch (stage) {
-            .vertex => .Vertex,
-            .fragment => .Fragment,
-            .compute => .GLCompute,
-            .geometry => .Geometry,
+            0 => .Vertex, // vertex
+            1 => .Fragment, // fragment
+            2 => .GLCompute, // compute
+            3 => .Geometry, // geometry
+            else => .Fragment,
         };
         const entry = self.findEntryPoint() orelse return;
         const entry_id = if (entry.result_id != 0) entry.result_id else self.allocId();
@@ -113,7 +118,7 @@ const Codegen = struct {
         try self.emitWord(entry_id);
         try self.emitStringLiteral(name);
 
-        if (stage == .fragment) {
+        if (stage == 1) { // fragment
             try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
             try self.emitWord(entry_id);
             try self.emitWord(@intFromEnum(spirv.ExecutionMode.OriginUpperLeft));
@@ -144,9 +149,7 @@ const Codegen = struct {
     }
 
     fn ensureType(self: *Codegen, ty: ast.Type) error{OutOfMemory}!u32 {
-        if (self.type_cache.get(ty)) |id| return id;
         const id = self.allocId();
-        try self.type_cache.put(self.alloc, ty, id);
         switch (ty) {
             .void => {
                 try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.TypeVoid)));
@@ -205,7 +208,7 @@ const Codegen = struct {
                     .mat4, .mat4x4 => ast.Type.vec4,
                     else => unreachable,
                 });
-                const num_cols = ty.numComponents() / switch (ty) {
+                const num_cols: u32 = switch (ty) {
                     .mat2, .mat2x2 => 2,
                     .mat2x3 => 3,
                     .mat2x4 => 4,
@@ -256,10 +259,10 @@ const Codegen = struct {
             },
             .named => |name| {
                 const td = self.module.types.get(name) orelse return id;
-                var member_ids = std.ArrayList(u32).init(self.alloc);
-                defer member_ids.deinit();
+                var member_ids = std.ArrayList(u32).initCapacity(self.alloc, td.members.len) catch unreachable;
+                defer member_ids.deinit(self.alloc);
                 for (td.members) |member| {
-                    try member_ids.append(try self.ensureType(member.ty));
+                    try member_ids.append(self.alloc, try self.ensureType(member.ty));
                 }
                 const word_count: u16 = 2 + @as(u16, @intCast(member_ids.items.len));
                 try self.emitWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.TypeStruct)));
@@ -366,14 +369,14 @@ const Codegen = struct {
             try self.emitWord(@intFromEnum(global.storage_class));
         }
     }
-    fn emitFunctions(self: *Codegen, stage: anytype) !void {
-        _ = stage;
+    fn emitFunctions(self: *Codegen, stage: u32) !void {
+        _ = stage; // Currently unused but kept for future extension
         for (self.module.functions) |func| {
             const return_type_id = try self.ensureType(func.return_type);
-            var param_type_ids = std.ArrayList(u32).init(self.alloc);
-            defer param_type_ids.deinit();
+            var param_type_ids = std.ArrayList(u32).initCapacity(self.alloc, func.params.len) catch unreachable;
+            defer param_type_ids.deinit(self.alloc);
             for (func.params) |param| {
-                try param_type_ids.append(try self.ensureType(param.ty));
+                try param_type_ids.append(self.alloc, try self.ensureType(param.ty));
             }
             const func_type_id = self.allocId();
             const func_type_wc: u16 = 2 + @as(u16, @intCast(param_type_ids.items.len));
@@ -660,3 +663,41 @@ const Codegen = struct {
         };
     }
 };
+
+test "codegen: header encoding" {
+    const alloc = std.testing.allocator;
+    const source = "#version 430\nvoid main() {}";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+    var root = try parser.parse(alloc, source, tokens);
+    defer parser.freeTree(alloc, &root);
+    var module = try semantic.analyze(alloc, &root);
+    defer module.deinit();
+
+    const result = try generate(alloc, &module, 1, 5); // fragment=1, @"1.5"=5
+    defer alloc.free(result);
+
+    try std.testing.expectEqual(@as(u32, spirv.MAGIC), result[0]);
+    try std.testing.expectEqual(spirv.encodeVersion(1, 5, 0), result[1]);
+    try std.testing.expectEqual(@as(u32, 0), result[2]); // Generator
+    try std.testing.expect(result[3] > 0); // Bound
+    try std.testing.expectEqual(@as(u32, 0), result[4]); // Schema
+}
+
+test "codegen: capabilities emitted" {
+    const alloc = std.testing.allocator;
+    const source = "#version 430\nvoid main() {}";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+    var root = try parser.parse(alloc, source, tokens);
+    defer parser.freeTree(alloc, &root);
+    var module = try semantic.analyze(alloc, &root);
+    defer module.deinit();
+
+    const result = try generate(alloc, &module, 1, 5); // fragment=1, @"1.5"=5
+    defer alloc.free(result);
+
+    // Word 5 should be OpCapability header (word_count=2, opcode=17)
+    try std.testing.expectEqual(spirv.encodeInstructionHeader(2, 17), result[5]);
+    try std.testing.expectEqual(@as(u32, 1), result[6]); // Shader capability
+}
