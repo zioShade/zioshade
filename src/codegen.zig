@@ -358,7 +358,13 @@ const Codegen = struct {
         }
     }
     fn emitGlobals(self: *Codegen) !void {
-        _ = self;
+        for (self.module.globals) |global| {
+            const ptr_type_id = try self.ensurePointerType(global.ty, global.storage_class);
+            try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Variable)));
+            try self.emitWord(ptr_type_id);
+            try self.emitWord(global.result_id);
+            try self.emitWord(@intFromEnum(global.storage_class));
+        }
     }
     fn emitFunctions(self: *Codegen, stage: anytype) !void {
         _ = self;
