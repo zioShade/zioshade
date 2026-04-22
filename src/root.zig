@@ -3,6 +3,7 @@ pub const diagnostic = @import("diagnostic.zig");
 pub const lexer = @import("lexer.zig");
 pub const preprocessor = @import("preprocessor.zig");
 pub const ast = @import("ast.zig");
+pub const ir = @import("ir.zig");
 
 pub const Error = error{
     OutOfMemory,
