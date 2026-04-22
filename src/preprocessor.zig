@@ -1,0 +1,1228 @@
+const std = @import("std");
+const lexer = @import("lexer.zig");
+
+pub const Preprocessor = struct {
+    alloc: std.mem.Allocator,
+    defines: std.StringHashMapUnmanaged(Macro),
+    if_stack: std.ArrayListUnmanaged(IfState),
+    output: std.ArrayListUnmanaged(lexer.Token),
+    source: [:0]const u8 = "",
+    version: u32 = 430,
+    expanding: std.ArrayListUnmanaged([]const u8),
+
+    pub fn init(alloc: std.mem.Allocator) Preprocessor {
+        return .{
+            .alloc = alloc,
+            .defines = .{},
+            .if_stack = .{},
+            .output = .{},
+            .expanding = .{},
+        };
+    }
+
+    pub fn deinit(self: *Preprocessor) void {
+        var macro_iter = self.defines.iterator();
+        while (macro_iter.next()) |entry| {
+            self.alloc.free(entry.key_ptr.*);
+            switch (entry.value_ptr.*) {
+                .object => |tokens| self.alloc.free(tokens),
+                .function => |f| {
+                    self.alloc.free(f.params);
+                    self.alloc.free(f.body);
+                },
+            }
+        }
+        self.defines.deinit(self.alloc);
+        self.if_stack.deinit(self.alloc);
+        self.output.deinit(self.alloc);
+        self.expanding.deinit(self.alloc);
+    }
+
+    pub fn addDefine(self: *Preprocessor, name: []const u8, value: []const lexer.Token) !void {
+        const name_copy = try self.alloc.dupe(u8, name);
+        errdefer self.alloc.free(name_copy);
+
+        const value_copy = try self.alloc.dupe(lexer.Token, value);
+        errdefer self.alloc.free(value_copy);
+
+        try self.defines.put(self.alloc, name_copy, .{ .object = value_copy });
+    }
+
+    fn isActive(self: *const Preprocessor) bool {
+        for (self.if_stack.items) |state| {
+            if (!state.active) return false;
+        }
+        return true;
+    }
+
+    fn getTokenText(self: *const Preprocessor, tok: lexer.Token) []const u8 {
+        return self.source[tok.start..tok.start + tok.len];
+    }
+
+    fn skipToEndOfLine(self: *Preprocessor, tokens: []const lexer.Token, index: *usize) void {
+        _ = self;
+        const start_line = tokens[index.*].loc.line;
+        while (index.* < tokens.len) : (index.* += 1) {
+            const tok = tokens[index.*];
+            if (tok.tag == .eof) break;
+            if (tok.loc.line > start_line) break;
+        }
+    }
+
+    fn parseDefine(self: *Preprocessor, tokens: []const lexer.Token, index: *usize) !void {
+        // Skip pp_define token
+        index.* += 1;
+
+        if (index.* >= tokens.len) return error.PreprocessFailed;
+
+        const name_tok = tokens[index.*];
+        if (name_tok.tag != .identifier) return error.PreprocessFailed;
+
+        const name = try self.alloc.dupe(u8, self.getTokenText(name_tok));
+        index.* += 1;
+
+        // Check for function-like macro
+        if (index.* < tokens.len and tokens[index.*].tag == .l_paren) {
+            index.* += 1; // skip '('
+
+            var params = std.ArrayListUnmanaged([]const u8){};
+            defer {
+                for (params.items) |p| self.alloc.free(p);
+                params.deinit(self.alloc);
+            }
+            defer {
+                for (params.items) |p| self.alloc.free(p);
+                params.deinit(self.alloc);
+            }
+
+            const is_variadic = false;
+
+            // Parse parameters
+            while (index.* < tokens.len) {
+                const tok = tokens[index.*];
+                if (tok.tag == .r_paren) {
+                    index.* += 1;
+                    break;
+                }
+
+                if (tok.tag == .identifier) {
+                    const param_name = try self.alloc.dupe(u8, self.getTokenText(tok));
+                    try params.append(self.alloc, param_name);
+                    index.* += 1;
+
+                    if (index.* < tokens.len and tokens[index.*].tag == .comma) {
+                        index.* += 1;
+                    }
+                } else {
+                    return error.PreprocessFailed;
+                }
+            }
+
+            // Parse body until end of line
+            var body = std.ArrayListUnmanaged(lexer.Token){};
+            defer {
+                for (body.items) |t| {
+                    _ = t;
+                }
+                // Note: we don't free body tokens since they're borrowed from source
+            }
+            while (index.* < tokens.len) {
+                const tok = tokens[index.*];
+                if (tok.tag == .eof or tok.loc.line > name_tok.loc.line) {
+                    break;
+                }
+                if (tok.tag != .semicolon) {
+                    try body.append(self.alloc, tok);
+                }
+                index.* += 1;
+            }
+
+            const params_owned = try self.alloc.dupe([]const u8, params.items);
+            for (params.items, 0..) |p, i| {
+                params_owned[i] = p;
+            }
+
+            const body_owned = try body.toOwnedSlice(self.alloc);
+
+            try self.defines.put(self.alloc, name, .{
+                .function = .{
+                    .params = params_owned,
+                    .body = body_owned,
+                    .is_variadic = is_variadic,
+                },
+            });
+        } else {
+            // Object-like macro
+            var body = std.ArrayListUnmanaged(lexer.Token){};
+            defer {
+                for (body.items) |t| {
+                    _ = t;
+                }
+                // Note: we don't free body tokens since they're borrowed from source
+            }
+            while (index.* < tokens.len) {
+                const tok = tokens[index.*];
+                if (tok.tag == .eof or tok.loc.line > name_tok.loc.line) {
+                    break;
+                }
+                if (tok.tag != .semicolon) {
+                    try body.append(self.alloc, tok);
+                }
+                index.* += 1;
+            }
+
+            const body_owned = try body.toOwnedSlice(self.alloc);
+            try self.defines.put(self.alloc, name, .{ .object = body_owned });
+        }
+    }
+
+    fn expandMacro(self: *Preprocessor, tokens: []const lexer.Token, index: *usize, identifier_tok: lexer.Token) !void {
+        const name = self.getTokenText(identifier_tok);
+
+        // Check for built-in macros
+        if (std.mem.eql(u8, name, "__LINE__")) {
+            const line_num = identifier_tok.loc.line;
+            var buf: [20]u8 = undefined;
+            const line_str = try std.fmt.bufPrintZ(&buf, "{}", .{line_num});
+            try self.output.append(self.alloc, .{
+                .tag = .int_literal,
+                .loc = identifier_tok.loc,
+                .start = 0,
+                .len = @intCast(line_str.len),
+            });
+            return;
+        }
+
+        if (std.mem.eql(u8, name, "__FILE__")) {
+            // Empty string for __FILE__
+            try self.output.append(self.alloc, .{
+                .tag = .string_literal,
+                .loc = identifier_tok.loc,
+                .start = 0,
+                .len = 0,
+            });
+            return;
+        }
+
+        if (std.mem.eql(u8, name, "__VERSION__")) {
+            var buf: [20]u8 = undefined;
+            const ver_str = try std.fmt.bufPrintZ(&buf, "{}", .{self.version});
+            try self.output.append(self.alloc, .{
+                .tag = .int_literal,
+                .loc = identifier_tok.loc,
+                .start = 0,
+                .len = @intCast(ver_str.len),
+            });
+            return;
+        }
+
+        // Check if already expanding this macro (prevent recursion)
+        for (self.expanding.items) |expanding_name| {
+            if (std.mem.eql(u8, expanding_name, name)) {
+                // Don't expand recursively, emit the identifier as-is
+                try self.output.append(self.alloc, identifier_tok);
+                return;
+            }
+        }
+
+        const macro = self.defines.get(name) orelse {
+            // Not a macro, emit as-is
+            try self.output.append(self.alloc, identifier_tok);
+            return;
+        };
+
+        // Add to expanding stack
+        try self.expanding.append(self.alloc, name);
+        defer {
+            _ = self.expanding.pop();
+        }
+
+        switch (macro) {
+            .object => |body| {
+                for (body) |tok| {
+                    try self.output.append(self.alloc, tok);
+                }
+            },
+            .function => |f| {
+                // Check if next token is '('
+                if (index.* >= tokens.len or tokens[index.*].tag != .l_paren) {
+                    // Not a function-like invocation, emit as-is
+                    try self.output.append(self.alloc, identifier_tok);
+                    return;
+                }
+
+                // Parse arguments
+                const args = try self.parseMacroArguments(tokens, index);
+                defer {
+                    for (args) |arg| {
+                        for (arg) |tok| {
+                            self.alloc.free(tok);
+                        }
+                        self.alloc.free(arg);
+                    }
+                    self.alloc.free(args);
+                }
+
+                // Substitute and expand
+                const func_macro = Macro{ .function = f };
+                try self.substituteAndExpand(func_macro, args);
+            },
+        }
+    }
+
+    fn parseMacroArguments(self: *Preprocessor, tokens: []const lexer.Token, index: *usize) ![][]lexer.Token {
+        var args = std.ArrayListUnmanaged([]lexer.Token){};
+        index.* += 1; // skip '('
+
+        var current_arg = std.ArrayListUnmanaged(lexer.Token){};
+        var paren_depth: u32 = 1;
+
+        while (index.* < tokens.len) : (index.* += 1) {
+            const tok = tokens[index.*];
+
+            if (tok.tag == .l_paren) {
+                paren_depth += 1;
+                try current_arg.append(self.alloc, tok);
+            } else if (tok.tag == .r_paren) {
+                paren_depth -= 1;
+                if (paren_depth == 0) {
+                    if (current_arg.items.len > 0 or args.items.len > 0) {
+                        try args.append(self.alloc, try current_arg.toOwnedSlice(self.alloc));
+                    }
+                    break;
+                }
+                try current_arg.append(self.alloc, tok);
+            } else if (tok.tag == .comma and paren_depth == 1) {
+                try args.append(self.alloc, try current_arg.toOwnedSlice(self.alloc));
+            } else {
+                try current_arg.append(self.alloc, tok);
+            }
+        }
+
+        return args.toOwnedSlice(self.alloc);
+    }
+
+    fn substituteAndExpand(self: *Preprocessor, func_macro: Macro, args: [][]lexer.Token) !void {
+        const f = func_macro.function;
+        for (f.body) |tok| {
+            if (tok.tag == .identifier) {
+                const param_name = self.getTokenText(tok);
+                var found = false;
+                for (f.params, 0..) |param, i| {
+                    if (std.mem.eql(u8, param_name, param)) {
+                        // Emit argument tokens
+                        if (i < args.len) {
+                            for (args[i]) |arg_tok| {
+                                try self.output.append(self.alloc, arg_tok);
+                            }
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    // Check for __VA_ARGS__ in variadic macro
+                    if (f.is_variadic and std.mem.eql(u8, param_name, "__VA_ARGS__")) {
+                        // Emit extra arguments
+                        for (f.params.len..args.len) |i| {
+                            for (args[i]) |arg_tok| {
+                                try self.output.append(self.alloc, arg_tok);
+                            }
+                            if (i < args.len - 1) {
+                                try self.output.append(self.alloc, .{
+                                    .tag = .comma,
+                                    .loc = tok.loc,
+                                    .start = 0,
+                                    .len = 1,
+                                });
+                            }
+                        }
+                    } else {
+                        // Not a parameter, emit as-is
+                        try self.output.append(self.alloc, tok);
+                    }
+                }
+            } else {
+                try self.output.append(self.alloc, tok);
+            }
+        }
+    }
+
+    fn evaluateExpression(self: *Preprocessor, tokens: []const lexer.Token, start: usize, end: usize) !i64 {
+        var evaluator = ExpressionEvaluator{
+            .preprocessor = self,
+            .tokens = tokens,
+            .start = start,
+            .end = end,
+            .pos = start,
+        };
+        return evaluator.evaluate();
+    }
+
+    fn parseVersion(self: *Preprocessor, tokens: []const lexer.Token, index: *usize) !void {
+        index.* += 1; // skip pp_version
+
+        if (index.* >= tokens.len) return error.PreprocessFailed;
+
+        const ver_tok = tokens[index.*];
+        if (ver_tok.tag == .int_literal) {
+            const ver_str = self.getTokenText(ver_tok);
+            self.version = try std.fmt.parseInt(u32, ver_str, 10);
+        }
+
+        // Skip to end of line
+        while (index.* < tokens.len) {
+            const tok = tokens[index.*];
+            if (tok.tag == .eof or tok.loc.line > tokens[index.* - 1].loc.line) {
+                break;
+            }
+            index.* += 1;
+        }
+    }
+
+    pub fn process(self: *Preprocessor, source: [:0]const u8, tokens: []const lexer.Token) ![]const lexer.Token {
+        self.source = source;
+        self.output.clearRetainingCapacity();
+        self.if_stack.clearRetainingCapacity();
+
+        var i: usize = 0;
+        while (i < tokens.len) {
+            const tok = tokens[i];
+
+            switch (tok.tag) {
+                .pp_version => {
+                    try self.parseVersion(tokens, &i);
+                },
+                .pp_define => {
+                    if (self.isActive()) {
+                        try self.parseDefine(tokens, &i);
+                    } else {
+                        self.skipToEndOfLine(tokens, &i);
+                    }
+                },
+                .pp_undef => {
+                    if (self.isActive()) {
+                        i += 1; // skip pp_undef
+                        if (i < tokens.len and tokens[i].tag == .identifier) {
+                            const name = self.getTokenText(tokens[i]);
+                            if (self.defines.fetchRemove(name)) |entry| {
+                                self.alloc.free(entry.key);
+                                switch (entry.value) {
+                                    .object => |body| self.alloc.free(body),
+                                    .function => |f| {
+                                        self.alloc.free(f.params);
+                                        self.alloc.free(f.body);
+                                    },
+                                }
+                            }
+                            i += 1;
+                        }
+                    } else {
+                        self.skipToEndOfLine(tokens, &i);
+                    }
+                },
+                .pp_ifdef => {
+                    i += 1; // skip pp_ifdef
+                    if (i < tokens.len and tokens[i].tag == .identifier) {
+                        const name = self.getTokenText(tokens[i]);
+                        const defined = self.defines.contains(name);
+                        try self.if_stack.append(self.alloc, .{
+                            .taken = defined,
+                            .any_taken = defined,
+                            .active = defined,
+                        });
+                        i += 1;
+                    } else {
+                        try self.if_stack.append(self.alloc, .{
+                            .taken = false,
+                            .any_taken = false,
+                            .active = false,
+                        });
+                    }
+                },
+                .pp_ifndef => {
+                    i += 1; // skip pp_ifndef
+                    if (i < tokens.len and tokens[i].tag == .identifier) {
+                        const name = self.getTokenText(tokens[i]);
+                        const defined = self.defines.contains(name);
+                        try self.if_stack.append(self.alloc, .{
+                            .taken = !defined,
+                            .any_taken = !defined,
+                            .active = !defined,
+                        });
+                        i += 1;
+                    } else {
+                        try self.if_stack.append(self.alloc, .{
+                            .taken = false,
+                            .any_taken = false,
+                            .active = false,
+                        });
+                    }
+                },
+                .pp_if => {
+                    i += 1; // skip pp_if
+                    // Find end of line for expression
+                    const expr_start = i;
+                    while (i < tokens.len and tokens[i].loc.line == tok.loc.line) : (i += 1) {}
+                    const expr_end = i;
+
+                    const result = try self.evaluateExpression(tokens, expr_start, expr_end);
+                    const taken = result != 0;
+                    try self.if_stack.append(self.alloc, .{
+                        .taken = taken,
+                        .any_taken = taken,
+                        .active = taken,
+                    });
+                },
+                .pp_elif => {
+                    if (self.if_stack.items.len == 0) return error.PreprocessFailed;
+                    const state = &self.if_stack.items[self.if_stack.items.len - 1];
+
+                    if (!state.any_taken) {
+                        i += 1; // skip pp_elif
+                        const expr_start = i;
+                        while (i < tokens.len and tokens[i].loc.line == tok.loc.line) : (i += 1) {}
+                        const expr_end = i;
+
+                        const result = try self.evaluateExpression(tokens, expr_start, expr_end);
+                        const taken = result != 0;
+                        state.taken = taken;
+                        state.any_taken = taken;
+                        state.active = taken;
+                    } else {
+                        state.active = false;
+                        self.skipToEndOfLine(tokens, &i);
+                    }
+                },
+                .pp_else => {
+                    if (self.if_stack.items.len == 0) return error.PreprocessFailed;
+                    const state = &self.if_stack.items[self.if_stack.items.len - 1];
+
+                    if (!state.any_taken) {
+                        state.taken = true;
+                        state.any_taken = true;
+                        state.active = true;
+                    } else {
+                        state.active = false;
+                    }
+                    i += 1;
+                },
+                .pp_endif => {
+                    if (self.if_stack.items.len == 0) return error.PreprocessFailed;
+                    _ = self.if_stack.pop();
+                    i += 1;
+                },
+                .pp_error, .pp_pragma, .pp_line => {
+                    self.skipToEndOfLine(tokens, &i);
+                },
+                .identifier => {
+                    if (self.isActive()) {
+                        try self.expandMacro(tokens, &i, tok);
+                    } else {
+                        i += 1;
+                    }
+                },
+                .eof => {
+                    if (self.isActive()) {
+                        try self.output.append(self.alloc, tok);
+                    }
+                    i += 1;
+                },
+                else => {
+                    if (self.isActive()) {
+                        try self.output.append(self.alloc, tok);
+                    }
+                    i += 1;
+                },
+            }
+        }
+
+        return self.output.toOwnedSlice(self.alloc);
+    }
+};
+
+const Macro = union(enum) {
+    object: []const lexer.Token,
+    function: struct {
+        params: []const []const u8,
+        body: []const lexer.Token,
+        is_variadic: bool,
+    },
+};
+
+const IfState = struct {
+    taken: bool,
+    any_taken: bool,
+    active: bool,
+};
+
+const ExpressionEvaluator = struct {
+    preprocessor: *Preprocessor,
+    tokens: []const lexer.Token,
+    start: usize,
+    end: usize,
+    pos: usize,
+
+    fn evaluate(self: *ExpressionEvaluator) !i64 {
+        self.pos = self.start;
+        return self.parseConditional();
+    }
+
+    fn parseConditional(self: *ExpressionEvaluator) !i64 {
+        const cond = try self.parseLogicalOr();
+        if (self.peek()) |tok| {
+            if (tok.tag == .question) {
+                self.pos += 1;
+                const left = try self.parseConditional();
+                if (self.peek()) |next| {
+                    if (next.tag == .colon) {
+                        self.pos += 1;
+                        const right = try self.parseConditional();
+                        return if (cond != 0) left else right;
+                    }
+                }
+            }
+        }
+        return cond;
+    }
+
+    fn parseLogicalOr(self: *ExpressionEvaluator) !i64 {
+        var left = try self.parseLogicalAnd();
+        while (self.peek()) |tok| {
+            if (tok.tag == .pipe_pipe) {
+                self.pos += 1;
+                const right = try self.parseLogicalAnd();
+                left = if (left != 0 or right != 0) 1 else 0;
+            } else {
+                break;
+            }
+        }
+        return left;
+    }
+
+    fn parseLogicalAnd(self: *ExpressionEvaluator) !i64 {
+        var left = try self.parseBitwiseOr();
+        while (self.peek()) |tok| {
+            if (tok.tag == .ampersand_ampersand) {
+                self.pos += 1;
+                const right = try self.parseBitwiseOr();
+                left = if (left != 0 and right != 0) 1 else 0;
+            } else {
+                break;
+            }
+        }
+        return left;
+    }
+
+    fn parseBitwiseOr(self: *ExpressionEvaluator) !i64 {
+        var left = try self.parseBitwiseXor();
+        while (self.peek()) |tok| {
+            if (tok.tag == .pipe) {
+                self.pos += 1;
+                const right = try self.parseBitwiseXor();
+                left = left | right;
+            } else {
+                break;
+            }
+        }
+        return left;
+    }
+
+    fn parseBitwiseXor(self: *ExpressionEvaluator) !i64 {
+        var left = try self.parseBitwiseAnd();
+        while (self.peek()) |tok| {
+            if (tok.tag == .caret) {
+                self.pos += 1;
+                const right = try self.parseBitwiseAnd();
+                left = left ^ right;
+            } else {
+                break;
+            }
+        }
+        return left;
+    }
+
+    fn parseBitwiseAnd(self: *ExpressionEvaluator) !i64 {
+        var left = try self.parseEquality();
+        while (self.peek()) |tok| {
+            if (tok.tag == .ampersand) {
+                self.pos += 1;
+                const right = try self.parseEquality();
+                left = left & right;
+            } else {
+                break;
+            }
+        }
+        return left;
+    }
+
+    fn parseEquality(self: *ExpressionEvaluator) !i64 {
+        var left = try self.parseRelational();
+        while (self.peek()) |tok| {
+            if (tok.tag == .eq) {
+                self.pos += 1;
+                const right = try self.parseRelational();
+                left = if (left == right) 1 else 0;
+            } else if (tok.tag == .bang_eq) {
+                self.pos += 1;
+                const right = try self.parseRelational();
+                left = if (left != right) 1 else 0;
+            } else {
+                break;
+            }
+        }
+        return left;
+    }
+
+    fn parseRelational(self: *ExpressionEvaluator) !i64 {
+        var left = try self.parseShift();
+        while (self.peek()) |tok| {
+            if (tok.tag == .lt) {
+                self.pos += 1;
+                const right = try self.parseShift();
+                left = if (left < right) 1 else 0;
+            } else if (tok.tag == .gt) {
+                self.pos += 1;
+                const right = try self.parseShift();
+                left = if (left > right) 1 else 0;
+            } else if (tok.tag == .lt_eq) {
+                self.pos += 1;
+                const right = try self.parseShift();
+                left = if (left <= right) 1 else 0;
+            } else if (tok.tag == .gt_eq) {
+                self.pos += 1;
+                const right = try self.parseShift();
+                left = if (left >= right) 1 else 0;
+            } else {
+                break;
+            }
+        }
+        return left;
+    }
+
+    fn parseShift(self: *ExpressionEvaluator) !i64 {
+        var left = try self.parseAdditive();
+        while (self.peek()) |tok| {
+            if (tok.tag == .lshift) {
+                self.pos += 1;
+                const right = try self.parseAdditive();
+                left = left << @as(u5, @intCast(@abs(right)));
+            } else if (tok.tag == .rshift) {
+                self.pos += 1;
+                const right = try self.parseAdditive();
+                left = left >> @as(u5, @intCast(@abs(right)));
+            } else {
+                break;
+            }
+        }
+        return left;
+    }
+
+    fn parseAdditive(self: *ExpressionEvaluator) !i64 {
+        var left = try self.parseMultiplicative();
+        while (self.peek()) |tok| {
+            if (tok.tag == .plus) {
+                self.pos += 1;
+                const right = try self.parseMultiplicative();
+                left = left + right;
+            } else if (tok.tag == .minus) {
+                self.pos += 1;
+                const right = try self.parseMultiplicative();
+                left = left - right;
+            } else {
+                break;
+            }
+        }
+        return left;
+    }
+
+    fn parseMultiplicative(self: *ExpressionEvaluator) !i64 {
+        var left = try self.parseUnary();
+        while (self.peek()) |tok| {
+            if (tok.tag == .star) {
+                self.pos += 1;
+                const right = try self.parseUnary();
+                left = left * right;
+            } else if (tok.tag == .slash) {
+                self.pos += 1;
+                const right = try self.parseUnary();
+                if (right == 0) return error.PreprocessFailed;
+                left = @divTrunc(left, right);
+            } else if (tok.tag == .percent) {
+                self.pos += 1;
+                const right = try self.parseUnary();
+                if (right == 0) return error.PreprocessFailed;
+                left = @rem(left, right);
+            } else {
+                break;
+            }
+        }
+        return left;
+    }
+
+    fn parseUnary(self: *ExpressionEvaluator) !i64 {
+        if (self.peek()) |tok| {
+            if (tok.tag == .plus) {
+                self.pos += 1;
+                return try self.parseUnary();
+            } else if (tok.tag == .minus) {
+                self.pos += 1;
+                const val = try self.parseUnary();
+                return -val;
+            } else if (tok.tag == .bang) {
+                self.pos += 1;
+                const val = try self.parseUnary();
+                return if (val == 0) 1 else 0;
+            } else if (tok.tag == .tilde) {
+                self.pos += 1;
+                const val = try self.parseUnary();
+                return ~val;
+            }
+        }
+
+        return try self.parsePrimary();
+    }
+
+    fn parsePrimary(self: *ExpressionEvaluator) !i64 {
+        if (self.peek()) |tok| {
+            if (tok.tag == .int_literal or tok.tag == .uint_literal) {
+                self.pos += 1;
+                const text = self.preprocessor.getTokenText(tok);
+                return std.fmt.parseInt(i64, text, 10);
+            }
+
+            if (tok.tag == .identifier) {
+                const name = self.preprocessor.getTokenText(tok);
+                self.pos += 1;
+
+                // Check for defined operator
+                if (std.mem.eql(u8, name, "defined")) {
+                    if (self.peek()) |next| {
+                        if (next.tag == .l_paren) {
+                            self.pos += 1;
+                            if (self.peek()) |ident| {
+                                if (ident.tag == .identifier) {
+                                    const macro_name = self.preprocessor.getTokenText(ident);
+                                    self.pos += 1;
+                                    if (self.peek()) |close| {
+                                        if (close.tag == .r_paren) {
+                                            self.pos += 1;
+                                            return if (self.preprocessor.defines.contains(macro_name)) 1 else 0;
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (next.tag == .identifier) {
+                            const macro_name = self.preprocessor.getTokenText(next);
+                            self.pos += 1;
+                            return if (self.preprocessor.defines.contains(macro_name)) 1 else 0;
+                        }
+                    }
+                    return 0;
+                }
+
+                // Check if it's a defined macro
+                if (self.preprocessor.defines.get(name)) |macro| {
+                    switch (macro) {
+                        .object => |body| {
+                            if (body.len > 0) {
+                                const body_tok = body[0];
+                                if (body_tok.tag == .int_literal or body_tok.tag == .uint_literal) {
+                                    const text = self.preprocessor.getTokenText(body_tok);
+                                    return std.fmt.parseInt(i64, text, 10);
+                                }
+                            }
+                        },
+                        .function => undefined,
+                    }
+                }
+
+                return 0;
+            }
+
+            if (tok.tag == .l_paren) {
+                self.pos += 1;
+                const val = try self.parseConditional();
+                if (self.peek()) |close| {
+                    if (close.tag == .r_paren) {
+                        self.pos += 1;
+                        return val;
+                    }
+                }
+                return error.PreprocessFailed;
+            }
+        }
+
+        return error.PreprocessFailed;
+    }
+
+    fn peek(self: *const ExpressionEvaluator) ?lexer.Token {
+        if (self.pos >= self.end) return null;
+        return self.tokens[self.pos];
+    }
+};
+
+// Tests
+test "expand object-like macro" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#define FOO 42\nint x = FOO;";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    // Check that FOO was expanded
+    var found_42 = false;
+    for (result) |tok| {
+        if (tok.tag == .int_literal) {
+            const text = source[tok.start..][0..tok.len];
+            if (std.mem.eql(u8, text, "42")) {
+                found_42 = true;
+            }
+        }
+    }
+    try std.testing.expect(found_42);
+}
+
+test "expand function-like macro" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#define ADD(a,b) a+b\nint x = ADD(1,2);";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    // Check that ADD was expanded
+    var found_plus = false;
+    for (result) |tok| {
+        if (tok.tag == .plus) {
+            found_plus = true;
+        }
+    }
+    try std.testing.expect(found_plus);
+}
+
+test "ifdef when defined" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    try pp.addDefine("FOO", &.{});
+
+    const source = "#ifdef FOO\nint x;\n#endif";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    // Should contain int x
+    var found_int = false;
+    for (result) |tok| {
+        if (tok.tag == .kw_int) {
+            found_int = true;
+        }
+    }
+    try std.testing.expect(found_int);
+}
+
+test "ifdef when not defined" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#ifdef FOO\nint x;\n#endif";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    // Should not contain int x
+    for (result) |tok| {
+        try std.testing.expect(tok.tag != .kw_int);
+    }
+}
+
+test "#if expression" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#if 1 > 0\nint x;\n#endif";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    var found_int = false;
+    for (result) |tok| {
+        if (tok.tag == .kw_int) {
+            found_int = true;
+        }
+    }
+    try std.testing.expect(found_int);
+}
+
+test "defined operator" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    try pp.addDefine("FOO", &.{});
+
+    const source = "#if defined(FOO)\nint x;\n#endif";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    var found_int = false;
+    for (result) |tok| {
+        if (tok.tag == .kw_int) {
+            found_int = true;
+        }
+    }
+    try std.testing.expect(found_int);
+}
+
+test "#undef removes macro" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#define FOO 42\n#undef FOO\nint x = FOO;";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    // FOO should remain as identifier
+    var found_identifier = false;
+    for (result) |tok| {
+        if (tok.tag == .identifier) {
+            const text = source[tok.start..][0..tok.len];
+            if (std.mem.eql(u8, text, "FOO")) {
+                found_identifier = true;
+            }
+        }
+    }
+    try std.testing.expect(found_identifier);
+}
+
+test "#version extracted and removed" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#version 450 core\nvoid main() {}";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    try std.testing.expectEqual(@as(u32, 450), pp.version);
+
+    // Should not contain pp_version
+    for (result) |tok| {
+        try std.testing.expect(tok.tag != .pp_version);
+    }
+}
+
+test "#else branch" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#if 0\nint x;\n#else\nfloat y;\n#endif";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    var found_float = false;
+    var found_int = false;
+    for (result) |tok| {
+        if (tok.tag == .kw_float) {
+            found_float = true;
+        }
+        if (tok.tag == .kw_int) {
+            found_int = true;
+        }
+    }
+    try std.testing.expect(found_float);
+    try std.testing.expect(!found_int);
+}
+
+test "nested #if blocks" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#if 1\n#if 1\nint x;\n#endif\n#endif";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    var found_int = false;
+    for (result) |tok| {
+        if (tok.tag == .kw_int) {
+            found_int = true;
+        }
+    }
+    try std.testing.expect(found_int);
+}
+
+test "#elif branch" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#if 0\nint x;\n#elif 1\nfloat y;\n#endif";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    var found_float = false;
+    var found_int = false;
+    for (result) |tok| {
+        if (tok.tag == .kw_float) {
+            found_float = true;
+        }
+        if (tok.tag == .kw_int) {
+            found_int = true;
+        }
+    }
+    try std.testing.expect(found_float);
+    try std.testing.expect(!found_int);
+}
+
+test "__LINE__ builtin" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "int x = __LINE__;";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    // Should have an int literal from __LINE__
+    var found_int_literal = false;
+    for (result) |tok| {
+        if (tok.tag == .int_literal) {
+            found_int_literal = true;
+        }
+    }
+    try std.testing.expect(found_int_literal);
+}
+
+test "__VERSION__ builtin" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "int x = __VERSION__;";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    // Should have an int literal from __VERSION__
+    var found_int_literal = false;
+    for (result) |tok| {
+        if (tok.tag == .int_literal) {
+            found_int_literal = true;
+        }
+    }
+    try std.testing.expect(found_int_literal);
+}
+
+test "stringify operator" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#define STR(x) #x\nint x = STR(hello);";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    // Should contain a string literal
+    var found_string = false;
+    for (result) |tok| {
+        if (tok.tag == .string_literal) {
+            found_string = true;
+        }
+    }
+    try std.testing.expect(found_string);
+}
+
+test "token paste operator" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#define PASTE(a,b) a##b\nint x = PASTE(foo,bar);";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    // Should contain an identifier (pasted result)
+    var found_identifier = false;
+    for (result) |tok| {
+        if (tok.tag == .identifier) {
+            found_identifier = true;
+        }
+    }
+    try std.testing.expect(found_identifier);
+}
+
+test "self-recursion prevention" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#define FOO FOO\nint x = FOO;";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    // Should not crash and should contain FOO identifier
+    var found_identifier = false;
+    for (result) |tok| {
+        if (tok.tag == .identifier) {
+            const text = source[tok.start..][0..tok.len];
+            if (std.mem.eql(u8, text, "FOO")) {
+                found_identifier = true;
+            }
+        }
+    }
+    try std.testing.expect(found_identifier);
+}
