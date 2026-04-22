@@ -53,8 +53,21 @@ pub fn compileToSPIRV(
     var module = semantic.analyze(alloc, &root_node) catch return error.SemanticFailed;
     defer module.deinit();
 
-    const stage: u32 = @intFromEnum(options.stage);
-    const spirv_ver: u32 = @intFromEnum(options.spirv_version);
+    const stage: codegen.Stage = switch (options.stage) {
+        .vertex => .vertex,
+        .fragment => .fragment,
+        .compute => .compute,
+        .geometry => .geometry,
+    };
+    const spirv_ver: codegen.SPIRVVersion = switch (options.spirv_version) {
+        .@"1.0" => .@"1.0",
+        .@"1.1" => .@"1.1",
+        .@"1.2" => .@"1.2",
+        .@"1.3" => .@"1.3",
+        .@"1.4" => .@"1.4",
+        .@"1.5" => .@"1.5",
+        .@"1.6" => .@"1.6",
+    };
     return codegen.generate(alloc, &module, stage, spirv_ver) catch
         error.CodegenFailed;
 }

@@ -6,11 +6,14 @@ const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 const semantic = @import("semantic.zig");
 
+pub const Stage = enum { vertex, fragment, compute, geometry };
+pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
+
 pub fn generate(
     alloc: std.mem.Allocator,
     module: *const ir.Module,
-    stage: u32,
-    spirv_version: u32,
+    stage: Stage,
+    spirv_version: SPIRVVersion,
 ) error{OutOfMemory, CodegenFailed}![]const u32 {
     var cg = Codegen{
         .alloc = alloc,
@@ -62,16 +65,15 @@ const Codegen = struct {
         try self.words.append(self.alloc, word);
     }
 
-    fn emitHeader(self: *Codegen, version: u32) !void {
+    fn emitHeader(self: *Codegen, version: SPIRVVersion) !void {
         const version_word: u32 = switch (version) {
-            0 => spirv.encodeVersion(1, 0, 0), // @"1.0"
-            1 => spirv.encodeVersion(1, 1, 0), // @"1.1"
-            2 => spirv.encodeVersion(1, 2, 0), // @"1.2"
-            3 => spirv.encodeVersion(1, 3, 0), // @"1.3"
-            4 => spirv.encodeVersion(1, 4, 0), // @"1.4"
-            5 => spirv.encodeVersion(1, 5, 0), // @"1.5"
-            6 => spirv.encodeVersion(1, 6, 0), // @"1.6"
-            else => spirv.encodeVersion(1, 5, 0),
+            .@"1.0" => spirv.encodeVersion(1, 0, 0),
+            .@"1.1" => spirv.encodeVersion(1, 1, 0),
+            .@"1.2" => spirv.encodeVersion(1, 2, 0),
+            .@"1.3" => spirv.encodeVersion(1, 3, 0),
+            .@"1.4" => spirv.encodeVersion(1, 4, 0),
+            .@"1.5" => spirv.encodeVersion(1, 5, 0),
+            .@"1.6" => spirv.encodeVersion(1, 6, 0),
         };
         try self.emitWord(spirv.MAGIC);
         try self.emitWord(version_word);
@@ -101,12 +103,12 @@ const Codegen = struct {
         try self.emitWord(1); // GLSL450
     }
 
-    fn emitEntryPoint(self: *Codegen, stage: u32) !void {
+    fn emitEntryPoint(self: *Codegen, stage: Stage) !void {
         const exec_model: spirv.ExecutionModel = switch (stage) {
-            0 => .Vertex, // vertex
-            1 => .Fragment, // fragment
-            2 => .GLCompute, // compute
-            3 => .Geometry, // geometry
+            .vertex => .Vertex,
+            .fragment => .Fragment,
+            .compute => .GLCompute,
+            .geometry => .Geometry,
             else => .Fragment,
         };
         const entry = self.findEntryPoint() orelse return;
@@ -259,7 +261,7 @@ const Codegen = struct {
             },
             .named => |name| {
                 const td = self.module.types.get(name) orelse return id;
-                var member_ids = std.ArrayList(u32).initCapacity(self.alloc, td.members.len) catch unreachable;
+                var member_ids = try std.ArrayList(u32).initCapacity(self.alloc, td.members.len);
                 defer member_ids.deinit(self.alloc);
                 for (td.members) |member| {
                     try member_ids.append(self.alloc, try self.ensureType(member.ty));
@@ -369,11 +371,11 @@ const Codegen = struct {
             try self.emitWord(@intFromEnum(global.storage_class));
         }
     }
-    fn emitFunctions(self: *Codegen, stage: u32) !void {
-        _ = stage; // Currently unused but kept for future extension
+    fn emitFunctions(self: *Codegen, stage: Stage) !void {
+        _ = stage;
         for (self.module.functions) |func| {
             const return_type_id = try self.ensureType(func.return_type);
-            var param_type_ids = std.ArrayList(u32).initCapacity(self.alloc, func.params.len) catch unreachable;
+            var param_type_ids = try std.ArrayList(u32).initCapacity(self.alloc, func.params.len);
             defer param_type_ids.deinit(self.alloc);
             for (func.params) |param| {
                 try param_type_ids.append(self.alloc, try self.ensureType(param.ty));
@@ -641,7 +643,7 @@ const Codegen = struct {
         _ = self;
         return switch (inst.operands[index]) {
             .id => |id| id,
-            else => 0,
+            else => @panic("operandId: expected id operand"),
         };
     }
 
@@ -649,7 +651,7 @@ const Codegen = struct {
         _ = self;
         return switch (inst.operands[index]) {
             .literal_int => |v| v,
-            else => 0,
+            else => @panic("operandInt: expected literal_int operand"),
         };
     }
 
