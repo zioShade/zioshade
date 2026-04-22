@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) void {
         "ir",
         "spirv",
         "semantic",
+        "codegen",
         "diagnostic",
     };
 
