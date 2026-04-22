@@ -1,0 +1,123 @@
+const std = @import("std");
+const ast = @import("ast.zig");
+
+pub const Module = struct {
+    functions: []const Function,
+    globals: []const Global,
+    types: std.StringHashMapUnmanaged(TypeDef),
+    entry_point: ?*Function,
+    alloc: std.mem.Allocator,
+
+    pub fn deinit(self: *Module) void {
+        self.alloc.free(self.functions);
+        self.alloc.free(self.globals);
+        var iter = self.types.iterator();
+        while (iter.next()) |entry| {
+            self.alloc.free(entry.key_ptr.*);
+            self.alloc.free(entry.value_ptr.members);
+        }
+        self.types.deinit(self.alloc);
+    }
+};
+
+pub const Function = struct {
+    name: []const u8,
+    return_type: ast.Type,
+    params: []const ast.FunctionParam,
+    body: []const Instruction,
+    locals: []const Local,
+    result_id: u32 = 0,
+};
+
+pub const Global = struct {
+    name: []const u8,
+    ty: ast.Type,
+    qualifier: ast.Qualifier,
+    layout: ?ast.Layout,
+    storage_class: SPIRVStorageClass,
+    result_id: u32 = 0,
+};
+
+pub const Local = struct {
+    name: []const u8,
+    ty: ast.Type,
+    result_id: u32 = 0,
+};
+
+pub const TypeDef = struct {
+    name: []const u8,
+    members: []const ast.StructMember,
+    size_bytes: u32,
+};
+
+pub const Instruction = struct {
+    tag: Tag,
+    result_type: ?u32 = null,
+    result_id: ?u32 = null,
+    operands: []const Operand = &.{},
+
+    pub const Tag = enum {
+        load,
+        store,
+        add,
+        sub,
+        mul,
+        div,
+        rem,
+        fadd,
+        fsub,
+        fmul,
+        fdiv,
+        neg,
+        fneg,
+        not_op,
+        convert_ftoi,
+        convert_itof,
+        vector_shuffle,
+        composite_construct,
+        composite_extract,
+        access_chain,
+        member_access_op,
+        image_sample,
+        image_fetch,
+        return_val,
+        return_void,
+        branch,
+        branch_conditional,
+        loop_merge,
+        selection_merge,
+        compare_eq,
+        compare_neq,
+        compare_lt,
+        compare_gt,
+        compare_lte,
+        compare_gte,
+        logical_and,
+        logical_or,
+        logical_not,
+        bit_and,
+        bit_or,
+        bit_xor,
+        bit_not,
+        shift_left,
+        shift_right,
+        ext_inst,
+        select,
+    };
+
+    pub const Operand = union(enum) {
+        id: u32,
+        literal_int: u32,
+        literal_float: f32,
+        literal_string: []const u8,
+    };
+};
+
+pub const SPIRVStorageClass = enum(u32) {
+    uniform_constant = 0,
+    input = 1,
+    uniform = 2,
+    output = 3,
+    function = 7,
+    push_constant = 9,
+};
