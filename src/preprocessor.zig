@@ -27,6 +27,7 @@ pub const Preprocessor = struct {
             switch (entry.value_ptr.*) {
                 .object => |tokens| self.alloc.free(tokens),
                 .function => |f| {
+                    for (f.params) |p| self.alloc.free(p);
                     self.alloc.free(f.params);
                     self.alloc.free(f.body);
                 },
@@ -86,14 +87,7 @@ pub const Preprocessor = struct {
             index.* += 1; // skip '('
 
             var params = std.ArrayListUnmanaged([]const u8){};
-            defer {
-                for (params.items) |p| self.alloc.free(p);
-                params.deinit(self.alloc);
-            }
-            defer {
-                for (params.items) |p| self.alloc.free(p);
-                params.deinit(self.alloc);
-            }
+            defer params.deinit(self.alloc);
 
             const is_variadic = false;
 
@@ -220,6 +214,7 @@ pub const Preprocessor = struct {
         for (self.expanding.items) |expanding_name| {
             if (std.mem.eql(u8, expanding_name, name)) {
                 // Don't expand recursively, emit the identifier as-is
+                index.* += 1;
                 try self.output.append(self.alloc, identifier_tok);
                 return;
             }
@@ -227,6 +222,7 @@ pub const Preprocessor = struct {
 
         const macro = self.defines.get(name) orelse {
             // Not a macro, emit as-is
+            index.* += 1;
             try self.output.append(self.alloc, identifier_tok);
             return;
         };
@@ -239,25 +235,27 @@ pub const Preprocessor = struct {
 
         switch (macro) {
             .object => |body| {
+                index.* += 1;
                 for (body) |tok| {
                     try self.output.append(self.alloc, tok);
                 }
             },
             .function => |f| {
                 // Check if next token is '('
-                if (index.* >= tokens.len or tokens[index.*].tag != .l_paren) {
+                if (index.* + 1 >= tokens.len or tokens[index.* + 1].tag != .l_paren) {
                     // Not a function-like invocation, emit as-is
+                    index.* += 1;
                     try self.output.append(self.alloc, identifier_tok);
                     return;
                 }
+
+                // Skip past identifier and '('
+                index.* += 2;
 
                 // Parse arguments
                 const args = try self.parseMacroArguments(tokens, index);
                 defer {
                     for (args) |arg| {
-                        for (arg) |tok| {
-                            self.alloc.free(tok);
-                        }
                         self.alloc.free(arg);
                     }
                     self.alloc.free(args);
@@ -556,6 +554,8 @@ const IfState = struct {
     active: bool,
 };
 
+const ExprEvalError = error{ PreprocessFailed, InvalidCharacter, Overflow };
+
 const ExpressionEvaluator = struct {
     preprocessor: *Preprocessor,
     tokens: []const lexer.Token,
@@ -563,12 +563,12 @@ const ExpressionEvaluator = struct {
     end: usize,
     pos: usize,
 
-    fn evaluate(self: *ExpressionEvaluator) !i64 {
+    fn evaluate(self: *ExpressionEvaluator) ExprEvalError!i64 {
         self.pos = self.start;
         return self.parseConditional();
     }
 
-    fn parseConditional(self: *ExpressionEvaluator) !i64 {
+    fn parseConditional(self: *ExpressionEvaluator) ExprEvalError!i64 {
         const cond = try self.parseLogicalOr();
         if (self.peek()) |tok| {
             if (tok.tag == .question) {
@@ -586,7 +586,7 @@ const ExpressionEvaluator = struct {
         return cond;
     }
 
-    fn parseLogicalOr(self: *ExpressionEvaluator) !i64 {
+    fn parseLogicalOr(self: *ExpressionEvaluator) ExprEvalError!i64 {
         var left = try self.parseLogicalAnd();
         while (self.peek()) |tok| {
             if (tok.tag == .pipe_pipe) {
@@ -600,7 +600,7 @@ const ExpressionEvaluator = struct {
         return left;
     }
 
-    fn parseLogicalAnd(self: *ExpressionEvaluator) !i64 {
+    fn parseLogicalAnd(self: *ExpressionEvaluator) ExprEvalError!i64 {
         var left = try self.parseBitwiseOr();
         while (self.peek()) |tok| {
             if (tok.tag == .ampersand_ampersand) {
@@ -614,7 +614,7 @@ const ExpressionEvaluator = struct {
         return left;
     }
 
-    fn parseBitwiseOr(self: *ExpressionEvaluator) !i64 {
+    fn parseBitwiseOr(self: *ExpressionEvaluator) ExprEvalError!i64 {
         var left = try self.parseBitwiseXor();
         while (self.peek()) |tok| {
             if (tok.tag == .pipe) {
@@ -628,7 +628,7 @@ const ExpressionEvaluator = struct {
         return left;
     }
 
-    fn parseBitwiseXor(self: *ExpressionEvaluator) !i64 {
+    fn parseBitwiseXor(self: *ExpressionEvaluator) ExprEvalError!i64 {
         var left = try self.parseBitwiseAnd();
         while (self.peek()) |tok| {
             if (tok.tag == .caret) {
@@ -642,7 +642,7 @@ const ExpressionEvaluator = struct {
         return left;
     }
 
-    fn parseBitwiseAnd(self: *ExpressionEvaluator) !i64 {
+    fn parseBitwiseAnd(self: *ExpressionEvaluator) ExprEvalError!i64 {
         var left = try self.parseEquality();
         while (self.peek()) |tok| {
             if (tok.tag == .ampersand) {
@@ -656,7 +656,7 @@ const ExpressionEvaluator = struct {
         return left;
     }
 
-    fn parseEquality(self: *ExpressionEvaluator) !i64 {
+    fn parseEquality(self: *ExpressionEvaluator) ExprEvalError!i64 {
         var left = try self.parseRelational();
         while (self.peek()) |tok| {
             if (tok.tag == .eq) {
@@ -674,7 +674,7 @@ const ExpressionEvaluator = struct {
         return left;
     }
 
-    fn parseRelational(self: *ExpressionEvaluator) !i64 {
+    fn parseRelational(self: *ExpressionEvaluator) ExprEvalError!i64 {
         var left = try self.parseShift();
         while (self.peek()) |tok| {
             if (tok.tag == .lt) {
@@ -700,7 +700,7 @@ const ExpressionEvaluator = struct {
         return left;
     }
 
-    fn parseShift(self: *ExpressionEvaluator) !i64 {
+    fn parseShift(self: *ExpressionEvaluator) ExprEvalError!i64 {
         var left = try self.parseAdditive();
         while (self.peek()) |tok| {
             if (tok.tag == .lshift) {
@@ -718,7 +718,7 @@ const ExpressionEvaluator = struct {
         return left;
     }
 
-    fn parseAdditive(self: *ExpressionEvaluator) !i64 {
+    fn parseAdditive(self: *ExpressionEvaluator) ExprEvalError!i64 {
         var left = try self.parseMultiplicative();
         while (self.peek()) |tok| {
             if (tok.tag == .plus) {
@@ -736,7 +736,7 @@ const ExpressionEvaluator = struct {
         return left;
     }
 
-    fn parseMultiplicative(self: *ExpressionEvaluator) !i64 {
+    fn parseMultiplicative(self: *ExpressionEvaluator) ExprEvalError!i64 {
         var left = try self.parseUnary();
         while (self.peek()) |tok| {
             if (tok.tag == .star) {
@@ -760,7 +760,7 @@ const ExpressionEvaluator = struct {
         return left;
     }
 
-    fn parseUnary(self: *ExpressionEvaluator) !i64 {
+    fn parseUnary(self: *ExpressionEvaluator) ExprEvalError!i64 {
         if (self.peek()) |tok| {
             if (tok.tag == .plus) {
                 self.pos += 1;
@@ -783,7 +783,7 @@ const ExpressionEvaluator = struct {
         return try self.parsePrimary();
     }
 
-    fn parsePrimary(self: *ExpressionEvaluator) !i64 {
+    fn parsePrimary(self: *ExpressionEvaluator) ExprEvalError!i64 {
         if (self.peek()) |tok| {
             if (tok.tag == .int_literal or tok.tag == .uint_literal) {
                 self.pos += 1;

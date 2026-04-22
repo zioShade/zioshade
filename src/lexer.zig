@@ -248,7 +248,12 @@ const Tokenizer = struct {
             self.skipWhitespace();
 
             if (self.offset >= self.source.len) {
-                try self.emitToken(.eof, 0, 0);
+                try self.tokens.append(alloc, .{
+                    .tag = .eof,
+                    .loc = self.loc,
+                    .start = self.offset,
+                    .len = 0,
+                });
                 break;
             }
 
@@ -337,13 +342,6 @@ const Tokenizer = struct {
         }
     }
 
-    fn emitToken(self: *Tokenizer, tag: Token.Tag, len: u32, advance: u32) !void {
-        _ = self;
-        _ = tag;
-        _ = len;
-        _ = advance;
-    }
-
     fn skipWhitespace(self: *Tokenizer) void {
         while (self.offset < self.source.len) {
             const c = self.source[self.offset];
@@ -384,12 +382,6 @@ const Tokenizer = struct {
 
         const directive = self.source[start..self.offset];
         const tag = pp_directive_map.get(directive) orelse return error.InvalidToken;
-
-        // Skip to end of line
-        while (self.offset < self.source.len and self.source[self.offset] != '\n') {
-            self.offset += 1;
-            self.loc.column += 1;
-        }
 
         return tag;
     }
@@ -728,7 +720,7 @@ test "tokenize keywords" {
     const tokens = try tokenize(alloc, source);
     defer alloc.free(tokens);
 
-    try std.testing.expectEqual(@as(usize, 8), tokens.len);
+    try std.testing.expectEqual(@as(usize, 9), tokens.len);
     try std.testing.expectEqual(Token.Tag.kw_void, tokens[0].tag);
     try std.testing.expectEqual(Token.Tag.kw_float, tokens[1].tag);
     try std.testing.expectEqual(Token.Tag.kw_int, tokens[2].tag);
@@ -737,6 +729,7 @@ test "tokenize keywords" {
     try std.testing.expectEqual(Token.Tag.kw_uniform, tokens[5].tag);
     try std.testing.expectEqual(Token.Tag.kw_in, tokens[6].tag);
     try std.testing.expectEqual(Token.Tag.kw_out, tokens[7].tag);
+    try std.testing.expectEqual(Token.Tag.eof, tokens[8].tag);
 }
 
 test "tokenize identifiers" {
@@ -818,16 +811,14 @@ test "tokenize preprocessor define" {
     const tokens = try tokenize(alloc, source);
     defer alloc.free(tokens);
 
-    try std.testing.expectEqual(@as(usize, 5), tokens.len);
+    try std.testing.expectEqual(@as(usize, 7), tokens.len);
     try std.testing.expectEqual(Token.Tag.pp_define, tokens[0].tag);
-    try std.testing.expectEqual(Token.Tag.kw_float, tokens[1].tag);
-    try std.testing.expectEqual(Token.Tag.identifier, tokens[2].tag);
-    try std.testing.expectEqual(Token.Tag.semicolon, tokens[3].tag);
-    try std.testing.expectEqual(Token.Tag.eof, tokens[4].tag);
-
-    // Check that pp_define covers the entire first line
-    const first_line_len = std.mem.indexOfScalar(u8, source, '\n').?;
-    try std.testing.expectEqual(@as(u32, @intCast(first_line_len)), tokens[0].len);
+    try std.testing.expectEqual(Token.Tag.identifier, tokens[1].tag);
+    try std.testing.expectEqual(Token.Tag.int_literal, tokens[2].tag);
+    try std.testing.expectEqual(Token.Tag.kw_float, tokens[3].tag);
+    try std.testing.expectEqual(Token.Tag.identifier, tokens[4].tag);
+    try std.testing.expectEqual(Token.Tag.semicolon, tokens[5].tag);
+    try std.testing.expectEqual(Token.Tag.eof, tokens[6].tag);
 }
 
 test "tokenize preprocessor ifdef" {
@@ -836,13 +827,14 @@ test "tokenize preprocessor ifdef" {
     const tokens = try tokenize(alloc, source);
     defer alloc.free(tokens);
 
-    try std.testing.expectEqual(@as(usize, 6), tokens.len);
+    try std.testing.expectEqual(@as(usize, 7), tokens.len);
     try std.testing.expectEqual(Token.Tag.pp_ifdef, tokens[0].tag);
-    try std.testing.expectEqual(Token.Tag.kw_float, tokens[1].tag);
-    try std.testing.expectEqual(Token.Tag.identifier, tokens[2].tag);
-    try std.testing.expectEqual(Token.Tag.semicolon, tokens[3].tag);
-    try std.testing.expectEqual(Token.Tag.pp_endif, tokens[4].tag);
-    try std.testing.expectEqual(Token.Tag.eof, tokens[5].tag);
+    try std.testing.expectEqual(Token.Tag.identifier, tokens[1].tag);
+    try std.testing.expectEqual(Token.Tag.kw_float, tokens[2].tag);
+    try std.testing.expectEqual(Token.Tag.identifier, tokens[3].tag);
+    try std.testing.expectEqual(Token.Tag.semicolon, tokens[4].tag);
+    try std.testing.expectEqual(Token.Tag.pp_endif, tokens[5].tag);
+    try std.testing.expectEqual(Token.Tag.eof, tokens[6].tag);
 }
 
 test "tokenize location tracking" {
@@ -894,13 +886,14 @@ test "tokenize simple shader" {
 
     // Check first 10 token tags
     try std.testing.expectEqual(Token.Tag.pp_version, tokens[0].tag);
-    try std.testing.expectEqual(Token.Tag.kw_out, tokens[1].tag);
-    try std.testing.expectEqual(Token.Tag.kw_vec4, tokens[2].tag);
-    try std.testing.expectEqual(Token.Tag.identifier, tokens[3].tag);
-    try std.testing.expectEqual(Token.Tag.semicolon, tokens[4].tag);
-    try std.testing.expectEqual(Token.Tag.kw_void, tokens[5].tag);
-    try std.testing.expectEqual(Token.Tag.identifier, tokens[6].tag);
-    try std.testing.expectEqual(Token.Tag.l_paren, tokens[7].tag);
-    try std.testing.expectEqual(Token.Tag.r_paren, tokens[8].tag);
-    try std.testing.expectEqual(Token.Tag.l_brace, tokens[9].tag);
+    try std.testing.expectEqual(Token.Tag.int_literal, tokens[1].tag);
+    try std.testing.expectEqual(Token.Tag.identifier, tokens[2].tag);
+    try std.testing.expectEqual(Token.Tag.kw_out, tokens[3].tag);
+    try std.testing.expectEqual(Token.Tag.kw_vec4, tokens[4].tag);
+    try std.testing.expectEqual(Token.Tag.identifier, tokens[5].tag);
+    try std.testing.expectEqual(Token.Tag.semicolon, tokens[6].tag);
+    try std.testing.expectEqual(Token.Tag.kw_void, tokens[7].tag);
+    try std.testing.expectEqual(Token.Tag.l_paren, tokens[9].tag);
+    try std.testing.expectEqual(Token.Tag.r_paren, tokens[10].tag);
+    try std.testing.expectEqual(Token.Tag.l_brace, tokens[11].tag);
 }
