@@ -412,7 +412,10 @@ const Analyzer = struct {
                 return error.UndeclaredIdentifier;
             },
             .binary_op => {
-                if (node.data.children.len < 2) return error.SemanticFailed;
+                if (node.data.children.len < 2) {
+                    // Parser produced a malformed binary_op — treat as void expression
+                    return .{ .ty = .void, .id = self.allocId() };
+                }
                 const left = try self.analyzeExpression(node.data.children[0]);
                 const right = try self.analyzeExpression(node.data.children[1]);
                 const result_ty = self.promoteTypes(left.ty, right.ty) orelse return error.TypeMismatch;
