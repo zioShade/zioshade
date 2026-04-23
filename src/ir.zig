@@ -58,6 +58,7 @@ pub const Instruction = struct {
     result_type: ?u32 = null,
     result_id: ?u32 = null,
     operands: []const Operand = &.{},
+    ty: ast.Type = .void, // AST type for codegen type resolution
 
     pub const Tag = enum {
         constant_int,

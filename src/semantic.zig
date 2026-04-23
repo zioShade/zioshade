@@ -225,6 +225,7 @@ const Analyzer = struct {
                 .result_type = null,
                 .result_id = null,
                 .operands = &.{},
+                .ty = .void,
             });
         }
 
@@ -252,12 +253,14 @@ const Analyzer = struct {
                     .ir_id = ir_id,
                 });
                 // Emit local variable declaration (function storage class = 7)
-                const sc_ops = [1]ir.Instruction.Operand{.{ .literal_int = 7 }};
+                const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                sc_operands[0] = .{ .literal_int = 7 };
                 try self.instructions.append(self.alloc, .{
                     .tag = .local_variable,
                     .result_type = null,
                     .result_id = ir_id,
-                    .operands = &sc_ops,
+                    .operands = sc_operands,
+                    .ty = ty,
                 });
                 if (node.data.children.len > 0) {
                     const init = try self.analyzeExpression(node.data.children[0]);
@@ -265,15 +268,15 @@ const Analyzer = struct {
                         return error.TypeMismatch;
                     }
                     // Emit store: target <- value
-                    const store_ops = [2]ir.Instruction.Operand{
-                        .{ .id = ir_id },
-                        .{ .id = init.id },
-                    };
+                    const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                    store_operands[0] = .{ .id = ir_id };
+                    store_operands[1] = .{ .id = init.id };
                     try self.instructions.append(self.alloc, .{
                         .tag = .store,
                         .result_type = null,
                         .result_id = null,
-                        .operands = &store_ops,
+                        .operands = store_operands,
+                        .ty = .void,
                     });
                 }
             },
@@ -306,12 +309,14 @@ const Analyzer = struct {
             .return_stmt => {
                 if (node.data.children.len > 0) {
                     const val = try self.analyzeExpression(node.data.children[0]);
-                    const ret_ops = [1]ir.Instruction.Operand{.{ .id = val.id }};
+                    const ret_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    ret_operands[0] = .{ .id = val.id };
                     try self.instructions.append(self.alloc, .{
                         .tag = .return_val,
                         .result_type = null,
                         .result_id = null,
-                        .operands = &ret_ops,
+                        .operands = ret_operands,
+                        .ty = val.ty,
                     });
                 } else {
                     try self.instructions.append(self.alloc, .{
@@ -319,6 +324,7 @@ const Analyzer = struct {
                         .result_type = null,
                         .result_id = null,
                         .operands = &.{},
+                        .ty = .void,
                     });
                 }
             },
@@ -336,45 +342,53 @@ const Analyzer = struct {
         switch (node.tag) {
             .int_literal => {
                 const id = self.allocId();
-                const ops = [1]ir.Instruction.Operand{.{ .literal_int = @as(u32, @intCast(node.data.int_val)) }};
+                const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                operands[0] = .{ .literal_int = @as(u32, @intCast(node.data.int_val)) };
                 try self.instructions.append(self.alloc, .{
                     .tag = .constant_int,
                     .result_type = null,
                     .result_id = id,
-                    .operands = &ops,
+                    .operands = operands,
+                    .ty = .int,
                 });
                 return .{ .ty = .int, .id = id };
             },
             .uint_literal => {
                 const id = self.allocId();
-                const ops = [1]ir.Instruction.Operand{.{ .literal_int = @as(u32, @intCast(node.data.int_val)) }};
+                const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                operands[0] = .{ .literal_int = @as(u32, @intCast(node.data.int_val)) };
                 try self.instructions.append(self.alloc, .{
                     .tag = .constant_int,
                     .result_type = null,
                     .result_id = id,
-                    .operands = &ops,
+                    .operands = operands,
+                    .ty = .uint,
                 });
                 return .{ .ty = .uint, .id = id };
             },
             .float_literal => {
                 const id = self.allocId();
-                const ops = [1]ir.Instruction.Operand{.{ .literal_float = @as(f32, @floatCast(node.data.float_val)) }};
+                const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                operands[0] = .{ .literal_float = @as(f32, @floatCast(node.data.float_val)) };
                 try self.instructions.append(self.alloc, .{
                     .tag = .constant_float,
                     .result_type = null,
                     .result_id = id,
-                    .operands = &ops,
+                    .operands = operands,
+                    .ty = .float,
                 });
                 return .{ .ty = .float, .id = id };
             },
             .bool_literal => {
                 const id = self.allocId();
-                const ops = [1]ir.Instruction.Operand{.{ .literal_int = if (node.data.int_val != 0) @as(u32, 1) else @as(u32, 0) }};
+                const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                operands[0] = .{ .literal_int = if (node.data.int_val != 0) @as(u32, 1) else @as(u32, 0) };
                 try self.instructions.append(self.alloc, .{
                     .tag = .constant_bool,
                     .result_type = null,
                     .result_id = id,
-                    .operands = &ops,
+                    .operands = operands,
+                    .ty = .bool,
                 });
                 return .{ .ty = .bool, .id = id };
             },
@@ -382,12 +396,14 @@ const Analyzer = struct {
                 if (self.lookup(node.data.name)) |sym| {
                     if (sym.kind == .param or sym.kind == .var_sym) {
                         const id = self.allocId();
-                        const ops = [1]ir.Instruction.Operand{.{ .id = sym.ir_id }};
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = sym.ir_id };
                         try self.instructions.append(self.alloc, .{
                             .tag = .load,
                             .result_type = null,
                             .result_id = id,
-                            .operands = &ops,
+                            .operands = operands,
+                            .ty = sym.ty,
                         });
                         return .{ .ty = sym.ty, .id = id };
                     }
@@ -426,15 +442,15 @@ const Analyzer = struct {
                     else => .add,
                 };
 
-                const ops = [2]ir.Instruction.Operand{
-                    .{ .id = left.id },
-                    .{ .id = right.id },
-                };
+                const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                operands[0] = .{ .id = left.id };
+                operands[1] = .{ .id = right.id };
                 try self.instructions.append(self.alloc, .{
                     .tag = tag,
                     .result_type = null,
                     .result_id = result_id,
-                    .operands = &ops,
+                    .operands = operands,
+                    .ty = result_ty,
                 });
                 return .{ .ty = result_ty, .id = result_id };
             },
@@ -452,12 +468,14 @@ const Analyzer = struct {
                     else => .neg,
                 };
 
-                const ops = [1]ir.Instruction.Operand{.{ .id = operand.id }};
+                const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                operands[0] = .{ .id = operand.id };
                 try self.instructions.append(self.alloc, .{
                     .tag = tag,
                     .result_type = null,
                     .result_id = result_id,
-                    .operands = &ops,
+                    .operands = operands,
+                    .ty = operand.ty,
                 });
                 return .{ .ty = operand.ty, .id = result_id };
             },
@@ -465,15 +483,15 @@ const Analyzer = struct {
                 if (node.data.children.len < 2) return error.SemanticFailed;
                 const target = try self.analyzeExpression(node.data.children[0]);
                 const value = try self.analyzeExpression(node.data.children[1]);
-                const store_ops = [2]ir.Instruction.Operand{
-                    .{ .id = target.id },
-                    .{ .id = value.id },
-                };
+                const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                store_operands[0] = .{ .id = target.id };
+                store_operands[1] = .{ .id = value.id };
                 try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
                     .result_id = null,
-                    .operands = &store_ops,
+                    .operands = store_operands,
+                    .ty = .void,
                 });
                 return .{ .ty = .void, .id = 0 };
             },
@@ -483,12 +501,14 @@ const Analyzer = struct {
                 const value = try self.analyzeExpression(node.data.children[1]);
                 // Load current value
                 const loaded_id = self.allocId();
-                const load_ops = [1]ir.Instruction.Operand{.{ .id = target.id }};
+                const load_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                load_operands[0] = .{ .id = target.id };
                 try self.instructions.append(self.alloc, .{
                     .tag = .load,
                     .result_type = null,
                     .result_id = loaded_id,
-                    .operands = &load_ops,
+                    .operands = load_operands,
+                    .ty = target.ty,
                 });
                 // Compute result
                 const result_ty = target.ty;
@@ -501,26 +521,26 @@ const Analyzer = struct {
                     else => .add,
                 };
                 const computed_id = self.allocId();
-                const bin_ops = [2]ir.Instruction.Operand{
-                    .{ .id = loaded_id },
-                    .{ .id = value.id },
-                };
+                const bin_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                bin_operands[0] = .{ .id = loaded_id };
+                bin_operands[1] = .{ .id = value.id };
                 try self.instructions.append(self.alloc, .{
                     .tag = op_tag,
                     .result_type = null,
                     .result_id = computed_id,
-                    .operands = &bin_ops,
+                    .operands = bin_operands,
+                    .ty = result_ty,
                 });
                 // Store back
-                const store_ops = [2]ir.Instruction.Operand{
-                    .{ .id = target.id },
-                    .{ .id = computed_id },
-                };
+                const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                store_operands[0] = .{ .id = target.id };
+                store_operands[1] = .{ .id = computed_id };
                 try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
                     .result_id = null,
-                    .operands = &store_ops,
+                    .operands = store_operands,
+                    .ty = .void,
                 });
                 return .{ .ty = .void, .id = 0 };
             },
@@ -547,6 +567,7 @@ const Analyzer = struct {
                         .result_type = null,
                         .result_id = result_id,
                         .operands = operands,
+                        .ty = result_ty,
                     });
                 }
                 // For non-builtin functions, just allocate the result_id (function calls not yet supported)
@@ -573,6 +594,7 @@ const Analyzer = struct {
                     .result_type = null,
                     .result_id = result_id,
                     .operands = operands,
+                    .ty = result_ty,
                 });
                 return .{ .ty = result_ty, .id = result_id };
             },
@@ -596,15 +618,15 @@ const Analyzer = struct {
                 // Single-component swizzle → CompositeExtract
                 if (node.data.name.len == 1) {
                     const idx = self.swizzleIndex(node.data.name[0]);
-                    const ops = [2]ir.Instruction.Operand{
-                        .{ .id = base.id },
-                        .{ .literal_int = idx },
-                    };
+                    const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                    operands[0] = .{ .id = base.id };
+                    operands[1] = .{ .literal_int = idx };
                     try self.instructions.append(self.alloc, .{
                         .tag = .composite_extract,
                         .result_type = null,
                         .result_id = result_id,
-                        .operands = &ops,
+                        .operands = operands,
+                        .ty = base.ty.elementType(),
                     });
                     return .{ .ty = base.ty.elementType(), .id = result_id };
                 }
