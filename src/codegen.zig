@@ -423,6 +423,49 @@ const Codegen = struct {
 
     fn emitInstruction(self: *Codegen, inst: ir.Instruction) !void {
         switch (inst.tag) {
+            .constant_int => {
+                const result_id = inst.result_id orelse return;
+                const val = self.operandInt(inst, 0);
+                const int_type_id = try self.ensureType(.int);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+                try self.emitWord(int_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(val);
+            },
+            .constant_float => {
+                const result_id = inst.result_id orelse return;
+                const val: f32 = switch (inst.operands[0]) {
+                    .literal_float => |v| v,
+                    else => unreachable,
+                };
+                const float_type_id = try self.ensureType(.float);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+                try self.emitWord(float_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(@as(u32, @bitCast(val)));
+            },
+            .constant_bool => {
+                const result_id = inst.result_id orelse return;
+                const val = self.operandInt(inst, 0);
+                const bool_type_id = try self.ensureType(.bool);
+                const op: spirv.Op = if (val != 0) .ConstantTrue else .ConstantFalse;
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(op)));
+                try self.emitWord(bool_type_id);
+                try self.emitWord(result_id);
+            },
+            .local_variable => {
+                const result_type_id = inst.result_type orelse return;
+                const result_id = inst.result_id orelse return;
+                const sc = self.operandInt(inst, 0);
+                const wc: u16 = if (inst.operands.len > 1) 5 else 4;
+                try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.Variable)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sc);
+                if (inst.operands.len > 1) {
+                    try self.emitWord(self.operandId(inst, 1));
+                }
+            },
             .load => {
                 const result_type_id = inst.result_type orelse return;
                 const result_id = inst.result_id orelse return;
