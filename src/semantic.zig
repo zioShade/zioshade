@@ -215,6 +215,19 @@ const Analyzer = struct {
             try self.analyzeStatement(child);
         }
 
+        // If no explicit return was emitted, add an implicit return_void
+        if (self.instructions.items.len == 0 or
+            self.instructions.items[self.instructions.items.len - 1].tag != .return_void and
+            self.instructions.items[self.instructions.items.len - 1].tag != .return_val)
+        {
+            try self.instructions.append(self.alloc, .{
+                .tag = .return_void,
+                .result_type = null,
+                .result_id = null,
+                .operands = &.{},
+            });
+        }
+
         const func = ir.Function{
             .name = node.data.name,
             .return_type = node.data.ty orelse .void,
@@ -238,11 +251,30 @@ const Analyzer = struct {
                     .ty = ty,
                     .ir_id = ir_id,
                 });
+                // Emit local variable declaration (function storage class = 7)
+                const sc_ops = [1]ir.Instruction.Operand{.{ .literal_int = 7 }};
+                try self.instructions.append(self.alloc, .{
+                    .tag = .local_variable,
+                    .result_type = null,
+                    .result_id = ir_id,
+                    .operands = &sc_ops,
+                });
                 if (node.data.children.len > 0) {
-                    const init_tid = try self.analyzeExpression(node.data.children[0]);
-                    if (!self.typesCompatible(ty, init_tid.ty)) {
+                    const init = try self.analyzeExpression(node.data.children[0]);
+                    if (!self.typesCompatible(ty, init.ty)) {
                         return error.TypeMismatch;
                     }
+                    // Emit store: target <- value
+                    const store_ops = [2]ir.Instruction.Operand{
+                        .{ .id = ir_id },
+                        .{ .id = init.id },
+                    };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .store,
+                        .result_type = null,
+                        .result_id = null,
+                        .operands = &store_ops,
+                    });
                 }
             },
             .block => {
@@ -273,7 +305,21 @@ const Analyzer = struct {
             },
             .return_stmt => {
                 if (node.data.children.len > 0) {
-                    _ = try self.analyzeExpression(node.data.children[0]);
+                    const val = try self.analyzeExpression(node.data.children[0]);
+                    const ret_ops = [1]ir.Instruction.Operand{.{ .id = val.id }};
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .return_val,
+                        .result_type = null,
+                        .result_id = null,
+                        .operands = &ret_ops,
+                    });
+                } else {
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .return_void,
+                        .result_type = null,
+                        .result_id = null,
+                        .operands = &.{},
+                    });
                 }
             },
             .discard_stmt, .break_stmt, .continue_stmt => {},
@@ -415,11 +461,68 @@ const Analyzer = struct {
                 });
                 return .{ .ty = operand.ty, .id = result_id };
             },
-            .assign_op, .compound_assign => {
+            .assign_op => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
-                _ = try self.analyzeExpression(node.data.children[0]);
-                _ = try self.analyzeExpression(node.data.children[1]);
-                return .{ .ty = .void, .id = self.allocId() };
+                const target = try self.analyzeExpression(node.data.children[0]);
+                const value = try self.analyzeExpression(node.data.children[1]);
+                const store_ops = [2]ir.Instruction.Operand{
+                    .{ .id = target.id },
+                    .{ .id = value.id },
+                };
+                try self.instructions.append(self.alloc, .{
+                    .tag = .store,
+                    .result_type = null,
+                    .result_id = null,
+                    .operands = &store_ops,
+                });
+                return .{ .ty = .void, .id = 0 };
+            },
+            .compound_assign => {
+                if (node.data.children.len < 2) return error.SemanticFailed;
+                const target = try self.analyzeExpression(node.data.children[0]);
+                const value = try self.analyzeExpression(node.data.children[1]);
+                // Load current value
+                const loaded_id = self.allocId();
+                const load_ops = [1]ir.Instruction.Operand{.{ .id = target.id }};
+                try self.instructions.append(self.alloc, .{
+                    .tag = .load,
+                    .result_type = null,
+                    .result_id = loaded_id,
+                    .operands = &load_ops,
+                });
+                // Compute result
+                const result_ty = target.ty;
+                const is_float = result_ty == .float or result_ty == .double;
+                const op_tag: ir.Instruction.Tag = switch (node.data.op orelse .add) {
+                    .add_assign => if (is_float) .fadd else .add,
+                    .sub_assign => if (is_float) .fsub else .sub,
+                    .mul_assign => if (is_float) .fmul else .mul,
+                    .div_assign => if (is_float) .fdiv else .div,
+                    else => .add,
+                };
+                const computed_id = self.allocId();
+                const bin_ops = [2]ir.Instruction.Operand{
+                    .{ .id = loaded_id },
+                    .{ .id = value.id },
+                };
+                try self.instructions.append(self.alloc, .{
+                    .tag = op_tag,
+                    .result_type = null,
+                    .result_id = computed_id,
+                    .operands = &bin_ops,
+                });
+                // Store back
+                const store_ops = [2]ir.Instruction.Operand{
+                    .{ .id = target.id },
+                    .{ .id = computed_id },
+                };
+                try self.instructions.append(self.alloc, .{
+                    .tag = .store,
+                    .result_type = null,
+                    .result_id = null,
+                    .operands = &store_ops,
+                });
+                return .{ .ty = .void, .id = 0 };
             },
             .func_call => {
                 _ = self.lookup(node.data.name);

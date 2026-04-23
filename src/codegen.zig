@@ -411,12 +411,6 @@ const Codegen = struct {
                 try self.emitInstruction(inst);
             }
 
-            if (func.body.len == 0) {
-                if (func.return_type == .void) {
-                    try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.Return)));
-                }
-            }
-
             try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.FunctionEnd)));
         }
     }
