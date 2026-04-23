@@ -195,25 +195,50 @@ const Analyzer = struct {
             .ir_id = self.allocId(),
         });
 
-        const math_funcs = .{
+        // Math functions that return float (or same type as primary argument)
+        const float_return_funcs = .{
             "abs",   "acos",  "asin",      "atan",    "atan2",
-            "ceil",  "clamp", "cos",       "cosh",    "cross",
-            "degrees", "determinant", "distance", "dot",
-            "exp",   "exp2",  "faceforward", "floor", "fract",
+            "ceil",  "clamp", "cos",       "cosh",
+            "degrees", "distance", "dot",
+            "exp",   "exp2",  "floor", "fract",
             "inversesqrt", "length", "log", "log2",
-            "max",   "min",   "mix",       "mod",     "normalize",
-            "pow",   "radians", "reflect", "refract",
-            "round", "sign",  "sin",       "sinh",
+            "max",   "min",   "mix",       "mod",
+            "pow",   "radians", "round", "sign",
+            "sin",       "sinh",
             "smoothstep", "sqrt", "step",  "tan",     "tanh",
-            "transpose",  "trunc",
+            "trunc",
         };
-        inline for (math_funcs) |name| {
+        inline for (float_return_funcs) |name| {
             try self.declare(name, .{
                 .kind = .func,
-                .ty = .void,
+                .ty = .float,
                 .ir_id = self.allocId(),
             });
         }
+
+        // Functions that return vec3
+        const vec3_return_funcs = .{
+            "cross", "reflect", "refract", "faceforward", "normalize",
+        };
+        inline for (vec3_return_funcs) |name| {
+            try self.declare(name, .{
+                .kind = .func,
+                .ty = .vec3,
+                .ir_id = self.allocId(),
+            });
+        }
+
+        // Matrix functions
+        try self.declare("determinant", .{
+            .kind = .func,
+            .ty = .float,
+            .ir_id = self.allocId(),
+        });
+        try self.declare("transpose", .{
+            .kind = .func,
+            .ty = .mat4,
+            .ir_id = self.allocId(),
+        });
 
         try self.declare("texture", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
         try self.declare("texture2D", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
@@ -598,19 +623,20 @@ const Analyzer = struct {
                 const result_id = self.allocId();
 
                 const is_float = result_ty == .float or result_ty == .double;
+                const op = node.data.op orelse .add;
 
-                const tag: ir.Instruction.Tag = switch (node.data.op orelse .add) {
+                const tag: ir.Instruction.Tag = switch (op) {
                     .add => if (is_float) .fadd else .add,
                     .sub => if (is_float) .fsub else .sub,
                     .mul => if (is_float) .fmul else .mul,
                     .div => if (is_float) .fdiv else .div,
                     .mod => .rem,
-                    .eq => .compare_eq,
-                    .neq => .compare_neq,
-                    .lt => .compare_lt,
-                    .gt => .compare_gt,
-                    .lte => .compare_lte,
-                    .gte => .compare_gte,
+                    .eq => if (is_float) .compare_feq else .compare_eq,
+                    .neq => if (is_float) .compare_fneq else .compare_neq,
+                    .lt => if (is_float) .compare_flt else .compare_lt,
+                    .gt => if (is_float) .compare_fgt else .compare_gt,
+                    .lte => if (is_float) .compare_flte else .compare_lte,
+                    .gte => if (is_float) .compare_fgte else .compare_gte,
                     .logical_and => .logical_and,
                     .logical_or => .logical_or,
                     .bit_and => .bit_and,
@@ -624,14 +650,21 @@ const Analyzer = struct {
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 operands[0] = .{ .id = left.id };
                 operands[1] = .{ .id = right.id };
+
+                // Comparison and logical operators return bool, not the operand type
+                const returns_bool = switch (op) {
+                    .eq, .neq, .lt, .gt, .lte, .gte, .logical_and, .logical_or => true,
+                    else => false,
+                };
+
                 try self.instructions.append(self.alloc, .{
                     .tag = tag,
                     .result_type = null,
                     .result_id = result_id,
                     .operands = operands,
-                    .ty = result_ty,
+                    .ty = if (returns_bool) .bool else result_ty,
                 });
-                return .{ .ty = result_ty, .id = result_id };
+                return .{ .ty = if (returns_bool) .bool else result_ty, .id = result_id };
             },
             .unary_op => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
