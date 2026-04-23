@@ -109,7 +109,10 @@ const Parser = struct {
                     _ = self.advance();
                     return;
                 },
-                .r_brace => return,
+                .r_brace => {
+                    _ = self.advance();
+                    return;
+                },
                 .kw_void, .kw_float, .kw_int, .kw_uint, .kw_bool,
                 .kw_vec2, .kw_vec3, .kw_vec4,
                 .kw_ivec2, .kw_ivec3, .kw_ivec4,
