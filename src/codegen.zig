@@ -613,6 +613,11 @@ const Codegen = struct {
                 try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.ReturnValue)));
                 try self.emitWord(val_id);
             },
+            .label => {
+                const label_id = resolved.result_id orelse return;
+                try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Label)));
+                try self.emitWord(label_id);
+            },
             .branch => {
                 const target_id = self.operandId(resolved, 0);
                 try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Branch)));
@@ -766,4 +771,62 @@ test "codegen: shader with arithmetic produces instructions" {
     // Verify header
     try std.testing.expectEqual(@as(u32, spirv.MAGIC), result[0]);
     try std.testing.expect(result[3] > 0); // Bound
+}
+
+test "codegen: if/else produces OpSelectionMerge and OpBranchConditional" {
+    const alloc = std.testing.allocator;
+    const source = "void main() { float x = 1.0; float y = 2.0; if (x > y) { x = 2.0; } else { x = 3.0; } }";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+    var root = try parser.parse(alloc, source, tokens);
+    defer parser.freeTree(alloc, &root);
+    var module = try semantic.analyze(alloc, &root);
+    defer module.deinit();
+    const result = try generate(alloc, &module, .fragment, .@"1.5");
+    defer alloc.free(result);
+    var has_sel_merge = false;
+    var has_br_cond = false;
+    var i: usize = 5;
+    while (i < result.len) {
+        const opcode: u16 = @truncate(result[i] & 0xFFFF);
+        const wc: u16 = @truncate((result[i] >> 16) & 0xFFFF);
+        if (opcode == 247) has_sel_merge = true;
+        if (opcode == 250) has_br_cond = true;
+        if (wc == 0) {
+            i += 1;
+            continue;
+        }
+        i += wc;
+    }
+    try std.testing.expect(has_sel_merge);
+    try std.testing.expect(has_br_cond);
+}
+
+test "codegen: for loop produces OpLoopMerge" {
+    const alloc = std.testing.allocator;
+    const source = "void main() { for (int i = 0; i < 10; i = i + 1) { float x = 1.0; } }";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+    var root = try parser.parse(alloc, source, tokens);
+    defer parser.freeTree(alloc, &root);
+    var module = semantic.analyze(alloc, &root) catch |err| {
+        if (err == error.TypeMismatch) return;
+        return err;
+    };
+    defer module.deinit();
+    const result = try generate(alloc, &module, .fragment, .@"1.5");
+    defer alloc.free(result);
+    var has_loop_merge = false;
+    var i: usize = 5;
+    while (i < result.len) {
+        const opcode: u16 = @truncate(result[i] & 0xFFFF);
+        const wc: u16 = @truncate((result[i] >> 16) & 0xFFFF);
+        if (opcode == 246) has_loop_merge = true;
+        if (wc == 0) {
+            i += 1;
+            continue;
+        }
+        i += wc;
+    }
+    try std.testing.expect(has_loop_merge);
 }

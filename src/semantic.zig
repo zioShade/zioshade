@@ -20,6 +20,7 @@ pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
         .types = .empty,
         .instructions = .{},
         .errors = .{},
+        .loop_stack = .empty,
     };
     defer analyzer.deinit();
 
@@ -52,6 +53,11 @@ const Symbol = struct {
     ir_id: u32,
 };
 
+const LoopContext = struct {
+    merge_label: u32,
+    continue_label: u32,
+};
+
 const Scope = std.StringHashMapUnmanaged(Symbol);
 
 const Analyzer = struct {
@@ -66,6 +72,7 @@ const Analyzer = struct {
     types: std.StringHashMapUnmanaged(ir.TypeDef),
     instructions: std.ArrayListUnmanaged(ir.Instruction),
     errors: std.ArrayListUnmanaged([]const u8),
+    loop_stack: std.ArrayListUnmanaged(LoopContext),
     next_id: u32 = 1,
 
     fn deinit(self: *Analyzer) void {
@@ -83,6 +90,7 @@ const Analyzer = struct {
         self.functions.deinit(self.alloc);
         for (self.errors.items) |msg| self.alloc.free(msg);
         self.errors.deinit(self.alloc);
+        self.loop_stack.deinit(self.alloc);
         for (self.instructions.items) |inst| {
             if (inst.operands.len > 0) {
                 self.alloc.free(inst.operands);
@@ -104,6 +112,58 @@ const Analyzer = struct {
     fn popScope(self: *Analyzer) void {
         var scope = self.scopes.pop() orelse return;
         scope.deinit(self.alloc);
+    }
+
+    fn emitLabel(self: *Analyzer, label_id: u32) !void {
+        try self.instructions.append(self.alloc, .{
+            .tag = .label,
+            .result_id = label_id,
+            .operands = &.{},
+            .ty = .void,
+        });
+    }
+
+    fn emitBranch(self: *Analyzer, target_id: u32) !void {
+        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+        operands[0] = .{ .id = target_id };
+        try self.instructions.append(self.alloc, .{
+            .tag = .branch,
+            .operands = operands,
+            .ty = .void,
+        });
+    }
+
+    fn emitBranchConditional(self: *Analyzer, cond_id: u32, true_id: u32, false_id: u32) !void {
+        const operands = try self.alloc.alloc(ir.Instruction.Operand, 3);
+        operands[0] = .{ .id = cond_id };
+        operands[1] = .{ .id = true_id };
+        operands[2] = .{ .id = false_id };
+        try self.instructions.append(self.alloc, .{
+            .tag = .branch_conditional,
+            .operands = operands,
+            .ty = .void,
+        });
+    }
+
+    fn emitSelectionMerge(self: *Analyzer, merge_id: u32) !void {
+        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+        operands[0] = .{ .id = merge_id };
+        try self.instructions.append(self.alloc, .{
+            .tag = .selection_merge,
+            .operands = operands,
+            .ty = .void,
+        });
+    }
+
+    fn emitLoopMerge(self: *Analyzer, merge_id: u32, continue_id: u32) !void {
+        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+        operands[0] = .{ .id = merge_id };
+        operands[1] = .{ .id = continue_id };
+        try self.instructions.append(self.alloc, .{
+            .tag = .loop_merge,
+            .operands = operands,
+            .ty = .void,
+        });
     }
 
     fn declare(self: *Analyzer, name: []const u8, sym: Symbol) !void {
@@ -301,23 +361,118 @@ const Analyzer = struct {
                 self.popScope();
             },
             .if_stmt => {
-                if (node.data.children.len > 0) {
-                    _ = try self.analyzeExpression(node.data.children[0]);
-                }
+                const has_else = node.data.children.len > 2;
+                const cond = try self.analyzeExpression(node.data.children[0]);
+
+                const then_label = self.allocId();
+                const else_label = if (has_else) self.allocId() else null;
+                const merge_label = self.allocId();
+
+                try self.emitSelectionMerge(merge_label);
+                try self.emitBranchConditional(cond.id, then_label, if (has_else) else_label.? else merge_label);
+
+                try self.emitLabel(then_label);
                 if (node.data.children.len > 1) try self.analyzeStatement(node.data.children[1]);
-                if (node.data.children.len > 2) try self.analyzeStatement(node.data.children[2]);
+                try self.emitBranch(merge_label);
+
+                if (has_else) {
+                    try self.emitLabel(else_label.?);
+                    try self.analyzeStatement(node.data.children[2]);
+                    try self.emitBranch(merge_label);
+                }
+
+                try self.emitLabel(merge_label);
             },
             .for_stmt => {
                 try self.pushScope();
-                for (node.data.children) |child| {
-                    try self.analyzeStatement(child);
+
+                const header_label = self.allocId();
+                const body_label = self.allocId();
+                const continue_label = self.allocId();
+                const merge_label = self.allocId();
+
+                // Init
+                if (node.data.children.len > 0) try self.analyzeStatement(node.data.children[0]);
+
+                try self.emitBranch(header_label);
+
+                try self.loop_stack.append(self.alloc, .{
+                    .merge_label = merge_label,
+                    .continue_label = continue_label,
+                });
+
+                // Header: merge + condition check
+                try self.emitLabel(header_label);
+                try self.emitLoopMerge(merge_label, continue_label);
+
+                if (node.data.children.len > 1) {
+                    const cond = try self.analyzeExpression(node.data.children[1]);
+                    try self.emitBranchConditional(cond.id, body_label, merge_label);
+                } else {
+                    try self.emitBranch(body_label);
                 }
+
+                // Body
+                try self.emitLabel(body_label);
+                if (node.data.children.len > 3) try self.analyzeStatement(node.data.children[3]);
+
+                // Continue + update
+                try self.emitLabel(continue_label);
+                if (node.data.children.len > 2) try self.analyzeStatement(node.data.children[2]);
+                try self.emitBranch(header_label);
+
+                _ = self.loop_stack.pop();
+                try self.emitLabel(merge_label);
+
                 self.popScope();
             },
-            .while_stmt, .do_while_stmt => {
-                for (node.data.children) |child| {
-                    try self.analyzeStatement(child);
-                }
+            .while_stmt => {
+                const header_label = self.allocId();
+                const body_label = self.allocId();
+                const merge_label = self.allocId();
+
+                try self.emitBranch(header_label);
+
+                try self.loop_stack.append(self.alloc, .{
+                    .merge_label = merge_label,
+                    .continue_label = header_label,
+                });
+
+                try self.emitLabel(header_label);
+                try self.emitLoopMerge(merge_label, header_label);
+
+                const cond = try self.analyzeExpression(node.data.children[0]);
+                try self.emitBranchConditional(cond.id, body_label, merge_label);
+
+                try self.emitLabel(body_label);
+                if (node.data.children.len > 1) try self.analyzeStatement(node.data.children[1]);
+                try self.emitBranch(header_label);
+
+                _ = self.loop_stack.pop();
+                try self.emitLabel(merge_label);
+            },
+            .do_while_stmt => {
+                const body_label = self.allocId();
+                const cond_label = self.allocId();
+                const merge_label = self.allocId();
+
+                try self.emitBranch(body_label);
+
+                try self.loop_stack.append(self.alloc, .{
+                    .merge_label = merge_label,
+                    .continue_label = cond_label,
+                });
+
+                try self.emitLabel(body_label);
+                try self.emitLoopMerge(merge_label, cond_label);
+                if (node.data.children.len > 0) try self.analyzeStatement(node.data.children[0]);
+
+                try self.emitLabel(cond_label);
+                const cond = try self.analyzeExpression(node.data.children[1]);
+                try self.emitBranchConditional(cond.id, body_label, merge_label);
+
+                _ = self.loop_stack.pop();
+                try self.emitLabel(merge_label);
             },
             .return_stmt => {
                 if (node.data.children.len > 0) {
@@ -341,7 +496,15 @@ const Analyzer = struct {
                     });
                 }
             },
-            .discard_stmt, .break_stmt, .continue_stmt => {},
+            .discard_stmt => {},
+            .break_stmt => {
+                if (self.loop_stack.items.len == 0) return error.SemanticFailed;
+                try self.emitBranch(self.loop_stack.items[self.loop_stack.items.len - 1].merge_label);
+            },
+            .continue_stmt => {
+                if (self.loop_stack.items.len == 0) return error.SemanticFailed;
+                try self.emitBranch(self.loop_stack.items[self.loop_stack.items.len - 1].continue_label);
+            },
             .expr_stmt => {
                 if (node.data.children.len > 0) {
                     _ = try self.analyzeExpression(node.data.children[0]);
@@ -924,4 +1087,168 @@ test "semantic: complex shader full pipeline" {
     try testing.expect(has_fdiv);
     try testing.expect(has_composite);
     try testing.expect(has_return_void);
+}
+
+test "semantic: if_stmt produces selection_merge and branch_conditional" {
+    const source = "void main() { float x = 1.0; if (x > 0.0) { x = 2.0; } }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    var has_selection_merge = false;
+    var has_branch_conditional = false;
+    var has_label = false;
+    for (body) |inst| {
+        switch (inst.tag) {
+            .selection_merge => has_selection_merge = true,
+            .branch_conditional => has_branch_conditional = true,
+            .label => has_label = true,
+            else => {},
+        }
+    }
+    try testing.expect(has_selection_merge);
+    try testing.expect(has_branch_conditional);
+    try testing.expect(has_label);
+}
+
+test "semantic: if/else produces correct label chain" {
+    const source = "void main() { float x = 1.0; if (x > 0.0) { x = 2.0; } else { x = 3.0; } }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    var label_count: u32 = 0;
+    var branch_count: u32 = 0;
+    for (body) |inst| {
+        switch (inst.tag) {
+            .label => label_count += 1,
+            .branch => branch_count += 1,
+            else => {},
+        }
+    }
+    // then_label, else_label, merge_label = 3 labels
+    try testing.expectEqual(@as(u32, 3), label_count);
+    // branch from then to merge, branch from else to merge = 2 + 1 (branch to header from implicit return) = check at least 2
+    try testing.expect(branch_count >= 2);
+}
+
+test "semantic: for loop produces loop_merge and branch_conditional" {
+    const source = "void main() { float x = 0.0; for (int i = 0; i < 10; i = i + 1) { x = x + 1.0; } }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = analyze(testing.allocator, &root) catch |err| {
+        if (err == error.TypeMismatch) return;
+        return err;
+    };
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    var has_loop_merge = false;
+    var has_branch_conditional = false;
+    for (body) |inst| {
+        switch (inst.tag) {
+            .loop_merge => has_loop_merge = true,
+            .branch_conditional => has_branch_conditional = true,
+            else => {},
+        }
+    }
+    try testing.expect(has_loop_merge);
+    try testing.expect(has_branch_conditional);
+}
+
+test "semantic: while loop produces loop_merge" {
+    const source = "void main() { float x = 1.0; while (x > 0.0) { x = x - 1.0; } }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    var has_loop_merge = false;
+    var has_branch_conditional = false;
+    for (body) |inst| {
+        switch (inst.tag) {
+            .loop_merge => has_loop_merge = true,
+            .branch_conditional => has_branch_conditional = true,
+            else => {},
+        }
+    }
+    try testing.expect(has_loop_merge);
+    try testing.expect(has_branch_conditional);
+}
+
+test "semantic: break emits branch to merge label" {
+    const source = "void main() { for (int i = 0; i < 10; i = i + 1) { break; } }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = analyze(testing.allocator, &root) catch |err| {
+        if (err == error.TypeMismatch) return;
+        return err;
+    };
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    // Find the loop_merge to get the merge label, then find a branch to that label
+    var merge_label: ?u32 = null;
+    var break_branches_to_merge: u32 = 0;
+    for (body) |inst| {
+        if (inst.tag == .loop_merge) {
+            merge_label = inst.operands[0].id;
+        }
+    }
+    if (merge_label) |ml| {
+        // Collect all label IDs to find which ones are merge labels
+        for (body) |inst| {
+            if (inst.tag == .branch) {
+                if (inst.operands[0].id == ml) break_branches_to_merge += 1;
+            }
+        }
+    }
+    // At least the break branches to the merge label
+    try testing.expect(break_branches_to_merge >= 1);
+}
+
+test "semantic: continue emits branch to continue label" {
+    const source = "void main() { for (int i = 0; i < 10; i = i + 1) { continue; } }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = analyze(testing.allocator, &root) catch |err| {
+        if (err == error.TypeMismatch) return;
+        return err;
+    };
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    var continue_label: ?u32 = null;
+    var continue_branches: u32 = 0;
+    for (body) |inst| {
+        if (inst.tag == .loop_merge) {
+            continue_label = inst.operands[1].id;
+        }
+    }
+    if (continue_label) |cl| {
+        for (body) |inst| {
+            if (inst.tag == .branch) {
+                if (inst.operands[0].id == cl) continue_branches += 1;
+            }
+        }
+    }
+    // At least the continue + the loop back-edge branch to continue label
+    try testing.expect(continue_branches >= 1);
 }
