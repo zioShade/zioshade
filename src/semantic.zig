@@ -288,12 +288,65 @@ const Analyzer = struct {
 
     fn analyzeExpression(self: *Analyzer, node: ast.Node) Error!TypedId {
         switch (node.tag) {
-            .int_literal => return .{ .ty = .int, .id = self.allocId() },
-            .uint_literal => return .{ .ty = .uint, .id = self.allocId() },
-            .float_literal => return .{ .ty = .float, .id = self.allocId() },
-            .bool_literal => return .{ .ty = .bool, .id = self.allocId() },
+            .int_literal => {
+                const id = self.allocId();
+                const ops = [1]ir.Instruction.Operand{.{ .literal_int = @as(u32, @intCast(node.data.int_val)) }};
+                try self.instructions.append(self.alloc, .{
+                    .tag = .constant_int,
+                    .result_type = null,
+                    .result_id = id,
+                    .operands = &ops,
+                });
+                return .{ .ty = .int, .id = id };
+            },
+            .uint_literal => {
+                const id = self.allocId();
+                const ops = [1]ir.Instruction.Operand{.{ .literal_int = @as(u32, @intCast(node.data.int_val)) }};
+                try self.instructions.append(self.alloc, .{
+                    .tag = .constant_int,
+                    .result_type = null,
+                    .result_id = id,
+                    .operands = &ops,
+                });
+                return .{ .ty = .uint, .id = id };
+            },
+            .float_literal => {
+                const id = self.allocId();
+                const ops = [1]ir.Instruction.Operand{.{ .literal_float = @as(f32, @floatCast(node.data.float_val)) }};
+                try self.instructions.append(self.alloc, .{
+                    .tag = .constant_float,
+                    .result_type = null,
+                    .result_id = id,
+                    .operands = &ops,
+                });
+                return .{ .ty = .float, .id = id };
+            },
+            .bool_literal => {
+                const id = self.allocId();
+                const ops = [1]ir.Instruction.Operand{.{ .literal_int = if (node.data.int_val != 0) @as(u32, 1) else @as(u32, 0) }};
+                try self.instructions.append(self.alloc, .{
+                    .tag = .constant_bool,
+                    .result_type = null,
+                    .result_id = id,
+                    .operands = &ops,
+                });
+                return .{ .ty = .bool, .id = id };
+            },
             .identifier => {
-                if (self.lookup(node.data.name)) |sym| return .{ .ty = sym.ty, .id = sym.ir_id };
+                if (self.lookup(node.data.name)) |sym| {
+                    if (sym.kind == .param or sym.kind == .var_sym) {
+                        const id = self.allocId();
+                        const ops = [1]ir.Instruction.Operand{.{ .id = sym.ir_id }};
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .load,
+                            .result_type = null,
+                            .result_id = id,
+                            .operands = &ops,
+                        });
+                        return .{ .ty = sym.ty, .id = id };
+                    }
+                    return .{ .ty = sym.ty, .id = sym.ir_id };
+                }
                 return error.UndeclaredIdentifier;
             },
             .binary_op => {
