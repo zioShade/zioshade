@@ -759,7 +759,7 @@ const Parser = struct {
 
     fn parseEquality(self: *Parser) Error!ast.Node {
         var left = try self.parseRelational();
-        while (self.current().tag == .eq or self.current().tag == .bang_eq) {
+        while (self.current().tag == .eq_eq or self.current().tag == .bang_eq) {
             const op: ast.Op = if (self.current().tag == .eq) .eq else .neq;
             const op_tok = self.advance();
             const right = try self.parseRelational();

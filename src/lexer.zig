@@ -118,6 +118,7 @@ pub const Token = struct {
         lshift,
         rshift,
         eq,
+        eq_eq,
         bang_eq,
         lt_eq,
         gt_eq,
@@ -557,7 +558,7 @@ const Tokenizer = struct {
             const c1 = s[i+1];
             const tag: ?Token.Tag = if (c0 == '<' and c1 == '<') .lshift
                 else if (c0 == '>' and c1 == '>') .rshift
-                else if (c0 == '=' and c1 == '=') .eq
+                else if (c0 == '=' and c1 == '=') .eq_eq
                 else if (c0 == '!' and c1 == '=') .bang_eq
                 else if (c0 == '<' and c1 == '=') .lt_eq
                 else if (c0 == '>' and c1 == '=') .gt_eq
@@ -701,7 +702,7 @@ test "tokenize compound operators" {
     defer alloc.free(tokens);
 
     try std.testing.expectEqual(@as(usize, 11), tokens.len);
-    try std.testing.expectEqual(Token.Tag.eq, tokens[0].tag);
+    try std.testing.expectEqual(Token.Tag.eq_eq, tokens[0].tag);
     try std.testing.expectEqual(Token.Tag.bang_eq, tokens[1].tag);
     try std.testing.expectEqual(Token.Tag.lt_eq, tokens[2].tag);
     try std.testing.expectEqual(Token.Tag.gt_eq, tokens[3].tag);
