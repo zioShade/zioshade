@@ -55,6 +55,10 @@ const Symbol = struct {
 const Scope = std.StringHashMapUnmanaged(Symbol);
 
 const Analyzer = struct {
+    const TypedId = struct {
+        ty: ast.Type,
+        id: u32,
+    };
     alloc: std.mem.Allocator,
     scopes: std.ArrayListUnmanaged(Scope),
     globals: std.ArrayListUnmanaged(ir.Global),
@@ -235,8 +239,8 @@ const Analyzer = struct {
                     .ir_id = ir_id,
                 });
                 if (node.data.children.len > 0) {
-                    const init_ty = try self.analyzeExpression(node.data.children[0]);
-                    if (!self.typesCompatible(ty, init_ty)) {
+                    const init_tid = try self.analyzeExpression(node.data.children[0]);
+                    if (!self.typesCompatible(ty, init_tid.ty)) {
                         return error.TypeMismatch;
                     }
                 }
@@ -282,31 +286,32 @@ const Analyzer = struct {
         }
     }
 
-    fn analyzeExpression(self: *Analyzer, node: ast.Node) Error!ast.Type {
+    fn analyzeExpression(self: *Analyzer, node: ast.Node) Error!TypedId {
         switch (node.tag) {
-            .int_literal => return .int,
-            .uint_literal => return .uint,
-            .float_literal => return .float,
-            .bool_literal => return .bool,
+            .int_literal => return .{ .ty = .int, .id = self.allocId() },
+            .uint_literal => return .{ .ty = .uint, .id = self.allocId() },
+            .float_literal => return .{ .ty = .float, .id = self.allocId() },
+            .bool_literal => return .{ .ty = .bool, .id = self.allocId() },
             .identifier => {
-                if (self.lookup(node.data.name)) |sym| return sym.ty;
+                if (self.lookup(node.data.name)) |sym| return .{ .ty = sym.ty, .id = sym.ir_id };
                 return error.UndeclaredIdentifier;
             },
             .binary_op => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
-                const left_ty = try self.analyzeExpression(node.data.children[0]);
-                const right_ty = try self.analyzeExpression(node.data.children[1]);
-                return self.promoteTypes(left_ty, right_ty) orelse error.TypeMismatch;
+                const left_tid = try self.analyzeExpression(node.data.children[0]);
+                const right_tid = try self.analyzeExpression(node.data.children[1]);
+                return .{ .ty = self.promoteTypes(left_tid.ty, right_tid.ty) orelse return error.TypeMismatch, .id = self.allocId() };
             },
             .unary_op => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
-                return self.analyzeExpression(node.data.children[0]);
+                const tid = try self.analyzeExpression(node.data.children[0]);
+                return .{ .ty = tid.ty, .id = self.allocId() };
             },
             .assign_op, .compound_assign => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
                 _ = try self.analyzeExpression(node.data.children[0]);
                 _ = try self.analyzeExpression(node.data.children[1]);
-                return .void;
+                return .{ .ty = .void, .id = self.allocId() };
             },
             .func_call => {
                 _ = self.lookup(node.data.name);
@@ -314,43 +319,45 @@ const Analyzer = struct {
                     _ = try self.analyzeExpression(arg);
                 }
                 if (self.lookup(node.data.name)) |sym| {
-                    return sym.ty;
+                    return .{ .ty = sym.ty, .id = self.allocId() };
                 }
-                return .void;
+                return .{ .ty = .void, .id = self.allocId() };
             },
             .type_constructor => {
                 for (node.data.children) |arg| {
                     _ = try self.analyzeExpression(arg);
                 }
-                return node.data.ty orelse .void;
+                return .{ .ty = node.data.ty orelse .void, .id = self.allocId() };
             },
             .ternary_op => {
                 if (node.data.children.len < 3) return error.SemanticFailed;
                 _ = try self.analyzeExpression(node.data.children[0]);
-                const then_ty = try self.analyzeExpression(node.data.children[1]);
-                const else_ty = try self.analyzeExpression(node.data.children[2]);
-                return self.promoteTypes(then_ty, else_ty) orelse then_ty;
+                const then_tid = try self.analyzeExpression(node.data.children[1]);
+                const else_tid = try self.analyzeExpression(node.data.children[2]);
+                return .{ .ty = self.promoteTypes(then_tid.ty, else_tid.ty) orelse then_tid.ty, .id = self.allocId() };
             },
             .member_access, .swizzle_access => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
-                const base_ty = try self.analyzeExpression(node.data.children[0]);
-                if (base_ty.isVector()) return .float;
-                return base_ty;
+                const base_tid = try self.analyzeExpression(node.data.children[0]);
+                if (base_tid.ty.isVector()) return .{ .ty = .float, .id = self.allocId() };
+                return base_tid;
             },
             .index_access => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
                 _ = try self.analyzeExpression(node.data.children[1]);
-                return try self.analyzeExpression(node.data.children[0]);
+                const base_tid = try self.analyzeExpression(node.data.children[0]);
+                return .{ .ty = base_tid.ty, .id = self.allocId() };
             },
             .post_increment, .post_decrement, .pre_increment, .pre_decrement => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
-                return self.analyzeExpression(node.data.children[0]);
+                const tid = try self.analyzeExpression(node.data.children[0]);
+                return .{ .ty = tid.ty, .id = self.allocId() };
             },
             .group => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
                 return self.analyzeExpression(node.data.children[0]);
             },
-            else => return .void,
+            else => return .{ .ty = .void, .id = self.allocId() },
         }
     }
 
