@@ -84,6 +84,28 @@ pub fn spirvToGLSL(
     return error.CodegenFailed;
 }
 
+/// Validate a SPIR-V binary using spirv-val. Returns true if validation passed,
+/// false if spirv-val is not found on PATH.
+pub fn validateSPIRV(alloc: std.mem.Allocator, spirv_words: []const u32) !bool {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmpfile = try tmp.dir.createFile("shader.spv", .{});
+    defer tmpfile.close();
+    const bytes = std.mem.sliceAsBytes(spirv_words);
+    try tmpfile.writeAll(bytes);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const spv_path = try tmp.dir.realpath("shader.spv", &path_buf);
+
+    const result = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ "spirv-val", spv_path },
+    }) catch return false;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    return result.term.Exited == 0;
+}
+
 pub fn compileToSPIRVWithDiagnostics(
     alloc: std.mem.Allocator,
     source: [:0]const u8,

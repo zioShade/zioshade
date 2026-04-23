@@ -123,6 +123,7 @@ pub const Instruction = struct {
         shift_right,
         ext_inst,
         select,
+        function_call,
     };
 
     pub const Operand = union(enum) {
