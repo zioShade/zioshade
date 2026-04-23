@@ -10,6 +10,11 @@ pub const Module = struct {
 
     pub fn deinit(self: *Module) void {
         for (self.functions) |func| {
+            for (func.body) |inst| {
+                if (inst.operands.len > 0) {
+                    self.alloc.free(inst.operands);
+                }
+            }
             self.alloc.free(func.body);
         }
         self.alloc.free(self.functions);

@@ -760,7 +760,7 @@ const Parser = struct {
     fn parseEquality(self: *Parser) Error!ast.Node {
         var left = try self.parseRelational();
         while (self.current().tag == .eq_eq or self.current().tag == .bang_eq) {
-            const op: ast.Op = if (self.current().tag == .eq) .eq else .neq;
+            const op: ast.Op = if (self.current().tag == .eq_eq) .eq else .neq;
             const op_tok = self.advance();
             const right = try self.parseRelational();
             left = .{
@@ -1263,4 +1263,78 @@ test "parse function call" {
     try std.testing.expectEqual(ast.Node.Tag.func_call, init.tag);
     try std.testing.expectEqualStrings("sin", init.data.name);
     try std.testing.expectEqual(@as(usize, 1), init.data.children.len);
+}
+
+test "parse equality operators" {
+    const alloc = std.testing.allocator;
+    const source = "void main() { bool a = x == y; bool b = x != y; }";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+    var root = try parse(alloc, source, tokens);
+    defer freeTree(alloc, &root);
+    const func = root.body[0];
+    try std.testing.expectEqual(@as(usize, 2), func.data.children.len);
+    // a = x == y
+    const stmt_a = func.data.children[0];
+    try std.testing.expectEqual(ast.Node.Tag.var_decl, stmt_a.tag);
+    const eq_expr = stmt_a.data.children[0];
+    try std.testing.expectEqual(ast.Node.Tag.binary_op, eq_expr.tag);
+    try std.testing.expectEqual(ast.Op.eq, eq_expr.data.op);
+    try std.testing.expectEqual(@as(usize, 2), eq_expr.data.children.len);
+    // b = x != y
+    const stmt_b = func.data.children[1];
+    const neq_expr = stmt_b.data.children[0];
+    try std.testing.expectEqual(ast.Node.Tag.binary_op, neq_expr.tag);
+    try std.testing.expectEqual(ast.Op.neq, neq_expr.data.op);
+}
+
+test "parse complex shader with chained ops" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\void main() {
+        \\    float a = 1.0;
+        \\    float b = 2.0;
+        \\    float c = a + b * 3.0 - 1.0;
+        \\    c = c / 2.0;
+        \\    bool flag = a > b;
+        \\    if (flag) {
+        \\        c = c + 1.0;
+        \\    }
+        \\    for (int i = 0; i < 10; i++) {
+        \\        c = c + 1.0;
+        \\    }
+        \\    vec4 color = vec4(c, c, c, 1.0);
+        \\}
+    ;
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+    var root = try parse(alloc, source, tokens);
+    defer freeTree(alloc, &root);
+
+    try std.testing.expectEqual(@as(usize, 1), root.body.len);
+    const func = root.body[0];
+    try std.testing.expectEqual(ast.Node.Tag.function_decl, func.tag);
+    // 8 statements: a, b, c, c=, flag, if, for, color
+    try std.testing.expectEqual(@as(usize, 8), func.data.children.len);
+
+    // Verify c = a + b * 3.0 - 1.0 has valid children
+    const c_decl = func.data.children[2];
+    try std.testing.expectEqual(ast.Node.Tag.var_decl, c_decl.tag);
+    const c_init = c_decl.data.children[0];
+    try std.testing.expectEqual(ast.Node.Tag.binary_op, c_init.tag);
+    try std.testing.expectEqual(@as(usize, 2), c_init.data.children.len);
+    // Should be (a + (b * 3.0)) - 1.0, so outer op is sub
+    try std.testing.expectEqual(ast.Op.sub, c_init.data.op);
+
+    // Verify the for loop
+    const for_stmt = func.data.children[6];
+    try std.testing.expectEqual(ast.Node.Tag.for_stmt, for_stmt.tag);
+    try std.testing.expectEqual(@as(usize, 4), for_stmt.data.children.len);
+
+    // Verify vec4 constructor
+    const color_decl = func.data.children[7];
+    try std.testing.expectEqual(ast.Node.Tag.var_decl, color_decl.tag);
+    const ctor = color_decl.data.children[0];
+    try std.testing.expectEqual(ast.Node.Tag.type_constructor, ctor.tag);
+    try std.testing.expectEqual(@as(usize, 4), ctor.data.children.len);
 }
