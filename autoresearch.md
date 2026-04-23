@@ -36,7 +36,16 @@ The script compiles the runner, then runs each test suite with per-file timeouts
 - Must handle hangs gracefully (per-file timeouts)
 
 ## What's Been Tried
-(Baseline run — nothing tried yet)
+
+### Baseline (commit 9088390)
+True baseline: **2 pass / 101 compile_error / 15 spirv-val fail / 79 hang / 0 crash** out of 197 valid test files.
+Used glslangValidator to classify: 197 valid, 136 invalid, 20 skipped out of 353 total.
+
+Key discoveries:
+- PASS detection was broken (summary "PASS: 0" line matched grep → ~214 false positives)
+- struct-varying.legacy.frag appears as PASS but has double-free memory corruption (GPA prints error but exits 0)
+- Ghostty .glsl files need -S frag/vert for glslangValidator
+- common.glsl is include-only, not standalone
 
 ### Architecture Notes
 - Pipeline: source → lexer.tokenize() → parser.parse() → semantic.analyze() → codegen.generate() → SPIR-V words
@@ -46,10 +55,10 @@ The script compiles the runner, then runs each test suite with per-file timeouts
 - The `synchronize()` method in parser tries to recover from errors by skipping to semicolons/r-brace/type keywords
 
 ### Key Bugs to Fix (Priority Order)
-1. **Stage detection**: runner.zig doesn't detect .vert/.comp stages — fixes many vert/comp shaders
-2. **Parser hangs**: Many files hang the parser (infinite loop on unexpected constructs)
-3. **OpEntryPoint interface variables**: globals with Input/Output storage class must be listed as operands
-4. **#include preprocessor**: Needed for Ghostty shaders
-5. **Uniform blocks**: Ghostty uses UBOs — need end-to-end support
-6. **Interface blocks**: in/out blocks for vertex/fragment I/O
-7. **Switch statements**: Ghostty uses switch — no parser/IR/codegen support
+1. **Parser hangs (79 files)**: Biggest category. Infinite loops on unexpected constructs.
+2. **Compile errors (101 files)**: Missing language features.
+3. **OpEntryPoint interface variables (P1)**: globals with Input/Output storage class must be listed as operands
+4. **#include preprocessor (P2)**: Needed for Ghostty shaders
+5. **Uniform blocks (P3)**: Ghostty uses UBOs — need end-to-end support
+6. **Interface blocks (P5)**: in/out blocks for vertex/fragment I/O
+7. **Switch statements (P6)**: Ghostty uses switch — no parser/IR/codegen support
