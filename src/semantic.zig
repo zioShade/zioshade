@@ -43,6 +43,7 @@ pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
         .globals = try analyzer.globals.toOwnedSlice(alloc),
         .types = analyzer.types,
         .entry_point = null,
+        .next_id_start = analyzer.next_id,
         .alloc = alloc,
     };
 }
@@ -299,6 +300,9 @@ const Analyzer = struct {
     fn analyzeFunction(self: *Analyzer, node: ast.Node) !void {
         try self.pushScope();
 
+        const func_sym = self.lookup(node.data.name);
+        const func_ir_id = if (func_sym) |sym| sym.ir_id else self.allocId();
+
         for (node.data.params) |param| {
             try self.declare(param.name, .{
                 .kind = .param,
@@ -333,7 +337,7 @@ const Analyzer = struct {
             .params = node.data.params,
             .body = try self.instructions.toOwnedSlice(self.alloc),
             .locals = &.{},
-            .result_id = 0,
+            .result_id = func_ir_id,
         };
         try self.functions.append(self.alloc, func);
 
@@ -539,6 +543,18 @@ const Analyzer = struct {
         }
     }
 
+    fn analyzeLValue(self: *Analyzer, node: ast.Node) Error!TypedId {
+        switch (node.tag) {
+            .identifier => {
+                if (self.lookup(node.data.name)) |sym| {
+                    return .{ .ty = sym.ty, .id = sym.ir_id };
+                }
+                return error.UndeclaredIdentifier;
+            },
+            else => return error.InvalidAssignment,
+        }
+    }
+
     fn analyzeExpression(self: *Analyzer, node: ast.Node) Error!TypedId {
         switch (node.tag) {
             .int_literal => {
@@ -693,7 +709,7 @@ const Analyzer = struct {
             },
             .assign_op => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
-                const target = try self.analyzeExpression(node.data.children[0]);
+                const target = try self.analyzeLValue(node.data.children[0]);
                 const value = try self.analyzeExpression(node.data.children[1]);
                 const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 store_operands[0] = .{ .id = target.id };
@@ -709,7 +725,7 @@ const Analyzer = struct {
             },
             .compound_assign => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
-                const target = try self.analyzeExpression(node.data.children[0]);
+                const target = try self.analyzeLValue(node.data.children[0]);
                 const value = try self.analyzeExpression(node.data.children[1]);
                 // Load current value
                 const loaded_id = self.allocId();
