@@ -202,6 +202,30 @@ const Analyzer = struct {
             .ir_id = self.allocId(),
         });
 
+        try self.declare("gl_Layer", .{
+            .kind = .var_sym,
+            .ty = .int,
+            .ir_id = self.allocId(),
+        });
+
+        try self.declare("gl_ViewportIndex", .{
+            .kind = .var_sym,
+            .ty = .int,
+            .ir_id = self.allocId(),
+        });
+
+        try self.declare("gl_VertexID", .{
+            .kind = .var_sym,
+            .ty = .int,
+            .ir_id = self.allocId(),
+        });
+
+        try self.declare("gl_InstanceID", .{
+            .kind = .var_sym,
+            .ty = .int,
+            .ir_id = self.allocId(),
+        });
+
         // Math functions that return float (or same type as primary argument)
         const float_return_funcs = .{
             "abs",   "acos",  "asin",      "atan",    "atan2",
@@ -825,19 +849,64 @@ const Analyzer = struct {
                 const result_id = self.allocId();
 
                 if (self.isGLSLBuiltin(node.data.name)) {
-                    const glsl_id = self.glslExtInstruction(node.data.name) orelse 1;
-                    const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
-                    operands[0] = .{ .literal_int = glsl_id };
-                    for (arg_tids.items, 1..) |tid, i| {
-                        operands[i] = .{ .id = tid.id };
+                    // Texture functions use different SPIR-V ops, not GLSL.std.450
+                    if (self.isTextureBuiltin(node.data.name)) {
+                        if (self.isImageSampleBuiltin(node.data.name)) {
+                            // texture(sampler, coord) → image_sample
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                            for (arg_tids.items, 0..) |tid, i| {
+                                operands[i] = .{ .id = tid.id };
+                            }
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .image_sample,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = result_ty,
+                            });
+                        } else {
+                            // texelFetch etc → image_fetch as fallback
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                            for (arg_tids.items, 0..) |tid, i| {
+                                operands[i] = .{ .id = tid.id };
+                            }
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .image_fetch,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = result_ty,
+                            });
+                        }
+                    } else if (std.mem.eql(u8, node.data.name, "dFdx") or std.mem.eql(u8, node.data.name, "dFdy")) {
+                        // Derivatives: emit as ext_inst with a made-up ID for now
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
+                        operands[0] = .{ .literal_int = 1 };
+                        for (arg_tids.items, 1..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .ext_inst,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = result_ty,
+                        });
+                    } else {
+                        const glsl_id = self.glslExtInstruction(node.data.name) orelse 1;
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
+                        operands[0] = .{ .literal_int = glsl_id };
+                        for (arg_tids.items, 1..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .ext_inst,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = result_ty,
+                        });
                     }
-                    try self.instructions.append(self.alloc, .{
-                        .tag = .ext_inst,
-                        .result_type = null,
-                        .result_id = result_id,
-                        .operands = operands,
-                        .ty = result_ty,
-                    });
                 } else {
                     const s = sym orelse return error.UndeclaredIdentifier;
                     const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
@@ -1038,11 +1107,28 @@ const Analyzer = struct {
             "mod", "normalize", "pow", "radians", "reflect", "refract",
             "round", "sign", "sin", "sinh", "smoothstep", "sqrt", "step",
             "tan", "tanh", "transpose", "trunc",
+            "texture", "texture2D", "textureLod", "texelFetch",
+            "dFdx", "dFdy",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
         }
         return false;
+    }
+
+    fn isTextureBuiltin(self: *Analyzer, name: []const u8) bool {
+        _ = self;
+        return std.mem.eql(u8, name, "texture") or
+            std.mem.eql(u8, name, "texture2D") or
+            std.mem.eql(u8, name, "textureLod") or
+            std.mem.eql(u8, name, "texelFetch");
+    }
+
+    fn isImageSampleBuiltin(self: *Analyzer, name: []const u8) bool {
+        _ = self;
+        return std.mem.eql(u8, name, "texture") or
+            std.mem.eql(u8, name, "texture2D") or
+            std.mem.eql(u8, name, "textureLod");
     }
 
     fn glslExtInstruction(self: *Analyzer, name: []const u8) ?u32 {
