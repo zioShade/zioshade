@@ -351,14 +351,69 @@ const Analyzer = struct {
             },
             .binary_op => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
-                const left_tid = try self.analyzeExpression(node.data.children[0]);
-                const right_tid = try self.analyzeExpression(node.data.children[1]);
-                return .{ .ty = self.promoteTypes(left_tid.ty, right_tid.ty) orelse return error.TypeMismatch, .id = self.allocId() };
+                const left = try self.analyzeExpression(node.data.children[0]);
+                const right = try self.analyzeExpression(node.data.children[1]);
+                const result_ty = self.promoteTypes(left.ty, right.ty) orelse return error.TypeMismatch;
+                const result_id = self.allocId();
+
+                const is_float = result_ty == .float or result_ty == .double;
+
+                const tag: ir.Instruction.Tag = switch (node.data.op orelse .add) {
+                    .add => if (is_float) .fadd else .add,
+                    .sub => if (is_float) .fsub else .sub,
+                    .mul => if (is_float) .fmul else .mul,
+                    .div => if (is_float) .fdiv else .div,
+                    .mod => .rem,
+                    .eq => .compare_eq,
+                    .neq => .compare_neq,
+                    .lt => .compare_lt,
+                    .gt => .compare_gt,
+                    .lte => .compare_lte,
+                    .gte => .compare_gte,
+                    .logical_and => .logical_and,
+                    .logical_or => .logical_or,
+                    .bit_and => .bit_and,
+                    .bit_or => .bit_or,
+                    .bit_xor => .bit_xor,
+                    .lshift => .shift_left,
+                    .rshift => .shift_right,
+                    else => .add,
+                };
+
+                const ops = [2]ir.Instruction.Operand{
+                    .{ .id = left.id },
+                    .{ .id = right.id },
+                };
+                try self.instructions.append(self.alloc, .{
+                    .tag = tag,
+                    .result_type = null,
+                    .result_id = result_id,
+                    .operands = &ops,
+                });
+                return .{ .ty = result_ty, .id = result_id };
             },
             .unary_op => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
-                const tid = try self.analyzeExpression(node.data.children[0]);
-                return .{ .ty = tid.ty, .id = self.allocId() };
+                const operand = try self.analyzeExpression(node.data.children[0]);
+                const result_id = self.allocId();
+
+                const is_float = operand.ty == .float or operand.ty == .double;
+
+                const tag: ir.Instruction.Tag = switch (node.data.op orelse .sub) {
+                    .sub => if (is_float) .fneg else .neg,
+                    .logical_not => .logical_not,
+                    .bit_not => .bit_not,
+                    else => .neg,
+                };
+
+                const ops = [1]ir.Instruction.Operand{.{ .id = operand.id }};
+                try self.instructions.append(self.alloc, .{
+                    .tag = tag,
+                    .result_type = null,
+                    .result_id = result_id,
+                    .operands = &ops,
+                });
+                return .{ .ty = operand.ty, .id = result_id };
             },
             .assign_op, .compound_assign => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
