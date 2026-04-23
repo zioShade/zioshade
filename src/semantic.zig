@@ -675,7 +675,7 @@ const Analyzer = struct {
                 const result_ty = self.promoteTypes(left.ty, right.ty) orelse return error.TypeMismatch;
                 const result_id = self.allocId();
 
-                const is_float = result_ty == .float or result_ty == .double;
+                const is_float = result_ty == .float or result_ty == .double or result_ty.isVector() or result_ty.isMatrix();
                 const op = node.data.op orelse .add;
 
                 const tag: ir.Instruction.Tag = switch (op) {
@@ -724,7 +724,7 @@ const Analyzer = struct {
                 const operand = try self.analyzeExpression(node.data.children[0]);
                 const result_id = self.allocId();
 
-                const is_float = operand.ty == .float or operand.ty == .double;
+                const is_float = operand.ty == .float or operand.ty == .double or operand.ty.isVector();
 
                 const tag: ir.Instruction.Tag = switch (node.data.op orelse .sub) {
                     .sub => if (is_float) .fneg else .neg,
@@ -777,7 +777,7 @@ const Analyzer = struct {
                 });
                 // Compute result
                 const result_ty = target.ty;
-                const is_float = result_ty == .float or result_ty == .double;
+                const is_float = result_ty == .float or result_ty == .double or result_ty.isVector() or result_ty.isMatrix();
                 const op_tag: ir.Instruction.Tag = switch (node.data.op orelse .add) {
                     .add_assign => if (is_float) .fadd else .add,
                     .sub_assign => if (is_float) .fsub else .sub,
@@ -817,7 +817,11 @@ const Analyzer = struct {
                     try arg_tids.append(self.alloc, tid);
                 }
                 const sym = self.lookup(node.data.name);
-                const result_ty: ast.Type = if (sym) |s| s.ty else .void;
+                // For GLSL builtins, infer result type from first argument (e.g., round(vec4) → vec4)
+                const result_ty: ast.Type = if (self.isGLSLBuiltin(node.data.name) and arg_tids.items.len > 0)
+                    arg_tids.items[0].ty
+                else if (sym) |s| s.ty
+                else .void;
                 const result_id = self.allocId();
 
                 if (self.isGLSLBuiltin(node.data.name)) {
@@ -860,6 +864,23 @@ const Analyzer = struct {
                 }
                 const result_ty = node.data.ty orelse .void;
                 const result_id = self.allocId();
+
+                // Handle scalar-to-vector splat: vec4(1.0) → CompositeConstruct with N copies
+                if (arg_tids.items.len == 1 and result_ty.isVector()) {
+                    const n = result_ty.numComponents();
+                    const operands = try self.alloc.alloc(ir.Instruction.Operand, n);
+                    for (0..n) |i| {
+                        operands[i] = .{ .id = arg_tids.items[0].id };
+                    }
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .composite_construct,
+                        .result_type = null,
+                        .result_id = result_id,
+                        .operands = operands,
+                        .ty = result_ty,
+                    });
+                    return .{ .ty = result_ty, .id = result_id };
+                }
 
                 // Allocate operand array
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
