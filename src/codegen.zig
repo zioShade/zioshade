@@ -416,10 +416,15 @@ const Codegen = struct {
     }
 
     fn emitInstruction(self: *Codegen, inst: ir.Instruction) !void {
-        switch (inst.tag) {
+        // Resolve null result_type from ast type
+        var resolved = inst;
+        if (resolved.result_type == null and resolved.result_id != null) {
+            resolved.result_type = try self.ensureType(inst.ty);
+        }
+        switch (resolved.tag) {
             .constant_int => {
-                const result_id = inst.result_id orelse return;
-                const val = self.operandInt(inst, 0);
+                const result_id = resolved.result_id orelse return;
+                const val = self.operandInt(resolved, 0);
                 const int_type_id = try self.ensureType(.int);
                 try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
                 try self.emitWord(int_type_id);
@@ -427,9 +432,10 @@ const Codegen = struct {
                 try self.emitWord(val);
             },
             .constant_float => {
-                const result_id = inst.result_id orelse return;
-                const val: f32 = switch (inst.operands[0]) {
+                const result_id = resolved.result_id orelse return;
+                const val: f32 = switch (resolved.operands[0]) {
                     .literal_float => |v| v,
+                    .literal_int => |v| @floatFromInt(v),
                     else => unreachable,
                 };
                 const float_type_id = try self.ensureType(.float);
@@ -439,8 +445,8 @@ const Codegen = struct {
                 try self.emitWord(@as(u32, @bitCast(val)));
             },
             .constant_bool => {
-                const result_id = inst.result_id orelse return;
-                const val = self.operandInt(inst, 0);
+                const result_id = resolved.result_id orelse return;
+                const val = self.operandInt(resolved, 0);
                 const bool_type_id = try self.ensureType(.bool);
                 const op: spirv.Op = if (val != 0) .ConstantTrue else .ConstantFalse;
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(op)));
@@ -448,69 +454,68 @@ const Codegen = struct {
                 try self.emitWord(result_id);
             },
             .local_variable => {
-                const result_type_id = inst.result_type orelse return;
-                const result_id = inst.result_id orelse return;
-                const sc = self.operandInt(inst, 0);
-                const wc: u16 = if (inst.operands.len > 1) 5 else 4;
+                const ptr_type_id = try self.ensurePointerType(resolved.ty, .function);
+                const result_id = resolved.result_id orelse return;
+                const wc: u16 = if (resolved.operands.len > 1) 5 else 4;
                 try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.Variable)));
-                try self.emitWord(result_type_id);
+                try self.emitWord(ptr_type_id);
                 try self.emitWord(result_id);
-                try self.emitWord(sc);
-                if (inst.operands.len > 1) {
-                    try self.emitWord(self.operandId(inst, 1));
+                try self.emitWord(@intFromEnum(ir.SPIRVStorageClass.function));
+                if (resolved.operands.len > 1) {
+                    try self.emitWord(self.operandId(resolved, 1));
                 }
             },
             .load => {
-                const result_type_id = inst.result_type orelse return;
-                const result_id = inst.result_id orelse return;
-                const ptr_id = self.operandId(inst, 0);
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const ptr_id = self.operandId(resolved, 0);
                 try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Load)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(ptr_id);
             },
             .store => {
-                const ptr_id = self.operandId(inst, 0);
-                const val_id = self.operandId(inst, 1);
+                const ptr_id = self.operandId(resolved, 0);
+                const val_id = self.operandId(resolved, 1);
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.Store)));
                 try self.emitWord(ptr_id);
                 try self.emitWord(val_id);
             },
-            .add => try self.emitBinOp(spirv.Op.IAdd, inst),
-            .sub => try self.emitBinOp(spirv.Op.ISub, inst),
-            .mul => try self.emitBinOp(spirv.Op.IMul, inst),
-            .div => try self.emitBinOp(spirv.Op.SDiv, inst),
-            .rem => try self.emitBinOp(spirv.Op.SRem, inst),
-            .fadd => try self.emitBinOp(spirv.Op.FAdd, inst),
-            .fsub => try self.emitBinOp(spirv.Op.FSub, inst),
-            .fmul => try self.emitBinOp(spirv.Op.FMul, inst),
-            .fdiv => try self.emitBinOp(spirv.Op.FDiv, inst),
-            .neg => try self.emitUnaryOp(spirv.Op.SNegate, inst),
-            .fneg => try self.emitUnaryOp(spirv.Op.FNegate, inst),
-            .not_op => try self.emitUnaryOp(spirv.Op.LogicalNot, inst),
-            .convert_ftoi => try self.emitUnaryOp(spirv.Op.ConvertFToS, inst),
-            .convert_itof => try self.emitUnaryOp(spirv.Op.ConvertSToF, inst),
-            .logical_and => try self.emitBinOp(spirv.Op.LogicalAnd, inst),
-            .logical_or => try self.emitBinOp(spirv.Op.LogicalOr, inst),
-            .logical_not => try self.emitUnaryOp(spirv.Op.LogicalNot, inst),
-            .bit_and => try self.emitBinOp(spirv.Op.BitwiseAnd, inst),
-            .bit_or => try self.emitBinOp(spirv.Op.BitwiseOr, inst),
-            .bit_xor => try self.emitBinOp(spirv.Op.BitwiseXor, inst),
-            .bit_not => try self.emitUnaryOp(spirv.Op.Not, inst),
-            .shift_left => try self.emitBinOp(spirv.Op.ShiftLeftLogical, inst),
-            .shift_right => try self.emitBinOp(spirv.Op.ShiftRightLogical, inst),
-            .compare_eq => try self.emitBinOp(spirv.Op.IEqual, inst),
-            .compare_neq => try self.emitBinOp(spirv.Op.INotEqual, inst),
-            .compare_lt => try self.emitBinOp(spirv.Op.SLessThan, inst),
-            .compare_gt => try self.emitBinOp(spirv.Op.SGreaterThan, inst),
-            .compare_lte => try self.emitBinOp(spirv.Op.SLessThanEqual, inst),
-            .compare_gte => try self.emitBinOp(spirv.Op.SGreaterThanEqual, inst),
+            .add => try self.emitBinOp(spirv.Op.IAdd, resolved),
+            .sub => try self.emitBinOp(spirv.Op.ISub, resolved),
+            .mul => try self.emitBinOp(spirv.Op.IMul, resolved),
+            .div => try self.emitBinOp(spirv.Op.SDiv, resolved),
+            .rem => try self.emitBinOp(spirv.Op.SRem, resolved),
+            .fadd => try self.emitBinOp(spirv.Op.FAdd, resolved),
+            .fsub => try self.emitBinOp(spirv.Op.FSub, resolved),
+            .fmul => try self.emitBinOp(spirv.Op.FMul, resolved),
+            .fdiv => try self.emitBinOp(spirv.Op.FDiv, resolved),
+            .neg => try self.emitUnaryOp(spirv.Op.SNegate, resolved),
+            .fneg => try self.emitUnaryOp(spirv.Op.FNegate, resolved),
+            .not_op => try self.emitUnaryOp(spirv.Op.LogicalNot, resolved),
+            .convert_ftoi => try self.emitUnaryOp(spirv.Op.ConvertFToS, resolved),
+            .convert_itof => try self.emitUnaryOp(spirv.Op.ConvertSToF, resolved),
+            .logical_and => try self.emitBinOp(spirv.Op.LogicalAnd, resolved),
+            .logical_or => try self.emitBinOp(spirv.Op.LogicalOr, resolved),
+            .logical_not => try self.emitUnaryOp(spirv.Op.LogicalNot, resolved),
+            .bit_and => try self.emitBinOp(spirv.Op.BitwiseAnd, resolved),
+            .bit_or => try self.emitBinOp(spirv.Op.BitwiseOr, resolved),
+            .bit_xor => try self.emitBinOp(spirv.Op.BitwiseXor, resolved),
+            .bit_not => try self.emitUnaryOp(spirv.Op.Not, resolved),
+            .shift_left => try self.emitBinOp(spirv.Op.ShiftLeftLogical, resolved),
+            .shift_right => try self.emitBinOp(spirv.Op.ShiftRightLogical, resolved),
+            .compare_eq => try self.emitBinOp(spirv.Op.IEqual, resolved),
+            .compare_neq => try self.emitBinOp(spirv.Op.INotEqual, resolved),
+            .compare_lt => try self.emitBinOp(spirv.Op.SLessThan, resolved),
+            .compare_gt => try self.emitBinOp(spirv.Op.SGreaterThan, resolved),
+            .compare_lte => try self.emitBinOp(spirv.Op.SLessThanEqual, resolved),
+            .compare_gte => try self.emitBinOp(spirv.Op.SGreaterThanEqual, resolved),
             .select => {
-                const result_type_id = inst.result_type orelse return;
-                const result_id = inst.result_id orelse return;
-                const cond_id = self.operandId(inst, 0);
-                const true_id = self.operandId(inst, 1);
-                const false_id = self.operandId(inst, 2);
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const cond_id = self.operandId(resolved, 0);
+                const true_id = self.operandId(resolved, 1);
+                const false_id = self.operandId(resolved, 2);
                 try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.Select)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
@@ -519,9 +524,9 @@ const Codegen = struct {
                 try self.emitWord(false_id);
             },
             .composite_construct => {
-                const result_type_id = inst.result_type orelse return;
-                const result_id = inst.result_id orelse return;
-                const wc: u16 = 2 + @as(u16, @intCast(inst.operands.len)) + 1;
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const wc: u16 = 2 + @as(u16, @intCast(resolved.operands.len)) + 1;
                 try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.CompositeConstruct)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
@@ -530,10 +535,10 @@ const Codegen = struct {
                 }
             },
             .composite_extract => {
-                const result_type_id = inst.result_type orelse return;
-                const result_id = inst.result_id orelse return;
-                const composite_id = self.operandId(inst, 0);
-                const index = self.operandInt(inst, 1);
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const composite_id = self.operandId(resolved, 0);
+                const index = self.operandInt(resolved, 1);
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
@@ -541,10 +546,10 @@ const Codegen = struct {
                 try self.emitWord(index);
             },
             .access_chain => {
-                const result_type_id = inst.result_type orelse return;
-                const result_id = inst.result_id orelse return;
-                const base_id = self.operandId(inst, 0);
-                const index_id = self.operandId(inst, 1);
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const base_id = self.operandId(resolved, 0);
+                const index_id = self.operandId(resolved, 1);
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
@@ -552,10 +557,10 @@ const Codegen = struct {
                 try self.emitWord(index_id);
             },
             .member_access_op => {
-                const result_type_id = inst.result_type orelse return;
-                const result_id = inst.result_id orelse return;
-                const base_id = self.operandId(inst, 0);
-                const member_idx = self.operandInt(inst, 1);
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const base_id = self.operandId(resolved, 0);
+                const member_idx = self.operandInt(resolved, 1);
                 const index_const_id = try self.emitIntConstant(member_idx);
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
                 try self.emitWord(result_type_id);
@@ -564,25 +569,25 @@ const Codegen = struct {
                 try self.emitWord(index_const_id);
             },
             .vector_shuffle => {
-                const result_type_id = inst.result_type orelse return;
-                const result_id = inst.result_id orelse return;
-                const vec1 = self.operandId(inst, 0);
-                const vec2 = self.operandId(inst, 1);
-                const wc: u16 = 5 + @as(u16, @intCast(inst.operands.len - 2));
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const vec1 = self.operandId(resolved, 0);
+                const vec2 = self.operandId(resolved, 1);
+                const wc: u16 = 5 + @as(u16, @intCast(resolved.operands.len - 2));
                 try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.VectorShuffle)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(vec1);
                 try self.emitWord(vec2);
-                for (inst.operands[2..]) |op| {
+                for (resolved.operands[2..]) |op| {
                     try self.emitWord(self.operandValue(op));
                 }
             },
             .image_sample => {
-                const result_type_id = inst.result_type orelse return;
-                const result_id = inst.result_id orelse return;
-                const sampled_image_id = self.operandId(inst, 0);
-                const coord_id = self.operandId(inst, 1);
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageSampleImplicitLod)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
@@ -590,10 +595,10 @@ const Codegen = struct {
                 try self.emitWord(coord_id);
             },
             .image_fetch => {
-                const result_type_id = inst.result_type orelse return;
-                const result_id = inst.result_id orelse return;
-                const image_id = self.operandId(inst, 0);
-                const coord_id = self.operandId(inst, 1);
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageFetch)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
@@ -604,49 +609,49 @@ const Codegen = struct {
                 try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.Return)));
             },
             .return_val => {
-                const val_id = self.operandId(inst, 0);
+                const val_id = self.operandId(resolved, 0);
                 try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.ReturnValue)));
                 try self.emitWord(val_id);
             },
             .branch => {
-                const target_id = self.operandId(inst, 0);
+                const target_id = self.operandId(resolved, 0);
                 try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Branch)));
                 try self.emitWord(target_id);
             },
             .branch_conditional => {
-                const cond_id = self.operandId(inst, 0);
-                const true_id = self.operandId(inst, 1);
-                const false_id = self.operandId(inst, 2);
+                const cond_id = self.operandId(resolved, 0);
+                const true_id = self.operandId(resolved, 1);
+                const false_id = self.operandId(resolved, 2);
                 try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.BranchConditional)));
                 try self.emitWord(cond_id);
                 try self.emitWord(true_id);
                 try self.emitWord(false_id);
             },
             .loop_merge => {
-                const merge_id = self.operandId(inst, 0);
-                const continue_id = self.operandId(inst, 1);
+                const merge_id = self.operandId(resolved, 0);
+                const continue_id = self.operandId(resolved, 1);
                 try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.LoopMerge)));
                 try self.emitWord(merge_id);
                 try self.emitWord(continue_id);
                 try self.emitWord(0); // LoopControl = None
             },
             .selection_merge => {
-                const merge_id = self.operandId(inst, 0);
+                const merge_id = self.operandId(resolved, 0);
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.SelectionMerge)));
                 try self.emitWord(merge_id);
                 try self.emitWord(0); // SelectionControl = None
             },
             .ext_inst => {
-                const result_type_id = inst.result_type orelse return;
-                const result_id = inst.result_id orelse return;
-                const ext_instruction = self.operandInt(inst, 0);
-                const wc: u16 = 5 + @as(u16, @intCast(inst.operands.len - 1));
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const ext_instruction = self.operandInt(resolved, 0);
+                const wc: u16 = 5 + @as(u16, @intCast(resolved.operands.len - 1));
                 try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.ExtInst)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(self.glsl_std_450_id);
                 try self.emitWord(ext_instruction);
-                for (inst.operands[1..]) |op| {
+                for (resolved.operands[1..]) |op| {
                     try self.emitWord(self.operandValue(op));
                 }
             },
@@ -738,4 +743,27 @@ test "codegen: capabilities emitted" {
     // Word 5 should be OpCapability header (word_count=2, opcode=17)
     try std.testing.expectEqual(spirv.encodeInstructionHeader(2, 17), result[5]);
     try std.testing.expectEqual(@as(u32, 1), result[6]); // Shader capability
+}
+
+test "codegen: shader with arithmetic produces instructions" {
+    const alloc = std.testing.allocator;
+    const source = "void main() { float x = 1.0; float y = 2.0; }";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+    var root = try parser.parse(alloc, source, tokens);
+    defer parser.freeTree(alloc, &root);
+    var module = try semantic.analyze(alloc, &root);
+    defer module.deinit();
+
+    // Verify semantic analysis produced instructions
+    try std.testing.expect(module.functions.len == 1);
+    try std.testing.expect(module.functions[0].body.len > 0);
+
+    // Generate SPIR-V binary
+    const result = try generate(alloc, &module, .fragment, .@"1.5");
+    defer alloc.free(result);
+
+    // Verify header
+    try std.testing.expectEqual(@as(u32, spirv.MAGIC), result[0]);
+    try std.testing.expect(result[3] > 0); // Bound
 }
