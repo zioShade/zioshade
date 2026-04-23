@@ -193,6 +193,7 @@ pub const Qualifier = packed struct {
     is_out: bool = false,
     is_uniform: bool = false,
     is_inout: bool = false,
+    is_buffer: bool = false,
 };
 
 pub const Layout = struct {

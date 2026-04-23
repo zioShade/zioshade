@@ -205,7 +205,7 @@ const Parser = struct {
         _ = self.advance();
 
         // Uniform block: layout(...) uniform Name { ... };
-        if (self.current().tag == .l_brace and qualifier != null and qualifier.?.is_uniform) {
+        if (self.current().tag == .l_brace and qualifier != null and (qualifier.?.is_uniform or qualifier.?.is_buffer)) {
             return self.parseUniformBlock(name_tok, qualifier, layout);
         }
 
@@ -227,6 +227,8 @@ const Parser = struct {
                 .kw_out => { q.is_out = true; _ = self.advance(); found = true; },
                 .kw_inout => { q.is_inout = true; _ = self.advance(); found = true; },
                 .kw_uniform => { q.is_uniform = true; _ = self.advance(); found = true; },
+                .kw_buffer => { q.is_buffer = true; _ = self.advance(); found = true; },
+                .kw_readonly, .kw_writeonly, .kw_coherent, .kw_restrict => { _ = self.advance(); found = true; },
                 else => break,
             }
         }
