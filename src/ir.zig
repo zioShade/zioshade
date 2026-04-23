@@ -9,6 +9,9 @@ pub const Module = struct {
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *Module) void {
+        for (self.functions) |func| {
+            self.alloc.free(func.body);
+        }
         self.alloc.free(self.functions);
         self.alloc.free(self.globals);
         var iter = self.types.iterator();
