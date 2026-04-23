@@ -57,6 +57,10 @@ pub const Instruction = struct {
     operands: []const Operand = &.{},
 
     pub const Tag = enum {
+        constant_int,
+        constant_float,
+        constant_bool,
+        local_variable,
         load,
         store,
         add,
