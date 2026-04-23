@@ -525,20 +525,56 @@ const Analyzer = struct {
                 return .{ .ty = .void, .id = 0 };
             },
             .func_call => {
-                _ = self.lookup(node.data.name);
+                var arg_tids = std.ArrayListUnmanaged(TypedId){};
+                defer arg_tids.deinit(self.alloc);
                 for (node.data.children) |arg| {
-                    _ = try self.analyzeExpression(arg);
+                    const tid = try self.analyzeExpression(arg);
+                    try arg_tids.append(self.alloc, tid);
                 }
-                if (self.lookup(node.data.name)) |sym| {
-                    return .{ .ty = sym.ty, .id = self.allocId() };
+                const sym = self.lookup(node.data.name);
+                const result_ty: ast.Type = if (sym) |s| s.ty else .void;
+                const result_id = self.allocId();
+
+                if (self.isGLSLBuiltin(node.data.name)) {
+                    const glsl_id = self.glslExtInstruction(node.data.name) orelse 1;
+                    const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
+                    operands[0] = .{ .literal_int = glsl_id };
+                    for (arg_tids.items, 1..) |tid, i| {
+                        operands[i] = .{ .id = tid.id };
+                    }
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .ext_inst,
+                        .result_type = null,
+                        .result_id = result_id,
+                        .operands = operands,
+                    });
                 }
-                return .{ .ty = .void, .id = self.allocId() };
+                // For non-builtin functions, just allocate the result_id (function calls not yet supported)
+                return .{ .ty = result_ty, .id = result_id };
             },
             .type_constructor => {
+                var arg_tids = std.ArrayListUnmanaged(TypedId){};
+                defer arg_tids.deinit(self.alloc);
                 for (node.data.children) |arg| {
-                    _ = try self.analyzeExpression(arg);
+                    const tid = try self.analyzeExpression(arg);
+                    try arg_tids.append(self.alloc, tid);
                 }
-                return .{ .ty = node.data.ty orelse .void, .id = self.allocId() };
+                const result_ty = node.data.ty orelse .void;
+                const result_id = self.allocId();
+
+                // Allocate operand array
+                const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                for (arg_tids.items, 0..) |tid, i| {
+                    operands[i] = .{ .id = tid.id };
+                }
+
+                try self.instructions.append(self.alloc, .{
+                    .tag = .composite_construct,
+                    .result_type = null,
+                    .result_id = result_id,
+                    .operands = operands,
+                });
+                return .{ .ty = result_ty, .id = result_id };
             },
             .ternary_op => {
                 if (node.data.children.len < 3) return error.SemanticFailed;
@@ -547,11 +583,33 @@ const Analyzer = struct {
                 const else_tid = try self.analyzeExpression(node.data.children[2]);
                 return .{ .ty = self.promoteTypes(then_tid.ty, else_tid.ty) orelse then_tid.ty, .id = self.allocId() };
             },
-            .member_access, .swizzle_access => {
+            .member_access => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
                 const base_tid = try self.analyzeExpression(node.data.children[0]);
                 if (base_tid.ty.isVector()) return .{ .ty = .float, .id = self.allocId() };
                 return base_tid;
+            },
+            .swizzle_access => {
+                if (node.data.children.len < 1) return error.SemanticFailed;
+                const base = try self.analyzeExpression(node.data.children[0]);
+                const result_id = self.allocId();
+                // Single-component swizzle → CompositeExtract
+                if (node.data.name.len == 1) {
+                    const idx = self.swizzleIndex(node.data.name[0]);
+                    const ops = [2]ir.Instruction.Operand{
+                        .{ .id = base.id },
+                        .{ .literal_int = idx },
+                    };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .composite_extract,
+                        .result_type = null,
+                        .result_id = result_id,
+                        .operands = &ops,
+                    });
+                    return .{ .ty = base.ty.elementType(), .id = result_id };
+                }
+                // Multi-component swizzle: simplified, just return base for now
+                return base;
             },
             .index_access => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
@@ -587,6 +645,84 @@ const Analyzer = struct {
         if (target == .float and source.isScalar()) return true;
         if (target == .uint and source == .int) return true;
         return false;
+    }
+
+    fn isGLSLBuiltin(self: *Analyzer, name: []const u8) bool {
+        _ = self;
+        const builtins = .{
+            "abs", "acos", "asin", "atan", "atan2", "ceil", "clamp",
+            "cos", "cosh", "cross", "degrees", "determinant", "distance",
+            "dot", "exp", "exp2", "faceforward", "floor", "fract",
+            "inversesqrt", "length", "log", "log2", "max", "min", "mix",
+            "mod", "normalize", "pow", "radians", "reflect", "refract",
+            "round", "sign", "sin", "sinh", "smoothstep", "sqrt", "step",
+            "tan", "tanh", "transpose", "trunc",
+        };
+        inline for (builtins) |b| {
+            if (std.mem.eql(u8, name, b)) return true;
+        }
+        return false;
+    }
+
+    fn glslExtInstruction(self: *Analyzer, name: []const u8) ?u32 {
+        _ = self;
+        // GLSL.std.450 instruction numbers
+        if (std.mem.eql(u8, name, "round")) return 1;
+        if (std.mem.eql(u8, name, "roundEven")) return 2;
+        if (std.mem.eql(u8, name, "trunc")) return 3;
+        if (std.mem.eql(u8, name, "abs")) return 4;
+        if (std.mem.eql(u8, name, "sign")) return 6;
+        if (std.mem.eql(u8, name, "floor")) return 8;
+        if (std.mem.eql(u8, name, "ceil")) return 9;
+        if (std.mem.eql(u8, name, "fract")) return 10;
+        if (std.mem.eql(u8, name, "radians")) return 11;
+        if (std.mem.eql(u8, name, "degrees")) return 12;
+        if (std.mem.eql(u8, name, "sin")) return 13;
+        if (std.mem.eql(u8, name, "cos")) return 14;
+        if (std.mem.eql(u8, name, "tan")) return 15;
+        if (std.mem.eql(u8, name, "asin")) return 16;
+        if (std.mem.eql(u8, name, "acos")) return 17;
+        if (std.mem.eql(u8, name, "atan")) return 18;
+        if (std.mem.eql(u8, name, "sinh")) return 19;
+        if (std.mem.eql(u8, name, "cosh")) return 20;
+        if (std.mem.eql(u8, name, "tanh")) return 21;
+        if (std.mem.eql(u8, name, "atan2")) return 25;
+        if (std.mem.eql(u8, name, "pow")) return 26;
+        if (std.mem.eql(u8, name, "exp")) return 27;
+        if (std.mem.eql(u8, name, "log")) return 28;
+        if (std.mem.eql(u8, name, "exp2")) return 29;
+        if (std.mem.eql(u8, name, "log2")) return 30;
+        if (std.mem.eql(u8, name, "sqrt")) return 31;
+        if (std.mem.eql(u8, name, "inversesqrt")) return 32;
+        if (std.mem.eql(u8, name, "determinant")) return 33;
+        if (std.mem.eql(u8, name, "normalize")) return 36;
+        if (std.mem.eql(u8, name, "faceforward")) return 40;
+        if (std.mem.eql(u8, name, "reflect")) return 41;
+        if (std.mem.eql(u8, name, "refract")) return 42;
+        if (std.mem.eql(u8, name, "min")) return 37;
+        if (std.mem.eql(u8, name, "max")) return 38;
+        if (std.mem.eql(u8, name, "clamp")) return 39;
+        if (std.mem.eql(u8, name, "mix")) return 43;
+        if (std.mem.eql(u8, name, "step")) return 44;
+        if (std.mem.eql(u8, name, "smoothstep")) return 45;
+        if (std.mem.eql(u8, name, "distance")) return 47;
+        if (std.mem.eql(u8, name, "length")) return 48;
+        if (std.mem.eql(u8, name, "dot")) return 49;
+        if (std.mem.eql(u8, name, "cross")) return 50;
+        if (std.mem.eql(u8, name, "transpose")) return 54;
+        if (std.mem.eql(u8, name, "mod")) return 35;
+        return null;
+    }
+
+    fn swizzleIndex(self: *Analyzer, c: u8) u32 {
+        _ = self;
+        return switch (c) {
+            'x', 'r' => 0,
+            'y', 'g' => 1,
+            'z', 'b' => 2,
+            'w', 'a' => 3,
+            else => 0,
+        };
     }
 };
 
