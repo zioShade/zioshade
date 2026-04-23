@@ -794,3 +794,73 @@ test "semantic: builtin gl_FragCoord available" {
     var module = try analyze(testing.allocator, &root);
     defer module.deinit();
 }
+
+test "semantic: float arithmetic lowers to fadd" {
+    const source = "void main() { float a = 1.0; float b = 2.0; float c = a + b; }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    try testing.expect(module.functions.len == 1);
+    const body = module.functions[0].body;
+    try testing.expect(body.len > 0);
+    var has_fadd = false;
+    for (body) |inst| {
+        if (inst.tag == .fadd) has_fadd = true;
+    }
+    try testing.expect(has_fadd);
+}
+
+test "semantic: assignment lowers to store" {
+    const source = "void main() { float x = 1.0; x = 2.0; }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    var store_count: u32 = 0;
+    for (body) |inst| {
+        if (inst.tag == .store) store_count += 1;
+    }
+    try testing.expect(store_count >= 2); // init store + assignment store
+}
+
+test "semantic: return value lowers to return_val" {
+    const source = "float foo() { return 1.0; }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    var has_return_val = false;
+    for (body) |inst| {
+        if (inst.tag == .return_val) has_return_val = true;
+    }
+    try testing.expect(has_return_val);
+}
+
+test "semantic: vec4 constructor lowers to composite_construct" {
+    const source = "void main() { vec4 v = vec4(1.0, 0.0, 0.0, 1.0); }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    var has_composite = false;
+    for (body) |inst| {
+        if (inst.tag == .composite_construct) has_composite = true;
+    }
+    try testing.expect(has_composite);
+}
