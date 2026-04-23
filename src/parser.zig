@@ -22,6 +22,28 @@ pub fn parse(alloc: std.mem.Allocator, source: [:0]const u8, tokens: []const lex
     }
 
     while (p.current().tag != .eof) {
+        // Skip preprocessor directives
+        switch (p.current().tag) {
+            .pp_version => {
+                _ = p.advance(); // skip #version
+                // Consume version number
+                if (p.current().tag == .int_literal or p.current().tag == .uint_literal) _ = p.advance();
+                // Consume optional profile (es, core, compatibility)
+                if (p.current().tag == .identifier) _ = p.advance();
+                continue;
+            },
+            .pp_define, .pp_undef, .pp_if, .pp_ifdef, .pp_ifndef, .pp_elif, .pp_else, .pp_endif, .pp_error, .pp_pragma, .pp_line => {
+                // Skip the directive line
+                _ = p.advance();
+                const start_line = p.current().loc.line;
+                while (p.current().tag != .eof and p.current().loc.line == start_line) {
+                    _ = p.advance();
+                }
+                continue;
+            },
+            else => {},
+        }
+
         const node = p.parseTopLevel() catch |err| {
             if (err == error.UnexpectedToken) {
                 p.synchronize();
