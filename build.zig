@@ -48,4 +48,11 @@ pub fn build(b: *std.Build) void {
         }));
         test_step.dependOn(&run_mod_tests.step);
     }
+
+    // SPIR-V validation step — run with: zig build validate
+    // Requires spirv-val on PATH (from Vulkan SDK or SPIRV-Tools build).
+    const validate_step = b.step("validate", "Run spirv-val on generated SPIR-V binaries");
+    const validate_run = b.addSystemCommand(&.{"spirv-val"});
+    validate_run.addArg("--help");
+    validate_step.dependOn(&validate_run.step);
 }

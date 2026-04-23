@@ -781,8 +781,21 @@ const Analyzer = struct {
                         .operands = operands,
                         .ty = result_ty,
                     });
+                } else {
+                    const s = sym orelse return error.UndeclaredIdentifier;
+                    const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
+                    operands[0] = .{ .id = s.ir_id };
+                    for (arg_tids.items, 0..) |tid, i| {
+                        operands[i + 1] = .{ .id = tid.id };
+                    }
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .function_call,
+                        .result_type = null,
+                        .result_id = result_id,
+                        .operands = operands,
+                        .ty = result_ty,
+                    });
                 }
-                // For non-builtin functions, just allocate the result_id (function calls not yet supported)
                 return .{ .ty = result_ty, .id = result_id };
             },
             .type_constructor => {
@@ -820,7 +833,45 @@ const Analyzer = struct {
             .member_access => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
                 const base_tid = try self.analyzeExpression(node.data.children[0]);
+
+                // Handle vector swizzles (e.g., vec4.x)
                 if (base_tid.ty.isVector()) return .{ .ty = .float, .id = self.allocId() };
+
+                // Handle struct member access
+                if (base_tid.ty == .named) {
+                    const struct_name = base_tid.ty.named;
+                    if (self.types.get(struct_name)) |td| {
+                        // Find member index
+                        const member_name = node.data.name;
+                        var member_index: ?u32 = null;
+                        for (td.members, 0..) |member, i| {
+                            if (std.mem.eql(u8, member.name, member_name)) {
+                                member_index = @as(u32, @intCast(i));
+                                break;
+                            }
+                        }
+
+                        if (member_index) |idx| {
+                            const result_id = self.allocId();
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            operands[0] = .{ .id = base_tid.id };
+                            operands[1] = .{ .literal_int = idx };
+
+                            // Find member type from the struct definition
+                            const member_ty = td.members[idx].ty;
+
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .access_chain,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = member_ty,
+                            });
+                            return .{ .ty = member_ty, .id = result_id };
+                        }
+                    }
+                }
+
                 return base_tid;
             },
             .swizzle_access => {
@@ -847,9 +898,31 @@ const Analyzer = struct {
             },
             .index_access => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
-                _ = try self.analyzeExpression(node.data.children[1]);
+                const index_tid = try self.analyzeExpression(node.data.children[1]);
                 const base_tid = try self.analyzeExpression(node.data.children[0]);
-                return .{ .ty = base_tid.ty, .id = self.allocId() };
+
+                // Determine element type from base type
+                const element_ty = if (base_tid.ty == .array)
+                    base_tid.ty.array.base.*
+                else if (base_tid.ty.isVector())
+                    base_tid.ty.elementType()
+                else
+                    return error.TypeMismatch;
+
+                const result_id = self.allocId();
+                const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                operands[0] = .{ .id = base_tid.id };
+                operands[1] = .{ .id = index_tid.id };
+
+                try self.instructions.append(self.alloc, .{
+                    .tag = .access_chain,
+                    .result_type = null,
+                    .result_id = result_id,
+                    .operands = operands,
+                    .ty = element_ty,
+                });
+
+                return .{ .ty = element_ty, .id = result_id };
             },
             .post_increment, .post_decrement, .pre_increment, .pre_decrement => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
