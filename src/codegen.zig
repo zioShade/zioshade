@@ -119,11 +119,27 @@ const Codegen = struct {
         const entry = self.findEntryPoint() orelse return;
         const entry_id = if (entry.result_id != 0) entry.result_id else self.allocId();
         const name = entry.name;
-        const word_count: u16 = 3 + @as(u16, @intCast(std.math.divCeil(usize, name.len + 1, 4) catch unreachable));
+
+        // Collect interface variable IDs (Input + Output globals)
+        var interface_ids = std.ArrayList(u32).initCapacity(self.alloc, 0) catch unreachable;
+        defer interface_ids.deinit(self.alloc);
+        for (self.module.globals) |global| {
+            if (global.storage_class == .input or global.storage_class == .output) {
+                interface_ids.append(self.alloc, global.result_id) catch unreachable;
+            }
+        }
+
+        const name_words = @as(u16, @intCast(std.math.divCeil(usize, name.len + 1, 4) catch unreachable));
+        const word_count: u16 = 3 + name_words + @as(u16, @intCast(interface_ids.items.len));
         try self.emitWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.EntryPoint)));
         try self.emitWord(@intFromEnum(exec_model));
         try self.emitWord(entry_id);
         try self.emitStringLiteral(name);
+
+        // Append interface variable IDs
+        for (interface_ids.items) |id| {
+            try self.emitWord(id);
+        }
 
         if (stage == .fragment) {
             try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
