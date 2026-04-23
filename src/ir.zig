@@ -97,6 +97,7 @@ pub const Instruction = struct {
         return_void,
         branch,
         branch_conditional,
+        label,
         loop_merge,
         selection_merge,
         compare_eq,
