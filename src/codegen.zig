@@ -47,7 +47,7 @@ const Codegen = struct {
     module: *const ir.Module,
     words: std.ArrayList(u32),
     next_id: u32,
-    emitted_types: std.AutoHashMapUnmanaged(u32, void), // type_id -> void (set of emitted types)
+    emitted_types: std.AutoHashMapUnmanaged(u32, u32), // @intFromEnum(ty) -> type_id
     glsl_std_450_id: u32,
 
     fn deinit(self: *Codegen) void {
@@ -150,6 +150,14 @@ const Codegen = struct {
     }
 
     fn ensureType(self: *Codegen, ty: ast.Type) error{OutOfMemory}!u32 {
+        // Dedup: for simple (non-payload) types, return cached ID if already emitted
+        if (ty != .named and ty != .array) {
+            const key = @intFromEnum(ty);
+            if (self.emitted_types.get(key)) |cached_id| {
+                return cached_id;
+            }
+        }
+
         const id = self.allocId();
         switch (ty) {
             .void => {
@@ -280,6 +288,11 @@ const Codegen = struct {
                 try self.emitWord(base_id);
                 try self.emitWord(const_id);
             },
+        }
+        // Cache for simple types
+        if (ty != .named and ty != .array) {
+            const key = @intFromEnum(ty);
+            try self.emitted_types.put(self.alloc, key, id);
         }
         return id;
     }
@@ -552,15 +565,17 @@ const Codegen = struct {
                 try self.emitWord(index);
             },
             .access_chain => {
-                const result_type_id = resolved.result_type orelse return;
+                // OpAccessChain returns a pointer, so we must use ensurePointerType, not the
+                // default value-type resolution from inst.ty.
+                const ptr_type_id = try self.ensurePointerType(inst.ty, .function);
                 const result_id = resolved.result_id orelse return;
                 const base_id = self.operandId(resolved, 0);
-                const index_id = self.operandId(resolved, 1);
+                const index_value = self.operandValue(resolved.operands[1]);
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
-                try self.emitWord(result_type_id);
+                try self.emitWord(ptr_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(base_id);
-                try self.emitWord(index_id);
+                try self.emitWord(index_value);
             },
             .member_access_op => {
                 const result_type_id = resolved.result_type orelse return;
@@ -662,6 +677,20 @@ const Codegen = struct {
                 try self.emitWord(result_id);
                 try self.emitWord(self.glsl_std_450_id);
                 try self.emitWord(ext_instruction);
+                for (resolved.operands[1..]) |op| {
+                    try self.emitWord(self.operandValue(op));
+                }
+            },
+            .function_call => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const function_id = self.operandId(resolved, 0);
+                const num_args = resolved.operands.len - 1;
+                const wc: u16 = 4 + @as(u16, @intCast(num_args));
+                try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.FunctionCall)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(function_id);
                 for (resolved.operands[1..]) |op| {
                     try self.emitWord(self.operandValue(op));
                 }
