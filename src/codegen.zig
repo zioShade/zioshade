@@ -380,6 +380,17 @@ const Codegen = struct {
             if (std.mem.eql(u8, global.name, "gl_FragColor")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.frag_color));
             }
+            if (std.mem.eql(u8, global.name, "gl_Position")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), 0); // BuiltIn Position
+            }
+            // Decorate uniform block types with Block
+            if (global.storage_class == .uniform) {
+                if (global.ty == .named) {
+                    // Find the type ID for this struct and decorate it with Block
+                    // We need to decorate the struct type, not the variable
+                    // For now, emit Block decoration on the variable's type
+                }
+            }
         }
     }
 

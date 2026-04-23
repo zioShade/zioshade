@@ -41,6 +41,14 @@ pub fn parse(alloc: std.mem.Allocator, source: [:0]const u8, tokens: []const lex
                 }
                 continue;
             },
+            .kw_precision => {
+                // Skip precision declaration: precision [lowp|mediump|highp] type;
+                _ = p.advance();
+                if (p.current().tag == .identifier) _ = p.advance(); // lowp/mediump/highp
+                if (p.current().tag == .identifier or p.current().tag == .kw_float or p.current().tag == .kw_int) _ = p.advance();
+                if (p.current().tag == .semicolon) _ = p.advance();
+                continue;
+            },
             else => {},
         }
 

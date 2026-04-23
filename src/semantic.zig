@@ -196,6 +196,12 @@ const Analyzer = struct {
             .ir_id = self.allocId(),
         });
 
+        try self.declare("gl_Position", .{
+            .kind = .var_sym,
+            .ty = .vec4,
+            .ir_id = self.allocId(),
+        });
+
         // Math functions that return float (or same type as primary argument)
         const float_return_funcs = .{
             "abs",   "acos",  "asin",      "atan",    "atan2",
@@ -268,6 +274,34 @@ const Analyzer = struct {
                 try self.declare(node.data.name, .{
                     .kind = .var_sym,
                     .ty = node.data.ty orelse .void,
+                    .ir_id = ir_id,
+                });
+            },
+            .uniform_block => {
+                const name = node.data.name;
+                // Register the block as a struct type
+                const members = try self.alloc.dupe(ast.StructMember, node.data.members);
+                const td = ir.TypeDef{
+                    .name = name,
+                    .members = members,
+                    .size_bytes = 0,
+                };
+                const owned_name = try self.alloc.dupe(u8, name);
+                try self.types.put(self.alloc, owned_name, td);
+
+                // Create a global variable for the uniform block
+                const ir_id = self.allocId();
+                try self.globals.append(self.alloc, .{
+                    .name = name,
+                    .ty = .{ .named = name },
+                    .qualifier = node.data.qualifier orelse .{ .is_uniform = true },
+                    .layout = node.data.layout,
+                    .storage_class = .uniform,
+                    .result_id = ir_id,
+                });
+                try self.declare(name, .{
+                    .kind = .var_sym,
+                    .ty = .{ .named = name },
                     .ir_id = ir_id,
                 });
             },
