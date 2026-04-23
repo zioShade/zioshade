@@ -265,10 +265,10 @@ const Codegen = struct {
                 try self.emitWord(1); // Dim = 2D
                 try self.emitWord(0); // Not depth
                 try self.emitWord(0); // Not arrayed
-                try self.emitWord(1); // Is multisampled
+                try self.emitWord(0); // Not multisampled
                 try self.emitWord(1); // Sampled = 1 (yes)
                 try self.emitWord(0); // ImageFormat = Unknown
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitWord(id);
                 try self.emitWord(image_id);
             },
@@ -281,10 +281,10 @@ const Codegen = struct {
                 try self.emitWord(3); // Dim = Cube
                 try self.emitWord(0);
                 try self.emitWord(0);
-                try self.emitWord(1);
+                try self.emitWord(0);
                 try self.emitWord(1);
                 try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitWord(id);
                 try self.emitWord(image_id);
             },
