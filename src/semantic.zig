@@ -261,7 +261,8 @@ const Analyzer = struct {
                     .in_decl => .input,
                     .out_decl => .output,
                     .uniform_decl => .uniform,
-                    else => .function,
+                    .var_decl => .private,
+                    else => .private,
                 };
                 try self.globals.append(self.alloc, .{
                     .name = node.data.name,
