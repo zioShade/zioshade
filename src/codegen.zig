@@ -19,8 +19,10 @@ pub fn generate(
         .alloc = alloc,
         .module = module,
         .words = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
-        .next_id = 1,
+        .next_id = module.next_id_start,
         .emitted_types = .{},
+        .emitted_ptr_types = .{},
+        .emitted_constants = .{},
         .glsl_std_450_id = 0,
     };
     defer cg.deinit();
@@ -48,10 +50,14 @@ const Codegen = struct {
     words: std.ArrayList(u32),
     next_id: u32,
     emitted_types: std.AutoHashMapUnmanaged(u32, u32), // @intFromEnum(ty) -> type_id
+    emitted_ptr_types: std.AutoHashMapUnmanaged(u64, u32), // (type_key << 32 | sc) -> ptr_type_id
+    emitted_constants: std.AutoHashMapUnmanaged(u64, u32), // (type_id << 32 | value) -> const_id
     glsl_std_450_id: u32,
 
     fn deinit(self: *Codegen) void {
         self.emitted_types.deinit(self.alloc);
+        self.emitted_ptr_types.deinit(self.alloc);
+        self.emitted_constants.deinit(self.alloc);
         self.words.deinit(self.alloc);
     }
 
@@ -113,7 +119,7 @@ const Codegen = struct {
         const entry = self.findEntryPoint() orelse return;
         const entry_id = if (entry.result_id != 0) entry.result_id else self.allocId();
         const name = entry.name;
-        const word_count: u16 = 4 + @as(u16, @intCast(std.math.divCeil(usize, name.len + 1, 4) catch unreachable));
+        const word_count: u16 = 3 + @as(u16, @intCast(std.math.divCeil(usize, name.len + 1, 4) catch unreachable));
         try self.emitWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.EntryPoint)));
         try self.emitWord(@intFromEnum(exec_model));
         try self.emitWord(entry_id);
@@ -299,21 +305,27 @@ const Codegen = struct {
 
     fn ensurePointerType(self: *Codegen, base_type: ast.Type, storage_class: ir.SPIRVStorageClass) error{OutOfMemory}!u32 {
         const base_id = try self.ensureType(base_type);
+        const key = (@as(u64, @intFromEnum(base_type)) << 32) | @as(u64, @intFromEnum(storage_class));
+        if (self.emitted_ptr_types.get(key)) |cached| return cached;
         const ptr_id = self.allocId();
         try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
         try self.emitWord(ptr_id);
         try self.emitWord(@intFromEnum(storage_class));
         try self.emitWord(base_id);
+        try self.emitted_ptr_types.put(self.alloc, key, ptr_id);
         return ptr_id;
     }
 
     fn emitIntConstant(self: *Codegen, val: u32) error{OutOfMemory}!u32 {
         const int_type_id = try self.ensureType(.uint);
+        const key = (@as(u64, int_type_id) << 32) | @as(u64, val);
+        if (self.emitted_constants.get(key)) |cached| return cached;
         const const_id = self.allocId();
         try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
         try self.emitWord(int_type_id);
         try self.emitWord(const_id);
         try self.emitWord(val);
+        try self.emitted_constants.put(self.alloc, key, const_id);
         return const_id;
     }
 
@@ -366,11 +378,61 @@ const Codegen = struct {
     fn emitTypesAndConstants(self: *Codegen) !void {
         for (self.module.globals) |global| {
             _ = try self.ensureType(global.ty);
+            _ = try self.ensurePointerType(global.ty, global.storage_class);
         }
         for (self.module.functions) |func| {
             _ = try self.ensureType(func.return_type);
             for (func.params) |param| {
                 _ = try self.ensureType(param.ty);
+            }
+            for (func.body) |inst| {
+                _ = try self.ensureType(inst.ty);
+                switch (inst.tag) {
+                    .local_variable => {
+                        _ = try self.ensurePointerType(inst.ty, .function);
+                    },
+                    .access_chain => {
+                        _ = try self.ensurePointerType(inst.ty, .function);
+                    },
+                    .constant_int => {
+                        const result_id = inst.result_id orelse continue;
+                        const val: u32 = switch (inst.operands[0]) {
+                            .literal_int => |v| v,
+                            else => continue,
+                        };
+                        const int_type_id = try self.ensureType(.int);
+                        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+                        try self.emitWord(int_type_id);
+                        try self.emitWord(result_id);
+                        try self.emitWord(val);
+                    },
+                    .constant_float => {
+                        const result_id = inst.result_id orelse continue;
+                        const val: f32 = switch (inst.operands[0]) {
+                            .literal_float => |v| v,
+                            .literal_int => |v| @floatFromInt(v),
+                            else => continue,
+                        };
+                        const float_type_id = try self.ensureType(.float);
+                        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+                        try self.emitWord(float_type_id);
+                        try self.emitWord(result_id);
+                        try self.emitWord(@as(u32, @bitCast(val)));
+                    },
+                    .constant_bool => {
+                        const result_id = inst.result_id orelse continue;
+                        const val: u32 = switch (inst.operands[0]) {
+                            .literal_int => |v| v,
+                            else => continue,
+                        };
+                        const bool_type_id = try self.ensureType(.bool);
+                        const op: spirv.Op = if (val != 0) .ConstantTrue else .ConstantFalse;
+                        try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(op)));
+                        try self.emitWord(bool_type_id);
+                        try self.emitWord(result_id);
+                    },
+                    else => {},
+                }
             }
         }
     }
@@ -393,7 +455,7 @@ const Codegen = struct {
                 try param_type_ids.append(self.alloc, try self.ensureType(param.ty));
             }
             const func_type_id = self.allocId();
-            const func_type_wc: u16 = 2 + @as(u16, @intCast(param_type_ids.items.len));
+            const func_type_wc: u16 = 3 + @as(u16, @intCast(param_type_ids.items.len));
             try self.emitWord(spirv.encodeInstructionHeader(func_type_wc, @intFromEnum(spirv.Op.TypeFunction)));
             try self.emitWord(func_type_id);
             try self.emitWord(return_type_id);
@@ -435,37 +497,7 @@ const Codegen = struct {
             resolved.result_type = try self.ensureType(inst.ty);
         }
         switch (resolved.tag) {
-            .constant_int => {
-                const result_id = resolved.result_id orelse return;
-                const val = self.operandInt(resolved, 0);
-                const int_type_id = try self.ensureType(.int);
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
-                try self.emitWord(int_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(val);
-            },
-            .constant_float => {
-                const result_id = resolved.result_id orelse return;
-                const val: f32 = switch (resolved.operands[0]) {
-                    .literal_float => |v| v,
-                    .literal_int => |v| @floatFromInt(v),
-                    else => unreachable,
-                };
-                const float_type_id = try self.ensureType(.float);
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
-                try self.emitWord(float_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(@as(u32, @bitCast(val)));
-            },
-            .constant_bool => {
-                const result_id = resolved.result_id orelse return;
-                const val = self.operandInt(resolved, 0);
-                const bool_type_id = try self.ensureType(.bool);
-                const op: spirv.Op = if (val != 0) .ConstantTrue else .ConstantFalse;
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(op)));
-                try self.emitWord(bool_type_id);
-                try self.emitWord(result_id);
-            },
+            .constant_int, .constant_float, .constant_bool => return,
             .local_variable => {
                 const ptr_type_id = try self.ensurePointerType(resolved.ty, .function);
                 const result_id = resolved.result_id orelse return;

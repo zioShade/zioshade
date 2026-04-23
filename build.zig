@@ -55,4 +55,25 @@ pub fn build(b: *std.Build) void {
     const validate_run = b.addSystemCommand(&.{"spirv-val"});
     validate_run.addArg("--help");
     validate_step.dependOn(&validate_run.step);
+
+    // Shader conformance tests — run with: zig build conformance
+    // Compiles real shaders from glslang/SPIRV-Cross/Ghostty and validates with spirv-val
+    const conformance_step = b.step("conformance", "Run shader conformance tests (glslang + SPIRV-Cross + Ghostty)");
+    const runner_mod = b.createModule(.{
+        .root_source_file = b.path("tests/runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    runner_mod.addImport("glslpp", glslpp_mod);
+    const runner_exe = b.addExecutable(.{
+        .name = "conformance-runner",
+        .root_module = runner_mod,
+    });
+    const run_conformance = b.addRunArtifact(runner_exe);
+    if (b.args) |args| {
+        for (args) |arg| {
+            run_conformance.addArg(arg);
+        }
+    }
+    conformance_step.dependOn(&run_conformance.step);
 }
