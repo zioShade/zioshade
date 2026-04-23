@@ -72,9 +72,22 @@ const Analyzer = struct {
         for (self.scopes.items) |*scope| scope.deinit(self.alloc);
         self.scopes.deinit(self.alloc);
         self.globals.deinit(self.alloc);
+        for (self.functions.items) |func| {
+            for (func.body) |inst| {
+                if (inst.operands.len > 0) {
+                    self.alloc.free(inst.operands);
+                }
+            }
+            self.alloc.free(func.body);
+        }
         self.functions.deinit(self.alloc);
         for (self.errors.items) |msg| self.alloc.free(msg);
         self.errors.deinit(self.alloc);
+        for (self.instructions.items) |inst| {
+            if (inst.operands.len > 0) {
+                self.alloc.free(inst.operands);
+            }
+        }
         self.instructions.deinit(self.alloc);
     }
 
@@ -866,4 +879,49 @@ test "semantic: vec4 constructor lowers to composite_construct" {
         if (inst.tag == .composite_construct) has_composite = true;
     }
     try testing.expect(has_composite);
+}
+
+test "semantic: complex shader full pipeline" {
+    const source =
+        \\void main() {
+        \\    float a = 1.0;
+        \\    float b = 2.0;
+        \\    float c = a + b * 3.0 - 1.0;
+        \\    c = c / 2.0;
+        \\    float d = a + b;
+        \\    vec4 color = vec4(c, c, c, 1.0);
+        \\}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    try testing.expect(module.functions.len == 1);
+    const body = module.functions[0].body;
+    var has_fadd = false;
+    var has_fsub = false;
+    var has_fmul = false;
+    var has_fdiv = false;
+    var has_composite = false;
+    var has_return_void = false;
+    for (body) |inst| {
+        switch (inst.tag) {
+            .fadd => has_fadd = true,
+            .fsub => has_fsub = true,
+            .fmul => has_fmul = true,
+            .fdiv => has_fdiv = true,
+            .composite_construct => has_composite = true,
+            .return_void => has_return_void = true,
+            else => {},
+        }
+    }
+    try testing.expect(has_fadd);
+    try testing.expect(has_fsub);
+    try testing.expect(has_fmul);
+    try testing.expect(has_fdiv);
+    try testing.expect(has_composite);
+    try testing.expect(has_return_void);
 }
