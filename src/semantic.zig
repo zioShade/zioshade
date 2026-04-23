@@ -273,9 +273,11 @@ const Analyzer = struct {
             },
             .struct_decl => {
                 const name = node.data.name;
+                // Duplicate members to avoid double-free with AST
+                const members = try self.alloc.dupe(ast.StructMember, node.data.members);
                 const td = ir.TypeDef{
                     .name = name,
-                    .members = node.data.members,
+                    .members = members,
                     .size_bytes = 0,
                 };
                 const owned_name = try self.alloc.dupe(u8, name);
