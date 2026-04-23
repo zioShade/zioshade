@@ -6,6 +6,7 @@ pub const Module = struct {
     globals: []const Global,
     types: std.StringHashMapUnmanaged(TypeDef),
     entry_point: ?*Function,
+    next_id_start: u32 = 1,
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *Module) void {
