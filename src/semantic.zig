@@ -939,6 +939,9 @@ const Analyzer = struct {
                     .add_assign => if (is_float) .fadd else .add,
                     .sub_assign => if (is_float) .fsub else .sub,
                     .mul_assign => blk: {
+                        if (target.ty.isMatrix() and value.ty.isMatrix()) break :blk .mat_mat_mul;
+                        if (target.ty.isMatrix() and value.ty.isVector()) break :blk .mat_vec_mul;
+                        if (target.ty.isVector() and value.ty.isMatrix()) break :blk .vec_mat_mul;
                         if (target.ty.isVector() and value.ty == .float) break :blk .vec_scalar_mul;
                         if (target.ty == .float and value.ty.isVector()) break :blk .scalar_vec_mul;
                         break :blk if (is_float) .fmul else .mul;
