@@ -205,7 +205,7 @@ const Parser = struct {
         _ = self.advance();
 
         // Uniform block: layout(...) uniform Name { ... };
-        if (self.current().tag == .l_brace and qualifier != null and (qualifier.?.is_uniform or qualifier.?.is_buffer)) {
+        if (self.current().tag == .l_brace and qualifier != null and (qualifier.?.is_uniform or qualifier.?.is_buffer or qualifier.?.is_in or qualifier.?.is_out)) {
             return self.parseUniformBlock(name_tok, qualifier, layout);
         }
 

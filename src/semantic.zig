@@ -307,6 +307,17 @@ const Analyzer = struct {
             },
             .uniform_block => {
                 const name = node.data.name;
+                const qual = node.data.qualifier orelse .{ .is_uniform = true };
+                // Determine storage class from qualifier
+                const storage_class: ir.SPIRVStorageClass = if (qual.is_in)
+                    .input
+                else if (qual.is_out)
+                    .output
+                else if (qual.is_buffer)
+                    .uniform // TODO: add StorageBuffer storage class
+                else
+                    .uniform;
+
                 // Register the block as a struct type
                 const members = try self.alloc.dupe(ast.StructMember, node.data.members);
                 const td = ir.TypeDef{
@@ -317,14 +328,14 @@ const Analyzer = struct {
                 const owned_name = try self.alloc.dupe(u8, name);
                 try self.types.put(self.alloc, owned_name, td);
 
-                // Create a global variable for the uniform block
+                // Create a global variable for the block
                 const ir_id = self.allocId();
                 try self.globals.append(self.alloc, .{
                     .name = name,
                     .ty = .{ .named = name },
-                    .qualifier = node.data.qualifier orelse .{ .is_uniform = true },
+                    .qualifier = qual,
                     .layout = node.data.layout,
-                    .storage_class = .uniform,
+                    .storage_class = storage_class,
                     .result_id = ir_id,
                 });
                 try self.declare(name, .{
