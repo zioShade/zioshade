@@ -1102,6 +1102,11 @@ const Analyzer = struct {
                     return .{ .ty = result_ty, .id = result_id };
                 }
 
+                // Scalar-to-scalar: float(x) → just return x (identity)
+                if (arg_tids.items.len == 1 and !result_ty.isVector() and !result_ty.isMatrix()) {
+                    return arg_tids.items[0];
+                }
+
                 // Allocate operand array
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                 for (arg_tids.items, 0..) |tid, i| {
