@@ -120,13 +120,12 @@ const Codegen = struct {
         const entry_id = if (entry.result_id != 0) entry.result_id else self.allocId();
         const name = entry.name;
 
-        // Collect interface variable IDs (Input + Output globals)
+        // Collect interface variable IDs
+        // SPIR-V 1.4+ requires ALL globals used by the entry point to be listed
         var interface_ids = std.ArrayList(u32).initCapacity(self.alloc, 0) catch unreachable;
         defer interface_ids.deinit(self.alloc);
         for (self.module.globals) |global| {
-            if (global.storage_class == .input or global.storage_class == .output or global.storage_class == .uniform) {
-                interface_ids.append(self.alloc, global.result_id) catch unreachable;
-            }
+            interface_ids.append(self.alloc, global.result_id) catch unreachable;
         }
 
         const name_words = @as(u16, @intCast(std.math.divCeil(usize, name.len + 1, 4) catch unreachable));
