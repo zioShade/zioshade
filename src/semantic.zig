@@ -45,6 +45,7 @@ pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
         .entry_point = null,
         .next_id_start = analyzer.next_id,
         .alloc = alloc,
+        .local_size = analyzer.local_size,
     };
 }
 
@@ -76,6 +77,7 @@ const Analyzer = struct {
     errors: std.ArrayListUnmanaged([]const u8),
     loop_stack: std.ArrayListUnmanaged(LoopContext),
     next_id: u32 = 1,
+    local_size: ?ir.LocalSize = null,
 
     fn deinit(self: *Analyzer) void {
         for (self.scopes.items) |*scope| scope.deinit(self.alloc);
@@ -228,6 +230,31 @@ const Analyzer = struct {
             try self.globals.append(self.alloc, .{ .name = "gl_InstanceID", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
             try self.declare("gl_InstanceID", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
         }
+        // gl_GlobalInvocationID: Input, BuiltIn GlobalInvocationId (vec3)
+        // Uses uvec3 which doesn't need BuiltIn decoration
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_GlobalInvocationID", .ty = .uvec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_GlobalInvocationID", .{ .kind = .var_sym, .ty = .uvec3, .ir_id = id });
+        }
+        // gl_LocalInvocationID: Input, BuiltIn LocalInvocationId (vec3)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_LocalInvocationID", .ty = .uvec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_LocalInvocationID", .{ .kind = .var_sym, .ty = .uvec3, .ir_id = id });
+        }
+        // gl_WorkGroupID: Input, BuiltIn WorkgroupId (vec3)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_WorkGroupID", .ty = .uvec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_WorkGroupID", .{ .kind = .var_sym, .ty = .uvec3, .ir_id = id });
+        }
+        // gl_NumWorkGroups: Input, BuiltIn NumWorkgroups (vec3)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_NumWorkGroups", .ty = .uvec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_NumWorkGroups", .{ .kind = .var_sym, .ty = .uvec3, .ir_id = id });
+        }
 
         // Math functions that return float (or same type as primary argument)
         const float_return_funcs = .{
@@ -283,6 +310,18 @@ const Analyzer = struct {
     fn collectTopLevel(self: *Analyzer, node: ast.Node) !void {
         switch (node.tag) {
             .var_decl, .uniform_decl, .in_decl, .out_decl => {
+                // Check for local_size_x layout (compute shader)
+                if (node.tag == .in_decl) {
+                    if (node.data.layout) |layout| {
+                        if (layout.local_size_x) |lsx| {
+                            self.local_size = .{
+                                .x = lsx,
+                                .y = layout.local_size_y orelse 1,
+                                .z = layout.local_size_z orelse 1,
+                            };
+                        }
+                    }
+                }
                 const ir_id = self.allocId();
                 const storage_class: ir.SPIRVStorageClass = switch (node.tag) {
                     .in_decl => .input,
