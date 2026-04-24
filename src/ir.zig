@@ -1,6 +1,8 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 
+pub const LocalSize = struct { x: u32, y: u32, z: u32 };
+
 pub const Module = struct {
     functions: []const Function,
     globals: []const Global,
@@ -8,6 +10,7 @@ pub const Module = struct {
     entry_point: ?*Function,
     next_id_start: u32 = 1,
     alloc: std.mem.Allocator,
+    local_size: ?LocalSize = null,
 
     pub fn deinit(self: *Module) void {
         for (self.functions) |func| {

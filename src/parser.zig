@@ -272,6 +272,12 @@ const Parser = struct {
                         layout.binding = std.fmt.parseInt(u32, val_text, 10) catch null;
                     } else if (std.mem.eql(u8, ident_text, "set")) {
                         layout.set = std.fmt.parseInt(u32, val_text, 10) catch null;
+                    } else if (std.mem.eql(u8, ident_text, "local_size_x")) {
+                        layout.local_size_x = std.fmt.parseInt(u32, val_text, 10) catch null;
+                    } else if (std.mem.eql(u8, ident_text, "local_size_y")) {
+                        layout.local_size_y = std.fmt.parseInt(u32, val_text, 10) catch null;
+                    } else if (std.mem.eql(u8, ident_text, "local_size_z")) {
+                        layout.local_size_z = std.fmt.parseInt(u32, val_text, 10) catch null;
                     }
                 }
             } else {

@@ -146,6 +146,16 @@ const Codegen = struct {
             try self.emitWord(entry_id);
             try self.emitWord(@intFromEnum(spirv.ExecutionMode.OriginUpperLeft));
         }
+        if (stage == .compute) {
+            if (self.module.local_size) |ls| {
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.LocalSize));
+                try self.emitWord(ls.x);
+                try self.emitWord(ls.y);
+                try self.emitWord(ls.z);
+            }
+        }
     }
 
     fn findEntryPoint(self: *Codegen) ?*const ir.Function {
@@ -381,7 +391,33 @@ const Codegen = struct {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.frag_color));
             }
             if (std.mem.eql(u8, global.name, "gl_Position")) {
-                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), 0); // BuiltIn Position
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.position));
+            }
+            if (std.mem.eql(u8, global.name, "gl_VertexID")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.vertex_index));
+            }
+            if (std.mem.eql(u8, global.name, "gl_InstanceID")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.instance_index));
+            }
+            // Only emit BuiltIn decorations for builtins that don't require extra capabilities
+            // gl_Layer, gl_ViewportIndex require Geometry capability — skip
+            if (false and std.mem.eql(u8, global.name, "gl_Layer")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.layer));
+            }
+            if (false and std.mem.eql(u8, global.name, "gl_ViewportIndex")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.viewport_index));
+            }
+            if (std.mem.eql(u8, global.name, "gl_GlobalInvocationID")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.global_invocation_id));
+            }
+            if (std.mem.eql(u8, global.name, "gl_LocalInvocationID")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.local_invocation_id));
+            }
+            if (std.mem.eql(u8, global.name, "gl_WorkGroupID")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.workgroup_id));
+            }
+            if (std.mem.eql(u8, global.name, "gl_NumWorkGroups")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.num_workgroups));
             }
             // Decorate uniform block types with Block
             if (global.storage_class == .uniform) {
