@@ -510,8 +510,17 @@ const Codegen = struct {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Label)));
             try self.emitWord(label_id);
 
+            // SPIR-V requires all OpVariable be first in the first block
             for (func.body) |inst| {
-                try self.emitInstruction(inst);
+                if (inst.tag == .local_variable) {
+                    try self.emitInstruction(inst);
+                }
+            }
+            // Then emit all other instructions
+            for (func.body) |inst| {
+                if (inst.tag != .local_variable) {
+                    try self.emitInstruction(inst);
+                }
             }
 
             try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.FunctionEnd)));
