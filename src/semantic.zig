@@ -49,9 +49,10 @@ pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
 }
 
 const Symbol = struct {
-    kind: enum { var_sym, param, func, type_sym },
+    kind: enum { var_sym, param, func, type_sym, block_member },
     ty: ast.Type,
     ir_id: u32,
+    member_index: u32 = 0, // For block_member: index into the parent block
 };
 
 const LoopContext = struct {
@@ -331,19 +332,12 @@ const Analyzer = struct {
                 });
 
                 // Also declare each member as directly accessible (GLSL allows this)
-                // Each member resolves to an access chain on the block variable
                 for (node.data.members, 0..) |member, idx| {
-                    const member_ir_id = self.allocId();
-                    const member_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                    member_operands[0] = .{ .id = ir_id };
-                    member_operands[1] = .{ .literal_int = @intCast(idx) };
-                    // We'll emit an access_chain for each member at function entry
-                    // For now, just register the symbol with the block's ir_id
-                    _ = member_ir_id;
                     try self.declare(member.name, .{
-                        .kind = .var_sym,
+                        .kind = .block_member,
                         .ty = member.ty,
-                        .ir_id = ir_id, // Points to block var; access chain happens later
+                        .ir_id = ir_id, // Block variable ID
+                        .member_index = @intCast(idx),
                     });
                 }
             },
@@ -625,6 +619,21 @@ const Analyzer = struct {
         switch (node.tag) {
             .identifier => {
                 if (self.lookup(node.data.name)) |sym| {
+                    if (sym.kind == .block_member) {
+                        // Generate access chain for the member pointer
+                        const ptr_id = self.allocId();
+                        const ac_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        ac_operands[0] = .{ .id = sym.ir_id };
+                        ac_operands[1] = .{ .literal_int = sym.member_index };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .access_chain,
+                            .result_type = null,
+                            .result_id = ptr_id,
+                            .operands = ac_operands,
+                            .ty = sym.ty,
+                        });
+                        return .{ .ty = sym.ty, .id = ptr_id };
+                    }
                     return .{ .ty = sym.ty, .id = sym.ir_id };
                 }
                 return error.UndeclaredIdentifier;
@@ -689,6 +698,32 @@ const Analyzer = struct {
             },
             .identifier => {
                 if (self.lookup(node.data.name)) |sym| {
+                    if (sym.kind == .block_member) {
+                        // Generate access chain to get a pointer to the member
+                        const ptr_id = self.allocId();
+                        const ac_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        ac_operands[0] = .{ .id = sym.ir_id };
+                        ac_operands[1] = .{ .literal_int = sym.member_index };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .access_chain,
+                            .result_type = null,
+                            .result_id = ptr_id,
+                            .operands = ac_operands,
+                            .ty = sym.ty,
+                        });
+                        // Then load from that pointer
+                        const id = self.allocId();
+                        const load_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        load_operands[0] = .{ .id = ptr_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .load,
+                            .result_type = null,
+                            .result_id = id,
+                            .operands = load_operands,
+                            .ty = sym.ty,
+                        });
+                        return .{ .ty = sym.ty, .id = id };
+                    }
                     if (sym.kind == .param or sym.kind == .var_sym) {
                         const id = self.allocId();
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
