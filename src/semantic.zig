@@ -185,47 +185,49 @@ const Analyzer = struct {
     fn injectBuiltins(self: *Analyzer) !void {
         try self.pushScope();
 
-        try self.declare("gl_FragCoord", .{
-            .kind = .var_sym,
-            .ty = .vec4,
-            .ir_id = self.allocId(),
-        });
-
-        try self.declare("gl_FragColor", .{
-            .kind = .var_sym,
-            .ty = .vec4,
-            .ir_id = self.allocId(),
-        });
-
-        try self.declare("gl_Position", .{
-            .kind = .var_sym,
-            .ty = .vec4,
-            .ir_id = self.allocId(),
-        });
-
-        try self.declare("gl_Layer", .{
-            .kind = .var_sym,
-            .ty = .int,
-            .ir_id = self.allocId(),
-        });
-
-        try self.declare("gl_ViewportIndex", .{
-            .kind = .var_sym,
-            .ty = .int,
-            .ir_id = self.allocId(),
-        });
-
-        try self.declare("gl_VertexID", .{
-            .kind = .var_sym,
-            .ty = .int,
-            .ir_id = self.allocId(),
-        });
-
-        try self.declare("gl_InstanceID", .{
-            .kind = .var_sym,
-            .ty = .int,
-            .ir_id = self.allocId(),
-        });
+        // GLSL builtins that need SPIR-V global variables
+        // gl_FragCoord: Input, BuiltIn FragCoord
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_FragCoord", .ty = .vec4, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_FragCoord", .{ .kind = .var_sym, .ty = .vec4, .ir_id = id });
+        }
+        // gl_FragColor: Output, BuiltIn FragColor
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_FragColor", .ty = .vec4, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
+            try self.declare("gl_FragColor", .{ .kind = .var_sym, .ty = .vec4, .ir_id = id });
+        }
+        // gl_Position: Output, BuiltIn Position
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_Position", .ty = .vec4, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
+            try self.declare("gl_Position", .{ .kind = .var_sym, .ty = .vec4, .ir_id = id });
+        }
+        // gl_Layer: Output, BuiltIn Layer
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_Layer", .ty = .int, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
+            try self.declare("gl_Layer", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+        // gl_ViewportIndex: Output, BuiltIn ViewportIndex
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_ViewportIndex", .ty = .int, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
+            try self.declare("gl_ViewportIndex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+        // gl_VertexID: Input, BuiltIn VertexIndex
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_VertexID", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_VertexID", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+        // gl_InstanceID: Input, BuiltIn InstanceIndex
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_InstanceID", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_InstanceID", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
 
         // Math functions that return float (or same type as primary argument)
         const float_return_funcs = .{
