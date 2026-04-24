@@ -1204,6 +1204,37 @@ const Analyzer = struct {
                             .ty = .float, // dot always returns float
                         });
                         return .{ .ty = .float, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "mix")) {
+                        // mix(x, y, a): if a is boolean, use OpSelect(a, x, y); otherwise FMix
+                        if (arg_tids.items.len >= 3 and (arg_tids.items[2].ty.isBoolVector() or arg_tids.items[2].ty == .bool)) {
+                            // Boolean mix → OpSelect(condition=a, true=x, false=y)
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                            operands[0] = .{ .id = arg_tids.items[2].id }; // condition
+                            operands[1] = .{ .id = arg_tids.items[0].id }; // true (x)
+                            operands[2] = .{ .id = arg_tids.items[1].id }; // false (y)
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .select,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = result_ty,
+                            });
+                        } else {
+                            // Regular FMix
+                            const glsl_id: u32 = 46;
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
+                            operands[0] = .{ .literal_int = glsl_id };
+                            for (arg_tids.items, 0..) |tid, i| {
+                                operands[i + 1] = .{ .id = tid.id };
+                            }
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .ext_inst,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = result_ty,
+                            });
+                        }
                     } else if (std.mem.eql(u8, node.data.name, "modf") or std.mem.eql(u8, node.data.name, "frexp")) {
                         // modf(x, ptr) → ModfStruct (GLSL.std.450 #36): only pass x, ignore ptr for now
                         // frexp(x, ptr) → FrexpStruct (GLSL.std.450 #51): only pass x, ignore ptr for now
