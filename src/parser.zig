@@ -331,6 +331,7 @@ const Parser = struct {
             .kw_mat4x4 => { _ = self.advance(); return .mat4x4; },
             .kw_sampler2d => { _ = self.advance(); return .sampler2d; },
             .kw_sampler2d_shadow => { _ = self.advance(); return .sampler2d; },
+            .kw_image2d => { _ = self.advance(); return .sampler2d; }, // Treat as sampler2d for now
             .kw_sampler_cube => { _ = self.advance(); return .sampler_cube; },
             .identifier => {
                 const tok = self.advance();

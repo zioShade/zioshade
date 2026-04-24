@@ -994,6 +994,21 @@ const Analyzer = struct {
                         // Emit a no-op (void) — TODO: proper OpControlBarrier/OpMemoryBarrier
                         return .{ .ty = .void, .id = result_id };
                     }
+                    // imageSize returns ivec2, needs OpImageQuerySize
+                    if (std.mem.eql(u8, node.data.name, "imageSize")) {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_query_size,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .ivec2,
+                        });
+                        return .{ .ty = .ivec2, .id = result_id };
+                    }
                     // Texture functions use different SPIR-V ops, not GLSL.std.450
                     if (self.isTextureBuiltin(node.data.name)) {
                         if (self.isImageSampleBuiltin(node.data.name)) {

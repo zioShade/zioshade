@@ -1,17 +1,20 @@
 # Autoresearch Ideas
 
 ## High Priority
-- **Fix '.' lexer tokenization CAREFULLY**: `accum.y` tokenizes as identifier + double_literal + identifier because `.` alone is classified as double_literal. Fix: in tryParseNumber, only return non-null if has_digit=true. But this causes 22-pass regression — need to investigate WHY and fix the root cause before re-applying.
-- **Add errdefer context to analyzeExpression**: Tag the AST node type when analyzeExpression fails. Then categorize the 115 compile errors by node type and fix the most common ones.
-- **Implicit load for variable references**: When a global/local variable is used in an expression, its ID is a pointer. Need to insert OpLoad before using the value in arithmetic/comparison. Currently works for some builtins but not consistently.
+- **Fix `[]` parsing in uniform blocks (3rd attempt)**: The `[]` after member names causes parser to consume tokens that break other parsing. Root cause: the `l_bracket` token is also used for attribute syntax and fixed-size arrays. Need to only consume `[]` when in a uniform/buffer block context, not globally. The is_runtime_array flag approach works in the semantic analyzer but the parser change regresses.
+- **Fix phantom IDs for `member_access` on vectors**: `vec4.x` returns phantom ID (no instruction). Needs OpLoad + OpCompositeExtract. But the lexer `.` bug complicates this.
+- **Fix `outerProduct` result type**: Should be mat{N}x{M}, not vec{N}. Same for other builtins with different result types.
+- **Add `imageLoad`/`imageStore`/`imageSize` SPIR-V ops**: These need OpImageRead/OpImageWrite/OpImageQuerySize, not ext_inst.
 
-## Medium Priority  
-- **Add lvalue support for index_access and member_access**: `analyzeLValue` only handles `.identifier`. Need `.index_access` (arr[i] = x) and `.member_access` (struct.field = x). Be careful with pointer stability for array type base. 6+ compile errors.
-- **Add `flat`, `centroid`, `sample`, `noperspective` qualifiers**: in-block qualifiers need parsing in tryQualifier.
-- **Single-component swizzle (vec4.x)**: Currently returns phantom ID with no instruction. Need OpLoad + OpCompositeExtract. But causes regression when applied naively — needs investigation.
-- **"Block must end with branch" (3 files)**: Root cause is if_stmt parsing failing (because `accum.y` tokenizes wrong → expression fails → parseIf fails → synchronize skips else → block only has expr_stmt). 
+## Medium Priority
+- **Fix result types for bitcast builtins**: `floatBitsToInt` → int (not float), `intBitsToFloat` → float, etc. Currently uses first arg type.
+- **Add proper OpControlBarrier/OpMemoryBarrier for barrier builtins**: Currently void stubs.
+- **Fix "Duplicate non-aggregate type declarations"**: `outer-product.comp` and `barriers.comp` emit duplicate OpTypeMatrix/OpTypeFunction. Might be from ensureType recursion or named type overlap.
+- **Fix "Operand requires previous definition"**: 6 files with undefined IDs. Check all remaining phantom ID patterns.
+- **Implicit load for variable references**: When global/local vars used in expressions, may need OpLoad before use.
 
 ## Low Priority
-- **#include preprocessor**: Ghostty shaders need it, classified as INVALID.
+- **`flat`, `centroid`, `sample`, `noperspective` qualifiers**: In-block qualifiers need parsing.
 - **Switch statements**: 4 valid test files use switch. Needs OpSwitch.
-- **Array brackets in uniform blocks**: `buffer SSBO { vec4 data[]; }` needs [] support. Reverted twice due to regressions.
+- **`#include` preprocessor**: Ghostty shaders need it, classified as INVALID.
+- **User-defined function return values**: `flush_params.frag` — function returns struct but semantic analyzer returns void for user-defined function calls.

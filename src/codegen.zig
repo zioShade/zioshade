@@ -94,6 +94,8 @@ const Codegen = struct {
     fn emitCapabilities(self: *Codegen) !void {
         try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
         try self.emitWord(@intFromEnum(spirv.Capability.shader));
+        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+        try self.emitWord(@intFromEnum(spirv.Capability.image_query));
     }
 
     fn emitExtInstImport(self: *Codegen) !void {
@@ -802,6 +804,15 @@ const Codegen = struct {
                 try self.emitWord(result_id);
                 try self.emitWord(image_id);
                 try self.emitWord(coord_id);
+            },
+            .image_query_size => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const image_id = self.operandId(resolved, 0);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.ImageQuerySize)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(image_id);
             },
             .return_void => {
                 try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.Return)));
