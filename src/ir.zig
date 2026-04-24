@@ -110,6 +110,8 @@ pub const Instruction = struct {
         image_sample,
         image_fetch,
         image_query_size,
+        image_read,
+        image_write,
         transpose,
         outer_product,
         dot,
