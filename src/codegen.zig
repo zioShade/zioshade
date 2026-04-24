@@ -420,6 +420,7 @@ const Codegen = struct {
                     },
                     .access_chain => {
                         _ = try self.ensurePointerType(inst.ty, .function);
+                        _ = try self.ensurePointerType(inst.ty, .uniform);
                     },
                     .constant_int => {
                         const result_id = inst.result_id orelse continue;
@@ -626,14 +627,22 @@ const Codegen = struct {
             .access_chain => {
                 // OpAccessChain returns a pointer, so we must use ensurePointerType, not the
                 // default value-type resolution from inst.ty.
-                const ptr_type_id = try self.ensurePointerType(inst.ty, .function);
+                // Determine storage class from the base variable
+                const base_id_val = self.operandId(resolved, 0);
+                var sc: ir.SPIRVStorageClass = .function;
+                for (self.module.globals) |global| {
+                    if (global.result_id == base_id_val) {
+                        sc = global.storage_class;
+                        break;
+                    }
+                }
+                const ptr_type_id = try self.ensurePointerType(inst.ty, sc);
                 const result_id = resolved.result_id orelse return;
-                const base_id = self.operandId(resolved, 0);
                 const index_value = self.operandValue(resolved.operands[1]);
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
                 try self.emitWord(ptr_type_id);
                 try self.emitWord(result_id);
-                try self.emitWord(base_id);
+                try self.emitWord(base_id_val);
                 try self.emitWord(index_value);
             },
             .member_access_op => {
