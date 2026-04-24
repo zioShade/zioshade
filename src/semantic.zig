@@ -730,7 +730,11 @@ const Analyzer = struct {
             if (last_error_inner.len == 0) {
                 last_error_inner = @tagName(node.tag);
             }
-            last_error_ctx = @tagName(node.tag);
+            // Use the identifier/function name when available for better error messages
+            last_error_ctx = switch (node.tag) {
+                .identifier, .func_call => node.data.name,
+                else => @tagName(node.tag),
+            };
         }
         switch (node.tag) {
             .int_literal => {
