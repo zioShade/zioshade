@@ -210,15 +210,24 @@ const Parser = struct {
         if (layout != null) {
             qualifier = self.tryQualifier() orelse qualifier;
         }
+
+        // Uniform/buffer/in/out block: layout(...) uniform Name { ... };
+        // Check BEFORE tryType() to avoid consuming the block name as a type
+        if (qualifier != null and (qualifier.?.is_uniform or qualifier.?.is_buffer or qualifier.?.is_in or qualifier.?.is_out)) {
+            if (self.current().tag == .identifier) {
+                const block_name_tok = self.current();
+                const next_pos = self.pos + 1;
+                if (next_pos < self.tokens.len and self.tokens[next_pos].tag == .l_brace) {
+                    _ = self.advance(); // consume block name
+                    return self.parseUniformBlock(block_name_tok, qualifier, layout);
+                }
+            }
+        }
+
         const ty = self.tryType() orelse return error.UnexpectedToken;
         const name_tok = self.current();
         if (name_tok.tag != .identifier) return error.UnexpectedToken;
         _ = self.advance();
-
-        // Uniform block: layout(...) uniform Name { ... };
-        if (self.current().tag == .l_brace and qualifier != null and (qualifier.?.is_uniform or qualifier.?.is_buffer or qualifier.?.is_in or qualifier.?.is_out)) {
-            return self.parseUniformBlock(name_tok, qualifier, layout);
-        }
 
         if (self.current().tag == .l_paren) {
             return self.parseFunctionDecl(name_tok, ty, qualifier, layout);
