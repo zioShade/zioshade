@@ -628,6 +628,7 @@ const Codegen = struct {
             .not_op => try self.emitUnaryOp(spirv.Op.LogicalNot, resolved),
             .convert_ftoi => try self.emitUnaryOp(spirv.Op.ConvertFToS, resolved),
             .convert_itof => try self.emitUnaryOp(spirv.Op.ConvertSToF, resolved),
+            .convert_utof => try self.emitUnaryOp(spirv.Op.ConvertUToF, resolved),
             .logical_and => try self.emitBinOp(spirv.Op.LogicalAnd, resolved),
             .logical_or => try self.emitBinOp(spirv.Op.LogicalOr, resolved),
             .logical_not => try self.emitUnaryOp(spirv.Op.LogicalNot, resolved),

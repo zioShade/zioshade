@@ -95,6 +95,7 @@ pub const Instruction = struct {
         not_op,
         convert_ftoi,
         convert_itof,
+        convert_utof,
         vector_shuffle,
         composite_construct,
         composite_extract,

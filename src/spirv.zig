@@ -48,6 +48,7 @@ pub const Op = enum(u16) {
     ImageFetch = 95,
     ConvertFToS = 110,
     ConvertSToF = 111,
+    ConvertUToF = 112,
     Bitcast = 124,
     SNegate = 126,
     FNegate = 127,
