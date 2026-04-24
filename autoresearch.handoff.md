@@ -1,50 +1,32 @@
-# Autoresearch Handoff Notes — Session 3
+# Autoresearch Handoff Notes — Session 6
 
-## Current State: 29 / 197 valid files pass
+## Current State
+- **57 passes**, 115 compile errors, 25 spirv-val failures, 0 hangs, 0 crashes out of 197 valid
+- Branch: `autoresearch/conformance-20260423`
+- Latest commit: `7b27a2b` (Session 6: promoteTypes fix + named type caching)
 
-Run `bash autoresearch.sh` — takes ~5min, outputs METRIC lines.
+## Key Wins This Session
+- **promoteTypes ordering fix** (+1 pass): Moved vector/scalar checks before float check. Fixes `2.0 * vec4` producing wrong result type.
+- **Named type caching in codegen**: Prevents duplicate OpTypeStruct emissions for the same struct name.
+- **OpTypeRuntimeArray support**: Ready for when array bracket parsing is re-enabled.
 
-### Breakdown
-- 29 PASS, 132 compile_error, 36 spirv-val_fail, 0 hang, 0 crash
-- Branch: `autoresearch/conformance-20260423` (latest commit ce97b39)
-- 19 experiments logged in `autoresearch.jsonl`
+## Failed Attempts (DO NOT RETRY without investigation)
+- **Lexer '.' tokenization fix**: `tryParseNumber` returns non-null for `.` alone (classified as double_literal). Fixing this to require has_digit causes 57→35 regression. The `.` as double_literal is relied upon by 22 shaders somehow.
+- **Swizzle composite_extract**: Adding OpLoad + OpCompositeExtract for single-component swizzles (vec4.x) causes regression. The load instructions seem to break instruction ordering.
+- **For-loop catch{} error resilience**: Catching errors in for-loop body/increment causes hangs.
+- **Array bracket parsing in uniform blocks**: `buffer SSBO { vec4 data[]; }` causes regression because unknown types (int32_t) create undefined IDs.
 
-## Key Fixes This Session (22→29)
-1. **Parser evaluation-order bug**: `makeBinaryOp()` helper fixes Zig 0.15.2 issue where `left = .{ .children = dupeNodes(&.{left, right}) }` corrupts AST by reading `left` after assignment. Affected ALL binary expressions! (+2 pass, +correct SPIR-V for many more)
-2. **Matrix/vector multiply ops**: OpMatrixTimesVector, OpVectorTimesScalar, etc. (+2 pass)
-3. **Texture() return type**: Always vec4, not sampler type. (+2 pass)
-4. **Uniform storage in OpEntryPoint**: Added Uniform storage class globals to interface list. (+1 pass)
+## Root Cause of "Block must end with branch" (3 files)
+The if/else inside a for-loop body fails to PARSE because:
+1. `accum.y > 10.0` — the `accum.y` part is tokenized as `accum` (identifier) + `.y` (double_literal!) + more
+2. The `.` in `accum.y` is consumed by `tryParseNumber` as a double_literal, not a dot operator
+3. parseExpression for `accum.y > 10.0` fails because `accum` is followed by double_literal, not dot
+4. parseIf fails, synchronize() skips the else, and the block only gets the `result += accum` statement
 
-## Top spirv-val Failure Categories (36 total)
-- 5 "block must end with branch" — if/for blocks missing OpBranch
-- 7 "interface variable not listed" — variables not in OpEntryPoint
-- 2 "Constituents type mismatch" — CompositeConstruct wrong types
-- 3 "Operand requires previous definition" — undefined IDs
-- 2 "execution model" — wrong stage
-- Others: various individual issues
-
-## Top Compile Error Categories (132 total)
-- All errors are in semantic analysis stage
-- Missing features: switch statements (4 files), proper uniform block handling
-- The parser's synchronize() accidentally parses single-member uniform blocks correctly
+This is a FUNDAMENTAL lexer bug. The fix requires understanding why 22 shaders regress when the '.' handling is changed.
 
 ## Architecture Notes
-- Pipeline: source → lexer → parser → semantic → codegen → SPIR-V
-- `synchronize()` stops at `kw_uniform` — this accidentally causes single-member uniform blocks to be parsed as standalone uniform_decl (which works!)
-- The `makeBinaryOp` fix affects ALL binary expressions — the parser was producing corrupted ASTs before
-- The `else => void` fallback in analyzeExpression silently returns void for unhandled node types
-- `block_member` symbol kind was added but the access chain path has bugs (produces "Id is 0")
-
-## Quick Wins for Next Session
-1. **Fix "block must end with branch" (5 files)**: Likely a missing OpBranch in if/for codegen
-2. **Implement proper switch statements**: Needs lexer tokens, parser, semantic OpSwitch, break handling in switch context
-3. **Fix interface variable listing (7 files)**: Some variables with Input/Output storage class not being listed
-4. **Fix `else => void` fallback**: Many unhandled AST node types silently produce void
-5. **Categorize the 132 compile errors**: Add error-type tracking to understand what's blocking
-
-## Tools & Paths
-- Zig: 0.15.2
-- glslangValidator: `C:/VulkanSDK/1.4.341.1/Bin/glslangValidator.exe`
-- spirv-val: `C:\VulkanSDK\1.4.341.1\Bin\spirv-val.exe`
-- Runner: `.zig-cache/o/*/conformance-runner.exe`
-- Build: `zig build conformance -- nul`
+- Loads are generated by specific handlers (compound_assign, ext_inst arguments) NOT by general variable access
+- Binary operations use raw pointer IDs as operands — this seems to work but may be incorrect for some operations
+- The ext_inst handler in codegen just emits raw operand IDs — no auto-loading
+- But SPIR-V output shows loads before ext_inst calls — source of these loads is unclear
