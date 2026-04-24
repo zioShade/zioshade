@@ -919,7 +919,10 @@ const Analyzer = struct {
                 }
                 const sym = self.lookup(node.data.name);
                 // For GLSL builtins, infer result type from first argument (e.g., round(vec4) → vec4)
-                const result_ty: ast.Type = if (self.isGLSLBuiltin(node.data.name) and arg_tids.items.len > 0)
+                // Exception: texture functions return vec4
+                const result_ty: ast.Type = if (self.isImageSampleBuiltin(node.data.name))
+                    .vec4
+                else if (self.isGLSLBuiltin(node.data.name) and arg_tids.items.len > 0)
                     arg_tids.items[0].ty
                 else if (sym) |s| s.ty
                 else .void;
