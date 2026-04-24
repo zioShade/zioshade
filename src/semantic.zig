@@ -429,11 +429,15 @@ const Analyzer = struct {
         const func_sym = self.lookup(node.data.name);
         const func_ir_id = if (func_sym) |sym| sym.ir_id else self.allocId();
 
+        var param_ids = std.ArrayListUnmanaged(u32){};
+        defer param_ids.deinit(self.alloc);
         for (node.data.params) |param| {
+            const pid = self.allocId();
+            try param_ids.append(self.alloc, pid);
             try self.declare(param.name, .{
                 .kind = .param,
                 .ty = param.ty,
-                .ir_id = self.allocId(),
+                .ir_id = pid,
             });
         }
 
@@ -461,6 +465,7 @@ const Analyzer = struct {
             .name = node.data.name,
             .return_type = node.data.ty orelse .void,
             .params = node.data.params,
+            .param_ids = try param_ids.toOwnedSlice(self.alloc),
             .body = try self.instructions.toOwnedSlice(self.alloc),
             .locals = &.{},
             .result_id = func_ir_id,

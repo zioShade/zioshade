@@ -545,10 +545,13 @@ const Codegen = struct {
     }
     fn emitFunctions(self: *Codegen, stage: Stage) !void {
         _ = stage;
+        // First pass: emit all function type declarations and save info
+        const FuncInfo = struct { func_type_id: u32, param_type_ids: []const u32 };
+        var func_infos = try std.ArrayList(FuncInfo).initCapacity(self.alloc, self.module.functions.len);
+        defer func_infos.deinit(self.alloc);
         for (self.module.functions) |func| {
             const return_type_id = try self.ensureType(func.return_type);
             var param_type_ids = try std.ArrayList(u32).initCapacity(self.alloc, func.params.len);
-            defer param_type_ids.deinit(self.alloc);
             for (func.params) |param| {
                 try param_type_ids.append(self.alloc, try self.ensureType(param.ty));
             }
@@ -560,17 +563,23 @@ const Codegen = struct {
             for (param_type_ids.items) |ptid| {
                 try self.emitWord(ptid);
             }
+            try func_infos.append(self.alloc, .{ .func_type_id = func_type_id, .param_type_ids = try param_type_ids.toOwnedSlice(self.alloc) });
+        }
 
+        // Second pass: emit function definitions
+        for (self.module.functions, 0..) |func, func_idx| {
+            const return_type_id = try self.ensureType(func.return_type);
+            const info = func_infos.items[func_idx];
             const func_id = if (func.result_id != 0) func.result_id else self.allocId();
             try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.Function)));
             try self.emitWord(return_type_id);
             try self.emitWord(func_id);
             try self.emitWord(0); // FunctionControl = None
-            try self.emitWord(func_type_id);
+            try self.emitWord(info.func_type_id);
 
             for (func.params, 0..) |_, i| {
-                const param_id = self.allocId();
-                const param_type_id = param_type_ids.items[i];
+                const param_id = if (i < func.param_ids.len) func.param_ids[i] else self.allocId();
+                const param_type_id = info.param_type_ids[i];
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.FunctionParameter)));
                 try self.emitWord(param_type_id);
                 try self.emitWord(param_id);

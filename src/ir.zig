@@ -36,6 +36,7 @@ pub const Function = struct {
     name: []const u8,
     return_type: ast.Type,
     params: []const ast.FunctionParam,
+    param_ids: []const u32 = &.{},
     body: []const Instruction,
     locals: []const Local,
     result_id: u32 = 0,
