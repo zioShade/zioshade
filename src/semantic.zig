@@ -205,6 +205,12 @@ const Analyzer = struct {
             try self.globals.append(self.alloc, .{ .name = "gl_FragColor", .ty = .vec4, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
             try self.declare("gl_FragColor", .{ .kind = .var_sym, .ty = .vec4, .ir_id = id });
         }
+        // gl_FrontFacing: Input, BuiltIn FrontFacing (bool)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_FrontFacing", .ty = .bool, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_FrontFacing", .{ .kind = .var_sym, .ty = .bool, .ir_id = id });
+        }
         // gl_Position: Output, BuiltIn Position
         {
             const id = self.allocId();
