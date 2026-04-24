@@ -105,6 +105,7 @@ pub const Type = union(enum) {
     mat3x2, mat3x3, mat3x4,
     mat4x2, mat4x3, mat4x4,
     sampler2d,
+    image2d,
     sampler_cube,
     named: []const u8,
     array: struct { base: *const Type, size: u32 },
@@ -115,7 +116,7 @@ pub const Type = union(enum) {
             .int, .uint => 4,
             .float => 4,
             .double => 8,
-            .void, .sampler2d, .sampler_cube, .named, .array => 0,
+            .void, .sampler2d, .image2d, .sampler_cube, .named, .array => 0,
             else => 4,
         };
     }
@@ -133,7 +134,7 @@ pub const Type = union(enum) {
             .mat2x3 => 6, .mat2x4 => 8,
             .mat3x2 => 6, .mat3x4 => 12,
             .mat4x2 => 8, .mat4x3 => 12,
-            .sampler2d, .sampler_cube, .named, .array => 0,
+            .sampler2d, .image2d, .sampler_cube, .named, .array => 0,
         };
     }
 
@@ -197,7 +198,7 @@ pub const Type = union(enum) {
 
     pub fn isSampler(self: Type) bool {
         return switch (self) {
-            .sampler2d, .sampler_cube => true,
+            .sampler2d, .image2d, .sampler_cube => true,
             else => false,
         };
     }

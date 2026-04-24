@@ -273,6 +273,18 @@ const Codegen = struct {
                 try self.emitWord(id);
                 try self.emitWord(image_id);
             },
+            .image2d => {
+                const float_id = try self.ensureType(.float);
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(id);
+                try self.emitWord(float_id);
+                try self.emitWord(1); // Dim = 2D
+                try self.emitWord(0); // Not depth
+                try self.emitWord(0); // Not arrayed
+                try self.emitWord(0); // Not multisampled
+                try self.emitWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitWord(0); // ImageFormat = Unknown
+            },
             .sampler_cube => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
