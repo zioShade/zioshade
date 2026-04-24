@@ -1108,13 +1108,13 @@ const Analyzer = struct {
                             const a_rows = arg_tids.items[0].ty.numComponents();
                             const b_rows = arg_tids.items[1].ty.numComponents();
                             const mat_ty: ast.Type = if (a_rows == 2 and b_rows == 2) .mat2
-                                else if (a_rows == 2 and b_rows == 3) .mat2x3
-                                else if (a_rows == 2 and b_rows == 4) .mat2x4
-                                else if (a_rows == 3 and b_rows == 2) .mat3x2
+                                else if (a_rows == 3 and b_rows == 2) .mat2x3 // 3 rows, 2 cols
+                                else if (a_rows == 4 and b_rows == 2) .mat2x4 // 4 rows, 2 cols
+                                else if (a_rows == 2 and b_rows == 3) .mat3x2 // 2 rows, 3 cols
                                 else if (a_rows == 3 and b_rows == 3) .mat3
-                                else if (a_rows == 3 and b_rows == 4) .mat3x4
-                                else if (a_rows == 4 and b_rows == 2) .mat4x2
-                                else if (a_rows == 4 and b_rows == 3) .mat4x3
+                                else if (a_rows == 4 and b_rows == 3) .mat3x4 // 4 rows, 3 cols
+                                else if (a_rows == 2 and b_rows == 4) .mat4x2 // 2 rows, 4 cols
+                                else if (a_rows == 3 and b_rows == 4) .mat4x3 // 3 rows, 4 cols
                                 else .mat4; // 4x4
                             // For each column j: column[j] = a * b_component[j]
                             // This requires VectorTimesScalar per column, then CompositeConstruct
