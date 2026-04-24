@@ -934,18 +934,64 @@ const Analyzer = struct {
                     .operands = load_operands,
                     .ty = target.ty,
                 });
+                // Convert value type to match target if needed
+                var value_id = value.id;
+                var value_ty = value.ty;
+                if (target.ty.isVector() and value_ty == .int) {
+                    // int → float → splat to vector
+                    const float_id = self.allocId();
+                    const conv_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    conv_operands[0] = .{ .id = value.id };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .convert_itof,
+                        .result_type = null,
+                        .result_id = float_id,
+                        .operands = conv_operands,
+                        .ty = .float,
+                    });
+                    // Splat float to vector
+                    const splat_id = self.allocId();
+                    const num_comps = target.ty.numComponents();
+                    const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
+                    for (0..num_comps) |i| {
+                        splat_operands[i] = .{ .id = float_id };
+                    }
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .composite_construct,
+                        .result_type = null,
+                        .result_id = splat_id,
+                        .operands = splat_operands,
+                        .ty = target.ty,
+                    });
+                    value_id = splat_id;
+                    value_ty = target.ty;
+                } else if (target.ty == .float and value_ty == .int) {
+                    // int → float
+                    const conv_id = self.allocId();
+                    const conv_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    conv_operands[0] = .{ .id = value.id };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .convert_itof,
+                        .result_type = null,
+                        .result_id = conv_id,
+                        .operands = conv_operands,
+                        .ty = .float,
+                    });
+                    value_id = conv_id;
+                    value_ty = .float;
+                }
                 // Compute result
-                const result_ty = target.ty;
-                const is_float = result_ty == .float or result_ty == .double or result_ty.isVector() or result_ty.isMatrix();
+                const result_ty_2 = target.ty;
+                const is_float = result_ty_2 == .float or result_ty_2 == .double or result_ty_2.isVector() or result_ty_2.isMatrix();
                 const op_tag: ir.Instruction.Tag = switch (node.data.op orelse .add) {
                     .add_assign => if (is_float) .fadd else .add,
                     .sub_assign => if (is_float) .fsub else .sub,
                     .mul_assign => blk: {
-                        if (target.ty.isMatrix() and value.ty.isMatrix()) break :blk .mat_mat_mul;
-                        if (target.ty.isMatrix() and value.ty.isVector()) break :blk .mat_vec_mul;
-                        if (target.ty.isVector() and value.ty.isMatrix()) break :blk .vec_mat_mul;
-                        if (target.ty.isVector() and value.ty == .float) break :blk .vec_scalar_mul;
-                        if (target.ty == .float and value.ty.isVector()) break :blk .scalar_vec_mul;
+                        if (target.ty.isMatrix() and value_ty.isMatrix()) break :blk .mat_mat_mul;
+                        if (target.ty.isMatrix() and value_ty.isVector()) break :blk .mat_vec_mul;
+                        if (target.ty.isVector() and value_ty.isMatrix()) break :blk .vec_mat_mul;
+                        if (target.ty.isVector() and value_ty == .float) break :blk .vec_scalar_mul;
+                        if (target.ty == .float and value_ty.isVector()) break :blk .scalar_vec_mul;
                         break :blk if (is_float) .fmul else .mul;
                     },
                     .div_assign => if (is_float) .fdiv else .div,
@@ -954,13 +1000,13 @@ const Analyzer = struct {
                 const computed_id = self.allocId();
                 const bin_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 bin_operands[0] = .{ .id = loaded_id };
-                bin_operands[1] = .{ .id = value.id };
+                bin_operands[1] = .{ .id = value_id };
                 try self.instructions.append(self.alloc, .{
                     .tag = op_tag,
                     .result_type = null,
                     .result_id = computed_id,
                     .operands = bin_operands,
-                    .ty = result_ty,
+                    .ty = result_ty_2,
                 });
                 // Store back
                 const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
@@ -1117,6 +1163,22 @@ const Analyzer = struct {
                             .ty = .float, // dot always returns float
                         });
                         return .{ .ty = .float, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "modf") or std.mem.eql(u8, node.data.name, "frexp")) {
+                        // modf(x, ptr) → ModfStruct (GLSL.std.450 #36): only pass x, ignore ptr for now
+                        // frexp(x, ptr) → FrexpStruct (GLSL.std.450 #51): only pass x, ignore ptr for now
+                        const glsl_id: u32 = if (std.mem.eql(u8, node.data.name, "modf")) 36 else 51;
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2); // instruction_id + 1 arg
+                        operands[0] = .{ .literal_int = glsl_id };
+                        operands[1] = .{ .id = arg_tids.items[0].id };
+                        // Result type is the same as the input type
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .ext_inst,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = arg_tids.items[0].ty,
+                        });
+                        return .{ .ty = arg_tids.items[0].ty, .id = result_id };
                     } else {
                         const glsl_id = self.glslExtInstruction(node.data.name) orelse 1;
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
