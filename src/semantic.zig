@@ -11,6 +11,8 @@ pub const Error = error{
     InvalidAssignment,
 };
 
+pub threadlocal var last_error_ctx: []const u8 = "";
+
 pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
     var analyzer = Analyzer{
         .alloc = alloc,
@@ -688,9 +690,13 @@ const Analyzer = struct {
                     }
                     return .{ .ty = sym.ty, .id = sym.ir_id };
                 }
+                last_error_ctx = node.data.name;
                 return error.UndeclaredIdentifier;
             },
-            else => return error.InvalidAssignment,
+            else => {
+                last_error_ctx = "invalid-assign";
+                return error.InvalidAssignment;
+            },
         }
     }
 
@@ -791,6 +797,7 @@ const Analyzer = struct {
                     }
                     return .{ .ty = sym.ty, .id = sym.ir_id };
                 }
+                last_error_ctx = node.data.name;
                 return error.UndeclaredIdentifier;
             },
             .binary_op => {
@@ -1195,7 +1202,10 @@ const Analyzer = struct {
                 if (node.data.children.len < 1) return error.SemanticFailed;
                 return self.analyzeExpression(node.data.children[0]);
             },
-            else => return .{ .ty = .void, .id = self.allocId() },
+            else => {
+                const ret: TypedId = .{ .ty = .void, .id = self.allocId() };
+                return ret;
+            },
         }
     }
 

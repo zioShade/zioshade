@@ -149,7 +149,7 @@ const Parser = struct {
                 .kw_bvec2, .kw_bvec3, .kw_bvec4,
                 .kw_uvec2, .kw_uvec3, .kw_uvec4,
                 .kw_mat2, .kw_mat3, .kw_mat4,
-                .kw_struct, .kw_uniform, .kw_in, .kw_out,
+                .kw_struct, .kw_uniform, .kw_in, .kw_out, .kw_buffer,
                 => return,
                 else => _ = self.advance(),
             }
