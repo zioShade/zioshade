@@ -457,6 +457,14 @@ const Codegen = struct {
                     .access_chain => {
                         _ = try self.ensurePointerType(inst.ty, .function);
                         _ = try self.ensurePointerType(inst.ty, .uniform);
+                        // Pre-emit the index constant so it's available during codegen
+                        if (inst.operands.len > 1) {
+                            const idx = switch (inst.operands[1]) {
+                                .literal_int => |v| v,
+                                else => 0,
+                            };
+                            _ = try self.emitIntConstant(idx);
+                        }
                     },
                     .constant_int => {
                         const result_id = inst.result_id orelse continue;
@@ -699,12 +707,14 @@ const Codegen = struct {
                 }
                 const ptr_type_id = try self.ensurePointerType(inst.ty, sc);
                 const result_id = resolved.result_id orelse return;
-                const index_value = self.operandValue(resolved.operands[1]);
+                // OpAccessChain indices must be result IDs of OpConstant, not literals
+                const index_literal = self.operandValue(resolved.operands[1]);
+                const index_id = try self.emitIntConstant(index_literal);
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
                 try self.emitWord(ptr_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(base_id_val);
-                try self.emitWord(index_value);
+                try self.emitWord(index_id);
             },
             .member_access_op => {
                 const result_type_id = resolved.result_type orelse return;
