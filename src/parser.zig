@@ -347,6 +347,17 @@ const Parser = struct {
         _ = try self.expect(.l_paren);
         var params = std.ArrayListUnmanaged(ast.FunctionParam){};
         defer params.deinit(self.alloc);
+        // Handle 'void' as sole parameter (meaning no params)
+        if (self.current().tag == .kw_void) {
+            const void_pos = self.pos;
+            _ = self.advance();
+            if (self.current().tag == .r_paren) {
+                // void as only param → empty param list
+            } else {
+                // void was a type, not a param-less marker
+                self.pos = void_pos;
+            }
+        }
         while (self.current().tag != .r_paren and self.current().tag != .eof) {
             const p_qual = self.tryQualifier();
             const p_type = self.tryType() orelse return error.UnexpectedToken;
