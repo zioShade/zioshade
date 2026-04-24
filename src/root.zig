@@ -18,6 +18,16 @@ pub const Error = error{
     CodegenFailed,
 };
 
+/// Detailed compile result for diagnostics
+pub const CompileDetail = enum {
+    lex_failed,
+    parse_failed,
+    semantic_failed,
+    codegen_failed,
+};
+
+pub threadlocal var last_compile_detail: ?CompileDetail = null;
+
 pub const Stage = enum { vertex, fragment, compute, geometry };
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
 
@@ -44,13 +54,23 @@ pub fn compileToSPIRV(
     source: [:0]const u8,
     options: CompileOptions,
 ) Error![]const u32 {
-    const tokens = lexer.tokenize(alloc, source) catch return error.LexFailed;
+    last_compile_detail = null;
+    const tokens = lexer.tokenize(alloc, source) catch {
+        last_compile_detail = .lex_failed;
+        return error.LexFailed;
+    };
     defer alloc.free(tokens);
 
-    var root_node = parser.parse(alloc, source, tokens) catch return error.ParseFailed;
+    var root_node = parser.parse(alloc, source, tokens) catch {
+        last_compile_detail = .parse_failed;
+        return error.ParseFailed;
+    };
     defer parser.freeTree(alloc, &root_node);
 
-    var module = semantic.analyze(alloc, &root_node) catch return error.SemanticFailed;
+    var module = semantic.analyze(alloc, &root_node) catch {
+        last_compile_detail = .semantic_failed;
+        return error.SemanticFailed;
+    };
     defer module.deinit();
 
     const stage: codegen.Stage = switch (options.stage) {
@@ -68,8 +88,10 @@ pub fn compileToSPIRV(
         .@"1.5" => .@"1.5",
         .@"1.6" => .@"1.6",
     };
-    return codegen.generate(alloc, &module, stage, spirv_ver) catch
-        error.CodegenFailed;
+    return codegen.generate(alloc, &module, stage, spirv_ver) catch {
+        last_compile_detail = .codegen_failed;
+        return error.CodegenFailed;
+    };
 }
 
 /// Cross-compile SPIR-V binary to GLSL source.

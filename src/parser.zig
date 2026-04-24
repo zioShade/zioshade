@@ -32,7 +32,7 @@ pub fn parse(alloc: std.mem.Allocator, source: [:0]const u8, tokens: []const lex
                 if (p.current().tag == .identifier) _ = p.advance();
                 continue;
             },
-            .pp_define, .pp_undef, .pp_if, .pp_ifdef, .pp_ifndef, .pp_elif, .pp_else, .pp_endif, .pp_error, .pp_pragma, .pp_line => {
+            .pp_define, .pp_undef, .pp_if, .pp_ifdef, .pp_ifndef, .pp_elif, .pp_else, .pp_endif, .pp_error, .pp_pragma, .pp_line, .pp_extension => {
                 // Skip the directive line
                 _ = p.advance();
                 const start_line = p.current().loc.line;

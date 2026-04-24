@@ -44,6 +44,8 @@ fn testShader(alloc: std.mem.Allocator, path: []const u8) !Result {
 
     // Compile GLSL -> SPIR-V
     const words = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage }) catch {
+        const detail = glslpp.last_compile_detail orelse .semantic_failed;
+        std.debug.print("  COMPILE-{} {s}\n", .{ detail, @tagName(detail) });
         return .compile_error;
     };
     defer alloc.free(words);
