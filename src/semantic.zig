@@ -837,8 +837,10 @@ const Analyzer = struct {
                         if (left.ty.isMatrix() and right.ty.isVector()) break :blk .mat_vec_mul;
                         if (left.ty.isVector() and right.ty.isMatrix()) break :blk .vec_mat_mul;
                         if (left.ty.isMatrix() and right.ty.isMatrix()) break :blk .mat_mat_mul;
+                        if (left.ty.isMatrix() and (right.ty == .float)) break :blk .mat_scalar_mul;
                         if (left.ty.isVector() and right.ty == .float) break :blk .vec_scalar_mul;
                         if (left.ty == .float and right.ty.isVector()) break :blk .scalar_vec_mul;
+                        if (left.ty == .float and right.ty.isMatrix()) break :blk .scalar_mat_mul;
                         break :blk if (is_float) .fmul else .mul;
                     },
                     .div => if (is_float) .fdiv else .div,
@@ -1507,9 +1509,12 @@ const Analyzer = struct {
     fn promoteTypes(self: *Analyzer, a: ast.Type, b: ast.Type) ?ast.Type {
         _ = self;
         if (std.meta.eql(a, b)) return a;
-        // Vector/scalar promotion must come before scalar type checks
+        // Vector/scalar promotion
         if (a.isVector() and b.isScalar()) return a;
         if (a.isScalar() and b.isVector()) return b;
+        // Matrix/scalar promotion
+        if (a.isMatrix() and b.isScalar()) return a;
+        if (a.isScalar() and b.isMatrix()) return b;
         // Matrix promotions
         if (a.isMatrix() and b.isVector()) return b;
         if (a.isVector() and b.isMatrix()) return a;
