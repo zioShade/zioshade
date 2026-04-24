@@ -107,6 +107,7 @@ pub const Instruction = struct {
         member_access_op,
         image_sample,
         image_fetch,
+        image_query_size,
         return_val,
         return_void,
         branch,
