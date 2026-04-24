@@ -1061,8 +1061,33 @@ const Analyzer = struct {
                 const result_id = self.allocId();
 
                 // Handle scalar-to-vector splat: vec4(1.0) → CompositeConstruct with N copies
+                // Handle vector conversion: vec4(ivec4_var) → ConvertUToF / ConvertSToF
                 if (arg_tids.items.len == 1 and result_ty.isVector()) {
+                    const arg_ty = arg_tids.items[0].ty;
                     const n = result_ty.numComponents();
+                    const arg_n = if (arg_ty.isVector()) arg_ty.numComponents() else 1;
+
+                    if (arg_ty.isVector() and arg_n == n) {
+                        // Same-size vector conversion
+                        const conv_tag: ir.Instruction.Tag = if (arg_ty == .ivec2 or arg_ty == .ivec3 or arg_ty == .ivec4)
+                            .convert_itof
+                        else if (arg_ty == .uvec2 or arg_ty == .uvec3 or arg_ty == .uvec4)
+                            .convert_utof
+                        else
+                            .composite_construct;
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = conv_tag,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = result_ty,
+                        });
+                        return .{ .ty = result_ty, .id = result_id };
+                    }
+
+                    // Scalar splat
                     const operands = try self.alloc.alloc(ir.Instruction.Operand, n);
                     for (0..n) |i| {
                         operands[i] = .{ .id = arg_tids.items[0].id };
