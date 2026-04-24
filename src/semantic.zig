@@ -701,6 +701,7 @@ const Analyzer = struct {
     }
 
     fn analyzeExpression(self: *Analyzer, node: ast.Node) Error!TypedId {
+        errdefer last_error_ctx = @tagName(node.tag);
         switch (node.tag) {
             .int_literal => {
                 const id = self.allocId();
@@ -1156,10 +1157,23 @@ const Analyzer = struct {
             },
             .ternary_op => {
                 if (node.data.children.len < 3) return error.SemanticFailed;
-                _ = try self.analyzeExpression(node.data.children[0]);
+                const cond_tid = try self.analyzeExpression(node.data.children[0]);
                 const then_tid = try self.analyzeExpression(node.data.children[1]);
                 const else_tid = try self.analyzeExpression(node.data.children[2]);
-                return .{ .ty = self.promoteTypes(then_tid.ty, else_tid.ty) orelse then_tid.ty, .id = self.allocId() };
+                const result_ty = self.promoteTypes(then_tid.ty, else_tid.ty) orelse then_tid.ty;
+                const result_id = self.allocId();
+                const operands = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                operands[0] = .{ .id = cond_tid.id };
+                operands[1] = .{ .id = then_tid.id };
+                operands[2] = .{ .id = else_tid.id };
+                try self.instructions.append(self.alloc, .{
+                    .tag = .select,
+                    .result_type = null,
+                    .result_id = result_id,
+                    .operands = operands,
+                    .ty = result_ty,
+                });
+                return .{ .ty = result_ty, .id = result_id };
             },
             .member_access => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
@@ -1303,7 +1317,7 @@ const Analyzer = struct {
             "dot", "exp", "exp2", "faceforward", "floor", "fract",
             "inversesqrt", "length", "log", "log2", "max", "min", "mix",
             "mod", "normalize", "pow", "radians", "reflect", "refract",
-            "round", "sign", "sin", "sinh", "smoothstep", "sqrt", "step",
+            "round", "roundEven", "sign", "sin", "sinh", "smoothstep", "sqrt", "step",
             "tan", "tanh", "transpose", "trunc",
             "texture", "texture2D", "textureLod", "texelFetch",
             "dFdx", "dFdy",
