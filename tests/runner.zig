@@ -32,8 +32,18 @@ fn testShader(alloc: std.mem.Allocator, path: []const u8) !Result {
     const source_z = try alloc.dupeZ(u8, source);
     defer alloc.free(source_z);
 
+    // Detect stage from file extension
+    const stage: glslpp.Stage = blk: {
+        if (std.mem.endsWith(u8, path, ".vert") or std.mem.endsWith(u8, path, ".v.glsl"))
+            break :blk .vertex
+        else if (std.mem.endsWith(u8, path, ".comp") or std.mem.endsWith(u8, path, ".c.glsl"))
+            break :blk .compute
+        else
+            break :blk .fragment;
+    };
+
     // Compile GLSL -> SPIR-V
-    const words = glslpp.compileToSPIRV(alloc, source_z, .{}) catch {
+    const words = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage }) catch {
         return .compile_error;
     };
     defer alloc.free(words);
