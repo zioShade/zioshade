@@ -84,6 +84,8 @@ pub const Instruction = struct {
         mat_vec_mul,
         vec_mat_mul,
         mat_mat_mul,
+        vec_scalar_mul,
+        scalar_vec_mul,
         fdiv,
         neg,
         fneg,
