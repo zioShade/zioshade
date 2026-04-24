@@ -24,6 +24,7 @@ pub fn generate(
         .emitted_named_types = .{},
         .emitted_ptr_types = .{},
         .emitted_constants = .{},
+        .emitted_func_types = .{},
         .glsl_std_450_id = 0,
     };
     defer cg.deinit();
@@ -54,6 +55,7 @@ const Codegen = struct {
     emitted_named_types: std.StringHashMapUnmanaged(u32), // struct name -> type_id
     emitted_ptr_types: std.AutoHashMapUnmanaged(u64, u32), // (type_key << 32 | sc) -> ptr_type_id
     emitted_constants: std.AutoHashMapUnmanaged(u64, u32), // (type_id << 32 | value) -> const_id
+    emitted_func_types: std.AutoHashMapUnmanaged(u64, u32), // hash(ret+params) -> func_type_id
     glsl_std_450_id: u32,
 
     fn deinit(self: *Codegen) void {
@@ -61,6 +63,7 @@ const Codegen = struct {
         self.emitted_named_types.deinit(self.alloc);
         self.emitted_ptr_types.deinit(self.alloc);
         self.emitted_constants.deinit(self.alloc);
+        self.emitted_func_types.deinit(self.alloc);
         self.words.deinit(self.alloc);
     }
 
@@ -557,6 +560,15 @@ const Codegen = struct {
             for (func.params) |param| {
                 try param_type_ids.append(self.alloc, try self.ensureType(param.ty));
             }
+            // Compute hash key for function type dedup
+            var func_type_key: u64 = return_type_id;
+            for (param_type_ids.items) |ptid| {
+                func_type_key = func_type_key *% 31 +% ptid;
+            }
+            if (self.emitted_func_types.get(func_type_key)) |cached_id| {
+                try func_infos.append(self.alloc, .{ .func_type_id = cached_id, .param_type_ids = try param_type_ids.toOwnedSlice(self.alloc) });
+                continue;
+            }
             const func_type_id = self.allocId();
             const func_type_wc: u16 = 3 + @as(u16, @intCast(param_type_ids.items.len));
             try self.emitWord(spirv.encodeInstructionHeader(func_type_wc, @intFromEnum(spirv.Op.TypeFunction)));
@@ -565,6 +577,7 @@ const Codegen = struct {
             for (param_type_ids.items) |ptid| {
                 try self.emitWord(ptid);
             }
+            try self.emitted_func_types.put(self.alloc, func_type_key, func_type_id);
             try func_infos.append(self.alloc, .{ .func_type_id = func_type_id, .param_type_ids = try param_type_ids.toOwnedSlice(self.alloc) });
         }
 
