@@ -55,10 +55,12 @@ Key discoveries:
 - The `synchronize()` method in parser tries to recover from errors by skipping to semicolons/r-brace/type keywords
 
 ### Key Bugs to Fix (Priority Order)
-1. **Parser hangs (79 files)**: Biggest category. Infinite loops on unexpected constructs.
-2. **Compile errors (101 files)**: Missing language features.
-3. **OpEntryPoint interface variables (P1)**: globals with Input/Output storage class must be listed as operands
-4. **#include preprocessor (P2)**: Needed for Ghostty shaders
-5. **Uniform blocks (P3)**: Ghostty uses UBOs — need end-to-end support
-6. **Interface blocks (P5)**: in/out blocks for vertex/fragment I/O
-7. **Switch statements (P6)**: Ghostty uses switch — no parser/IR/codegen support
+1. **Parser hangs**: FIXED — synchronize() now consumes r_brace.
+2. **OpEntryPoint interface variables**: FIXED — Input/Output globals listed as operands.
+3. **Double-free in struct members**: FIXED — TypeDef duplicates members slice.
+4. **GL builtins not emitted as globals**: FIXED — gl_Position etc now registered as proper globals.
+5. **Compile errors (132 files)**: Missing language features + type promotion gaps.
+6. **spirv-val failures (43 files)**: Wrong SPIR-V output — type mismatches, undefined IDs.
+7. **#include preprocessor**: Needed for Ghostty shaders (10 files).
+8. **Uniform blocks**: Basic support added, member access chains need storage class fix.
+9. **Switch statements**: No parser support yet.
