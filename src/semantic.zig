@@ -796,7 +796,9 @@ const Analyzer = struct {
                         });
                         return .{ .ty = sym.ty, .id = id };
                     }
-                    if (sym.kind == .param or sym.kind == .var_sym) {
+                    if (sym.kind == .var_sym) {
+                        // Variables (globals/locals) are pointers — need OpLoad to get value
+                        // Parameters are already values — no load needed
                         const id = self.allocId();
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         operands[0] = .{ .id = sym.ir_id };
