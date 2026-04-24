@@ -93,6 +93,7 @@ pub const Token = struct {
         pp_error,
         pp_pragma,
         pp_line,
+        pp_extension,
 
         // Operators
         l_paren,
@@ -234,6 +235,7 @@ fn makePPDirectiveMap() PPDirectiveMap {
         .{ "error", .pp_error },
         .{ "pragma", .pp_pragma },
         .{ "line", .pp_line },
+        .{ "extension", .pp_extension },
     });
 }
 
@@ -419,16 +421,12 @@ const Tokenizer = struct {
         self.offset += 2;
         self.loc.column += 2;
 
-        var nesting: u32 = 1;
-        while (self.offset + 1 < self.source.len and nesting > 0) {
-            if (self.source[self.offset] == '/' and self.source[self.offset + 1] == '*') {
+        // Block comments do NOT nest in GLSL — /* inside a comment is just text
+        while (self.offset + 1 < self.source.len) {
+            if (self.source[self.offset] == '*' and self.source[self.offset + 1] == '/') {
                 self.offset += 2;
                 self.loc.column += 2;
-                nesting += 1;
-            } else if (self.source[self.offset] == '*' and self.source[self.offset + 1] == '/') {
-                self.offset += 2;
-                self.loc.column += 2;
-                nesting -= 1;
+                return;
             } else if (self.source[self.offset] == '\n') {
                 self.offset += 1;
                 self.loc.line += 1;
@@ -438,10 +436,7 @@ const Tokenizer = struct {
                 self.loc.column += 1;
             }
         }
-
-        if (nesting > 0) {
-            return error.UnterminatedComment;
-        }
+        // Unterminated comment — just return, no error
     }
 
     fn parseStringLiteral(self: *Tokenizer) Error!u32 {
