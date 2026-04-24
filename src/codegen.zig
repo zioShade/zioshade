@@ -858,6 +858,28 @@ const Codegen = struct {
                     try self.emitWord(cid);
                 }
             },
+            .dot => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const a_id = self.operandId(resolved, 0);
+                const b_id = self.operandId(resolved, 1);
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.Dot)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(a_id);
+                try self.emitWord(b_id);
+            },
+            .derivative => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const val_id = self.operandId(resolved, 1);
+                const which = self.operandInt(resolved, 0);
+                const opcode: u16 = if (which == 0) @intFromEnum(spirv.Op.DPdx) else @intFromEnum(spirv.Op.DPdy);
+                try self.emitWord(spirv.encodeInstructionHeader(4, opcode));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(val_id);
+            },
             .return_void => {
                 try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.Return)));
             },

@@ -1089,19 +1089,34 @@ const Analyzer = struct {
                             .ty = result_ty,
                         });
                     } else if (std.mem.eql(u8, node.data.name, "dFdx") or std.mem.eql(u8, node.data.name, "dFdy")) {
-                        // Derivatives: emit as ext_inst with a made-up ID for now
+                        // Derivatives: OpDPdx/OpDPdy (core SPIR-V)
+                        const is_dx = std.mem.eql(u8, node.data.name, "dFdx");
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
-                        operands[0] = .{ .literal_int = 1 };
+                        operands[0] = .{ .literal_int = if (is_dx) 0 else 1 }; // 0=DPdx, 1=DPdy
                         for (arg_tids.items, 1..) |tid, i| {
                             operands[i] = .{ .id = tid.id };
                         }
                         try self.instructions.append(self.alloc, .{
-                            .tag = .ext_inst,
+                            .tag = .derivative,
                             .result_type = null,
                             .result_id = result_id,
                             .operands = operands,
                             .ty = result_ty,
                         });
+                    } else if (std.mem.eql(u8, node.data.name, "dot")) {
+                        // dot(a, b) → OpDot (core SPIR-V, not GLSL.std.450)
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .dot,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .float, // dot always returns float
+                        });
+                        return .{ .ty = .float, .id = result_id };
                     } else {
                         const glsl_id = self.glslExtInstruction(node.data.name) orelse 1;
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
@@ -1511,12 +1526,12 @@ const Analyzer = struct {
 
     fn glslExtInstruction(self: *Analyzer, name: []const u8) ?u32 {
         _ = self;
-        // GLSL.std.450 instruction numbers
+        // GLSL.std.450 instruction numbers (from official spec)
         if (std.mem.eql(u8, name, "round")) return 1;
         if (std.mem.eql(u8, name, "roundEven")) return 2;
         if (std.mem.eql(u8, name, "trunc")) return 3;
-        if (std.mem.eql(u8, name, "abs")) return 4;
-        if (std.mem.eql(u8, name, "sign")) return 6;
+        if (std.mem.eql(u8, name, "abs")) return 4; // FAbs
+        if (std.mem.eql(u8, name, "sign")) return 6; // FSign
         if (std.mem.eql(u8, name, "floor")) return 8;
         if (std.mem.eql(u8, name, "ceil")) return 9;
         if (std.mem.eql(u8, name, "fract")) return 10;
@@ -1538,42 +1553,48 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "exp2")) return 29;
         if (std.mem.eql(u8, name, "log2")) return 30;
         if (std.mem.eql(u8, name, "sqrt")) return 31;
-        if (std.mem.eql(u8, name, "inversesqrt")) return 32;
-        if (std.mem.eql(u8, name, "determinant")) return 33;
-        if (std.mem.eql(u8, name, "normalize")) return 36;
-        if (std.mem.eql(u8, name, "faceforward")) return 40;
-        if (std.mem.eql(u8, name, "reflect")) return 41;
-        if (std.mem.eql(u8, name, "refract")) return 42;
-        if (std.mem.eql(u8, name, "min")) return 37;
-        if (std.mem.eql(u8, name, "max")) return 38;
-        if (std.mem.eql(u8, name, "clamp")) return 39;
-        if (std.mem.eql(u8, name, "mix")) return 43;
-        if (std.mem.eql(u8, name, "step")) return 44;
-        if (std.mem.eql(u8, name, "smoothstep")) return 45;
-        if (std.mem.eql(u8, name, "distance")) return 47;
-        if (std.mem.eql(u8, name, "length")) return 48;
-        if (std.mem.eql(u8, name, "dot")) return 49;
-        if (std.mem.eql(u8, name, "cross")) return 50;
+        if (std.mem.eql(u8, name, "inversesqrt")) return 32; // InverseSqrt
+        if (std.mem.eql(u8, name, "determinant")) return 33; // Determinant
+        if (std.mem.eql(u8, name, "inverse")) return 34; // MatrixInverse
+        if (std.mem.eql(u8, name, "mod")) return 35; // Modf
+        if (std.mem.eql(u8, name, "modf")) return 36; // ModfStruct (returns struct)
+        if (std.mem.eql(u8, name, "min")) return 37; // FMin
+        if (std.mem.eql(u8, name, "max")) return 40; // FMax
+        if (std.mem.eql(u8, name, "clamp")) return 43; // FClamp
+        if (std.mem.eql(u8, name, "mix")) return 46; // FMix
+        if (std.mem.eql(u8, name, "step")) return 48; // Step
+        if (std.mem.eql(u8, name, "smoothstep")) return 49; // SmoothStep
+        if (std.mem.eql(u8, name, "fma")) return 50; // Fma
+        if (std.mem.eql(u8, name, "frexp")) return 51; // FrexpStruct
+        if (std.mem.eql(u8, name, "ldexp")) return 52; // Ldexp
+        // Pack/Unpack
+        if (std.mem.eql(u8, name, "packSnorm4x8")) return 53;
+        if (std.mem.eql(u8, name, "packSnorm2x16")) return 54;
+        if (std.mem.eql(u8, name, "packUnorm4x8")) return 55;
+        if (std.mem.eql(u8, name, "packUnorm2x16")) return 56;
+        if (std.mem.eql(u8, name, "packHalf2x16")) return 57;
+        if (std.mem.eql(u8, name, "unpackSnorm2x16")) return 59;
+        if (std.mem.eql(u8, name, "unpackUnorm2x16")) return 60;
+        if (std.mem.eql(u8, name, "unpackHalf2x16")) return 61;
+        if (std.mem.eql(u8, name, "unpackSnorm4x8")) return 62;
+        if (std.mem.eql(u8, name, "unpackUnorm4x8")) return 63;
+        // Geometric
+        if (std.mem.eql(u8, name, "length")) return 65; // Length
+        if (std.mem.eql(u8, name, "distance")) return 66; // Distance
+        if (std.mem.eql(u8, name, "cross")) return 67; // Cross
+        if (std.mem.eql(u8, name, "normalize")) return 68; // Normalize
+        if (std.mem.eql(u8, name, "faceforward")) return 69; // FaceForward
+        if (std.mem.eql(u8, name, "reflect")) return 70; // Reflect
+        if (std.mem.eql(u8, name, "refract")) return 71; // Refract
+        // NOT GLSL.std.450 — handled as core SPIR-V ops
         if (std.mem.eql(u8, name, "transpose") or std.mem.eql(u8, name, "outerProduct"))
-            return null; // Not GLSL.std.450 — handled as core ops or specially
-        if (std.mem.eql(u8, name, "mod")) return 35;
-        // Additional GLSL.std.450 instructions
-        if (std.mem.eql(u8, name, "inverse")) return 55; // MatrixInverse
-        if (std.mem.eql(u8, name, "fma")) return 46;
-        if (std.mem.eql(u8, name, "frexp")) return 51;
-        if (std.mem.eql(u8, name, "ldexp")) return 52;
-        if (std.mem.eql(u8, name, "modf")) return 34; // FMod (same as mod, but different semantics)
-        if (std.mem.eql(u8, name, "packSnorm4x8")) return 56;
-        if (std.mem.eql(u8, name, "packSnorm2x16")) return 57;
-        if (std.mem.eql(u8, name, "packUnorm4x8")) return 58;
-        if (std.mem.eql(u8, name, "packUnorm2x16")) return 59;
-        if (std.mem.eql(u8, name, "packHalf2x16")) return 60;
-        if (std.mem.eql(u8, name, "unpackSnorm2x16")) return 61;
-        if (std.mem.eql(u8, name, "unpackUnorm2x16")) return 62;
-        if (std.mem.eql(u8, name, "unpackHalf2x16")) return 63;
-        if (std.mem.eql(u8, name, "unpackSnorm4x8")) return 64;
-        if (std.mem.eql(u8, name, "unpackUnorm4x8")) return 65;
-        if (std.mem.eql(u8, name, "outerProduct")) return 53;
+            return null;
+        // dot uses OpDot (core SPIR-V opcode 141), not GLSL.std.450
+        if (std.mem.eql(u8, name, "dot"))
+            return null;
+        // dFdx/dFdy are core SPIR-V ops (DPdx/DPdy), not GLSL.std.450
+        if (std.mem.eql(u8, name, "dFdx") or std.mem.eql(u8, name, "dFdy"))
+            return null;
         return null;
     }
 
