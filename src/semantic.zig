@@ -1014,6 +1014,38 @@ const Analyzer = struct {
                         });
                         return .{ .ty = .ivec2, .id = result_id };
                     }
+                    // outerProduct(vecN, vecM) → matNxM
+                    // Not a GLSL.std.450 instruction — need to compute via VectorTimesScalar
+                    if (std.mem.eql(u8, node.data.name, "outerProduct")) {
+                        if (arg_tids.items.len >= 2) {
+                            const a_rows = arg_tids.items[0].ty.numComponents();
+                            const b_rows = arg_tids.items[1].ty.numComponents();
+                            const mat_ty: ast.Type = if (a_rows == 2 and b_rows == 2) .mat2
+                                else if (a_rows == 2 and b_rows == 3) .mat2x3
+                                else if (a_rows == 2 and b_rows == 4) .mat2x4
+                                else if (a_rows == 3 and b_rows == 2) .mat3x2
+                                else if (a_rows == 3 and b_rows == 3) .mat3
+                                else if (a_rows == 3 and b_rows == 4) .mat3x4
+                                else if (a_rows == 4 and b_rows == 2) .mat4x2
+                                else if (a_rows == 4 and b_rows == 3) .mat4x3
+                                else .mat4; // 4x4
+                            // For each column j: column[j] = a * b_component[j]
+                            // This requires VectorTimesScalar per column, then CompositeConstruct
+                            // For now, emit as a special outer_product IR instruction
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                            for (arg_tids.items, 0..) |tid, i| {
+                                operands[i] = .{ .id = tid.id };
+                            }
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .outer_product,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = mat_ty,
+                            });
+                            return .{ .ty = mat_ty, .id = result_id };
+                        }
+                    }
                     // Texture functions use different SPIR-V ops, not GLSL.std.450
                     if (self.isTextureBuiltin(node.data.name)) {
                         if (self.isImageSampleBuiltin(node.data.name)) {
@@ -1043,6 +1075,19 @@ const Analyzer = struct {
                                 .ty = result_ty,
                             });
                         }
+                    } else if (std.mem.eql(u8, node.data.name, "transpose")) {
+                        // transpose(mat) → OpTranspose (core SPIR-V, not GLSL.std.450)
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .transpose,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = result_ty,
+                        });
                     } else if (std.mem.eql(u8, node.data.name, "dFdx") or std.mem.eql(u8, node.data.name, "dFdy")) {
                         // Derivatives: emit as ext_inst with a made-up ID for now
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
@@ -1509,7 +1554,8 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "length")) return 48;
         if (std.mem.eql(u8, name, "dot")) return 49;
         if (std.mem.eql(u8, name, "cross")) return 50;
-        if (std.mem.eql(u8, name, "transpose")) return 54;
+        if (std.mem.eql(u8, name, "transpose") or std.mem.eql(u8, name, "outerProduct"))
+            return null; // Not GLSL.std.450 — handled as core ops or specially
         if (std.mem.eql(u8, name, "mod")) return 35;
         // Additional GLSL.std.450 instructions
         if (std.mem.eql(u8, name, "inverse")) return 55; // MatrixInverse

@@ -189,9 +189,16 @@ const Codegen = struct {
     }
 
     fn ensureType(self: *Codegen, ty: ast.Type) error{OutOfMemory}!u32 {
+        // Normalize aliases for dedup: mat2 == mat2x2, mat3 == mat3x3, mat4 == mat4x4
+        const normalized = switch (ty) {
+            .mat2 => ast.Type.mat2x2,
+            .mat3 => ast.Type.mat3x3,
+            .mat4 => ast.Type.mat4x4,
+            else => ty,
+        };
         // Dedup: for simple (non-payload) types, return cached ID if already emitted
-        if (ty != .named and ty != .array) {
-            const key = @intFromEnum(ty);
+        if (normalized != .named and normalized != .array) {
+            const key = @intFromEnum(normalized);
             if (self.emitted_types.get(key)) |cached_id| {
                 return cached_id;
             }
@@ -240,34 +247,11 @@ const Codegen = struct {
                 try self.emitWord(elem_type);
                 try self.emitWord(count);
             },
-            .mat2, .mat3, .mat4,
-            .mat2x2, .mat2x3, .mat2x4,
-            .mat3x2, .mat3x3, .mat3x4,
-            .mat4x2, .mat4x3, .mat4x4 => {
-                const col_type = try self.ensureType(switch (ty) {
-                    .mat2, .mat2x2 => ast.Type.vec2,
-                    .mat2x3 => ast.Type.vec3,
-                    .mat2x4 => ast.Type.vec4,
-                    .mat3x2 => ast.Type.vec2,
-                    .mat3, .mat3x3 => ast.Type.vec3,
-                    .mat3x4 => ast.Type.vec4,
-                    .mat4x2 => ast.Type.vec2,
-                    .mat4x3 => ast.Type.vec3,
-                    .mat4, .mat4x4 => ast.Type.vec4,
-                    else => unreachable,
-                });
-                const num_cols: u32 = switch (ty) {
-                    .mat2, .mat2x2 => 2,
-                    .mat2x3 => 3,
-                    .mat2x4 => 4,
-                    .mat3x2 => 2,
-                    .mat3, .mat3x3 => 3,
-                    .mat3x4 => 4,
-                    .mat4x2 => 2,
-                    .mat4x3 => 3,
-                    .mat4, .mat4x4 => 4,
-                    else => unreachable,
-                };
+            .mat2, .mat2x2, .mat2x3, .mat2x4,
+            .mat3x2, .mat3, .mat3x3, .mat3x4,
+            .mat4x2, .mat4x3, .mat4, .mat4x4 => {
+                const col_type = try self.ensureType(ty.columnType());
+                const num_cols = ty.numColumns();
                 try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeMatrix)));
                 try self.emitWord(id);
                 try self.emitWord(col_type);
@@ -342,8 +326,8 @@ const Codegen = struct {
             },
         }
         // Cache for simple types
-        if (ty != .named and ty != .array) {
-            const key = @intFromEnum(ty);
+        if (normalized != .named and normalized != .array) {
+            const key = @intFromEnum(normalized);
             try self.emitted_types.put(self.alloc, key, id);
         }
         return id;
@@ -826,6 +810,53 @@ const Codegen = struct {
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(image_id);
+            },
+            .transpose => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const matrix_id = self.operandId(resolved, 0);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Transpose)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(matrix_id);
+            },
+            .outer_product => {
+                // outerProduct(a, b) where a=vecN, b=vecM → matNxM
+                // For each column j: extract b[j], then OpVectorTimesScalar(a, b[j])
+                // Then OpCompositeConstruct(col_0, col_1, ..., col_M-1)
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const a_id = self.operandId(resolved, 0);
+                const b_id = self.operandId(resolved, 1);
+                const num_cols = resolved.ty.numColumns();
+                const col_type_id = try self.ensureType(resolved.ty.columnType());
+                // Build each column: a * b[j]
+                const col_ids = try self.alloc.alloc(u32, num_cols);
+                for (0..num_cols) |j| {
+                    const b_comp_id = self.allocId();
+                    const float_id = try self.ensureType(.float);
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
+                    try self.emitWord(float_id);
+                    try self.emitWord(b_comp_id);
+                    try self.emitWord(b_id);
+                    try self.emitWord(@intCast(j));
+                    // VectorTimesScalar(a, b[j])
+                    const col_id = self.allocId();
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.VectorTimesScalar)));
+                    try self.emitWord(col_type_id);
+                    try self.emitWord(col_id);
+                    try self.emitWord(a_id);
+                    try self.emitWord(b_comp_id);
+                    col_ids[j] = col_id;
+                }
+                // OpCompositeConstruct
+                const wc: u16 = 3 + @as(u16, @intCast(num_cols));
+                try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.CompositeConstruct)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                for (col_ids) |cid| {
+                    try self.emitWord(cid);
+                }
             },
             .return_void => {
                 try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.Return)));

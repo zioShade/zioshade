@@ -164,6 +164,30 @@ pub const Type = union(enum) {
         };
     }
 
+    /// For matrix types, returns the column vector type (vec2/vec3/vec4)
+    /// In GLSL matCxR: C columns, R rows → column type is vecR
+    pub fn columnType(self: Type) Type {
+        return switch (self) {
+            .mat2, .mat2x2, .mat3x2, .mat4x2 => .vec2,
+            .mat2x3, .mat3, .mat3x3, .mat4x3 => .vec3,
+            .mat2x4, .mat3x4, .mat4, .mat4x4 => .vec4,
+            else => .void,
+        };
+    }
+
+    /// For matrix types, returns the number of columns
+    /// In GLSL matCxR: C columns
+    pub fn numColumns(self: Type) u32 {
+        return switch (self) {
+            .mat2, .mat2x2 => 2,
+            .mat2x3, .mat2x4 => 2,
+            .mat3x2, .mat3, .mat3x3 => 3,
+            .mat3x4 => 3,
+            .mat4x2, .mat4x3, .mat4, .mat4x4 => 4,
+            else => 0,
+        };
+    }
+
     pub fn isSampler(self: Type) bool {
         return switch (self) {
             .sampler2d, .sampler_cube => true,
