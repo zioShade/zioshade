@@ -124,7 +124,7 @@ const Codegen = struct {
         var interface_ids = std.ArrayList(u32).initCapacity(self.alloc, 0) catch unreachable;
         defer interface_ids.deinit(self.alloc);
         for (self.module.globals) |global| {
-            if (global.storage_class == .input or global.storage_class == .output) {
+            if (global.storage_class == .input or global.storage_class == .output or global.storage_class == .uniform) {
                 interface_ids.append(self.alloc, global.result_id) catch unreachable;
             }
         }
@@ -571,6 +571,9 @@ const Codegen = struct {
             .fadd => try self.emitBinOp(spirv.Op.FAdd, resolved),
             .fsub => try self.emitBinOp(spirv.Op.FSub, resolved),
             .fmul => try self.emitBinOp(spirv.Op.FMul, resolved),
+            .mat_vec_mul => try self.emitBinOp(spirv.Op.MatrixTimesVector, resolved),
+            .vec_mat_mul => try self.emitBinOp(spirv.Op.VectorTimesMatrix, resolved),
+            .mat_mat_mul => try self.emitBinOp(spirv.Op.MatrixTimesMatrix, resolved),
             .fdiv => try self.emitBinOp(spirv.Op.FDiv, resolved),
             .neg => try self.emitUnaryOp(spirv.Op.SNegate, resolved),
             .fneg => try self.emitUnaryOp(spirv.Op.FNegate, resolved),

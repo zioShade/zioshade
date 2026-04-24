@@ -771,7 +771,12 @@ const Analyzer = struct {
                 const tag: ir.Instruction.Tag = switch (op) {
                     .add => if (is_float) .fadd else .add,
                     .sub => if (is_float) .fsub else .sub,
-                    .mul => if (is_float) .fmul else .mul,
+                    .mul => blk: {
+                        if (left.ty.isMatrix() and right.ty.isVector()) break :blk .mat_vec_mul;
+                        if (left.ty.isVector() and right.ty.isMatrix()) break :blk .vec_mat_mul;
+                        if (left.ty.isMatrix() and right.ty.isMatrix()) break :blk .mat_mat_mul;
+                        break :blk if (is_float) .fmul else .mul;
+                    },
                     .div => if (is_float) .fdiv else .div,
                     .mod => .rem,
                     .eq => if (is_float) .compare_feq else .compare_eq,
