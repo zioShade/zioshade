@@ -12,8 +12,11 @@ pub const Error = error{
 };
 
 pub threadlocal var last_error_ctx: []const u8 = "";
+pub threadlocal var last_error_inner: []const u8 = "";
 
 pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
+    last_error_inner = "";
+    last_error_ctx = "";
     var analyzer = Analyzer{
         .alloc = alloc,
         .scopes = .empty,
@@ -706,7 +709,12 @@ const Analyzer = struct {
     }
 
     fn analyzeExpression(self: *Analyzer, node: ast.Node) Error!TypedId {
-        errdefer last_error_ctx = @tagName(node.tag);
+        errdefer {
+            if (last_error_inner.len == 0) {
+                last_error_inner = @tagName(node.tag);
+            }
+            last_error_ctx = @tagName(node.tag);
+        }
         switch (node.tag) {
             .int_literal => {
                 const id = self.allocId();
@@ -1326,6 +1334,17 @@ const Analyzer = struct {
             "tan", "tanh", "transpose", "trunc",
             "texture", "texture2D", "textureLod", "texelFetch",
             "dFdx", "dFdy",
+            // Additional GLSL builtins
+            "inverse", "outerProduct",
+            "lessThan", "greaterThan", "lessThanEqual", "greaterThanEqual",
+            "equal", "notEqual", "any", "all",
+            "floatBitsToInt", "floatBitsToUint", "intBitsToFloat", "uintBitsToFloat",
+            "fma", "frexp", "ldexp", "modf",
+            "packSnorm4x8", "packUnorm4x8", "packHalf2x16",
+            "packSnorm2x16", "packUnorm2x16",
+            "unpackSnorm2x16", "unpackUnorm2x16", "unpackHalf2x16",
+            "unpackSnorm4x8", "unpackUnorm4x8",
+            "imageSize", "imageLoad", "imageStore",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
@@ -1395,6 +1414,23 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "cross")) return 50;
         if (std.mem.eql(u8, name, "transpose")) return 54;
         if (std.mem.eql(u8, name, "mod")) return 35;
+        // Additional GLSL.std.450 instructions
+        if (std.mem.eql(u8, name, "inverse")) return 55; // MatrixInverse
+        if (std.mem.eql(u8, name, "fma")) return 46;
+        if (std.mem.eql(u8, name, "frexp")) return 51;
+        if (std.mem.eql(u8, name, "ldexp")) return 52;
+        if (std.mem.eql(u8, name, "modf")) return 34; // FMod (same as mod, but different semantics)
+        if (std.mem.eql(u8, name, "packSnorm4x8")) return 56;
+        if (std.mem.eql(u8, name, "packSnorm2x16")) return 57;
+        if (std.mem.eql(u8, name, "packUnorm4x8")) return 58;
+        if (std.mem.eql(u8, name, "packUnorm2x16")) return 59;
+        if (std.mem.eql(u8, name, "packHalf2x16")) return 60;
+        if (std.mem.eql(u8, name, "unpackSnorm2x16")) return 61;
+        if (std.mem.eql(u8, name, "unpackUnorm2x16")) return 62;
+        if (std.mem.eql(u8, name, "unpackHalf2x16")) return 63;
+        if (std.mem.eql(u8, name, "unpackSnorm4x8")) return 64;
+        if (std.mem.eql(u8, name, "unpackUnorm4x8")) return 65;
+        if (std.mem.eql(u8, name, "outerProduct")) return 53;
         return null;
     }
 
