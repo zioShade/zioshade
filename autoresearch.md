@@ -41,6 +41,27 @@ The script compiles the runner, then runs each test suite with per-file timeouts
 True baseline: **2 pass / 101 compile_error / 15 spirv-val fail / 79 hang / 0 crash** out of 197 valid test files.
 Used glslangValidator to classify: 197 valid, 136 invalid, 20 skipped out of 353 total.
 
+### Current state (commit 483e72f) — 22 passes
+Key wins:
+- Fixed parser hangs (synchronize consumes r_brace) → 79→0 hangs
+- Fixed OpEntryPoint interface variables → +4 passes
+- Fixed struct member double-free → +2 passes, 0 crashes
+- Added GL builtins as proper globals → +1 pass
+- Scalar-to-vector splat, GLSL builtin type inference → +3 passes
+- Sampler type encoding fix, top-level var storage class → +5 passes
+- Uniform block member access, in/out block support
+- Buffer/readonly/writeonly/coherent/restrict keywords
+
+Key blockers for 132 compile errors:
+- All errors are in semantic analysis stage (not lex/parse)
+- Most common: UndeclaredIdentifier (missing builtins), TypeMismatch, InvalidAssignment
+- UBO member access produces wrong types (void instead of mat4) — AST nesting issue
+
+Key blockers for 43 spirv-val failures:
+- Undefined IDs (from block member access chains or wrong storage class)
+- Wrong result types (void instead of proper types)
+- OpVariable not first in block (local vars after instructions)
+
 Key discoveries:
 - PASS detection was broken (summary "PASS: 0" line matched grep → ~214 false positives)
 - struct-varying.legacy.frag appears as PASS but has double-free memory corruption (GPA prints error but exits 0)
