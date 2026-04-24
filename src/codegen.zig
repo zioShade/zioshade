@@ -21,6 +21,7 @@ pub fn generate(
         .words = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .next_id = module.next_id_start,
         .emitted_types = .{},
+        .emitted_named_types = .{},
         .emitted_ptr_types = .{},
         .emitted_constants = .{},
         .glsl_std_450_id = 0,
@@ -50,12 +51,14 @@ const Codegen = struct {
     words: std.ArrayList(u32),
     next_id: u32,
     emitted_types: std.AutoHashMapUnmanaged(u32, u32), // @intFromEnum(ty) -> type_id
+    emitted_named_types: std.StringHashMapUnmanaged(u32), // struct name -> type_id
     emitted_ptr_types: std.AutoHashMapUnmanaged(u64, u32), // (type_key << 32 | sc) -> ptr_type_id
     emitted_constants: std.AutoHashMapUnmanaged(u64, u32), // (type_id << 32 | value) -> const_id
     glsl_std_450_id: u32,
 
     fn deinit(self: *Codegen) void {
         self.emitted_types.deinit(self.alloc);
+        self.emitted_named_types.deinit(self.alloc);
         self.emitted_ptr_types.deinit(self.alloc);
         self.emitted_constants.deinit(self.alloc);
         self.words.deinit(self.alloc);
@@ -298,6 +301,10 @@ const Codegen = struct {
                 try self.emitWord(image_id);
             },
             .named => |name| {
+                // Check if this named type was already emitted
+                if (self.emitted_named_types.get(name)) |cached_id| {
+                    return cached_id;
+                }
                 const td = self.module.types.get(name) orelse return id;
                 var member_ids = try std.ArrayList(u32).initCapacity(self.alloc, td.members.len);
                 defer member_ids.deinit(self.alloc);
@@ -310,14 +317,23 @@ const Codegen = struct {
                 for (member_ids.items) |mid| {
                     try self.emitWord(mid);
                 }
+                // Cache the named type
+                try self.emitted_named_types.put(self.alloc, name, id);
             },
             .array => |arr| {
                 const base_id = try self.ensureType(arr.base.*);
-                const const_id = try self.emitIntConstant(arr.size);
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeArray)));
-                try self.emitWord(id);
-                try self.emitWord(base_id);
-                try self.emitWord(const_id);
+                if (arr.size == 0) {
+                    // Runtime array: OpTypeRuntimeArray
+                    try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeRuntimeArray)));
+                    try self.emitWord(id);
+                    try self.emitWord(base_id);
+                } else {
+                    const const_id = try self.emitIntConstant(arr.size);
+                    try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeArray)));
+                    try self.emitWord(id);
+                    try self.emitWord(base_id);
+                    try self.emitWord(const_id);
+                }
             },
         }
         // Cache for simple types
