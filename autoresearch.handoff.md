@@ -1,59 +1,50 @@
-# Autoresearch Handoff Notes — Session 2
+# Autoresearch Handoff Notes — Session 3
 
-## Current State: 22 / 197 valid files pass
+## Current State: 29 / 197 valid files pass
 
-Run `bash autoresearch.sh` — takes ~4min, outputs METRIC lines.
+Run `bash autoresearch.sh` — takes ~5min, outputs METRIC lines.
 
 ### Breakdown
-- 22 PASS, 132 compile_error, 43 spirv-val_fail, 0 hang, 0 crash
-- Branch: `autoresearch/conformance-20260423` (latest commit f8acac1)
-- 14 experiments logged in `autoresearch.jsonl`
+- 29 PASS, 132 compile_error, 36 spirv-val_fail, 0 hang, 0 crash
+- Branch: `autoresearch/conformance-20260423` (latest commit ce97b39)
+- 19 experiments logged in `autoresearch.jsonl`
 
-## P0 Bug: UBO member access returns void type
-When `uMVP` (uniform block member, mat4) is used in `uMVP * aVertex`:
-- Debug showed: `analyzeExpression(uMVP)` returns `{ty=void, id=X}`
-- The binary_op then gets `left=void right=vec4` → `promoteTypes(void,vec4)` → void
-- Results in `OpIMul %void` in SPIR-V
-- **Root cause**: The AST for the expression has a **nested binary_op** where `uMVP` should be. The `analyzeExpression(.identifier)` handler is never reached for `uMVP`.
-- **Next step**: Dump the parser AST for `tests/spirv-cross/basic.vert` to understand the nesting. The parser may be producing unexpected structure for `gl_Position = uMVP * aVertex`.
+## Key Fixes This Session (22→29)
+1. **Parser evaluation-order bug**: `makeBinaryOp()` helper fixes Zig 0.15.2 issue where `left = .{ .children = dupeNodes(&.{left, right}) }` corrupts AST by reading `left` after assignment. Affected ALL binary expressions! (+2 pass, +correct SPIR-V for many more)
+2. **Matrix/vector multiply ops**: OpMatrixTimesVector, OpVectorTimesScalar, etc. (+2 pass)
+3. **Texture() return type**: Always vec4, not sampler type. (+2 pass)
+4. **Uniform storage in OpEntryPoint**: Added Uniform storage class globals to interface list. (+1 pass)
 
-## P1: 132 compile errors (all in semantic analysis)
-Common causes:
-- UndeclaredIdentifier (missing builtins/variables)
-- TypeMismatch
-- InvalidAssignment
+## Top spirv-val Failure Categories (36 total)
+- 5 "block must end with branch" — if/for blocks missing OpBranch
+- 7 "interface variable not listed" — variables not in OpEntryPoint
+- 2 "Constituents type mismatch" — CompositeConstruct wrong types
+- 3 "Operand requires previous definition" — undefined IDs
+- 2 "execution model" — wrong stage
+- Others: various individual issues
 
-## P2: 43 spirv-val failures
-- Undefined IDs (block member access chains not properly emitted)
-- Wrong result types (void where proper type expected)
-- Interface variable not listed (in/out blocks)
+## Top Compile Error Categories (132 total)
+- All errors are in semantic analysis stage
+- Missing features: switch statements (4 files), proper uniform block handling
+- The parser's synchronize() accidentally parses single-member uniform blocks correctly
 
-## Architecture
-- Pipeline: source → lexer.tokenize() → parser.parse() → semantic.analyze() → codegen.generate()
-- compileToSPIRV catches all errors generically — can't see which sub-stage fails
-- Semantic analysis is the bottleneck — ALL compile errors happen there
-- The `block_member` symbol kind was added but may not be reached for all UBO access patterns
+## Architecture Notes
+- Pipeline: source → lexer → parser → semantic → codegen → SPIR-V
+- `synchronize()` stops at `kw_uniform` — this accidentally causes single-member uniform blocks to be parsed as standalone uniform_decl (which works!)
+- The `makeBinaryOp` fix affects ALL binary expressions — the parser was producing corrupted ASTs before
+- The `else => void` fallback in analyzeExpression silently returns void for unhandled node types
+- `block_member` symbol kind was added but the access chain path has bugs (produces "Id is 0")
 
 ## Quick Wins for Next Session
-1. **Dump AST** for `basic.vert` — understand parser output structure
-2. **Categorize compile errors** — add error-type tracking to `autoresearch.sh`
-3. **Fix `else => void` fallback** in `analyzeExpression` — many unhandled AST node types silently produce void, causing cascading failures
-4. **Implement `texture()` built-in** — many shaders use it
-5. **Implement switch statements** — parser/IR/codegen missing
-
-## Key Files Modified
-- `src/semantic.zig` — most changes (type system, block_member, builtins)
-- `src/codegen.zig` — SPIR-V emission, OpVariable reordering
-- `src/parser.zig` — in/out block parsing, synchronize fix
-- `src/lexer.zig` — precision keyword, buffer/coherent/restrict/writeonly/readonly
-- `src/ir.zig` — SPIRVStorageClass additions (private, input, output)
-- `tests/runner.zig` — stage detection from file extension
-- `src/root.zig` — public API (unchanged signature)
+1. **Fix "block must end with branch" (5 files)**: Likely a missing OpBranch in if/for codegen
+2. **Implement proper switch statements**: Needs lexer tokens, parser, semantic OpSwitch, break handling in switch context
+3. **Fix interface variable listing (7 files)**: Some variables with Input/Output storage class not being listed
+4. **Fix `else => void` fallback**: Many unhandled AST node types silently produce void
+5. **Categorize the 132 compile errors**: Add error-type tracking to understand what's blocking
 
 ## Tools & Paths
 - Zig: 0.15.2
 - glslangValidator: `C:/VulkanSDK/1.4.341.1/Bin/glslangValidator.exe`
 - spirv-val: `C:\VulkanSDK\1.4.341.1\Bin\spirv-val.exe`
-- Runner: `.zig-cache/o/*/conformance-runner.exe` (built via `zig build conformance -- nul`)
-- Classification cache: `.zig-cache/ref_classification.txt`
-- Build: `zig build conformance -- nul` (must pass `-- nul` to satisfy arg)
+- Runner: `.zig-cache/o/*/conformance-runner.exe`
+- Build: `zig build conformance -- nul`
