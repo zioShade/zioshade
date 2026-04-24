@@ -664,6 +664,18 @@ const Codegen = struct {
                 try self.emitWord(self.operandId(resolved, 1)); // vector (was right)
                 try self.emitWord(self.operandId(resolved, 0)); // scalar (was left)
             },
+            .mat_scalar_mul => try self.emitBinOp(spirv.Op.MatrixTimesScalar, resolved),
+            .scalar_mat_mul => {
+                // Swap operands: scalar * mat → OpMatrixTimesScalar(mat, scalar)
+                const result_type = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const wc: u16 = 5;
+                try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.MatrixTimesScalar)));
+                try self.emitWord(result_type);
+                try self.emitWord(result_id);
+                try self.emitWord(self.operandId(resolved, 1)); // matrix (was right)
+                try self.emitWord(self.operandId(resolved, 0)); // scalar (was left)
+            },
             .fdiv => try self.emitBinOp(spirv.Op.FDiv, resolved),
             .neg => try self.emitUnaryOp(spirv.Op.SNegate, resolved),
             .fneg => try self.emitUnaryOp(spirv.Op.FNegate, resolved),
