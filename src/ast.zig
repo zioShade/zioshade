@@ -144,6 +144,13 @@ pub const Type = union(enum) {
         };
     }
 
+    pub fn isBoolVector(self: Type) bool {
+        return switch (self) {
+            .bvec2, .bvec3, .bvec4 => true,
+            else => false,
+        };
+    }
+
     pub fn isVector(self: Type) bool {
         return switch (self) {
             .vec2, .vec3, .vec4,
