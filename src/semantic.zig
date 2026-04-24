@@ -329,6 +329,23 @@ const Analyzer = struct {
                     .ty = .{ .named = name },
                     .ir_id = ir_id,
                 });
+
+                // Also declare each member as directly accessible (GLSL allows this)
+                // Each member resolves to an access chain on the block variable
+                for (node.data.members, 0..) |member, idx| {
+                    const member_ir_id = self.allocId();
+                    const member_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                    member_operands[0] = .{ .id = ir_id };
+                    member_operands[1] = .{ .literal_int = @intCast(idx) };
+                    // We'll emit an access_chain for each member at function entry
+                    // For now, just register the symbol with the block's ir_id
+                    _ = member_ir_id;
+                    try self.declare(member.name, .{
+                        .kind = .var_sym,
+                        .ty = member.ty,
+                        .ir_id = ir_id, // Points to block var; access chain happens later
+                    });
+                }
             },
             .struct_decl => {
                 const name = node.data.name;
@@ -1086,7 +1103,13 @@ const Analyzer = struct {
         if (a == .float or b == .float) return .float;
         if (a == .double or b == .double) return .double;
         if (a == .uint or b == .uint) return .uint;
-        return null;
+        // mat * vec → vec result; vec * scalar → vec result
+        if (a.isMatrix() and b.isVector()) return b;
+        if (a.isVector() and b.isMatrix()) return a;
+        if (a.isVector() and b.isScalar()) return a;
+        if (a.isScalar() and b.isVector()) return b;
+        // For other mixed types, return left (e.g., struct member access)
+        return a;
     }
 
     fn typesCompatible(self: *Analyzer, target: ast.Type, source: ast.Type) bool {
