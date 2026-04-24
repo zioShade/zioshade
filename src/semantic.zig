@@ -448,13 +448,24 @@ const Analyzer = struct {
 
         for (node.data.children) |child| {
             try self.analyzeStatement(child);
+            // Stop processing after a return statement (dead code elimination)
+            if (self.instructions.items.len > 0) {
+                const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
+                if (last_tag == .return_void or last_tag == .return_val) break;
+            }
+        }
+
+        // Check if any return statement was emitted
+        var has_explicit_return = false;
+        for (self.instructions.items) |inst| {
+            if (inst.tag == .return_void or inst.tag == .return_val) {
+                has_explicit_return = true;
+                break;
+            }
         }
 
         // If no explicit return was emitted, add an implicit return_void
-        if (self.instructions.items.len == 0 or
-            self.instructions.items[self.instructions.items.len - 1].tag != .return_void and
-            self.instructions.items[self.instructions.items.len - 1].tag != .return_val)
-        {
+        if (!has_explicit_return) {
             try self.instructions.append(self.alloc, .{
                 .tag = .return_void,
                 .result_type = null,

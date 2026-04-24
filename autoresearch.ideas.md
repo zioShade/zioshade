@@ -1,20 +1,35 @@
-# Autoresearch Ideas
+# Autoresearch Ideas Backlog
 
-## High Priority
-- **Fix `[]` parsing in uniform blocks (3rd attempt)**: The `[]` after member names causes parser to consume tokens that break other parsing. Root cause: the `l_bracket` token is also used for attribute syntax and fixed-size arrays. Need to only consume `[]` when in a uniform/buffer block context, not globally. The is_runtime_array flag approach works in the semantic analyzer but the parser change regresses.
-- **Fix phantom IDs for `member_access` on vectors**: `vec4.x` returns phantom ID (no instruction). Needs OpLoad + OpCompositeExtract. But the lexer `.` bug complicates this.
-- **Fix `outerProduct` result type**: Should be mat{N}x{M}, not vec{N}. Same for other builtins with different result types.
-- **Add `imageLoad`/`imageStore`/`imageSize` SPIR-V ops**: These need OpImageRead/OpImageWrite/OpImageQuerySize, not ext_inst.
+## High Priority (likely to fix multiple spirv-val failures)
+
+- **Fix "block must end with branch" (4 files)**: false-loop-init.frag, hoisted-temporary.frag, inside-loop-dominated.frag, shader-debug-info.frag. Root cause: if/for control flow analysis doesn't emit proper OpBranch for all code paths. Need to ensure every basic block ends with a branch instruction. May need to add a "fallthrough" OpBranch at the end of if/else blocks.
+
+- **Fix phantom IDs (6 files)**: spv.nvAtomicFp16Vec.frag, combined-texture-sampler-shadow.vk.frag, image-formats.comp, int64.desktop.comp, struct-packing.comp, coherent-image.comp. Root cause: IDs allocated but never emitted as results. Could be from ensureType allocations that don't get emitted, or from code paths that allocate IDs but error out.
+
+- **Fix ext_inst word count for length/distance/normalize on scalars (3 files)**: scalar-std450-distance-length-normalize.comp, texture_buffer.vert, coherent-image.comp. GLSL.std.450 Length/Distance/Normalize take 1 arg (not 2). When called with scalar args, our generic ext_inst passes all args.
 
 ## Medium Priority
-- **Fix result types for bitcast builtins**: `floatBitsToInt` → int (not float), `intBitsToFloat` → float, etc. Currently uses first arg type.
-- **Add proper OpControlBarrier/OpMemoryBarrier for barrier builtins**: Currently void stubs.
-- **Fix "Duplicate non-aggregate type declarations"**: `outer-product.comp` and `barriers.comp` emit duplicate OpTypeMatrix/OpTypeFunction. Might be from ensureType recursion or named type overlap.
-- **Fix "Operand requires previous definition"**: 6 files with undefined IDs. Check all remaining phantom ID patterns.
-- **Implicit load for variable references**: When global/local vars used in expressions, may need OpLoad before use.
 
-## Low Priority
-- **`flat`, `centroid`, `sample`, `noperspective` qualifiers**: In-block qualifiers need parsing.
-- **Switch statements**: 4 valid test files use switch. Needs OpSwitch.
-- **`#include` preprocessor**: Ghostty shaders need it, classified as INVALID.
-- **User-defined function return values**: `flush_params.frag` — function returns struct but semantic analyzer returns void for user-defined function calls.
+- **Proper image2D/iimage2D/uimage2D type support**: Currently mapped to sampler2d. Need separate types for SPIR-V. imageLoad on iimage2D returns ivec4, not vec4.
+
+- **Fix mat3(mat4) conversion**: matrix-conversion.flatten.frag. Need to extract 3 columns from mat4 and construct mat3.
+
+- **Fix execution model for texture sampling**: explicit-lod.legacy.vert, implicit-lod.legacy.vert. Need to use OpImageSampleExplicitLod for non-fragment stages.
+
+- **Fix modf result type**: modf.legacy.frag. ModfStruct (GLSL.std.450 #36) returns a struct type, not the input type. Need to create the struct type and extract components.
+
+- **Function overloading support**: type-alias.comp has two `overload()` functions with different param types. Our semantic analyzer can't handle this — it maps names to single symbols.
+
+- **Fix "Branch must appear in a block"**: selection-block-dominator.frag, switch-nested.legacy.vert. Likely same root cause as "block must end with branch" — control flow structure issues.
+
+- **Fix OpReturn non-void**: link.multiBlocksInvalid.0.1.vert etc. Functions with non-void return type need OpReturnValue, not OpReturn.
+
+- **Fix OpTypePointer in wrong section**: struct-flatten-stores.legacy.vert. Type declarations after function definitions are invalid.
+
+## Low Priority / Deferred
+
+- **Array bracket parsing in uniform blocks**: `buffer SSBO { vec4 data[]; }` — 4 attempts failed, all regressed. Root cause: parser change affects non-array blocks.
+
+- **Lexer '.' tokenization bug**: `.` alone classified as double_literal. Fixing causes 22-shader regression. Related to `accum.y` tokenization.
+
+- **Switch statement support**: Need OpSwitch implementation for switch statements.
