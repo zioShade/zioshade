@@ -823,6 +823,26 @@ const Codegen = struct {
                 try self.emitWord(result_id);
                 try self.emitWord(image_id);
             },
+            .image_read => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageRead)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(image_id);
+                try self.emitWord(coord_id);
+            },
+            .image_write => {
+                const image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const value_id = self.operandId(resolved, 2);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.ImageWrite)));
+                try self.emitWord(image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(value_id);
+            },
             .transpose => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;

@@ -1168,6 +1168,32 @@ const Analyzer = struct {
                                 .ty = result_ty,
                             });
                         }
+                    } else if (std.mem.eql(u8, node.data.name, "imageLoad")) {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_read,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .vec4, // imageLoad returns vec4
+                        });
+                        return .{ .ty = .vec4, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "imageStore")) {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_write,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = operands,
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = 0 };
                     } else if (std.mem.eql(u8, node.data.name, "transpose")) {
                         // transpose(mat) → OpTranspose (core SPIR-V, not GLSL.std.450)
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
@@ -1729,8 +1755,10 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "faceforward")) return 69; // FaceForward
         if (std.mem.eql(u8, name, "reflect")) return 70; // Reflect
         if (std.mem.eql(u8, name, "refract")) return 71; // Refract
-        // NOT GLSL.std.450 — handled as core SPIR-V ops
+        // NOT GLSL.std.450 — handled as core SPIR-V ops or specially
         if (std.mem.eql(u8, name, "transpose") or std.mem.eql(u8, name, "outerProduct"))
+            return null;
+        if (std.mem.eql(u8, name, "imageLoad") or std.mem.eql(u8, name, "imageStore"))
             return null;
         // dot uses OpDot (core SPIR-V opcode 141), not GLSL.std.450
         if (std.mem.eql(u8, name, "dot"))
