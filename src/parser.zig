@@ -170,6 +170,17 @@ const Parser = struct {
         return self.alloc.dupe(ast.Node, nodes);
     }
 
+    /// Create a binary_op node. Must use this instead of direct struct literal
+    /// to avoid Zig evaluation-order issues with `left` reassignment.
+    fn makeBinaryOp(self: *Parser, loc: ast.Node.Loc, op: ast.Op, left: ast.Node, right: ast.Node) Error!ast.Node {
+        const children = try self.dupeNodes(&.{ left, right });
+        return .{
+            .tag = .binary_op,
+            .loc = loc,
+            .data = .{ .op = op, .children = children },
+        };
+    }
+
     fn isTypeKeyword(tag: lexer.Token.Tag) bool {
         return switch (tag) {
             .kw_void, .kw_float, .kw_int, .kw_uint, .kw_bool,
@@ -727,11 +738,7 @@ const Parser = struct {
         while (self.current().tag == .pipe_pipe) {
             const op_tok = self.advance();
             const right = try self.parseLogicalAnd();
-            left = .{
-                .tag = .binary_op,
-                .loc = self.nodeLoc(op_tok),
-                .data = .{ .op = .logical_or, .children = try self.dupeNodes(&.{ left, right }) },
-            };
+            left = try self.makeBinaryOp(self.nodeLoc(op_tok), .logical_or, left, right);
         }
         return left;
     }
@@ -741,11 +748,7 @@ const Parser = struct {
         while (self.current().tag == .ampersand_ampersand) {
             const op_tok = self.advance();
             const right = try self.parseBitwiseOr();
-            left = .{
-                .tag = .binary_op,
-                .loc = self.nodeLoc(op_tok),
-                .data = .{ .op = .logical_and, .children = try self.dupeNodes(&.{ left, right }) },
-            };
+            left = try self.makeBinaryOp(self.nodeLoc(op_tok), .logical_and, left, right);
         }
         return left;
     }
@@ -755,11 +758,7 @@ const Parser = struct {
         while (self.current().tag == .pipe) {
             const op_tok = self.advance();
             const right = try self.parseBitwiseXor();
-            left = .{
-                .tag = .binary_op,
-                .loc = self.nodeLoc(op_tok),
-                .data = .{ .op = .bit_or, .children = try self.dupeNodes(&.{ left, right }) },
-            };
+            left = try self.makeBinaryOp(self.nodeLoc(op_tok), .bit_or, left, right);
         }
         return left;
     }
@@ -769,11 +768,7 @@ const Parser = struct {
         while (self.current().tag == .caret) {
             const op_tok = self.advance();
             const right = try self.parseBitwiseAnd();
-            left = .{
-                .tag = .binary_op,
-                .loc = self.nodeLoc(op_tok),
-                .data = .{ .op = .bit_xor, .children = try self.dupeNodes(&.{ left, right }) },
-            };
+            left = try self.makeBinaryOp(self.nodeLoc(op_tok), .bit_xor, left, right);
         }
         return left;
     }
@@ -783,11 +778,7 @@ const Parser = struct {
         while (self.current().tag == .ampersand) {
             const op_tok = self.advance();
             const right = try self.parseEquality();
-            left = .{
-                .tag = .binary_op,
-                .loc = self.nodeLoc(op_tok),
-                .data = .{ .op = .bit_and, .children = try self.dupeNodes(&.{ left, right }) },
-            };
+            left = try self.makeBinaryOp(self.nodeLoc(op_tok), .bit_and, left, right);
         }
         return left;
     }
@@ -798,11 +789,7 @@ const Parser = struct {
             const op: ast.Op = if (self.current().tag == .eq_eq) .eq else .neq;
             const op_tok = self.advance();
             const right = try self.parseRelational();
-            left = .{
-                .tag = .binary_op,
-                .loc = self.nodeLoc(op_tok),
-                .data = .{ .op = op, .children = try self.dupeNodes(&.{ left, right }) },
-            };
+            left = try self.makeBinaryOp(self.nodeLoc(op_tok), op, left, right);
         }
         return left;
     }
@@ -820,11 +807,7 @@ const Parser = struct {
             if (op) |o| {
                 const op_tok = self.advance();
                 const right = try self.parseShift();
-                left = .{
-                    .tag = .binary_op,
-                    .loc = self.nodeLoc(op_tok),
-                    .data = .{ .op = o, .children = try self.dupeNodes(&.{ left, right }) },
-                };
+                left = try self.makeBinaryOp(self.nodeLoc(op_tok), o, left, right);
             } else break;
         }
         return left;
@@ -836,11 +819,7 @@ const Parser = struct {
             const op: ast.Op = if (self.current().tag == .lshift) .lshift else .rshift;
             const op_tok = self.advance();
             const right = try self.parseAdditive();
-            left = .{
-                .tag = .binary_op,
-                .loc = self.nodeLoc(op_tok),
-                .data = .{ .op = op, .children = try self.dupeNodes(&.{ left, right }) },
-            };
+            left = try self.makeBinaryOp(self.nodeLoc(op_tok), op, left, right);
         }
         return left;
     }
@@ -851,11 +830,7 @@ const Parser = struct {
             const op: ast.Op = if (self.current().tag == .plus) .add else .sub;
             const op_tok = self.advance();
             const right = try self.parseMultiplicative();
-            left = .{
-                .tag = .binary_op,
-                .loc = self.nodeLoc(op_tok),
-                .data = .{ .op = op, .children = try self.dupeNodes(&.{ left, right }) },
-            };
+            left = try self.makeBinaryOp(self.nodeLoc(op_tok), op, left, right);
         }
         return left;
     }
@@ -871,11 +846,7 @@ const Parser = struct {
             };
             const op_tok = self.advance();
             const right = try self.parseUnary();
-            left = .{
-                .tag = .binary_op,
-                .loc = self.nodeLoc(op_tok),
-                .data = .{ .op = op, .children = try self.dupeNodes(&.{ left, right }) },
-            };
+            left = try self.makeBinaryOp(self.nodeLoc(op_tok), op, left, right);
         }
         return left;
     }

@@ -307,7 +307,7 @@ const Analyzer = struct {
             },
             .uniform_block => {
                 const name = node.data.name;
-                const qual = node.data.qualifier orelse .{ .is_uniform = true };
+                const qual = node.data.qualifier orelse ast.Qualifier{ .is_uniform = true };
                 // Determine storage class from qualifier
                 const storage_class: ir.SPIRVStorageClass = if (qual.is_in)
                     .input
