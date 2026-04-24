@@ -756,6 +756,7 @@ const Analyzer = struct {
                 const is_float = result_ty == .float or result_ty == .double or result_ty.isVector() or result_ty.isMatrix();
                 const op = node.data.op orelse .add;
 
+
                 const tag: ir.Instruction.Tag = switch (op) {
                     .add => if (is_float) .fadd else .add,
                     .sub => if (is_float) .fsub else .sub,
