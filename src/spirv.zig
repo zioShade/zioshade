@@ -118,8 +118,18 @@ pub const Capability = enum(u32) {
 
 pub const BuiltIn = enum(u32) {
     position = 0,
+    point_size = 1,
+    vertex_index = 5,
+    instance_index = 6,
+    layer = 9,
+    viewport_index = 10,
     frag_coord = 15,
+    front_facing = 19,
     frag_color = 17,
+    num_workgroups = 24,
+    workgroup_id = 26,
+    global_invocation_id = 28,
+    local_invocation_id = 29,
     _,
 };
 
