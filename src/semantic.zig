@@ -1289,8 +1289,67 @@ const Analyzer = struct {
             },
             .post_increment, .post_decrement, .pre_increment, .pre_decrement => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
-                const tid = try self.analyzeExpression(node.data.children[0]);
-                return .{ .ty = tid.ty, .id = self.allocId() };
+                // Get the lvalue (variable pointer)
+                const lval = try self.analyzeLValue(node.data.children[0]);
+                // Load current value
+                const loaded_id = self.allocId();
+                try self.instructions.append(self.alloc, .{
+                    .tag = .load,
+                    .result_type = null,
+                    .result_id = loaded_id,
+                    .operands = &.{.{ .id = lval.id }},
+                    .ty = lval.ty,
+                });
+                // Create constant 1
+                const one_id = self.allocId();
+                const one_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                if (lval.ty == .int or lval.ty.isVector()) {
+                    one_ops[0] = .{ .literal_int = 1 };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .constant_int,
+                        .result_type = null,
+                        .result_id = one_id,
+                        .operands = one_ops,
+                        .ty = .int,
+                    });
+                } else {
+                    one_ops[0] = .{ .literal_float = 1.0 };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .constant_float,
+                        .result_type = null,
+                        .result_id = one_id,
+                        .operands = one_ops,
+                        .ty = .float,
+                    });
+                }
+                // Compute new value
+                const new_val_id = self.allocId();
+                const is_add = node.tag == .post_increment or node.tag == .pre_increment;
+                const arith_tag: ir.Instruction.Tag = if (lval.ty == .int or lval.ty == .uint) (if (is_add) .add else .sub) else (if (is_add) .fadd else .fsub);
+                const arith_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                arith_ops[0] = .{ .id = loaded_id };
+                arith_ops[1] = .{ .id = one_id };
+                try self.instructions.append(self.alloc, .{
+                    .tag = arith_tag,
+                    .result_type = null,
+                    .result_id = new_val_id,
+                    .operands = arith_ops,
+                    .ty = lval.ty,
+                });
+                // Store new value
+                const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                store_ops[0] = .{ .id = lval.id };
+                store_ops[1] = .{ .id = new_val_id };
+                try self.instructions.append(self.alloc, .{
+                    .tag = .store,
+                    .result_type = null,
+                    .result_id = null,
+                    .operands = store_ops,
+                    .ty = .void,
+                });
+                // For post-increment, return original value; for pre, return new
+                const return_id = if (node.tag == .post_increment or node.tag == .post_decrement) loaded_id else new_val_id;
+                return .{ .ty = lval.ty, .id = return_id };
             },
             .group => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
