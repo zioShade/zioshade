@@ -826,6 +826,45 @@ const Analyzer = struct {
                 const result_ty = self.promoteTypes(left.ty, right.ty) orelse return error.TypeMismatch;
                 const result_id = self.allocId();
 
+                // Splat scalar to vector if needed for arithmetic ops
+                var left_id = left.id;
+                var right_id = right.id;
+                if (result_ty.isVector()) {
+                    if (left.ty.isScalar() and !right.ty.isScalar()) {
+                        // Splat left scalar to vector
+                        const num_comps = result_ty.numComponents();
+                        const splat_id = self.allocId();
+                        const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
+                        for (0..num_comps) |i| {
+                            splat_operands[i] = .{ .id = left.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_construct,
+                            .result_type = null,
+                            .result_id = splat_id,
+                            .operands = splat_operands,
+                            .ty = result_ty,
+                        });
+                        left_id = splat_id;
+                    } else if (!left.ty.isScalar() and right.ty.isScalar()) {
+                        // Splat right scalar to vector
+                        const num_comps = result_ty.numComponents();
+                        const splat_id = self.allocId();
+                        const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
+                        for (0..num_comps) |i| {
+                            splat_operands[i] = .{ .id = right.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_construct,
+                            .result_type = null,
+                            .result_id = splat_id,
+                            .operands = splat_operands,
+                            .ty = result_ty,
+                        });
+                        right_id = splat_id;
+                    }
+                }
+
                 const is_float = result_ty == .float or result_ty == .double or result_ty.isVector() or result_ty.isMatrix();
                 const op = node.data.op orelse .add;
 
@@ -862,8 +901,8 @@ const Analyzer = struct {
                 };
 
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                operands[0] = .{ .id = left.id };
-                operands[1] = .{ .id = right.id };
+                operands[0] = .{ .id = left_id };
+                operands[1] = .{ .id = right_id };
 
                 // Comparison and logical operators return bool, not the operand type
                 const returns_bool = switch (op) {
