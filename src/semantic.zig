@@ -1124,6 +1124,21 @@ const Analyzer = struct {
                         });
                         return .{ .ty = .ivec2, .id = result_id };
                     }
+                    // textureSize(sampler, lod) → ivec2, uses OpImageQuerySizeLod
+                    if (std.mem.eql(u8, node.data.name, "textureSize")) {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_query_size,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .ivec2,
+                        });
+                        return .{ .ty = .ivec2, .id = result_id };
+                    }
                     // outerProduct(vecN, vecM) → matNxM
                     // Not a GLSL.std.450 instruction — need to compute via VectorTimesScalar
                     if (std.mem.eql(u8, node.data.name, "outerProduct")) {
@@ -1674,7 +1689,7 @@ const Analyzer = struct {
             "packSnorm2x16", "packUnorm2x16",
             "unpackSnorm2x16", "unpackUnorm2x16", "unpackHalf2x16",
             "unpackSnorm4x8", "unpackUnorm4x8",
-            "imageSize", "imageLoad", "imageStore",
+            "imageSize", "imageLoad", "imageStore", "textureSize",
             // Barrier/memory builtins (void, special handling)
             "barrier", "memoryBarrier", "memoryBarrierShared",
             "memoryBarrierImage", "memoryBarrierBuffer", "groupMemoryBarrier",
