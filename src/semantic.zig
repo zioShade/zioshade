@@ -826,6 +826,9 @@ const Analyzer = struct {
                 const result_ty = self.promoteTypes(left.ty, right.ty) orelse return error.TypeMismatch;
                 const result_id = self.allocId();
 
+                // Track if we splatted so we can use regular ops
+                var did_splat = false;
+
                 // Splat scalar to vector if needed for arithmetic ops
                 var left_id = left.id;
                 var right_id = right.id;
@@ -846,6 +849,7 @@ const Analyzer = struct {
                             .ty = result_ty,
                         });
                         left_id = splat_id;
+                        did_splat = true;
                     } else if (!left.ty.isScalar() and right.ty.isScalar()) {
                         // Splat right scalar to vector
                         const num_comps = result_ty.numComponents();
@@ -862,6 +866,7 @@ const Analyzer = struct {
                             .ty = result_ty,
                         });
                         right_id = splat_id;
+                        did_splat = true;
                     }
                 }
 
@@ -873,6 +878,7 @@ const Analyzer = struct {
                     .add => if (is_float) .fadd else .add,
                     .sub => if (is_float) .fsub else .sub,
                     .mul => blk: {
+                        if (did_splat) break :blk if (is_float) .fmul else .mul;
                         if (left.ty.isMatrix() and right.ty.isVector()) break :blk .mat_vec_mul;
                         if (left.ty.isVector() and right.ty.isMatrix()) break :blk .vec_mat_mul;
                         if (left.ty.isMatrix() and right.ty.isMatrix()) break :blk .mat_mat_mul;
