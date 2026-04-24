@@ -1102,9 +1102,41 @@ const Analyzer = struct {
                     return .{ .ty = result_ty, .id = result_id };
                 }
 
-                // Scalar-to-scalar: float(x) → just return x (identity)
+                // Scalar-to-scalar type conversion: float(int_val), int(uint_val), etc.
                 if (arg_tids.items.len == 1 and !result_ty.isVector() and !result_ty.isMatrix()) {
-                    return arg_tids.items[0];
+                    if (std.meta.eql(arg_tids.items[0].ty, result_ty)) {
+                        // Same type: identity
+                        return arg_tids.items[0];
+                    }
+                    // Different scalar types: insert conversion
+                    const conv_tag: ir.Instruction.Tag = blk: {
+                        const from = arg_tids.items[0].ty;
+                        const to = result_ty;
+                        if (to == .float or to == .double) {
+                            if (from == .int or from == .ivec2) break :blk .convert_itof;
+                            if (from == .uint or from == .uvec2) break :blk .convert_utof;
+                        }
+                        if (to == .int) {
+                            if (from == .float or from == .double) break :blk .convert_ftoi;
+                            if (from == .uint) break :blk .convert_uti;
+                        }
+                        if (to == .uint) {
+                            if (from == .float or from == .double) break :blk .convert_ftou;
+                            if (from == .int) break :blk .convert_iti;
+                        }
+                        break :blk .composite_construct; // fallback
+                    };
+                    const result_id2 = self.allocId();
+                    const conv_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    conv_operands[0] = .{ .id = arg_tids.items[0].id };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = conv_tag,
+                        .result_type = null,
+                        .result_id = result_id2,
+                        .operands = conv_operands,
+                        .ty = result_ty,
+                    });
+                    return .{ .ty = result_ty, .id = result_id2 };
                 }
 
                 // Allocate operand array
