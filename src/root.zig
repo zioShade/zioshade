@@ -44,22 +44,13 @@ pub fn compileToSPIRV(
     source: [:0]const u8,
     options: CompileOptions,
 ) Error![]const u32 {
-    const tokens = lexer.tokenize(alloc, source) catch {
-        std.debug.print("  STAGE: lex\n", .{});
-        return error.LexFailed;
-    };
+    const tokens = lexer.tokenize(alloc, source) catch return error.LexFailed;
     defer alloc.free(tokens);
 
-    var root_node = parser.parse(alloc, source, tokens) catch {
-        std.debug.print("  STAGE: parse ({} tokens)\n", .{tokens.len});
-        return error.ParseFailed;
-    };
+    var root_node = parser.parse(alloc, source, tokens) catch return error.ParseFailed;
     defer parser.freeTree(alloc, &root_node);
 
-    var module = semantic.analyze(alloc, &root_node) catch {
-        std.debug.print("  STAGE: semantic ({} top-level nodes)\n", .{root_node.body.len});
-        return error.SemanticFailed;
-    };
+    var module = semantic.analyze(alloc, &root_node) catch return error.SemanticFailed;
     defer module.deinit();
 
     const stage: codegen.Stage = switch (options.stage) {
