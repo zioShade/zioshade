@@ -1274,14 +1274,15 @@ const Analyzer = struct {
     fn promoteTypes(self: *Analyzer, a: ast.Type, b: ast.Type) ?ast.Type {
         _ = self;
         if (std.meta.eql(a, b)) return a;
+        // Vector/scalar promotion must come before scalar type checks
+        if (a.isVector() and b.isScalar()) return a;
+        if (a.isScalar() and b.isVector()) return b;
+        // Matrix promotions
+        if (a.isMatrix() and b.isVector()) return b;
+        if (a.isVector() and b.isMatrix()) return a;
         if (a == .float or b == .float) return .float;
         if (a == .double or b == .double) return .double;
         if (a == .uint or b == .uint) return .uint;
-        // mat * vec → vec result; vec * scalar → vec result
-        if (a.isMatrix() and b.isVector()) return b;
-        if (a.isVector() and b.isMatrix()) return a;
-        if (a.isVector() and b.isScalar()) return a;
-        if (a.isScalar() and b.isVector()) return b;
         // For other mixed types, return left (e.g., struct member access)
         return a;
     }
