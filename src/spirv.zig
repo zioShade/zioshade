@@ -47,6 +47,7 @@ pub const Op = enum(u16) {
     ImageSampleImplicitLod = 87,
     ImageFetch = 95,
     ImageQuerySize = 99,
+    Transpose = 84,
     ConvertFToS = 110,
     ConvertSToF = 111,
     ConvertUToF = 112,
