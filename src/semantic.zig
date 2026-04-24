@@ -989,6 +989,11 @@ const Analyzer = struct {
                 const result_id = self.allocId();
 
                 if (self.isGLSLBuiltin(node.data.name)) {
+                    // Barrier/memory functions — void, no SPIR-V instruction needed for now
+                    if (self.isBarrierBuiltin(node.data.name)) {
+                        // Emit a no-op (void) — TODO: proper OpControlBarrier/OpMemoryBarrier
+                        return .{ .ty = .void, .id = result_id };
+                    }
                     // Texture functions use different SPIR-V ops, not GLSL.std.450
                     if (self.isTextureBuiltin(node.data.name)) {
                         if (self.isImageSampleBuiltin(node.data.name)) {
@@ -1345,6 +1350,9 @@ const Analyzer = struct {
             "unpackSnorm2x16", "unpackUnorm2x16", "unpackHalf2x16",
             "unpackSnorm4x8", "unpackUnorm4x8",
             "imageSize", "imageLoad", "imageStore",
+            // Barrier/memory builtins (void, special handling)
+            "barrier", "memoryBarrier", "memoryBarrierShared",
+            "memoryBarrierImage", "memoryBarrierBuffer", "groupMemoryBarrier",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
@@ -1358,6 +1366,16 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "texture2D") or
             std.mem.eql(u8, name, "textureLod") or
             std.mem.eql(u8, name, "texelFetch");
+    }
+
+    fn isBarrierBuiltin(self: *Analyzer, name: []const u8) bool {
+        _ = self;
+        return std.mem.eql(u8, name, "barrier") or
+            std.mem.eql(u8, name, "memoryBarrier") or
+            std.mem.eql(u8, name, "memoryBarrierShared") or
+            std.mem.eql(u8, name, "memoryBarrierImage") or
+            std.mem.eql(u8, name, "memoryBarrierBuffer") or
+            std.mem.eql(u8, name, "groupMemoryBarrier");
     }
 
     fn isImageSampleBuiltin(self: *Analyzer, name: []const u8) bool {
