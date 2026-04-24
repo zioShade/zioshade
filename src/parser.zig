@@ -330,9 +330,9 @@ const Parser = struct {
             .kw_mat4x2 => { _ = self.advance(); return .mat4x2; },
             .kw_mat4x3 => { _ = self.advance(); return .mat4x3; },
             .kw_mat4x4 => { _ = self.advance(); return .mat4x4; },
-            .kw_sampler2d => { _ = self.advance(); return .sampler2d; },
+            .kw_sampler2d, .kw_isampler2d, .kw_usampler2d, .kw_sampler2d_array, .kw_sampler3d, .kw_sampler_buffer, .kw_sampler2d_ms, .kw_sampler_cube_array, .kw_isampler_cube, .kw_usampler_cube, .kw_isampler3d, .kw_usampler3d => { _ = self.advance(); return .sampler2d; },
             .kw_sampler2d_shadow => { _ = self.advance(); return .sampler2d; },
-            .kw_image2d => { _ = self.advance(); return .sampler2d; }, // Treat as sampler2d for now
+            .kw_image2d => { _ = self.advance(); return .image2d; },
             .kw_sampler_cube => { _ = self.advance(); return .sampler_cube; },
             .identifier => {
                 const tok = self.advance();
