@@ -1282,6 +1282,12 @@ const Analyzer = struct {
                             });
                         }
                     } else if (std.mem.eql(u8, node.data.name, "imageLoad")) {
+                        // Determine result type from image argument type
+                        const img_result_ty: ast.Type = if (arg_tids.items.len > 0) switch (arg_tids.items[0].ty) {
+                            .iimage2d => .ivec4,
+                            .uimage2d => .uvec4,
+                            else => .vec4,
+                        } else .vec4;
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                         for (arg_tids.items, 0..) |tid, i| {
                             operands[i] = .{ .id = tid.id };
@@ -1291,9 +1297,9 @@ const Analyzer = struct {
                             .result_type = null,
                             .result_id = result_id,
                             .operands = operands,
-                            .ty = .vec4, // imageLoad returns vec4
+                            .ty = img_result_ty,
                         });
-                        return .{ .ty = .vec4, .id = result_id };
+                        return .{ .ty = img_result_ty, .id = result_id };
                     } else if (std.mem.eql(u8, node.data.name, "imageStore")) {
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                         for (arg_tids.items, 0..) |tid, i| {
