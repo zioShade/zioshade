@@ -1,44 +1,35 @@
 # Autoresearch Ideas Backlog
 
-## Current State: 98 passes (up from 92 at session start, +6 total)
-- Session: 92→93 (image-ms) → 96 (switch no-op) → 97 (matrix column index) → 98 (struct type pre-emit)
-- Remaining: 95 compile errors, 4 spirv-val failures, 0 hangs, 0 crashes
+## Current State: 98 passes (from 92 at session start, +6 total)
 
-## Session Wins
+## Session Progress (92→98)
 - image2DMS/image2DMSArray types + multisample image read/write (+1)
 - Basic switch statement support (lexer+parser+no-op semantic) (+3)
 - Matrix column indexing via OpCompositeExtract (+1)
 - Pre-emit all named struct types from module.types (+1, -2 spirv-val)
-- Added errdefer in analyzeStatement for better error diagnostics
+- Push constant storage class + member ptr pre-emit + array type dedup (0, infrastructure)
 
-## Failed Experiments
-- **Parser-level swizzle detection** (96→64): Treating '.' + identifier as member_access cascades into crashes. Semantic handler not robust enough.
-- **Lexer fix: bare '.' as dot** (96→64): Same root cause — semantic can't handle all new member_access nodes.
-- **Invocation interlock + atomic builtins** (96, no change): Complex implementation that didn't help any files pass (interlock files also need atomicAnd, buffer atomics).
-- All 3 swizzle attempts failed. The semantic member_access handler must be fixed FIRST.
+## Swizzle Fix — BLOCKED (4 failed attempts)
+The #1 opportunity but requires fixing the semantic handler FIRST. The problem:
+- 4 attempts all regressed 98→74 or 98→76
+- Root cause: changing lexer/parser creates member_access nodes that the semantic can't handle
+- The "Invalid free" crashes come from l-value handling of nested member_access
+- Many previously-passing files RELY on `.` being hidden as double_literal
+- Need to make semantic handle ALL member_access cases before changing lexer/parser
 
-## Spirv-Val Failures (4 remaining)
-1. **cfg.comp**: "A block must end with a branch instruction" — switch no-op fallout
-2. **cfg-preserve-parameter.comp**: "OpStore type for pointer is not a pointer type" — switch no-op
-3. **struct-flatten-stores-multi-dimension.legacy.vert**: Forward-referenced IDs (60-62) — semantic type IDs don't match codegen IDs
-4. **type-alias.comp**: "Id 63 is defined more than once" — function overloading not supported
+## Remaining Wins
+### Spirv-Val (4)
+1. **cfg.comp / cfg-preserve-parameter.comp**: Switch no-op structural issues
+2. **struct-flatten-stores-multi-dimension.legacy.vert**: Phantom IDs
+3. **type-alias.comp**: Function overloading
 
-## High-Impact Opportunities
-### Swizzle Fix (BLOCKS ~50 compile errors)
-The #1 opportunity. Requires:
-1. Fix semantic `member_access` handler for ALL cases (struct fields, swizzle reads, swizzle writes, vector components)
-2. Fix `analyzeLValue` for swizzle writes (v.x = val)
-3. THEN fix lexer to tokenize bare '.' as dot (not double_literal)
-4. Verify no crashes or regressions on existing 98 passing files
+### Compile Errors (95)
+- 63/95 are swizzle-related (undeclared identifiers from `.xy` patterns)
+- 10/95 are swizzle write related (assign_op inner=assign_op)
+- Remaining: missing builtins, unsupported types, complex features
 
-### Easy Wins (if any remain)
-- Add missing image types (image1D, imageCube, etc.) — only affects image-query.desktop.frag
-- row_major/column_major layout qualifier — only affects rowmajor.flatten.vert
-- Float16 types (half) — only affects spv.nvAtomicFp16Vec.frag
-
-## Medium Priority
-- Struct type ID alignment (semantic vs codegen) — fixes struct-flatten-stores
-- Proper switch statement OpSwitch emission — fixes cfg.comp/cfg-preserve-parameter
-- Function overloading — fixes type-alias.comp
-- Output parameter support — fixes flush_params.frag, partial-write-preserve.frag
-- Array type constructors (vec4[](...)) — fixes constant-array.frag, return-array.vert
+## Infrastructure Added
+- Push constant storage class detection in semantic
+- Array type dedup cache in codegen
+- Member pointer type pre-emission for struct members
+- isSwizzleName helper + proper vector swizzle semantic code (dormant, needs lexer fix)
