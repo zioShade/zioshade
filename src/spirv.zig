@@ -129,6 +129,8 @@ pub const Capability = enum(u32) {
     image_cube_array = 3,
     sample_rate_shading = 5,
     image_query = 50,
+    sampled_buffer = 46,
+    image_buffer = 47,
     _,
 };
 
