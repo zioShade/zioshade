@@ -1770,27 +1770,27 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "step")) return 48; // Step
         if (std.mem.eql(u8, name, "smoothstep")) return 49; // SmoothStep
         if (std.mem.eql(u8, name, "fma")) return 50; // Fma
-        if (std.mem.eql(u8, name, "frexp")) return 51; // FrexpStruct
-        if (std.mem.eql(u8, name, "ldexp")) return 52; // Ldexp
-        // Pack/Unpack
-        if (std.mem.eql(u8, name, "packSnorm4x8")) return 53;
-        if (std.mem.eql(u8, name, "packSnorm2x16")) return 54;
+        if (std.mem.eql(u8, name, "frexp")) return 52; // FrexpStruct
+        if (std.mem.eql(u8, name, "ldexp")) return 53; // Ldexp
+        // Pack/Unpack (verified against spirv-tools)
+        if (std.mem.eql(u8, name, "packSnorm4x8")) return 54;
         if (std.mem.eql(u8, name, "packUnorm4x8")) return 55;
-        if (std.mem.eql(u8, name, "packUnorm2x16")) return 56;
-        if (std.mem.eql(u8, name, "packHalf2x16")) return 57;
-        if (std.mem.eql(u8, name, "unpackSnorm2x16")) return 59;
-        if (std.mem.eql(u8, name, "unpackUnorm2x16")) return 60;
-        if (std.mem.eql(u8, name, "unpackHalf2x16")) return 61;
-        if (std.mem.eql(u8, name, "unpackSnorm4x8")) return 62;
-        if (std.mem.eql(u8, name, "unpackUnorm4x8")) return 63;
-        // Geometric
-        if (std.mem.eql(u8, name, "length")) return 65; // Length
-        if (std.mem.eql(u8, name, "distance")) return 66; // Distance
-        if (std.mem.eql(u8, name, "cross")) return 67; // Cross
-        if (std.mem.eql(u8, name, "normalize")) return 68; // Normalize
-        if (std.mem.eql(u8, name, "faceforward")) return 69; // FaceForward
-        if (std.mem.eql(u8, name, "reflect")) return 70; // Reflect
-        if (std.mem.eql(u8, name, "refract")) return 71; // Refract
+        if (std.mem.eql(u8, name, "packSnorm2x16")) return 56;
+        if (std.mem.eql(u8, name, "packUnorm2x16")) return 57;
+        if (std.mem.eql(u8, name, "packHalf2x16")) return 58;
+        if (std.mem.eql(u8, name, "unpackSnorm2x16")) return 60;
+        if (std.mem.eql(u8, name, "unpackUnorm2x16")) return 61;
+        if (std.mem.eql(u8, name, "unpackHalf2x16")) return 62;
+        if (std.mem.eql(u8, name, "unpackSnorm4x8")) return 63;
+        if (std.mem.eql(u8, name, "unpackUnorm4x8")) return 64;
+        // Geometric (verified against spirv-tools)
+        if (std.mem.eql(u8, name, "length")) return 66; // Length
+        if (std.mem.eql(u8, name, "distance")) return 67; // Distance
+        if (std.mem.eql(u8, name, "cross")) return 68; // Cross
+        if (std.mem.eql(u8, name, "normalize")) return 69; // Normalize
+        if (std.mem.eql(u8, name, "faceforward")) return 70; // FaceForward
+        if (std.mem.eql(u8, name, "reflect")) return 71; // Reflect
+        if (std.mem.eql(u8, name, "refract")) return 72; // Refract
         // NOT GLSL.std.450 — handled as core SPIR-V ops or specially
         if (std.mem.eql(u8, name, "transpose") or std.mem.eql(u8, name, "outerProduct"))
             return null;
