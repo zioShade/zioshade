@@ -1,33 +1,43 @@
 # Autoresearch Ideas Backlog
 
-## Current State: 104 passes (from 92 at session start, +12 total)
+## Current State: 107 passes (from 104 at session start, +3 total)
 
-## Session Progress (92→104, +12)
-- Push constant + array dedup + member ptr pre-emit (infrastructure, 92→98)
-- Index_access l-value for compound assignments (+1, 98→99)
-- Member-level layout() qualifiers in struct/uniform blocks (+1, 99→100)
-- Struct constructors (OpCompositeConstruct) + type_sym phantom ID fix + pointer cache key fix (+1, 100→101)
-- Array size suffix in parseVarDecl for global arrays (+2, 101→103)
-- CompositeExtract for constant-index array access on loaded values (+1, 103→104)
-- flat/smooth/noperspective keyword parsing (infrastructure, no gain)
-- #extension preprocessor skip (infrastructure)
+## Session Progress (104→107, +3)
+- Auto-load pointers in binary_op/func_call args/return (+1, 104→105, fixed array.flatten.vert spirv-val)
+- Auto-load pointers in member_access handler (infrastructure, 105 unchanged)
+- User-defined type var_decls via struct_names tracking + named type content comparison fix (+2, 105→107)
+- Array suffix in parseLocalVarDecl (infrastructure, 107 unchanged)
+- Comma-separated declarators: TRIED, caused crash (invalid free), REVERTED
 
 ## Key Blockers
-1. **Swizzle Fix** (~42 compile errors): `.xy` tokenized as double_literal. 4 failed attempts to fix.
-2. **User-Defined Type Var Decls** (~5+ compile errors): `Foo f = ...;` can't parse because `Foo` isn't a type keyword. Adding `identifier identifier` detection breaks 5 other files due to pointer/value mismatch in the semantic.
-3. **Pointer/Value Mismatch**: Access chains return pointers, expressions expect values. Need auto-load after access chains.
-4. **Switch Control Flow** (2 spirv-val): No-op switch produces invalid SPIR-V.
-5. **Function Overloading** (1 spirv-val): Fundamental limitation.
-
-## Quick Win Candidates
-- `copy.flatten.vert` (+1 spirv-val): `Light light = lights[i]` — needs user-type var_decl + pointer/value fix
-- `constant-composites.frag`: Array constructors + user-type var_decls
-- `struct.rowmajor.flatten.vert`: User-type var_decl `Foo f = foo;`
-- Missing sampler types for image-query files (sampler1D, samplerCube, samplerCubeArray)
-- `textureLodOffset` builtin variant
+1. **Swizzle Fix** (~19 assign_op|identifier errors): `.xy` tokenized as double_literal. 4+ failed attempts to fix.
+2. **Switch Control Flow** (2 spirv-val): No-op switch produces invalid SPIR-V.
+3. **Function Overloading** (1 spirv-val): Fundamental limitation.
+4. **Comma-separated declarators**: Caused crash, needs careful implementation.
 
 ## Remaining Spirv-Val Failures (4)
-1. **array.flatten.vert**: Chained access chains produce pointers not values
-2. **cfg.comp**: Switch no-op — "block must end with branch"
-3. **cfg-preserve-parameter.comp**: Switch no-op + OpStore type issue
-4. **type-alias.comp**: Function overloading — fundamental limitation
+1. **cfg.comp**: Switch no-op — "block must end with branch"
+2. **cfg-preserve-parameter.comp**: Switch + OpStore type issue
+3. **partial-write-preserve.frag**: Function overloading — "Id defined more than once"
+4. **type-alias.comp**: Function overloading — "Id defined more than once"
+
+## Quick Win Candidates
+- Matrix-vector multiply (v0 * f.MVP0 where MVP0 is mat3x4) — needs OpMatrixTimesVector etc.
+- Missing sampler types (sampler1D, samplerCube, samplerCubeArray)
+- normalize() builtin — 2 files need it (ocean.vert, ground.vert)
+- modf() builtin — 2 files need it
+- group() builtins (subgroup operations) — 2 files
+- For-loop comma-separated init — needs crash-free implementation
+- `return-array.vert` — function returning array type
+
+## Error Distribution (86 compile errors)
+- 19 assign_op|identifier (swizzle-related)
+- 7 assign_op|func_call (unsupported builtins)
+- 6 type_constructor|identifier (user-type constructor issues)
+- 5 index_access|identifier (swizzle-related)
+- 5 binary_op|identifier (various)
+- 4 compound_assign|func_call (unsupported sampler types)
+- 4 beginInvocationInterlockARB (fragment shader interlock)
+- 4 assign_op|assign_op (mixed: 16-bit types, stencil export, composite construct)
+- 3 normalize|identifier (missing builtin)
+- 2 var_decl (empty inner — mat3x4 issues)
