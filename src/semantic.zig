@@ -511,6 +511,9 @@ const Analyzer = struct {
     }
 
     fn analyzeStatement(self: *Analyzer, node: ast.Node) !void {
+        errdefer {
+            if (last_error_ctx.len == 0) last_error_ctx = @tagName(node.tag);
+        }
         switch (node.tag) {
             .var_decl => {
                 const ir_id = self.allocId();
@@ -597,6 +600,13 @@ const Analyzer = struct {
                     });
                 } else {
                     try self.emitLabel(merge_label);
+                }
+            },
+            .switch_stmt => {
+                // Switch: parse and evaluate selector, but skip case bodies for now
+                // TODO: proper OpSwitch emission with case labels
+                if (node.data.children.len >= 1) {
+                    _ = try self.analyzeExpression(node.data.children[0]);
                 }
             },
             .for_stmt => {
