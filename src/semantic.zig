@@ -364,8 +364,11 @@ const Analyzer = struct {
             .uniform_block => {
                 const name = node.data.name;
                 const qual = node.data.qualifier orelse ast.Qualifier{ .is_uniform = true };
-                // Determine storage class from qualifier
-                const storage_class: ir.SPIRVStorageClass = if (qual.is_in)
+                // Determine storage class from qualifier and layout
+                const has_push_constant = if (node.data.layout) |l| l.push_constant else false;
+                const storage_class: ir.SPIRVStorageClass = if (has_push_constant)
+                    .push_constant
+                else if (qual.is_in)
                     .input
                 else if (qual.is_out)
                     .output
