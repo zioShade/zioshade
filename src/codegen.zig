@@ -565,6 +565,9 @@ const Codegen = struct {
                     .access_chain => {
                         _ = try self.ensurePointerType(inst.ty, .function);
                         _ = try self.ensurePointerType(inst.ty, .uniform);
+                        _ = try self.ensurePointerType(inst.ty, .output);
+                        _ = try self.ensurePointerType(inst.ty, .input);
+                        _ = try self.ensurePointerType(inst.ty, .private);
                         // Pre-emit the index constant so it's available during codegen
                         if (inst.operands.len > 1) {
                             const idx = switch (inst.operands[1]) {
