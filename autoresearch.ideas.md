@@ -1,35 +1,52 @@
 # Autoresearch Ideas Backlog
 
-## Current State: 98 passes (from 92 at session start, +6 total)
+## Current State: 101 passes (from 92 at session start, +9 total)
 
-## Session Progress (92→98)
-- image2DMS/image2DMSArray types + multisample image read/write (+1)
-- Basic switch statement support (lexer+parser+no-op semantic) (+3)
-- Matrix column indexing via OpCompositeExtract (+1)
-- Pre-emit all named struct types from module.types (+1, -2 spirv-val)
-- Push constant storage class + member ptr pre-emit + array type dedup (0, infrastructure)
+## Session Progress (92→101)
+- Push constant + array dedup + member ptr pre-emit (infrastructure, 92→98)
+- Index_access l-value for compound assignments (+1, 98→99)
+- Member-level layout() qualifiers in struct/uniform blocks (+1, 99→100)
+- Struct constructors (OpCompositeConstruct) + type_sym phantom ID fix (+1, 100→101)
+- Also: #extension preprocessor skip, ensurePointerType cache key fix
 
 ## Swizzle Fix — BLOCKED (4 failed attempts)
-The #1 opportunity but requires fixing the semantic handler FIRST. The problem:
-- 4 attempts all regressed 98→74 or 98→76
-- Root cause: changing lexer/parser creates member_access nodes that the semantic can't handle
-- The "Invalid free" crashes come from l-value handling of nested member_access
-- Many previously-passing files RELY on `.` being hidden as double_literal
+The #1 opportunity. ~42/92 compile errors are swizzle-related.
+- Root cause: lexer tokenizes `.xy` as double_literal, not `dot` + `identifier`
+- Fixing lexer/parser creates member_access nodes semantic can't handle
 - Need to make semantic handle ALL member_access cases before changing lexer/parser
+- isSwizzleName helper + vector swizzle code exists but dormant
 
-## Remaining Wins
-### Spirv-Val (4)
-1. **cfg.comp / cfg-preserve-parameter.comp**: Switch no-op structural issues
-2. **struct-flatten-stores-multi-dimension.legacy.vert**: Phantom IDs
-3. **type-alias.comp**: Function overloading
+## User-Defined Type Var Decls — BLOCKED
+Pattern `StructType varName = ...;` inside function bodies is NOT parsed as var_decl.
+- Parser's `isTypeKeyword` only knows built-in types
+- `identifier identifier` detection causes regressions (breaks 5+ files)
+- Needs a smarter approach: maintain a set of known struct names in the parser
+- This blocks ~5 files that use struct local variables with function calls
 
-### Compile Errors (95)
-- 63/95 are swizzle-related (undeclared identifiers from `.xy` patterns)
-- 10/95 are swizzle write related (assign_op inner=assign_op)
-- Remaining: missing builtins, unsupported types, complex features
+## Pointer/Value Mismatch — Infrastructure Issue
+Access chains return pointers, but expressions expect values.
+- block_member array types return pointers (for chaining)
+- index_access creates access chains but doesn't load the result
+- var_decl stores need values, not pointers
+- Need: auto-load after access chain when value context is expected
+- Affects: array.flatten.vert, copy.flatten.vert, struct member access in some contexts
+
+## Remaining Spirv-Val Failures (4)
+1. **array.flatten.vert**: Chained access chains produce pointers, need loads
+2. **cfg.comp**: Switch no-op — "block must end with branch"
+3. **cfg-preserve-parameter.comp**: Switch no-op + OpStore type issue
+4. **type-alias.comp**: Function overloading — fundamental limitation
+
+## Quick Win Opportunities
+- `flush_params.frag`: Needs `identifier identifier` var_decl parsing for user types
+- `constant-composites.frag`: `const` array initializers
+- `demote-to-helper.vk.nocompat.frag`: Missing `demote` builtin (OpDemoteToHelperInvocationEXT)
+- `image-query.desktop.frag`: Missing sampler types (sampler1D, samplerCube, etc.)
+- `shader_trinary_minmax.comp`: Missing `min3`/`max3` builtins
 
 ## Infrastructure Added
-- Push constant storage class detection in semantic
-- Array type dedup cache in codegen
-- Member pointer type pre-emission for struct members
-- isSwizzleName helper + proper vector swizzle semantic code (dormant, needs lexer fix)
+- ptr_storage_class tracking in codegen (for chained access chains)
+- Struct constructor detection (type_sym → OpCompositeConstruct)
+- ensurePointerType uses type ID as cache key (not enum value)
+- Multi-dimensional array type parsing (while loop instead of if)
+- #extension preprocessor skip
