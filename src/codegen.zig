@@ -546,6 +546,7 @@ const Codegen = struct {
             try self.emitWord(@intFromEnum(global.storage_class));
         }
     }
+
     fn emitFunctions(self: *Codegen, stage: Stage) !void {
         _ = stage;
         // First pass: emit all function type declarations and save info
@@ -700,6 +701,8 @@ const Codegen = struct {
             .convert_iti => try self.emitUnaryOp(spirv.Op.ConvertSToU, resolved),
             .convert_itof => try self.emitUnaryOp(spirv.Op.ConvertSToF, resolved),
             .convert_utof => try self.emitUnaryOp(spirv.Op.ConvertUToF, resolved),
+            .is_nan => try self.emitUnaryOp(spirv.Op.IsNan, resolved),
+            .is_inf => try self.emitUnaryOp(spirv.Op.IsInf, resolved),
             .logical_and => try self.emitBinOp(spirv.Op.LogicalAnd, resolved),
             .logical_or => try self.emitBinOp(spirv.Op.LogicalOr, resolved),
             .logical_not => try self.emitUnaryOp(spirv.Op.LogicalNot, resolved),
