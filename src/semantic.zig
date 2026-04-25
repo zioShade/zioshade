@@ -1977,8 +1977,8 @@ const Analyzer = struct {
 
                 const result_id = self.allocId();
 
-                // For matrix indexing with constant index, use OpCompositeExtract
-                if (base_tid.ty.isMatrix()) {
+                // For matrix/array indexing with constant index, use OpCompositeExtract
+                if (base_tid.ty.isMatrix() or base_tid.ty == .array) {
                     // Check if index is a compile-time constant
                     var const_idx: ?u32 = null;
                     for (self.instructions.items, 0..) |inst, i| {
