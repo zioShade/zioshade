@@ -793,15 +793,52 @@ const Analyzer = struct {
                 return error.UndeclaredIdentifier;
             },
             .member_access => {
-                // For swizzle writes (v.x = val), delegate to base variable
-                // TODO: proper component-level store
-                if (node.data.children.len > 0) {
-                    const child = node.data.children[0];
-                    if (child.tag == .identifier) {
-                        if (self.lookup(child.data.name)) |sym| {
-                            return .{ .ty = sym.ty, .id = sym.ir_id };
+                if (node.data.children.len < 1) return error.InvalidAssignment;
+                const base_lv = try self.analyzeLValue(node.data.children[0]);
+                const member_name = node.data.name;
+                // Struct member access: base_ptr + member_index → member_ptr
+                if (base_lv.ty == .named) {
+                    const struct_name = base_lv.ty.named;
+                    if (self.types.get(struct_name)) |td| {
+                        var member_index: ?u32 = null;
+                        for (td.members, 0..) |member, i| {
+                            if (std.mem.eql(u8, member.name, member_name)) {
+                                member_index = @as(u32, @intCast(i));
+                                break;
+                            }
+                        }
+                        if (member_index) |idx| {
+                            const member_ty = td.members[idx].ty;
+                            const ptr_id = self.allocId();
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            operands[0] = .{ .id = base_lv.id };
+                            operands[1] = .{ .literal_int = idx };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .access_chain,
+                                .result_type = null,
+                                .result_id = ptr_id,
+                                .operands = operands,
+                                .ty = member_ty,
+                            });
+                            return .{ .ty = member_ty, .id = ptr_id, .is_ptr = true };
                         }
                     }
+                }
+                // Vector swizzle write (single component): v.x = val
+                if (base_lv.ty.isVector() and member_name.len == 1) {
+                    const idx = self.swizzleIndex(member_name[0]);
+                    const ptr_id = self.allocId();
+                    const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                    operands[0] = .{ .id = base_lv.id };
+                    operands[1] = .{ .literal_int = idx };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .access_chain,
+                        .result_type = null,
+                        .result_id = ptr_id,
+                        .operands = operands,
+                        .ty = .float,
+                    });
+                    return .{ .ty = .float, .id = ptr_id, .is_ptr = true };
                 }
                 last_error_ctx = "invalid-assign";
                 return error.InvalidAssignment;
@@ -1976,23 +2013,24 @@ const Analyzer = struct {
             .member_access => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
                 var base_tid = try self.analyzeExpression(node.data.children[0]);
-                // Auto-load pointer base
-                if (base_tid.is_ptr) {
+
+                // Handle vector swizzles (e.g., vec4.x)
+                // Only for value-based vectors (not pointers to vectors)
+                if (base_tid.ty.isVector() and !base_tid.is_ptr) return .{ .ty = .float, .id = self.allocId() };
+                // For pointer-to-vector, load first then extract
+                if (base_tid.ty.isVector() and base_tid.is_ptr) {
                     const ld = self.allocId();
                     const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                     ops[0] = .{ .id = base_tid.id };
                     try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = base_tid.ty });
                     base_tid = .{ .ty = base_tid.ty, .id = ld };
+                    return .{ .ty = .float, .id = self.allocId() };
                 }
-
-                // Handle vector swizzles (e.g., vec4.x)
-                if (base_tid.ty.isVector()) return .{ .ty = .float, .id = self.allocId() };
 
                 // Handle struct member access
                 if (base_tid.ty == .named) {
                     const struct_name = base_tid.ty.named;
                     if (self.types.get(struct_name)) |td| {
-                        // Find member index
                         const member_name = node.data.name;
                         var member_index: ?u32 = null;
                         for (td.members, 0..) |member, i| {
@@ -2003,22 +2041,36 @@ const Analyzer = struct {
                         }
 
                         if (member_index) |idx| {
-                            const result_id = self.allocId();
-                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                            operands[0] = .{ .id = base_tid.id };
-                            operands[1] = .{ .literal_int = idx };
-
-                            // Find member type from the struct definition
                             const member_ty = td.members[idx].ty;
+                            const result_id = self.allocId();
 
-                            try self.instructions.append(self.alloc, .{
-                                .tag = .access_chain,
-                                .result_type = null,
-                                .result_id = result_id,
-                                .operands = operands,
-                                .ty = member_ty,
-                            });
-                            return .{ .ty = member_ty, .id = result_id };
+                            if (base_tid.is_ptr) {
+                                // Pointer base → access_chain (pointer result)
+                                const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                operands[0] = .{ .id = base_tid.id };
+                                operands[1] = .{ .literal_int = idx };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .access_chain,
+                                    .result_type = null,
+                                    .result_id = result_id,
+                                    .operands = operands,
+                                    .ty = member_ty,
+                                });
+                                return .{ .ty = member_ty, .id = result_id, .is_ptr = true };
+                            } else {
+                                // Value base → composite_extract (value result)
+                                const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                operands[0] = .{ .id = base_tid.id };
+                                operands[1] = .{ .literal_int = idx };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .composite_extract,
+                                    .result_type = null,
+                                    .result_id = result_id,
+                                    .operands = operands,
+                                    .ty = member_ty,
+                                });
+                                return .{ .ty = member_ty, .id = result_id };
+                            }
                         }
                     }
                 }
