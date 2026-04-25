@@ -1,36 +1,44 @@
 # Autoresearch Ideas Backlog
 
-## Current State: 96 passes (up from 92 at session start, +4)
+## Current State: 98 passes (up from 92 at session start, +6 total)
+- Session: 92→93 (image-ms) → 96 (switch no-op) → 97 (matrix column index) → 98 (struct type pre-emit)
+- Remaining: 95 compile errors, 4 spirv-val failures, 0 hangs, 0 crashes
 
-### Session Progress (92→96)
-- image2DMS/image2DMSArray types + multisample image read/write (+1: image-ms.desktop.frag)
-- Basic switch statement support (lexer+parser+no-op semantic) (+3: switch*.legacy files)
+## Session Wins
+- image2DMS/image2DMSArray types + multisample image read/write (+1)
+- Basic switch statement support (lexer+parser+no-op semantic) (+3)
+- Matrix column indexing via OpCompositeExtract (+1)
+- Pre-emit all named struct types from module.types (+1, -2 spirv-val)
+- Added errdefer in analyzeStatement for better error diagnostics
 
-## High Priority (Spirv-Val Fixes - 6 remaining)
-- **Phantom IDs** (2): spv.nvAtomicFp16Vec (float16), tensor_read (ARM tensors)
-- **Forward refs** (1): struct-flatten-stores (struct type constructors)
-- **Duplicate ID** (1): type-alias (function overloading)
-- **Switch no-op fallout** (2): cfg.comp, cfg-preserve-parameter — files now compile but switch bodies skipped, causing type errors in SPIR-V
+## Failed Experiments
+- **Parser-level swizzle detection** (96→64): Treating '.' + identifier as member_access cascades into crashes. Semantic handler not robust enough.
+- **Lexer fix: bare '.' as dot** (96→64): Same root cause — semantic can't handle all new member_access nodes.
+- **Invocation interlock + atomic builtins** (96, no change): Complex implementation that didn't help any files pass (interlock files also need atomicAnd, buffer atomics).
+- All 3 swizzle attempts failed. The semantic member_access handler must be fixed FIRST.
 
-## Blocked: Swizzle/Lexer Fix (35+ compile errors)
-The lexer tokenizes `.` followed by letters (e.g., `.xy`) as double_literal instead of dot. This blocks:
-- 35 assign_op errors (v.x = ...)
-- 8 compound_assign errors (v.x += ...)
-- 6 index_access errors (gl_GlobalInvocationID.x)
-- 5 binary_op errors (v.xy + ...)
-- And many more (imageLoad, imageStore, texelFetch, modf, normalize, etc.)
+## Spirv-Val Failures (4 remaining)
+1. **cfg.comp**: "A block must end with a branch instruction" — switch no-op fallout
+2. **cfg-preserve-parameter.comp**: "OpStore type for pointer is not a pointer type" — switch no-op
+3. **struct-flatten-stores-multi-dimension.legacy.vert**: Forward-referenced IDs (60-62) — semantic type IDs don't match codegen IDs
+4. **type-alias.comp**: "Id 63 is defined more than once" — function overloading not supported
 
-Previous attempts to fix caused 92→67 regression. The fix requires:
-1. Lexer: `.` not followed by digit → dot token
-2. Semantic: proper CompositeExtract for single swizzle, VectorShuffle for multi
-3. Semantic: proper l-value handling for swizzle writes (VectorInsertDynamic)
+## High-Impact Opportunities
+### Swizzle Fix (BLOCKS ~50 compile errors)
+The #1 opportunity. Requires:
+1. Fix semantic `member_access` handler for ALL cases (struct fields, swizzle reads, swizzle writes, vector components)
+2. Fix `analyzeLValue` for swizzle writes (v.x = val)
+3. THEN fix lexer to tokenize bare '.' as dot (not double_literal)
+4. Verify no crashes or regressions on existing 98 passing files
 
-## Medium Priority (Other Compile Errors)
-- **type_constructor** (6): Array constructors, struct constructors
-- **Missing builtins** (20+): beginInvocationInterlockARB, rayQuery, subgroup ops, etc.
-- **Missing image types**: image1D, imageCube, imageCubeArray, image3D, image2DArray
+### Easy Wins (if any remain)
+- Add missing image types (image1D, imageCube, etc.) — only affects image-query.desktop.frag
+- row_major/column_major layout qualifier — only affects rowmajor.flatten.vert
+- Float16 types (half) — only affects spv.nvAtomicFp16Vec.frag
 
-## Ideas for Next Session
-- **Fix cfg.comp spirv-val failures**: The switch no-op means variables assigned in switch don't get values. Could emit default initializations.
-- **Image type keywords**: Add image1D, image3D, imageCube, etc. Only image-query.desktop.frag uses them.
-- **Function overloading**: type-alias.comp needs overload resolution.
+## Medium Priority
+- Struct type ID alignment (semantic vs codegen) — fixes struct-flatten-stores
+- Proper switch statement OpSwitch emission — fixes cfg.comp/cfg-preserve-parameter
+- Function overloading — fixes type-alias.comp
+- Output parameter support — fixes flush_params.frag, partial-write-preserve.frag
+- Array type constructors (vec4[](...)) — fixes constant-array.frag, return-array.vert
