@@ -18,6 +18,7 @@ pub fn generate(
     var cg = Codegen{
         .alloc = alloc,
         .module = module,
+        .stage = stage,
         .words = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .next_id = module.next_id_start,
         .emitted_types = .{},
@@ -51,6 +52,7 @@ pub fn generate(
 const Codegen = struct {
     alloc: std.mem.Allocator,
     module: *const ir.Module,
+    stage: Stage,
     words: std.ArrayList(u32),
     next_id: u32,
     emitted_types: std.AutoHashMapUnmanaged(u32, u32), // @intFromEnum(ty) -> type_id
@@ -445,6 +447,20 @@ const Codegen = struct {
         return const_id;
     }
 
+    fn emitFloatConstant(self: *Codegen, val: f32) error{OutOfMemory}!u32 {
+        const float_type_id = try self.ensureType(.float);
+        const val_bits: u32 = @bitCast(val);
+        const key = (@as(u64, float_type_id) << 32) | @as(u64, val_bits);
+        if (self.emitted_constants.get(key)) |cached| return cached;
+        const const_id = self.allocId();
+        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+        try self.emitWord(float_type_id);
+        try self.emitWord(const_id);
+        try self.emitWord(val_bits);
+        try self.emitted_constants.put(self.alloc, key, const_id);
+        return const_id;
+    }
+
     fn emitNames(self: *Codegen) !void {
         for (self.module.globals) |global| {
             try self.emitName(global.result_id, global.name);
@@ -599,6 +615,13 @@ const Codegen = struct {
                 }
             }
         }
+
+        // Pre-emit commonly needed constants so they're in the types section
+        // (not inside function bodies where they'd violate SPIR-V section ordering)
+        _ = try self.emitFloatConstant(0.0);
+        _ = try self.emitFloatConstant(1.0);
+        _ = try self.emitIntConstant(0);
+        _ = try self.emitIntConstant(1);
     }
     fn emitGlobals(self: *Codegen) !void {
         for (self.module.globals) |global| {
@@ -877,11 +900,24 @@ const Codegen = struct {
                 const result_id = resolved.result_id orelse return;
                 const sampled_image_id = self.operandId(resolved, 0);
                 const coord_id = self.operandId(resolved, 1);
-                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageSampleImplicitLod)));
-                try self.emitWord(result_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(sampled_image_id);
-                try self.emitWord(coord_id);
+                if (self.stage == .vertex or self.stage == .compute) {
+                    // Implicit LOD not allowed in vertex/compute shaders
+                    // Convert to explicit LOD with level 0
+                    const zero_id = try self.emitFloatConstant(0.0);
+                    try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageSampleExplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(2); // Image Operands Mask: Lod
+                    try self.emitWord(zero_id);
+                } else {
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageSampleImplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(coord_id);
+                }
             },
             .image_sample_explicit_lod => {
                 const result_type_id = resolved.result_type orelse return;
