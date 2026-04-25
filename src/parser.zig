@@ -945,10 +945,11 @@ const Parser = struct {
                     _ = self.advance();
                     const index = try self.parseExpression();
                     _ = self.expect(.r_bracket) catch break;
+                    const base = expr;
                     expr = .{
                         .tag = .index_access,
-                        .loc = expr.loc,
-                        .data = .{ .children = try self.dupeNodes(&.{ expr, index }) },
+                        .loc = base.loc,
+                        .data = .{ .children = try self.dupeNodes(&.{ base, index }) },
                     };
                 },
                 .dot => {
@@ -956,26 +957,29 @@ const Parser = struct {
                     const member_tok = self.current();
                     _ = self.advance();
                     const member_name = self.text(member_tok);
+                    const base = expr; // Capture before constructing new node
                     expr = .{
                         .tag = .member_access,
-                        .loc = expr.loc,
-                        .data = .{ .name = member_name, .children = try self.dupeNodes(&.{expr}) },
+                        .loc = base.loc,
+                        .data = .{ .name = member_name, .children = try self.dupeNodes(&.{base}) },
                     };
                 },
                 .plus_plus => {
                     _ = self.advance();
+                    const pp_base = expr;
                     expr = .{
                         .tag = .post_increment,
-                        .loc = expr.loc,
-                        .data = .{ .children = try self.dupeNodes(&.{expr}) },
+                        .loc = pp_base.loc,
+                        .data = .{ .children = try self.dupeNodes(&.{pp_base}) },
                     };
                 },
                 .minus_minus => {
                     _ = self.advance();
+                    const mm_base = expr;
                     expr = .{
                         .tag = .post_decrement,
-                        .loc = expr.loc,
-                        .data = .{ .children = try self.dupeNodes(&.{expr}) },
+                        .loc = mm_base.loc,
+                        .data = .{ .children = try self.dupeNodes(&.{mm_base}) },
                     };
                 },
                 else => break,
