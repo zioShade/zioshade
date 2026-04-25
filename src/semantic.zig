@@ -2205,6 +2205,10 @@ const Analyzer = struct {
 
     fn typesCompatible(self: *Analyzer, target: ast.Type, source: ast.Type) bool {
         _ = self;
+        // For named types, compare by content
+        if (target == .named and source == .named) {
+            return std.mem.eql(u8, target.named, source.named);
+        }
         if (std.meta.eql(target, source)) return true;
         if (target == .float and source.isScalar()) return true;
         if (target == .uint and source == .int) return true;
