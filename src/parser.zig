@@ -337,7 +337,9 @@ const Parser = struct {
             .kw_image2d => { _ = self.advance(); return .image2d; },
             .kw_iimage2d => { _ = self.advance(); return .iimage2d; },
             .kw_uimage2d => { _ = self.advance(); return .uimage2d; },
-            .kw_image3d, .kw_imagecube, .kw_image2d_array, .kw_image2d_ms, .kw_image2d_ms_array => { _ = self.advance(); return .image2d; },
+            .kw_image2d_ms => { _ = self.advance(); return .image2d_ms; },
+            .kw_image2d_ms_array => { _ = self.advance(); return .image2d_ms_array; },
+            .kw_image3d, .kw_imagecube, .kw_image2d_array => { _ = self.advance(); return .image2d; },
             .kw_texture2d, .kw_sampler_shadow, .kw_sampler_plain => { _ = self.advance(); return .sampler2d; },
             .kw_sampler_cube => { _ = self.advance(); return .sampler_cube; },
             .identifier => {
