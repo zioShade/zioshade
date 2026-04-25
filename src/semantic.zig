@@ -1307,20 +1307,44 @@ const Analyzer = struct {
                             });
                         }
                     } else if (std.mem.eql(u8, node.data.name, "modf") or std.mem.eql(u8, node.data.name, "frexp")) {
-                        // modf(x, ptr) → ModfStruct (GLSL.std.450 #36): only pass x, ignore ptr for now
-                        // frexp(x, ptr) → FrexpStruct (GLSL.std.450 #51): only pass x, ignore ptr for now
-                        const glsl_id: u32 = if (std.mem.eql(u8, node.data.name, "modf")) 36 else 51;
-                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2); // instruction_id + 1 arg
-                        operands[0] = .{ .literal_int = glsl_id };
-                        operands[1] = .{ .id = arg_tids.items[0].id };
-                        // Result type is the same as the input type
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .ext_inst,
-                            .result_type = null,
-                            .result_id = result_id,
-                            .operands = operands,
-                            .ty = arg_tids.items[0].ty,
-                        });
+                        // modf(x, ptr) → GLSL.std.450 Modf (#35): returns fractional, stores int via ptr
+                        // frexp(x, ptr) → GLSL.std.450 Frexp (#51): returns mantissa, stores exp via ptr
+                        const glsl_id: u32 = if (std.mem.eql(u8, node.data.name, "modf")) 35 else 51;
+                        // Get pointer for second arg (output parameter)
+                        var ptr_id: u32 = 0;
+                        if (node.data.children.len > 1) {
+                            if (self.analyzeLValue(node.data.children[1])) |lval| {
+                                ptr_id = lval.id;
+                            } else |_| {
+                                ptr_id = 0; // fallback
+                            }
+                        }
+                        if (ptr_id != 0) {
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 3); // inst_id + value + ptr
+                            operands[0] = .{ .literal_int = glsl_id };
+                            operands[1] = .{ .id = arg_tids.items[0].id };
+                            operands[2] = .{ .id = ptr_id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .ext_inst,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = arg_tids.items[0].ty,
+                            });
+                        } else {
+                            // Fallback: use Struct version with 1 arg (no output param)
+                            const struct_glsl_id: u32 = if (std.mem.eql(u8, node.data.name, "modf")) 36 else 52;
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            operands[0] = .{ .literal_int = struct_glsl_id };
+                            operands[1] = .{ .id = arg_tids.items[0].id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .ext_inst,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = arg_tids.items[0].ty,
+                            });
+                        }
                         return .{ .ty = arg_tids.items[0].ty, .id = result_id };
                     } else {
                         const glsl_id = self.glslExtInstruction(node.data.name) orelse 1;
