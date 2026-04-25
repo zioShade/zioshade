@@ -1072,6 +1072,23 @@ const Analyzer = struct {
                     });
                     value_id = splat_id;
                     value_ty = target.ty;
+                } else if (target.ty.isVector() and value_ty == .float) {
+                    // float → splat to vector
+                    const splat_id = self.allocId();
+                    const num_comps = target.ty.numComponents();
+                    const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
+                    for (0..num_comps) |i| {
+                        splat_operands[i] = .{ .id = value.id };
+                    }
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .composite_construct,
+                        .result_type = null,
+                        .result_id = splat_id,
+                        .operands = splat_operands,
+                        .ty = target.ty,
+                    });
+                    value_id = splat_id;
+                    value_ty = target.ty;
                 } else if (target.ty == .float and value_ty == .int) {
                     // int → float
                     const conv_id = self.allocId();
