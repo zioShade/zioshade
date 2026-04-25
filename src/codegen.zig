@@ -460,18 +460,8 @@ const Codegen = struct {
 
     fn ensurePointerType(self: *Codegen, base_type: ast.Type, storage_class: ir.SPIRVStorageClass) error{OutOfMemory}!u32 {
         const base_id = try self.ensureType(base_type);
-        // For named types, use the struct name to differentiate cache keys
-        const key: u64 = switch (base_type) {
-            .named => |name| blk: {
-                const sc: u64 = @intFromEnum(storage_class);
-                var h: u64 = sc;
-                for (name) |c| {
-                    h = h *% 31 +% @as(u64, c);
-                }
-                break :blk h;
-            },
-            else => (@as(u64, @intFromEnum(base_type)) << 32) | @as(u64, @intFromEnum(storage_class)),
-        };
+        // Use the actual type ID as key to correctly distinguish different array/nested types
+        const key: u64 = (@as(u64, base_id) << 32) | @as(u64, @intFromEnum(storage_class));
         if (self.emitted_ptr_types.get(key)) |cached| return cached;
         const ptr_id = self.allocId();
         try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));

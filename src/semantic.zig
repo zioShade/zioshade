@@ -427,7 +427,7 @@ const Analyzer = struct {
                 try self.declare(name, .{
                     .kind = .type_sym,
                     .ty = .{ .named = name },
-                    .ir_id = self.allocId(),
+                    .ir_id = 0, // Type symbols don't need SPIR-V IDs
                 });
             },
             .function_decl, .function_prototype => {
@@ -1555,6 +1555,21 @@ const Analyzer = struct {
                     }
                 } else {
                     const s = sym orelse return error.UndeclaredIdentifier;
+                    // If the symbol is a type_sym, treat as struct constructor (OpCompositeConstruct)
+                    if (s.kind == .type_sym) {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_construct,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = result_ty,
+                        });
+                        return .{ .ty = result_ty, .id = result_id };
+                    }
                     const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
                     operands[0] = .{ .id = s.ir_id };
                     for (arg_tids.items, 0..) |tid, i| {
