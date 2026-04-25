@@ -860,6 +860,21 @@ const Codegen = struct {
                 try self.emitWord(coord_id);
                 try self.emitWord(value_id);
             },
+            .atomic_iadd => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const ptr_id = self.operandId(resolved, 0);
+                const value_id = self.operandId(resolved, 1);
+                const scope: u32 = switch (resolved.operands[2]) { .literal_int => |v| v, else => 1 };
+                const semantics: u32 = switch (resolved.operands[3]) { .literal_int => |v| v, else => 64 };
+                try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.AtomicIAdd)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(ptr_id);
+                try self.emitWord(scope);
+                try self.emitWord(semantics);
+                try self.emitWord(value_id);
+            },
             .transpose => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;

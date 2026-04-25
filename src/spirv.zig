@@ -49,6 +49,7 @@ pub const Op = enum(u16) {
     ImageQuerySize = 104,
     ImageRead = 98,
     ImageWrite = 99,
+    AtomicIAdd = 234,
     Transpose = 84,
     ConvertFToS = 110,
     ConvertSToF = 111,
