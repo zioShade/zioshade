@@ -618,6 +618,23 @@ const Codegen = struct {
 
         // Pre-emit commonly needed constants so they're in the types section
         // (not inside function bodies where they'd violate SPIR-V section ordering)
+        // Scan all instructions for literal constants used as indices
+        for (self.module.functions) |func| {
+            for (func.body) |inst| {
+                switch (inst.tag) {
+                    .access_chain, .composite_extract, .vector_shuffle => {
+                        for (inst.operands) |op| {
+                            switch (op) {
+                                .literal_int => |v| _ = try self.emitIntConstant(v),
+                                else => {},
+                            }
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+        // Also pre-emit common constants
         _ = try self.emitFloatConstant(0.0);
         _ = try self.emitFloatConstant(1.0);
         _ = try self.emitIntConstant(0);
@@ -859,9 +876,12 @@ const Codegen = struct {
                 }
                 const ptr_type_id = try self.ensurePointerType(inst.ty, sc);
                 const result_id = resolved.result_id orelse return;
-                // OpAccessChain indices must be result IDs of OpConstant, not literals
-                const index_literal = self.operandValue(resolved.operands[1]);
-                const index_id = try self.emitIntConstant(index_literal);
+                // OpAccessChain indices: can be OpConstant or runtime scalar integer
+                const index_id: u32 = switch (resolved.operands[1]) {
+                    .id => |v| v, // Runtime index — use the ID directly
+                    .literal_int => |v| try self.emitIntConstant(v), // Literal — emit constant
+                    else => try self.emitIntConstant(0),
+                };
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
                 try self.emitWord(ptr_type_id);
                 try self.emitWord(result_id);
