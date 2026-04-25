@@ -510,7 +510,7 @@ pub const Preprocessor = struct {
                     _ = self.if_stack.pop();
                     i += 1;
                 },
-                .pp_error, .pp_pragma, .pp_line => {
+                .pp_error, .pp_pragma, .pp_line, .pp_extension => {
                     self.skipToEndOfLine(tokens, &i);
                 },
                 .identifier => {
