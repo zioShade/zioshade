@@ -723,7 +723,14 @@ const Analyzer = struct {
             },
             .return_stmt => {
                 if (node.data.children.len > 0) {
-                    const val = try self.analyzeExpression(node.data.children[0]);
+                    var val = try self.analyzeExpression(node.data.children[0]);
+                    if (val.is_ptr) {
+                        const ld = self.allocId();
+                        const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        ops[0] = .{ .id = val.id };
+                        try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = val.ty });
+                        val = .{ .ty = val.ty, .id = ld };
+                    }
                     const ret_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                     ret_operands[0] = .{ .id = val.id };
                     try self.instructions.append(self.alloc, .{
@@ -953,8 +960,23 @@ const Analyzer = struct {
                     // Parser produced a malformed binary_op — treat as void expression
                     return .{ .ty = .void, .id = self.allocId() };
                 }
-                const left = try self.analyzeExpression(node.data.children[0]);
-                const right = try self.analyzeExpression(node.data.children[1]);
+                var left = try self.analyzeExpression(node.data.children[0]);
+                var right = try self.analyzeExpression(node.data.children[1]);
+                // Auto-load pointers
+                if (left.is_ptr) {
+                    const ld = self.allocId();
+                    const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    ops[0] = .{ .id = left.id };
+                    try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = left.ty });
+                    left = .{ .ty = left.ty, .id = ld };
+                }
+                if (right.is_ptr) {
+                    const ld = self.allocId();
+                    const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    ops[0] = .{ .id = right.id };
+                    try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = right.ty });
+                    right = .{ .ty = right.ty, .id = ld };
+                }
                 const result_ty = self.promoteTypes(left.ty, right.ty) orelse return error.TypeMismatch;
                 const result_id = self.allocId();
 
@@ -1249,7 +1271,14 @@ const Analyzer = struct {
                 var arg_tids = std.ArrayListUnmanaged(TypedId){};
                 defer arg_tids.deinit(self.alloc);
                 for (node.data.children) |arg| {
-                    const tid = try self.analyzeExpression(arg);
+                    var tid = try self.analyzeExpression(arg);
+                    if (tid.is_ptr) {
+                        const ld = self.allocId();
+                        const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        ops[0] = .{ .id = tid.id };
+                        try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = tid.ty });
+                        tid = .{ .ty = tid.ty, .id = ld };
+                    }
                     try arg_tids.append(self.alloc, tid);
                 }
                 const sym = self.lookup(node.data.name);
@@ -1632,7 +1661,14 @@ const Analyzer = struct {
                 var arg_tids = std.ArrayListUnmanaged(TypedId){};
                 defer arg_tids.deinit(self.alloc);
                 for (node.data.children) |arg| {
-                    const tid = try self.analyzeExpression(arg);
+                    var tid = try self.analyzeExpression(arg);
+                    if (tid.is_ptr) {
+                        const ld = self.allocId();
+                        const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        ops[0] = .{ .id = tid.id };
+                        try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = tid.ty });
+                        tid = .{ .ty = tid.ty, .id = ld };
+                    }
                     try arg_tids.append(self.alloc, tid);
                 }
                 const result_ty = node.data.ty orelse .void;
