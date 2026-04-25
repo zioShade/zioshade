@@ -115,6 +115,7 @@ pub const Op = enum(u16) {
     Kill = 252,
     Return = 253,
     ReturnValue = 254,
+    Unreachable = 255,
     _,
 };
 

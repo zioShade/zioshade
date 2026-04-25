@@ -118,6 +118,7 @@ pub const Instruction = struct {
         derivative,
         return_val,
         return_void,
+        unreachable_inst,
         branch,
         branch_conditional,
         label,

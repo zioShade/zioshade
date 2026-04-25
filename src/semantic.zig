@@ -135,7 +135,7 @@ const Analyzer = struct {
     fn lastInstructionIsReturn(self: *Analyzer) bool {
         if (self.instructions.items.len == 0) return false;
         const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
-        return last_tag == .return_void or last_tag == .return_val;
+        return last_tag == .return_void or last_tag == .return_val or last_tag == .unreachable_inst;
     }
 
     fn emitBranch(self: *Analyzer, target_id: u32) !void {
@@ -463,25 +463,37 @@ const Analyzer = struct {
             // Stop processing after a return statement (dead code elimination)
             if (self.instructions.items.len > 0) {
                 const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
-                if (last_tag == .return_void or last_tag == .return_val) break;
+                if (last_tag == .return_void or last_tag == .return_val or last_tag == .unreachable_inst) break;
             }
         }
 
         // Check if the last instruction is a return (covers all paths)
         const needs_implicit_return = if (self.instructions.items.len > 0) blk: {
             const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
-            break :blk last_tag != .return_void and last_tag != .return_val;
+            break :blk last_tag != .return_void and last_tag != .return_val and last_tag != .unreachable_inst;
         } else true;
 
-        // If last instruction is not a return, add an implicit return_void
+        // If last instruction is not a return, add an implicit return
         if (needs_implicit_return) {
-            try self.instructions.append(self.alloc, .{
-                .tag = .return_void,
-                .result_type = null,
-                .result_id = null,
-                .operands = &.{},
-                .ty = .void,
-            });
+            const func_ret_ty = node.data.ty orelse .void;
+            if (func_ret_ty == .void) {
+                try self.instructions.append(self.alloc, .{
+                    .tag = .return_void,
+                    .result_type = null,
+                    .result_id = null,
+                    .operands = &.{},
+                    .ty = .void,
+                });
+            } else {
+                // Non-void function with unreachable code path: emit OpUnreachable
+                try self.instructions.append(self.alloc, .{
+                    .tag = .unreachable_inst,
+                    .result_type = null,
+                    .result_id = null,
+                    .operands = &.{},
+                    .ty = .void,
+                });
+            }
         }
 
         const func = ir.Function{
@@ -570,7 +582,22 @@ const Analyzer = struct {
                     if (!else_returned) try self.emitBranch(merge_label);
                 }
 
-                try self.emitLabel(merge_label);
+                const else_did_return = if (has_else) blk: {
+                    break :blk self.lastInstructionIsReturn();
+                } else false;
+                const all_branches_returned = then_returned and (!has_else or else_did_return);
+                if (all_branches_returned) {
+                    try self.emitLabel(merge_label);
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .unreachable_inst,
+                        .result_type = null,
+                        .result_id = null,
+                        .operands = &.{},
+                        .ty = .void,
+                    });
+                } else {
+                    try self.emitLabel(merge_label);
+                }
             },
             .for_stmt => {
                 try self.pushScope();
