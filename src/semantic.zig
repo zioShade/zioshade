@@ -1314,6 +1314,27 @@ const Analyzer = struct {
                             .operands = operands,
                             .ty = result_ty,
                         });
+                    } else if (std.mem.eql(u8, node.data.name, "isnan") or std.mem.eql(u8, node.data.name, "isinf")) {
+                        const is_nan = std.mem.eql(u8, node.data.name, "isnan");
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        // Result type: bvec with same dimension as input
+                        const bvec_ty: ast.Type = if (arg_tids.items[0].ty.isVector()) switch (arg_tids.items[0].ty.numComponents()) {
+                            2 => .bvec2,
+                            3 => .bvec3,
+                            4 => .bvec4,
+                            else => .bool,
+                        } else .bool;
+                        try self.instructions.append(self.alloc, .{
+                            .tag = if (is_nan) .is_nan else .is_inf,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = bvec_ty,
+                        });
+                        return .{ .ty = bvec_ty, .id = result_id };
                     } else if (std.mem.eql(u8, node.data.name, "dot")) {
                         // dot(a, b) → OpDot (core SPIR-V, not GLSL.std.450)
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
@@ -1450,12 +1471,24 @@ const Analyzer = struct {
 
                     if (arg_ty.isVector() and arg_n == n) {
                         // Same-size vector conversion
-                        const conv_tag: ir.Instruction.Tag = if (arg_ty == .ivec2 or arg_ty == .ivec3 or arg_ty == .ivec4)
-                            .convert_itof
-                        else if (arg_ty == .uvec2 or arg_ty == .uvec3 or arg_ty == .uvec4)
-                            .convert_utof
-                        else
-                            .composite_construct;
+                        const conv_tag: ir.Instruction.Tag = blk: {
+                            // int/uint vector → float vector
+                            if (result_ty == .vec2 or result_ty == .vec3 or result_ty == .vec4) {
+                                if (arg_ty == .ivec2 or arg_ty == .ivec3 or arg_ty == .ivec4) break :blk .convert_itof;
+                                if (arg_ty == .uvec2 or arg_ty == .uvec3 or arg_ty == .uvec4) break :blk .convert_utof;
+                            }
+                            // float/uint vector → int vector
+                            if (result_ty == .ivec2 or result_ty == .ivec3 or result_ty == .ivec4) {
+                                if (arg_ty == .vec2 or arg_ty == .vec3 or arg_ty == .vec4) break :blk .convert_ftoi;
+                                if (arg_ty == .uvec2 or arg_ty == .uvec3 or arg_ty == .uvec4) break :blk .convert_uti;
+                            }
+                            // float/int vector → uint vector
+                            if (result_ty == .uvec2 or result_ty == .uvec3 or result_ty == .uvec4) {
+                                if (arg_ty == .vec2 or arg_ty == .vec3 or arg_ty == .vec4) break :blk .convert_ftou;
+                                if (arg_ty == .ivec2 or arg_ty == .ivec3 or arg_ty == .ivec4) break :blk .convert_iti;
+                            }
+                            break :blk .composite_construct;
+                        };
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         operands[0] = .{ .id = arg_tids.items[0].id };
                         try self.instructions.append(self.alloc, .{
@@ -1877,6 +1910,7 @@ const Analyzer = struct {
             "tan", "tanh", "transpose", "trunc",
             "texture", "texture2D", "textureLod", "texelFetch",
             "dFdx", "dFdy",
+            "isnan", "isinf",
             // Additional GLSL builtins
             "inverse", "outerProduct",
             "lessThan", "greaterThan", "lessThanEqual", "greaterThanEqual",
@@ -1995,6 +2029,9 @@ const Analyzer = struct {
             return null;
         // dFdx/dFdy are core SPIR-V ops (DPdx/DPdy), not GLSL.std.450
         if (std.mem.eql(u8, name, "dFdx") or std.mem.eql(u8, name, "dFdy"))
+            return null;
+        // isnan/isinf are core SPIR-V ops (OpIsNan/OpIsInf), not GLSL.std.450
+        if (std.mem.eql(u8, name, "isnan") or std.mem.eql(u8, name, "isinf"))
             return null;
         return null;
     }
