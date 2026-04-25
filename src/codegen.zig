@@ -22,6 +22,7 @@ pub fn generate(
         .words = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .next_id = module.next_id_start,
         .emitted_types = .{},
+        .emitted_array_types = .{},
         .emitted_named_types = .{},
         .emitted_ptr_types = .{},
         .emitted_constants = .{},
@@ -56,6 +57,7 @@ const Codegen = struct {
     words: std.ArrayList(u32),
     next_id: u32,
     emitted_types: std.AutoHashMapUnmanaged(u32, u32), // @intFromEnum(ty) -> type_id
+    emitted_array_types: std.AutoHashMapUnmanaged(u64, u32), // hash -> type_id
     emitted_named_types: std.StringHashMapUnmanaged(u32), // struct name -> type_id
     emitted_ptr_types: std.AutoHashMapUnmanaged(u64, u32), // (type_key << 32 | sc) -> ptr_type_id
     emitted_constants: std.AutoHashMapUnmanaged(u64, u32), // (type_id << 32 | value) -> const_id
@@ -66,6 +68,7 @@ const Codegen = struct {
 
     fn deinit(self: *Codegen) void {
         self.emitted_types.deinit(self.alloc);
+        self.emitted_array_types.deinit(self.alloc);
         self.emitted_named_types.deinit(self.alloc);
         self.emitted_ptr_types.deinit(self.alloc);
         self.emitted_constants.deinit(self.alloc);
@@ -422,7 +425,13 @@ const Codegen = struct {
                 try self.emitted_named_types.put(self.alloc, name, id);
             },
             .array => |arr| {
-                const base_id = try self.ensureType(arr.base.*);
+                // Check cache for duplicate array types
+                const base_id_for_key = try self.ensureType(arr.base.*);
+                const cache_key = (@as(u64, base_id_for_key) << 32) | @as(u64, arr.size);
+                if (self.emitted_array_types.get(cache_key)) |cached_id| {
+                    return cached_id;
+                }
+                const base_id = base_id_for_key;
                 if (arr.size == 0) {
                     // Runtime array: OpTypeRuntimeArray
                     try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeRuntimeArray)));
@@ -435,6 +444,7 @@ const Codegen = struct {
                     try self.emitWord(base_id);
                     try self.emitWord(const_id);
                 }
+                try self.emitted_array_types.put(self.alloc, cache_key, id);
             },
         }
         // Cache for simple types
@@ -590,6 +600,19 @@ const Codegen = struct {
         for (self.module.globals) |global| {
             _ = try self.ensureType(global.ty);
             _ = try self.ensurePointerType(global.ty, global.storage_class);
+            // Also pre-emit pointer types for struct members
+            if (global.ty == .named) {
+                const td = self.module.types.get(global.ty.named) orelse continue;
+                for (td.members) |member| {
+                    _ = try self.ensureType(member.ty);
+                    _ = try self.ensurePointerType(member.ty, global.storage_class);
+                    // For array members, also emit element type pointer
+                    if (member.ty == .array) {
+                        _ = try self.ensureType(member.ty.array.base.*);
+                        _ = try self.ensurePointerType(member.ty.array.base.*, global.storage_class);
+                    }
+                }
+            }
         }
         for (self.module.functions) |func| {
             _ = try self.ensureType(func.return_type);
