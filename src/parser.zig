@@ -249,6 +249,7 @@ const Parser = struct {
                 .kw_uniform => { q.is_uniform = true; _ = self.advance(); found = true; },
                 .kw_buffer => { q.is_buffer = true; _ = self.advance(); found = true; },
                 .kw_readonly, .kw_writeonly, .kw_coherent, .kw_restrict, .kw_invariant,
+                .kw_flat, .kw_smooth, .kw_noperspective,
                 .kw_mediump, .kw_highp, .kw_lowp => { _ = self.advance(); found = true; },
                 else => break,
             }
