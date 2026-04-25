@@ -757,6 +757,20 @@ const Analyzer = struct {
                 last_error_ctx = node.data.name;
                 return error.UndeclaredIdentifier;
             },
+            .member_access => {
+                // For swizzle writes (v.x = val), delegate to base variable
+                // TODO: proper component-level store
+                if (node.data.children.len > 0) {
+                    const child = node.data.children[0];
+                    if (child.tag == .identifier) {
+                        if (self.lookup(child.data.name)) |sym| {
+                            return .{ .ty = sym.ty, .id = sym.ir_id };
+                        }
+                    }
+                }
+                last_error_ctx = "invalid-assign";
+                return error.InvalidAssignment;
+            },
             else => {
                 last_error_ctx = "invalid-assign";
                 return error.InvalidAssignment;
