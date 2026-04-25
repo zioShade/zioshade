@@ -1157,6 +1157,8 @@ const Analyzer = struct {
                 // Exception: texture functions return vec4
                 const result_ty: ast.Type = if (self.isImageSampleBuiltin(node.data.name))
                     .vec4
+                else if (std.mem.eql(u8, node.data.name, "texelFetch"))
+                    .vec4
                 else if (self.isGLSLBuiltin(node.data.name) and arg_tids.items.len > 0)
                     arg_tids.items[0].ty
                 else if (sym) |s| s.ty
@@ -1269,17 +1271,47 @@ const Analyzer = struct {
                             });
                         } else {
                             // texelFetch etc → image_fetch as fallback
-                            const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
-                            for (arg_tids.items, 0..) |tid, i| {
-                                operands[i] = .{ .id = tid.id };
+                            // If first arg is a sampler, extract image first
+                            const fetch_args = arg_tids.items;
+                            if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler_cube)) {
+                                const extracted_id = self.allocId();
+                                const extract_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                extract_operands[0] = .{ .id = fetch_args[0].id };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .extract_image,
+                                    .result_type = null,
+                                    .result_id = extracted_id,
+                                    .operands = extract_operands,
+                                    .ty = .image2d, // extracted image type
+                                });
+                                // Replace first arg with extracted image
+                                var new_args = try self.alloc.alloc(ir.Instruction.Operand, fetch_args.len);
+                                new_args[0] = .{ .id = extracted_id };
+                                for (1..fetch_args.len) |i| {
+                                    new_args[i] = .{ .id = fetch_args[i].id };
+                                }
+                                const operands = try self.alloc.alloc(ir.Instruction.Operand, fetch_args.len);
+                                for (operands, 0..) |*op, i| op.* = new_args[i];
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .image_fetch,
+                                    .result_type = null,
+                                    .result_id = result_id,
+                                    .operands = operands,
+                                    .ty = result_ty,
+                                });
+                            } else {
+                                const operands = try self.alloc.alloc(ir.Instruction.Operand, fetch_args.len);
+                                for (fetch_args, 0..) |tid, i| {
+                                    operands[i] = .{ .id = tid.id };
+                                }
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .image_fetch,
+                                    .result_type = null,
+                                    .result_id = result_id,
+                                    .operands = operands,
+                                    .ty = result_ty,
+                                });
                             }
-                            try self.instructions.append(self.alloc, .{
-                                .tag = .image_fetch,
-                                .result_type = null,
-                                .result_id = result_id,
-                                .operands = operands,
-                                .ty = result_ty,
-                            });
                         }
                     } else if (std.mem.eql(u8, node.data.name, "imageLoad")) {
                         // Determine result type from image argument type
