@@ -450,6 +450,7 @@ const Parser = struct {
         var members = std.ArrayListUnmanaged(ast.StructMember){};
         defer members.deinit(self.alloc);
         while (self.current().tag != .r_brace and self.current().tag != .eof) {
+            if (self.current().tag == .kw_layout) _ = try self.tryLayout();
             const member_qual = self.tryQualifier();
             const member_ty = self.tryType() orelse return error.UnexpectedToken;
             const member_name = self.current();
@@ -495,6 +496,7 @@ const Parser = struct {
         var members = std.ArrayListUnmanaged(ast.StructMember){};
         defer members.deinit(self.alloc);
         while (self.current().tag != .r_brace and self.current().tag != .eof) {
+            if (self.current().tag == .kw_layout) _ = try self.tryLayout();
             const member_qual = self.tryQualifier();
             const member_ty = self.tryType() orelse return error.UnexpectedToken;
             const member_name = self.current();
