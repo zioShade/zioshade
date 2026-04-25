@@ -888,6 +888,17 @@ const Codegen = struct {
                 try self.emitWord(base_id_val);
                 try self.emitWord(index_id);
             },
+            .vector_extract_dynamic => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const vec_id = self.operandId(resolved, 0);
+                const index_id = self.operandId(resolved, 1);
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.VectorExtractDynamic)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(vec_id);
+                try self.emitWord(index_id);
+            },
             .member_access_op => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
