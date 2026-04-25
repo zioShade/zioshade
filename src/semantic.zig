@@ -1922,10 +1922,39 @@ const Analyzer = struct {
                     base_tid.ty.array.base.*
                 else if (base_tid.ty.isVector())
                     base_tid.ty.elementType()
+                else if (base_tid.ty.isMatrix())
+                    base_tid.ty.columnType()
                 else
                     return error.TypeMismatch;
 
                 const result_id = self.allocId();
+
+                // For matrix indexing with constant index, use OpCompositeExtract
+                if (base_tid.ty.isMatrix()) {
+                    // Check if index is a compile-time constant
+                    var const_idx: ?u32 = null;
+                    for (self.instructions.items, 0..) |inst, i| {
+                        if (inst.result_id != null and inst.result_id.? == index_tid.id and inst.tag == .constant_int) {
+                            const_idx = switch (inst.operands[0]) { .literal_int => |v| v, else => null };
+                            _ = i;
+                            break;
+                        }
+                    }
+                    if (const_idx) |idx| {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        operands[0] = .{ .id = base_tid.id };
+                        operands[1] = .{ .literal_int = idx };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_extract,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = element_ty,
+                        });
+                        return .{ .ty = element_ty, .id = result_id };
+                    }
+                }
+
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 operands[0] = .{ .id = base_tid.id };
                 operands[1] = .{ .id = index_tid.id };
