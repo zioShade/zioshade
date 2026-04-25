@@ -581,13 +581,16 @@ const Analyzer = struct {
                     .continue_label = continue_label,
                 });
 
-                // Header: merge + condition check
+                // Header: condition check, then merge + branch
                 try self.emitLabel(header_label);
-                try self.emitLoopMerge(merge_label, continue_label);
-
+                var cond_id: u32 = undefined;
                 if (node.data.children.len > 1) {
                     const cond = try self.analyzeExpression(node.data.children[1]);
-                    try self.emitBranchConditional(cond.id, body_label, merge_label);
+                    cond_id = cond.id;
+                }
+                try self.emitLoopMerge(merge_label, continue_label);
+                if (node.data.children.len > 1) {
+                    try self.emitBranchConditional(cond_id, body_label, merge_label);
                 } else {
                     try self.emitBranch(body_label);
                 }
@@ -595,6 +598,7 @@ const Analyzer = struct {
                 // Body
                 try self.emitLabel(body_label);
                 if (node.data.children.len > 3) try self.analyzeStatement(node.data.children[3]);
+                try self.emitBranch(continue_label); // body -> continue
 
                 // Continue + update
                 try self.emitLabel(continue_label);
@@ -619,9 +623,8 @@ const Analyzer = struct {
                 });
 
                 try self.emitLabel(header_label);
-                try self.emitLoopMerge(merge_label, header_label);
-
                 const cond = try self.analyzeExpression(node.data.children[0]);
+                try self.emitLoopMerge(merge_label, header_label);
                 try self.emitBranchConditional(cond.id, body_label, merge_label);
 
                 try self.emitLabel(body_label);
