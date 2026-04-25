@@ -399,7 +399,14 @@ const Codegen = struct {
                 if (self.emitted_named_types.get(name)) |cached_id| {
                     return cached_id;
                 }
-                const td = self.module.types.get(name) orelse return id;
+                const td = self.module.types.get(name) orelse {
+                    // Named type not found — emit empty struct as placeholder
+                    const word_count: u16 = 2;
+                    try self.emitWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.TypeStruct)));
+                    try self.emitWord(id);
+                    try self.emitted_named_types.put(self.alloc, name, id);
+                    return id;
+                };
                 var member_ids = try std.ArrayList(u32).initCapacity(self.alloc, td.members.len);
                 defer member_ids.deinit(self.alloc);
                 for (td.members) |member| {
@@ -575,6 +582,11 @@ const Codegen = struct {
 
     // Stub methods — implemented in subsequent tasks
     fn emitTypesAndConstants(self: *Codegen) !void {
+        // First, emit all named struct types from the module
+        var type_iter = self.module.types.iterator();
+        while (type_iter.next()) |entry| {
+            _ = try self.ensureType(.{ .named = entry.key_ptr.* });
+        }
         for (self.module.globals) |global| {
             _ = try self.ensureType(global.ty);
             _ = try self.ensurePointerType(global.ty, global.storage_class);
