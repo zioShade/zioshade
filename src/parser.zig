@@ -584,6 +584,7 @@ const Parser = struct {
             .kw_for => self.parseFor(),
             .kw_while => self.parseWhile(),
             .kw_do => self.parseDoWhile(),
+            .kw_switch => self.parseSwitch(),
             .kw_return => self.parseReturn(),
             .kw_discard => {
                 const tok = self.advance();
@@ -715,6 +716,65 @@ const Parser = struct {
             .tag = .do_while_stmt,
             .loc = self.nodeLoc(tok),
             .data = .{ .children = try self.dupeNodes(&.{ body, cond }) },
+        };
+    }
+
+    fn parseSwitch(self: *Parser) Error!ast.Node {
+        const tok = self.advance(); // 'switch'
+        _ = try self.expect(.l_paren);
+        const expr = try self.parseExpression();
+        _ = try self.expect(.r_paren);
+        _ = try self.expect(.l_brace);
+
+        // Parse case/default blocks as children (selector is stored separately in ty field)
+        var children = std.ArrayListUnmanaged(ast.Node){};
+        defer children.deinit(self.alloc);
+        // Store selector expression in the first child slot
+        const expr_node = expr; // Capture before dupeNodes
+        while (self.current().tag != .r_brace and self.current().tag != .eof) {
+            if (self.current().tag == .kw_case) {
+                _ = self.advance();
+                const val = try self.parseExpression();
+                _ = try self.expect(.colon);
+                // Parse statements until next case/default/}
+                var case_body = std.ArrayListUnmanaged(ast.Node){};
+                defer case_body.deinit(self.alloc);
+                while (self.current().tag != .kw_case and self.current().tag != .kw_default and self.current().tag != .r_brace) {
+                    try case_body.append(self.alloc, try self.parseStatement());
+                }
+                const case_base = val; // Capture before dupeNodes
+                try children.append(self.alloc, .{
+                    .tag = .block,
+                    .loc = case_base.loc,
+                    .data = .{ .children = try self.dupeNodes(case_body.items), .ty = case_base.data.ty, .name = "case" },
+                });
+            } else if (self.current().tag == .kw_default) {
+                _ = self.advance();
+                _ = try self.expect(.colon);
+                var case_body = std.ArrayListUnmanaged(ast.Node){};
+                defer case_body.deinit(self.alloc);
+                while (self.current().tag != .kw_case and self.current().tag != .kw_default and self.current().tag != .r_brace) {
+                    try case_body.append(self.alloc, try self.parseStatement());
+                }
+                try children.append(self.alloc, .{
+                    .tag = .block,
+                    .loc = self.nodeLoc(tok),
+                    .data = .{ .children = try self.dupeNodes(case_body.items), .ty = null, .name = "default" },
+                });
+            } else break;
+        }
+        _ = try self.expect(.r_brace);
+
+        // Store selector expression and case children
+        var all_children = std.ArrayListUnmanaged(ast.Node){};
+        defer all_children.deinit(self.alloc);
+        try all_children.append(self.alloc, expr_node);
+        for (children.items) |c| try all_children.append(self.alloc, c);
+
+        return .{
+            .tag = .switch_stmt,
+            .loc = self.nodeLoc(tok),
+            .data = .{ .children = try self.dupeNodes(all_children.items), .ty = null, .name = "switch" },
         };
     }
 
