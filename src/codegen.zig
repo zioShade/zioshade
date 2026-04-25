@@ -109,6 +109,10 @@ const Codegen = struct {
         try self.emitWord(@intFromEnum(spirv.Capability.sampled_buffer));
         try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
         try self.emitWord(@intFromEnum(spirv.Capability.image_buffer));
+        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+        try self.emitWord(@intFromEnum(spirv.Capability.image_ms_array));
+        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+        try self.emitWord(@intFromEnum(spirv.Capability.storage_image_multisample));
     }
 
     fn emitExtInstImport(self: *Codegen) !void {
@@ -347,6 +351,30 @@ const Codegen = struct {
                 try self.emitWord(0); // Not depth
                 try self.emitWord(0); // Not arrayed
                 try self.emitWord(0); // Not multisampled
+                try self.emitWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitWord(0); // ImageFormat = Unknown
+            },
+            .image2d_ms => {
+                const float_id = try self.ensureType(.float);
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(id);
+                try self.emitWord(float_id);
+                try self.emitWord(1); // Dim = 2D
+                try self.emitWord(0); // Not depth
+                try self.emitWord(0); // Not arrayed
+                try self.emitWord(1); // Multisampled = 1
+                try self.emitWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitWord(0); // ImageFormat = Unknown
+            },
+            .image2d_ms_array => {
+                const float_id = try self.ensureType(.float);
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(id);
+                try self.emitWord(float_id);
+                try self.emitWord(1); // Dim = 2D
+                try self.emitWord(0); // Not depth
+                try self.emitWord(1); // Arrayed = 1
+                try self.emitWord(1); // Multisampled = 1
                 try self.emitWord(2); // Sampled = 2 (no sampler needed)
                 try self.emitWord(0); // ImageFormat = Unknown
             },
@@ -1010,20 +1038,46 @@ const Codegen = struct {
                 const result_id = resolved.result_id orelse return;
                 const image_id = self.operandId(resolved, 0);
                 const coord_id = self.operandId(resolved, 1);
-                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageRead)));
-                try self.emitWord(result_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(image_id);
-                try self.emitWord(coord_id);
+                if (resolved.operands.len >= 3) {
+                    // MS image: imageLoad(image, coord, sample_index)
+                    // OpImageRead result_type result image coordinate [ImageOperands Sample]
+                    const sample_id = self.operandId(resolved, 2);
+                    try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageRead)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(64); // Image Operands Mask: Sample (bit 6)
+                    try self.emitWord(sample_id);
+                } else {
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageRead)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(image_id);
+                    try self.emitWord(coord_id);
+                }
             },
             .image_write => {
                 const image_id = self.operandId(resolved, 0);
                 const coord_id = self.operandId(resolved, 1);
-                const value_id = self.operandId(resolved, 2);
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.ImageWrite)));
-                try self.emitWord(image_id);
-                try self.emitWord(coord_id);
-                try self.emitWord(value_id);
+                if (resolved.operands.len >= 4) {
+                    // MS image: imageStore(image, coord, sample_index, value)
+                    // OpImageWrite image coordinate texel [ImageOperands Sample]
+                    const sample_id = self.operandId(resolved, 2);
+                    const value_id = self.operandId(resolved, 3);
+                    try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageWrite)));
+                    try self.emitWord(image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(value_id);
+                    try self.emitWord(64); // Image Operands Mask: Sample (bit 6)
+                    try self.emitWord(sample_id);
+                } else {
+                    const value_id = self.operandId(resolved, 2);
+                    try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.ImageWrite)));
+                    try self.emitWord(image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(value_id);
+                }
             },
             .atomic_iadd => {
                 const result_type_id = resolved.result_type orelse return;

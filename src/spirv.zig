@@ -133,6 +133,8 @@ pub const Capability = enum(u32) {
     image_query = 50,
     sampled_buffer = 46,
     image_buffer = 47,
+    image_ms_array = 48,
+    storage_image_multisample = 27,
     _,
 };
 
