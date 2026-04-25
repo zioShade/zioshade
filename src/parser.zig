@@ -646,10 +646,24 @@ const Parser = struct {
 
     fn parseLocalVarDecl(self: *Parser) Error!ast.Node {
         const qualifier = self.tryQualifier();
-        const ty = self.tryType() orelse return error.UnexpectedToken;
+        var ty = self.tryType() orelse return error.UnexpectedToken;
         const name_tok = self.current();
         if (name_tok.tag != .identifier) return error.UnexpectedToken;
         _ = self.advance();
+        // Handle array size suffix: float a[4]
+        while (self.current().tag == .l_bracket) {
+            _ = self.advance();
+            const size_tok = self.current();
+            var arr_size: u32 = 0;
+            if (size_tok.tag == .int_literal) {
+                arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                _ = self.advance();
+            }
+            _ = self.expect(.r_bracket) catch break;
+            const arr_base = try self.alloc.create(ast.Type);
+            arr_base.* = ty;
+            ty = .{ .array = .{ .base = arr_base, .size = arr_size } };
+        }
 
         var init_nodes = std.ArrayListUnmanaged(ast.Node){};
         defer init_nodes.deinit(self.alloc);
