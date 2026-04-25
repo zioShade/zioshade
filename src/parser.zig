@@ -453,10 +453,25 @@ const Parser = struct {
             const member_name = self.current();
             if (member_name.tag != .identifier) return error.UnexpectedToken;
             _ = self.advance();
+            // Check for array size suffix: vec2 a[1]
+            var member_ty_final = member_ty;
+            if (self.current().tag == .l_bracket) {
+                _ = self.advance();
+                const size_tok = self.current();
+                var arr_size: u32 = 0;
+                if (size_tok.tag == .int_literal) {
+                    arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                    _ = self.advance();
+                }
+                _ = self.expect(.r_bracket) catch break;
+                const arr_base = try self.alloc.create(ast.Type);
+                arr_base.* = member_ty;
+                member_ty_final = .{ .array = .{ .base = arr_base, .size = arr_size } };
+            }
             _ = try self.expect(.semicolon);
             try members.append(self.alloc, .{
                 .name = self.text(member_name),
-                .ty = member_ty,
+                .ty = member_ty_final,
                 .qualifier = member_qual,
             });
         }
@@ -483,10 +498,25 @@ const Parser = struct {
             const member_name = self.current();
             if (member_name.tag != .identifier) return error.UnexpectedToken;
             _ = self.advance();
+            // Check for array size suffix: vec2 a[1]
+            var member_ty_final = member_ty;
+            if (self.current().tag == .l_bracket) {
+                _ = self.advance();
+                const size_tok = self.current();
+                var arr_size: u32 = 0;
+                if (size_tok.tag == .int_literal) {
+                    arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                    _ = self.advance();
+                }
+                _ = self.expect(.r_bracket) catch break;
+                const arr_base = try self.alloc.create(ast.Type);
+                arr_base.* = member_ty;
+                member_ty_final = .{ .array = .{ .base = arr_base, .size = arr_size } };
+            }
             _ = try self.expect(.semicolon);
             try members.append(self.alloc, .{
                 .name = self.text(member_name),
-                .ty = member_ty,
+                .ty = member_ty_final,
                 .qualifier = member_qual,
             });
         }
