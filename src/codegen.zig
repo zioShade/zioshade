@@ -883,6 +883,21 @@ const Codegen = struct {
                 try self.emitWord(sampled_image_id);
                 try self.emitWord(coord_id);
             },
+            .image_sample_explicit_lod => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const lod_id = if (resolved.operands.len > 2) self.operandId(resolved, 2) else self.operandId(resolved, 1);
+                // OpImageSampleExplicitLod: result_type, result, sampled_image, coordinate, ImageOperands(Lod=2), lod_value
+                try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageSampleExplicitLod)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(2); // Image Operands Mask: Lod
+                try self.emitWord(lod_id);
+            },
             .image_fetch => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;

@@ -1257,13 +1257,15 @@ const Analyzer = struct {
                     // Texture functions use different SPIR-V ops, not GLSL.std.450
                     if (self.isTextureBuiltin(node.data.name)) {
                         if (self.isImageSampleBuiltin(node.data.name)) {
-                            // texture(sampler, coord) → image_sample
+                            // texture(sampler, coord) → image_sample (implicit or explicit lod)
+                            const is_explicit_lod = std.mem.eql(u8, node.data.name, "textureLod");
+                            const tag: ir.Instruction.Tag = if (is_explicit_lod) .image_sample_explicit_lod else .image_sample;
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                             for (arg_tids.items, 0..) |tid, i| {
                                 operands[i] = .{ .id = tid.id };
                             }
                             try self.instructions.append(self.alloc, .{
-                                .tag = .image_sample,
+                                .tag = tag,
                                 .result_type = null,
                                 .result_id = result_id,
                                 .operands = operands,

@@ -45,6 +45,7 @@ pub const Op = enum(u16) {
     CompositeExtract = 81,
     SampledImage = 86,
     ImageSampleImplicitLod = 87,
+    ImageSampleExplicitLod = 88,
     ImageFetch = 95,
     OpImage = 100,
     ImageQuerySize = 104,
