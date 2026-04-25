@@ -132,6 +132,12 @@ const Analyzer = struct {
         });
     }
 
+    fn lastInstructionIsReturn(self: *Analyzer) bool {
+        if (self.instructions.items.len == 0) return false;
+        const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
+        return last_tag == .return_void or last_tag == .return_val;
+    }
+
     fn emitBranch(self: *Analyzer, target_id: u32) !void {
         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
         operands[0] = .{ .id = target_id };
@@ -461,17 +467,14 @@ const Analyzer = struct {
             }
         }
 
-        // Check if any return statement was emitted
-        var has_explicit_return = false;
-        for (self.instructions.items) |inst| {
-            if (inst.tag == .return_void or inst.tag == .return_val) {
-                has_explicit_return = true;
-                break;
-            }
-        }
+        // Check if the last instruction is a return (covers all paths)
+        const needs_implicit_return = if (self.instructions.items.len > 0) blk: {
+            const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
+            break :blk last_tag != .return_void and last_tag != .return_val;
+        } else true;
 
-        // If no explicit return was emitted, add an implicit return_void
-        if (!has_explicit_return) {
+        // If last instruction is not a return, add an implicit return_void
+        if (needs_implicit_return) {
             try self.instructions.append(self.alloc, .{
                 .tag = .return_void,
                 .result_type = null,
@@ -552,13 +555,19 @@ const Analyzer = struct {
                 try self.emitBranchConditional(cond.id, then_label, if (has_else) else_label.? else merge_label);
 
                 try self.emitLabel(then_label);
-                if (node.data.children.len > 1) try self.analyzeStatement(node.data.children[1]);
-                try self.emitBranch(merge_label);
+                const then_returned = if (node.data.children.len > 1) blk: {
+                    try self.analyzeStatement(node.data.children[1]);
+                    break :blk self.lastInstructionIsReturn();
+                } else false;
+                if (!then_returned) try self.emitBranch(merge_label);
 
                 if (has_else) {
                     try self.emitLabel(else_label.?);
-                    try self.analyzeStatement(node.data.children[2]);
-                    try self.emitBranch(merge_label);
+                    const else_returned = blk: {
+                        try self.analyzeStatement(node.data.children[2]);
+                        break :blk self.lastInstructionIsReturn();
+                    };
+                    if (!else_returned) try self.emitBranch(merge_label);
                 }
 
                 try self.emitLabel(merge_label);
