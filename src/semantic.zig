@@ -1653,6 +1653,65 @@ const Analyzer = struct {
                     return .{ .ty = result_ty, .id = result_id2 };
                 }
 
+                // Matrix-to-matrix conversion: mat3(mat4_m) → extract columns, shrink, build smaller matrix
+                if (arg_tids.items.len == 1 and result_ty.isMatrix() and arg_tids.items[0].ty.isMatrix()) {
+                    const src_ty = arg_tids.items[0].ty;
+                    const src_id = arg_tids.items[0].id;
+                    const dst_cols = result_ty.numColumns();
+                    const dst_col_type = result_ty.columnType();
+                    const src_col_type = src_ty.columnType();
+                    const dst_col_n = dst_col_type.numComponents();
+                    const src_col_n = src_col_type.numComponents();
+                    // Extract first dst_cols columns from source matrix
+                    const col_ids = try self.alloc.alloc(u32, dst_cols);
+                    for (0..dst_cols) |i| {
+                        const extracted_col_id = self.allocId();
+                        const extract_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        extract_ops[0] = .{ .id = src_id };
+                        extract_ops[1] = .{ .literal_int = @intCast(i) };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_extract,
+                            .result_type = null,
+                            .result_id = extracted_col_id,
+                            .operands = extract_ops,
+                            .ty = src_col_type,
+                        });
+                        // If column sizes differ, shrink via vector_shuffle
+                        if (dst_col_n < src_col_n) {
+                            const shuffle_id = self.allocId();
+                            const shuffle_ops = try self.alloc.alloc(ir.Instruction.Operand, 2 + dst_col_n);
+                            shuffle_ops[0] = .{ .id = extracted_col_id };
+                            shuffle_ops[1] = .{ .id = extracted_col_id };
+                            for (0..dst_col_n) |j| {
+                                shuffle_ops[2 + j] = .{ .literal_int = @intCast(j) };
+                            }
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .vector_shuffle,
+                                .result_type = null,
+                                .result_id = shuffle_id,
+                                .operands = shuffle_ops,
+                                .ty = dst_col_type,
+                            });
+                            col_ids[i] = shuffle_id;
+                        } else {
+                            col_ids[i] = extracted_col_id;
+                        }
+                    }
+                    // Build the result matrix from extracted columns
+                    const construct_ops = try self.alloc.alloc(ir.Instruction.Operand, dst_cols);
+                    for (col_ids, 0..) |cid, i| {
+                        construct_ops[i] = .{ .id = cid };
+                    }
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .composite_construct,
+                        .result_type = null,
+                        .result_id = result_id,
+                        .operands = construct_ops,
+                        .ty = result_ty,
+                    });
+                    return .{ .ty = result_ty, .id = result_id };
+                }
+
                 // Convert arguments to match result component type if needed
                 const result_scalar: ast.Type = switch (result_ty) {
                     .vec2, .vec3, .vec4 => .float,
