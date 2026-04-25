@@ -25,6 +25,7 @@ pub fn generate(
         .emitted_ptr_types = .{},
         .emitted_constants = .{},
         .emitted_func_types = .{},
+        .sampled_image_inner_id = 0,
         .glsl_std_450_id = 0,
     };
     defer cg.deinit();
@@ -56,6 +57,7 @@ const Codegen = struct {
     emitted_ptr_types: std.AutoHashMapUnmanaged(u64, u32), // (type_key << 32 | sc) -> ptr_type_id
     emitted_constants: std.AutoHashMapUnmanaged(u64, u32), // (type_id << 32 | value) -> const_id
     emitted_func_types: std.AutoHashMapUnmanaged(u64, u32), // hash(ret+params) -> func_type_id
+    sampled_image_inner_id: u32, // TypeImage (Sampled=1) for use with OpImage extraction
     glsl_std_450_id: u32,
 
     fn deinit(self: *Codegen) void {
@@ -269,6 +271,7 @@ const Codegen = struct {
                 try self.emitWord(0); // Not multisampled
                 try self.emitWord(1); // Sampled = 1 (yes)
                 try self.emitWord(0); // ImageFormat = Unknown
+                self.sampled_image_inner_id = image_id; // Save for OpImage extraction
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitWord(id);
                 try self.emitWord(image_id);
@@ -849,11 +852,23 @@ const Codegen = struct {
                 const result_id = resolved.result_id orelse return;
                 const image_id = self.operandId(resolved, 0);
                 const coord_id = self.operandId(resolved, 1);
+                // If operand was a sampler, image_id is already the extracted image
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageFetch)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(image_id);
                 try self.emitWord(coord_id);
+            },
+            .extract_image => {
+                // Result type must be the image type inside the sampled image (Sampled=1)
+                const result_type_id = self.sampled_image_inner_id;
+                if (result_type_id == 0) return; // No sampler emitted, can't extract
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.OpImage)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
             },
             .image_query_size => {
                 const result_type_id = resolved.result_type orelse return;
