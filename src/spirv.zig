@@ -46,7 +46,7 @@ pub const Op = enum(u16) {
     SampledImage = 86,
     ImageSampleImplicitLod = 87,
     ImageFetch = 95,
-    ImageQuerySize = 100,
+    ImageQuerySize = 104,
     ImageRead = 98,
     ImageWrite = 99,
     Transpose = 84,
@@ -124,7 +124,7 @@ pub const Capability = enum(u32) {
     sampled_image_array_dynamic_indexing = 2,
     image_cube_array = 3,
     sample_rate_shading = 5,
-    image_query = 22,
+    image_query = 50,
     _,
 };
 

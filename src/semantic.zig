@@ -1559,10 +1559,85 @@ const Analyzer = struct {
                     return .{ .ty = result_ty, .id = result_id2 };
                 }
 
-                // Allocate operand array
-                const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                // Convert arguments to match result component type if needed
+                const result_scalar: ast.Type = switch (result_ty) {
+                    .vec2, .vec3, .vec4 => .float,
+                    .ivec2, .ivec3, .ivec4 => .int,
+                    .uvec2, .uvec3, .uvec4 => .uint,
+                    else => result_ty, // mat types etc
+                };
+                const converted_ids = try self.alloc.alloc(u32, arg_tids.items.len);
                 for (arg_tids.items, 0..) |tid, i| {
-                    operands[i] = .{ .id = tid.id };
+                    var arg_id = tid.id;
+                    const arg_ty = tid.ty;
+                    // Check if this argument's component type matches result's
+                    const arg_scalar: ast.Type = if (arg_ty.isVector()) switch (arg_ty) {
+                        .vec2, .vec3, .vec4 => .float,
+                        .ivec2, .ivec3, .ivec4 => .int,
+                        .uvec2, .uvec3, .uvec4 => .uint,
+                        else => .void,
+                    } else arg_ty;
+                    if (!std.meta.eql(arg_scalar, result_scalar) and result_scalar.isScalar() and arg_scalar.isScalar()) {
+                        // Need type conversion
+                        const conv_tag: ir.Instruction.Tag = blk: {
+                            if (result_scalar == .float) {
+                                if (arg_scalar == .int) break :blk .convert_itof;
+                                if (arg_scalar == .uint) break :blk .convert_utof;
+                            }
+                            if (result_scalar == .int) {
+                                if (arg_scalar == .float) break :blk .convert_ftoi;
+                                if (arg_scalar == .uint) break :blk .convert_uti;
+                            }
+                            if (result_scalar == .uint) {
+                                if (arg_scalar == .float) break :blk .convert_ftou;
+                                if (arg_scalar == .int) break :blk .convert_iti;
+                            }
+                            break :blk .composite_construct;
+                        };
+                        const conv_id = self.allocId();
+                        const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        conv_ops[0] = .{ .id = arg_id };
+                        const conv_result_ty: ast.Type = if (arg_ty.isVector()) blk: {
+                            // Convert ivec2 → vec2, ivec3 → vec3, etc.
+                            const n = arg_ty.numComponents();
+                            break :blk switch (result_scalar) {
+                                .float => switch (n) {
+                                    2 => .vec2,
+                                    3 => .vec3,
+                                    4 => .vec4,
+                                    else => result_ty,
+                                },
+                                .int => switch (n) {
+                                    2 => .ivec2,
+                                    3 => .ivec3,
+                                    4 => .ivec4,
+                                    else => result_ty,
+                                },
+                                .uint => switch (n) {
+                                    2 => .uvec2,
+                                    3 => .uvec3,
+                                    4 => .uvec4,
+                                    else => result_ty,
+                                },
+                                else => result_ty,
+                            };
+                        } else result_scalar;
+                        try self.instructions.append(self.alloc, .{
+                            .tag = conv_tag,
+                            .result_type = null,
+                            .result_id = conv_id,
+                            .operands = conv_ops,
+                            .ty = conv_result_ty,
+                        });
+                        arg_id = conv_id;
+                    }
+                    converted_ids[i] = arg_id;
+                }
+
+                // Allocate operand array
+                const operands = try self.alloc.alloc(ir.Instruction.Operand, converted_ids.len);
+                for (converted_ids, 0..) |cid, i| {
+                    operands[i] = .{ .id = cid };
                 }
 
                 try self.instructions.append(self.alloc, .{
