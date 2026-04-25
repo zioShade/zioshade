@@ -72,6 +72,7 @@ const Analyzer = struct {
     const TypedId = struct {
         ty: ast.Type,
         id: u32,
+        is_ptr: bool = false, // true if id is a pointer (from access_chain), not a value
     };
     alloc: std.mem.Allocator,
     scopes: std.ArrayListUnmanaged(Scope),
@@ -537,7 +538,21 @@ const Analyzer = struct {
                     .ty = ty,
                 });
                 if (node.data.children.len > 0) {
-                    const init = try self.analyzeExpression(node.data.children[0]);
+                    var init = try self.analyzeExpression(node.data.children[0]);
+                    // If the initializer is a pointer (from access chain), load it first
+                    if (init.is_ptr) {
+                        const loaded_id = self.allocId();
+                        const load_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        load_ops[0] = .{ .id = init.id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .load,
+                            .result_type = null,
+                            .result_id = loaded_id,
+                            .operands = load_ops,
+                            .ty = init.ty,
+                        });
+                        init = .{ .ty = init.ty, .id = loaded_id };
+                    }
                     if (!self.typesCompatible(ty, init.ty)) {
                         return error.TypeMismatch;
                     }
@@ -898,7 +913,7 @@ const Analyzer = struct {
                         // If the member is an array type, don't load — return the pointer
                         // so that index_access can chain another access chain
                         if (sym.ty == .array) {
-                            return .{ .ty = sym.ty, .id = ptr_id };
+                            return .{ .ty = sym.ty, .id = ptr_id, .is_ptr = true };
                         }
                         // Then load from that pointer
                         const id = self.allocId();
@@ -1070,7 +1085,21 @@ const Analyzer = struct {
             .assign_op => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
                 const target = try self.analyzeLValue(node.data.children[0]);
-                const value = try self.analyzeExpression(node.data.children[1]);
+                var value = try self.analyzeExpression(node.data.children[1]);
+                // If value is a pointer, load it
+                if (value.is_ptr) {
+                    const loaded_id = self.allocId();
+                    const load_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    load_ops[0] = .{ .id = value.id };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .load,
+                        .result_type = null,
+                        .result_id = loaded_id,
+                        .operands = load_ops,
+                        .ty = value.ty,
+                    });
+                    value = .{ .ty = value.ty, .id = loaded_id };
+                }
                 const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 store_operands[0] = .{ .id = target.id };
                 store_operands[1] = .{ .id = value.id };
@@ -1086,7 +1115,21 @@ const Analyzer = struct {
             .compound_assign => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
                 const target = try self.analyzeLValue(node.data.children[0]);
-                const value = try self.analyzeExpression(node.data.children[1]);
+                var value = try self.analyzeExpression(node.data.children[1]);
+                // If value is a pointer, load it
+                if (value.is_ptr) {
+                    const ld_id = self.allocId();
+                    const ld_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    ld_ops[0] = .{ .id = value.id };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .load,
+                        .result_type = null,
+                        .result_id = ld_id,
+                        .operands = ld_ops,
+                        .ty = value.ty,
+                    });
+                    value = .{ .ty = value.ty, .id = ld_id };
+                }
                 // Load current value
                 const loaded_id = self.allocId();
                 const load_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
@@ -1978,7 +2021,8 @@ const Analyzer = struct {
                 const result_id = self.allocId();
 
                 // For matrix/array indexing with constant index, use OpCompositeExtract
-                if (base_tid.ty.isMatrix() or base_tid.ty == .array) {
+                // But only if the base is a VALUE, not a pointer
+                if (!base_tid.is_ptr and (base_tid.ty.isMatrix() or base_tid.ty == .array)) {
                     // Check if index is a compile-time constant
                     var const_idx: ?u32 = null;
                     for (self.instructions.items, 0..) |inst, i| {
@@ -2017,7 +2061,9 @@ const Analyzer = struct {
                     .ty = element_ty,
                 });
 
-                return .{ .ty = element_ty, .id = result_id };
+                // Access chains produce pointers, vector_extract_dynamic produces values
+                const is_ptr_result = tag == .access_chain;
+                return .{ .ty = element_ty, .id = result_id, .is_ptr = is_ptr_result };
             },
             .post_increment, .post_decrement, .pre_increment, .pre_decrement => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
