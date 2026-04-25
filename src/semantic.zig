@@ -1424,10 +1424,49 @@ const Analyzer = struct {
                         return .{ .ty = result_ty, .id = result_id };
                     }
 
+                    // Convert scalar type if needed (e.g., vec4(int_val) → convert int→float first)
+                    var splat_id = arg_tids.items[0].id;
+                    const splat_ty = arg_ty;
+                    // Determine component type of result vector
+                    const result_scalar: ast.Type = switch (result_ty) {
+                        .vec2, .vec3, .vec4 => .float,
+                        .ivec2, .ivec3, .ivec4 => .int,
+                        .uvec2, .uvec3, .uvec4 => .uint,
+                        else => .void,
+                    };
+                    const need_conv = !std.meta.eql(splat_ty, result_scalar) and result_scalar != .void;
+                    if (need_conv) {
+                        const conv_tag: ir.Instruction.Tag = blk: {
+                            if (result_scalar == .float) {
+                                if (splat_ty == .int) break :blk .convert_itof;
+                                if (splat_ty == .uint) break :blk .convert_utof;
+                            }
+                            if (result_scalar == .int) {
+                                if (splat_ty == .float) break :blk .convert_ftoi;
+                                if (splat_ty == .uint) break :blk .convert_uti;
+                            }
+                            if (result_scalar == .uint) {
+                                if (splat_ty == .float) break :blk .convert_ftou;
+                                if (splat_ty == .int) break :blk .convert_iti;
+                            }
+                            break :blk .composite_construct;
+                        };
+                        const conv_id = self.allocId();
+                        const conv_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        conv_operands[0] = .{ .id = splat_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = conv_tag,
+                            .result_type = null,
+                            .result_id = conv_id,
+                            .operands = conv_operands,
+                            .ty = result_scalar,
+                        });
+                        splat_id = conv_id;
+                    }
                     // Scalar splat
                     const operands = try self.alloc.alloc(ir.Instruction.Operand, n);
                     for (0..n) |i| {
-                        operands[i] = .{ .id = arg_tids.items[0].id };
+                        operands[i] = .{ .id = splat_id };
                     }
                     try self.instructions.append(self.alloc, .{
                         .tag = .composite_construct,
