@@ -13,6 +13,7 @@ pub fn parse(alloc: std.mem.Allocator, source: [:0]const u8, tokens: []const lex
         .source = source,
         .tokens = tokens,
         .pos = 0,
+        .struct_names = .{},
     };
 
     var body = std.ArrayListUnmanaged(ast.Node){};
@@ -97,6 +98,7 @@ const Parser = struct {
     source: [:0]const u8,
     tokens: []const lexer.Token,
     pos: usize,
+    struct_names: std.StringHashMapUnmanaged(void),
 
     // ── Navigation ────────────────────────────────────────────
 
@@ -108,6 +110,11 @@ const Parser = struct {
     fn peek(self: *Parser) lexer.Token {
         if (self.pos + 1 >= self.tokens.len) return self.tokens[self.tokens.len - 1];
         return self.tokens[self.pos + 1];
+    }
+
+    fn peek2(self: *Parser) lexer.Token {
+        if (self.pos + 2 >= self.tokens.len) return self.tokens[self.tokens.len - 1];
+        return self.tokens[self.pos + 2];
     }
 
     fn advance(self: *Parser) lexer.Token {
@@ -461,6 +468,9 @@ const Parser = struct {
         const name_tok = self.current();
         if (name_tok.tag != .identifier) return error.UnexpectedToken;
         _ = self.advance();
+        // Register struct name for local var decl detection
+        const owned_name = try self.alloc.dupe(u8, self.text(name_tok));
+        try self.struct_names.put(self.alloc, owned_name, {});
 
         _ = try self.expect(.l_brace);
         var members = std.ArrayListUnmanaged(ast.StructMember){};
@@ -582,6 +592,17 @@ const Parser = struct {
         // Local variable declaration: type identifier ...
         if (isTypeKeyword(cur) and nxt == .identifier) {
             return self.parseLocalVarDecl();
+        }
+        // User-defined struct type variable declaration: StructName identifier ...
+        // Only if cur is a known struct name and followed by = or ; or [
+        if (cur == .identifier and nxt == .identifier) {
+            const type_name = self.text(self.current());
+            if (self.struct_names.contains(type_name)) {
+                const third = self.peek2().tag;
+                if (third == .eq or third == .semicolon or third == .l_bracket) {
+                    return self.parseLocalVarDecl();
+                }
+            }
         }
         // const type identifier ...
         if (cur == .kw_const and isTypeKeyword(nxt)) {
