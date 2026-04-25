@@ -37,6 +37,7 @@ pub const Node = struct {
         for_stmt,
         while_stmt,
         do_while_stmt,
+        switch_stmt,
         return_stmt,
         discard_stmt,
         break_stmt,
