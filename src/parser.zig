@@ -411,7 +411,22 @@ const Parser = struct {
         };
     }
 
-    fn parseVarDecl(self: *Parser, name_tok: lexer.Token, ty: ast.Type, qualifier: ?ast.Qualifier, layout: ?ast.Layout) Error!ast.Node {
+    fn parseVarDecl(self: *Parser, name_tok: lexer.Token, mut_ty: ast.Type, qualifier: ?ast.Qualifier, layout: ?ast.Layout) Error!ast.Node {
+        // Handle array size suffix: float a[4]
+        var ty = mut_ty;
+        while (self.current().tag == .l_bracket) {
+            _ = self.advance();
+            const size_tok = self.current();
+            var arr_size: u32 = 0;
+            if (size_tok.tag == .int_literal) {
+                arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                _ = self.advance();
+            }
+            _ = self.expect(.r_bracket) catch break;
+            const arr_base = try self.alloc.create(ast.Type);
+            arr_base.* = ty;
+            ty = .{ .array = .{ .base = arr_base, .size = arr_size } };
+        }
         var init_nodes = std.ArrayListUnmanaged(ast.Node){};
         defer init_nodes.deinit(self.alloc);
         if (self.current().tag == .eq) {
