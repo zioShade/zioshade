@@ -1,37 +1,33 @@
 # Autoresearch Ideas Backlog
 
-## Critical Path (Biggest Impact)
+## High Priority (Spirv-Val Fixes - 6 remaining)
 
-- **Fix lexer '.' + parser swizzle + semantic swizzle (TRIPLE FIX)**: The '.' is tokenized as double_literal even for `v.xy`. The fix requires THREE changes together:
-  1. **Lexer**: `tryParseNumber` should return null for `.` not followed by digit
-  2. **Parser**: parsePostfix .dot case needs evaluation-order fix (DONE in commit 01d4a19)
-  3. **Semantic**: member_access handler needs proper swizzle codegen (CompositeExtract for single, VectorShuffle for multi)
+- **Phantom IDs** (3 files): `ensureType(.named)` returns an ID without emitting the type instruction. Need to fix named type emission to always emit before referencing.
+  - spv.nvAtomicFp16Vec.frag: float16 types not emitted
+  - int64.desktop.comp: int64 type not emitted
+  - struct-packing.comp: named struct types not emitted as OpTypeStruct
   
-  The triple fix was attempted but caused 83→61 regression. Root cause: some files that previously had swizzles silently ignored (phantom IDs producing wrong types) now produce correct types that conflict with other parts of the shader. Need to identify and fix those cascading issues.
+- **OpTypePointer in wrong section** (1): struct-flatten-stores — pointer types emitted during function body. Pre-emit pointer types in emitTypesAndConstants.
+  
+- **image-ms.desktop.frag** (1): image2DMS uses rgba8 format but SPIR-V expects correct ImageFormat. The image type emission doesn't set the format from the layout qualifier.
 
-- **Remaining spirv-val failures** (12 files): Phantom IDs (3), execution model (2), iimage2D type (2), texture_buffer (1), matrix conversion (1), struct-flatten (1), type-alias (1), depth unchanged (1).
+- **type-alias.comp** (1): Function overloading — same function name with different parameter types produces duplicate IDs.
 
-## Medium Priority
+## Medium Priority (Compile Errors - 102)
 
-- **Fix struct type constructor functions**: struct-flatten-stores references functions Foo(), Bar(), Baz() that are never emitted. Need to emit type constructors as SPIR-V functions.
+- **Swizzle/Lexer fix** (54 assign_op errors): The `.` is tokenized as double_literal. Requires coordinated lexer + parser + semantic fix. Parser evaluation-order fix is DONE. Need: 1) Lexer: `.` not followed by digit → dot token 2) Semantic: proper CompositeExtract/VectorShuffle for swizzles. Previous attempts caused regressions (83→61). Need more careful approach.
 
-- **Proper iimage2D/uimage2D type support**: Currently all image types mapped to image2d (float sampled type). Requires adding types to ast.zig.
+- **Switch statements** (3 files): No parser support. Would need .kw_switch parsing, case/default handling, OpSwitch SPIR-V emission.
 
-- **Fix mat3(mat4) conversion**: matrix-conversion.flatten.frag.
+- **CFG/empty ctx** (7 files): Errors in analyzeStatement without errdefer context. Root cause unclear.
 
-- **Fix texture_buffer.vert**: Need OpImage extraction from sampled image before OpImageFetch.
+- **Missing builtins**: beginInvocationInterlockARB (4), rayQueryInitializeEXT (3), normalize (3), subgroupQuadAll (2), group (2), modf (2).
 
-- **Switch statement support**: 3 files use switch.
+## Done This Session (83→89, +6 passes)
 
-- **Function overloading**: type-alias.comp — fundamental limitation.
-
-## Done / Tried & Failed
-
-- **Lexer '.' fix alone**: Causes 83→56 regression (27 files). Must be paired with proper swizzle codegen.
-- **Lexer + swizzle (without parser fix)**: 83→56 regression.
-- **Lexer + parser + swizzle**: 83→61 regression. Parser fix is correct but cascading type issues remain.
-- **Array bracket parsing in uniform blocks**: 4 attempts failed, all regressed.
-- **preEmitPointerTypes**: Exposed deeper bug with struct type constructors.
-- **Fix int→float conversion in type constructors**: DONE.
-- **Fix "Branch must appear in a block"**: DONE.
-- **Fix OpReturn non-void**: DONE.
+- iimage2d/uimage2d distinct types (+1: coherent-image.comp)
+- sampler_buffer/image_buffer types (+1: texture_buffer.vert)
+- OpImageSampleExplicitLod for textureLod (+1: explicit-lod.legacy.vert)
+- Matrix-to-matrix conversion mat3(mat4) (+1: matrix-conversion.flatten.frag)
+- Implicit LOD→explicit for vertex shaders + pre-emit constants (+1: implicit-lod.legacy.vert)
+- OpVectorExtractDynamic for runtime vector indexing (+1: int-attribute.legacy.vert)
