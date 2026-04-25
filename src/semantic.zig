@@ -1906,8 +1906,10 @@ const Analyzer = struct {
                 operands[0] = .{ .id = base_tid.id };
                 operands[1] = .{ .id = index_tid.id };
 
+                // Use vector_extract_dynamic for runtime indexing into loaded vectors
+                const tag: ir.Instruction.Tag = if (base_tid.ty.isVector()) .vector_extract_dynamic else .access_chain;
                 try self.instructions.append(self.alloc, .{
-                    .tag = .access_chain,
+                    .tag = tag,
                     .result_type = null,
                     .result_id = result_id,
                     .operands = operands,

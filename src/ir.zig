@@ -108,6 +108,7 @@ pub const Instruction = struct {
         composite_construct,
         composite_extract,
         access_chain,
+        vector_extract_dynamic,
         member_access_op,
         image_sample,
         image_sample_explicit_lod,

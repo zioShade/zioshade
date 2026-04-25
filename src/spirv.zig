@@ -48,6 +48,7 @@ pub const Op = enum(u16) {
     ImageSampleExplicitLod = 88,
     ImageFetch = 95,
     OpImage = 100,
+    VectorExtractDynamic = 77,
     ImageQuerySize = 104,
     ImageRead = 98,
     ImageWrite = 99,
