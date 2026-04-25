@@ -784,6 +784,31 @@ const Analyzer = struct {
                 last_error_ctx = "invalid-assign";
                 return error.InvalidAssignment;
             },
+            .index_access => {
+                // array[index] as l-value: get pointer to element via access chain
+                if (node.data.children.len < 2) return error.SemanticFailed;
+                const base_lv = try self.analyzeLValue(node.data.children[0]);
+                const index_tid = try self.analyzeExpression(node.data.children[1]);
+                // Determine element type
+                const element_ty = if (base_lv.ty == .array)
+                    base_lv.ty.array.base.*
+                else if (base_lv.ty.isVector())
+                    base_lv.ty.elementType()
+                else
+                    return error.TypeMismatch;
+                const ptr_id = self.allocId();
+                const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                operands[0] = .{ .id = base_lv.id };
+                operands[1] = .{ .id = index_tid.id };
+                try self.instructions.append(self.alloc, .{
+                    .tag = .access_chain,
+                    .result_type = null,
+                    .result_id = ptr_id,
+                    .operands = operands,
+                    .ty = element_ty,
+                });
+                return .{ .ty = element_ty, .id = ptr_id };
+            },
             else => {
                 last_error_ctx = "invalid-assign";
                 return error.InvalidAssignment;
