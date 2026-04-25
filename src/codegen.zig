@@ -934,6 +934,9 @@ const Codegen = struct {
                 try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.ReturnValue)));
                 try self.emitWord(val_id);
             },
+            .unreachable_inst => {
+                try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.Unreachable)));
+            },
             .label => {
                 const label_id = resolved.result_id orelse return;
                 try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Label)));
