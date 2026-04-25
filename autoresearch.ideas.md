@@ -1,36 +1,37 @@
 # Autoresearch Ideas Backlog
 
-## High Priority
+## Critical Path (Biggest Impact)
 
-- **Fix lexer '.' tokenization properly**: `.` is classified as `double_literal` even for `v.xy`. The fix: in `tryParseNumber()`, if `.` is NOT followed by a digit, return null (treat as dot operator). The previous attempt caused regression because it didn't account for the fact that the fix also changes how the PARSER works for expressions like `v.x` where `v` is a local var. The lexer fix itself is correct but needs to be paired with proper member_access swizzle handling in semantic.zig. Key insight: the old phantom-ID approach for vector swizzles (`return .{ .ty = .float, .id = self.allocId() }`) was silently working for many cases despite being incorrect — it produced wrong types but no errors. The real fix needs BOTH lexer + proper swizzle codegen simultaneously, tested together.
+- **Fix lexer '.' + parser swizzle + semantic swizzle (TRIPLE FIX)**: The '.' is tokenized as double_literal even for `v.xy`. The fix requires THREE changes together:
+  1. **Lexer**: `tryParseNumber` should return null for `.` not followed by digit
+  2. **Parser**: parsePostfix .dot case needs evaluation-order fix (DONE in commit 01d4a19)
+  3. **Semantic**: member_access handler needs proper swizzle codegen (CompositeExtract for single, VectorShuffle for multi)
+  
+  The triple fix was attempted but caused 83→61 regression. Root cause: some files that previously had swizzles silently ignored (phantom IDs producing wrong types) now produce correct types that conflict with other parts of the shader. Need to identify and fix those cascading issues.
 
-- **Fix remaining phantom IDs** (3 files): spv.nvAtomicFp16Vec, int64.desktop.comp, struct-packing.comp. Root cause: ensureType(.named) returns allocated ID without emitting instruction when type not registered. These all use types we don't support (int64, nv extensions, arrays in structs).
-
-- **Fix execution model for texture sampling** (2 files): explicit-lod.legacy.vert, implicit-lod.legacy.vert. Callgraph contains function calling texture sampling in non-fragment stage. Need to detect vertex stage and avoid emitting texture ops.
+- **Remaining spirv-val failures** (12 files): Phantom IDs (3), execution model (2), iimage2D type (2), texture_buffer (1), matrix conversion (1), struct-flatten (1), type-alias (1), depth unchanged (1).
 
 ## Medium Priority
 
-- **Proper iimage2D/uimage2D type support**: Currently all image types mapped to image2d (float sampled type). iimage2D should use int sampled type. Causes OpStore type mismatches in coherent-image.comp and image-ms.desktop.frag. Requires adding .iimage2d/.uimage2d types to ast.zig and propagating through parser/semantic/codegen.
+- **Fix struct type constructor functions**: struct-flatten-stores references functions Foo(), Bar(), Baz() that are never emitted. Need to emit type constructors as SPIR-V functions.
 
-- **Fix mat3(mat4) conversion**: matrix-conversion.flatten.frag. Need to extract 3 columns from mat4 and construct mat3. Complex: requires column extraction + component truncation.
+- **Proper iimage2D/uimage2D type support**: Currently all image types mapped to image2d (float sampled type). Requires adding types to ast.zig.
 
-- **Fix OpTypePointer in wrong section**: struct-flatten-stores.legacy.vert. Type declarations emitted during function body. preEmitPointerTypes approach failed because it exposed deeper bug (struct type constructor functions not emitted). The real fix requires pre-allocating ALL type IDs before emitting any function code, or buffering type declarations separately.
+- **Fix mat3(mat4) conversion**: matrix-conversion.flatten.frag.
 
-- **Switch statement support**: Need OpSwitch implementation. 3 files use switch (switch.legacy.frag, switch-unreachable-break.frag, switch-unsigned-case.frag).
+- **Fix texture_buffer.vert**: Need OpImage extraction from sampled image before OpImageFetch.
 
-- **Function overloading**: type-alias.comp has two `overload()` functions with different param types. Fundamental limitation of single-symbol lookup.
+- **Switch statement support**: 3 files use switch.
 
-- **Fix texture_buffer.vert**: texelFetch on samplerBuffer. OpImageFetch requires OpTypeImage operand, not OpTypeSampledImage. Need to extract image from sampled image with OpImage before OpImageFetch.
+- **Function overloading**: type-alias.comp — fundamental limitation.
 
-## Done (don't re-attempt)
+## Done / Tried & Failed
 
-- **Fix int->float conversion in type constructors**: DONE — vec4(int_val) now converts int→float before splat.
-- **Fix "Branch must appear in a block"**: DONE — selection-block-dominator fixed with int→float conversion, switch-nested fixed with OpUnreachable.
-- **Fix OpReturn non-void**: DONE — link files skipped (no main()), switch-nested fixed with OpUnreachable.
-
-## Tried & Failed / Stale
-
-- **Fix lexer '.' tokenization (naive)**: Causes 83→56 regression. Must be paired with proper swizzle codegen.
+- **Lexer '.' fix alone**: Causes 83→56 regression (27 files). Must be paired with proper swizzle codegen.
+- **Lexer + swizzle (without parser fix)**: 83→56 regression.
+- **Lexer + parser + swizzle**: 83→61 regression. Parser fix is correct but cascading type issues remain.
 - **Array bracket parsing in uniform blocks**: 4 attempts failed, all regressed.
-- **preEmitPointerTypes**: Exposed deeper bug with struct type constructor functions not being emitted.
-- **Multi-component swizzle in member_access**: Regressed because lexer produces wrong tokens for swizzles on local vars.
+- **preEmitPointerTypes**: Exposed deeper bug with struct type constructors.
+- **Fix int→float conversion in type constructors**: DONE.
+- **Fix "Branch must appear in a block"**: DONE.
+- **Fix OpReturn non-void**: DONE.

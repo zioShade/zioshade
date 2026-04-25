@@ -1169,6 +1169,27 @@ const Analyzer = struct {
                         // Emit a no-op (void) — TODO: proper OpControlBarrier/OpMemoryBarrier
                         return .{ .ty = .void, .id = result_id };
                     }
+                    // atomicAdd(ptr, value) → OpAtomicIAdd
+                    if (std.mem.eql(u8, node.data.name, "atomicAdd")) {
+                        // Returns the original value
+                        const ret_ty = if (arg_tids.items.len > 1) arg_tids.items[1].ty else .uint;
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 3);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        // Memory scope = Device (1), Memory semantics = Uniform (64) for UBO/SSBO
+                        operands[arg_tids.items.len] = .{ .literal_int = 1 }; // scope
+                        operands[arg_tids.items.len + 1] = .{ .literal_int = 64 }; // semantics
+                        operands[arg_tids.items.len + 2] = .{ .literal_int = 64 }; // (unused in IAdd)
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .atomic_iadd,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = ret_ty,
+                        });
+                        return .{ .ty = ret_ty, .id = result_id };
+                    }
                     // imageSize returns ivec2, needs OpImageQuerySize
                     if (std.mem.eql(u8, node.data.name, "imageSize")) {
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
@@ -1925,6 +1946,8 @@ const Analyzer = struct {
             // Barrier/memory builtins (void, special handling)
             "barrier", "memoryBarrier", "memoryBarrierShared",
             "memoryBarrierImage", "memoryBarrierBuffer", "groupMemoryBarrier",
+            // Atomic builtins
+            "atomicAdd",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;

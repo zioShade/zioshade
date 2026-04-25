@@ -114,6 +114,7 @@ pub const Instruction = struct {
         image_query_size,
         image_read,
         image_write,
+        atomic_iadd,
         transpose,
         outer_product,
         dot,
