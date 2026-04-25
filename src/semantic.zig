@@ -1273,7 +1273,7 @@ const Analyzer = struct {
                             // texelFetch etc → image_fetch as fallback
                             // If first arg is a sampler, extract image first
                             const fetch_args = arg_tids.items;
-                            if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler_cube)) {
+                            if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler_cube or fetch_args[0].ty == .sampler_buffer)) {
                                 const extracted_id = self.allocId();
                                 const extract_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                                 extract_operands[0] = .{ .id = fetch_args[0].id };
@@ -1282,7 +1282,7 @@ const Analyzer = struct {
                                     .result_type = null,
                                     .result_id = extracted_id,
                                     .operands = extract_operands,
-                                    .ty = .image2d, // extracted image type
+                                    .ty = if (fetch_args[0].ty == .sampler_buffer) .sampler_buffer else .image2d, // extracted image type
                                 });
                                 // Replace first arg with extracted image
                                 var new_args = try self.alloc.alloc(ir.Instruction.Operand, fetch_args.len);
