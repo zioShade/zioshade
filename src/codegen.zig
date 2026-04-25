@@ -27,6 +27,7 @@ pub fn generate(
         .emitted_ptr_types = .{},
         .emitted_constants = .{},
         .emitted_func_types = .{},
+        .ptr_storage_class = .{},
         .sampled_image_inner_id = 0,
         .sampler_buffer_inner_id = 0,
         .glsl_std_450_id = 0,
@@ -62,6 +63,7 @@ const Codegen = struct {
     emitted_ptr_types: std.AutoHashMapUnmanaged(u64, u32), // (type_key << 32 | sc) -> ptr_type_id
     emitted_constants: std.AutoHashMapUnmanaged(u64, u32), // (type_id << 32 | value) -> const_id
     emitted_func_types: std.AutoHashMapUnmanaged(u64, u32), // hash(ret+params) -> func_type_id
+    ptr_storage_class: std.AutoHashMapUnmanaged(u32, ir.SPIRVStorageClass), // result_id -> storage class for pointers
     sampled_image_inner_id: u32, // TypeImage (Sampled=1) for use with OpImage extraction
     sampler_buffer_inner_id: u32, // TypeImage (Dim=Buffer, Sampled=1) for texelFetch
     glsl_std_450_id: u32,
@@ -73,6 +75,7 @@ const Codegen = struct {
         self.emitted_ptr_types.deinit(self.alloc);
         self.emitted_constants.deinit(self.alloc);
         self.emitted_func_types.deinit(self.alloc);
+        self.ptr_storage_class.deinit(self.alloc);
         self.words.deinit(self.alloc);
     }
 
@@ -600,6 +603,8 @@ const Codegen = struct {
         for (self.module.globals) |global| {
             _ = try self.ensureType(global.ty);
             _ = try self.ensurePointerType(global.ty, global.storage_class);
+            // Track storage class for this global's result_id
+            try self.ptr_storage_class.put(self.alloc, global.result_id, global.storage_class);
             // Also pre-emit pointer types for struct members
             if (global.ty == .named) {
                 const td = self.module.types.get(global.ty.named) orelse continue;
@@ -631,6 +636,7 @@ const Codegen = struct {
                         _ = try self.ensurePointerType(inst.ty, .output);
                         _ = try self.ensurePointerType(inst.ty, .input);
                         _ = try self.ensurePointerType(inst.ty, .private);
+                        _ = try self.ensurePointerType(inst.ty, .push_constant);
                         // Pre-emit the index constant so it's available during codegen
                         if (inst.operands.len > 1) {
                             const idx = switch (inst.operands[1]) {
@@ -933,15 +939,19 @@ const Codegen = struct {
                 // default value-type resolution from inst.ty.
                 // Determine storage class from the base variable
                 const base_id_val = self.operandId(resolved, 0);
-                var sc: ir.SPIRVStorageClass = .function;
-                for (self.module.globals) |global| {
-                    if (global.result_id == base_id_val) {
-                        sc = global.storage_class;
-                        break;
+                const sc: ir.SPIRVStorageClass = sc: {
+                    // First check our tracked pointer storage classes
+                    if (self.ptr_storage_class.get(base_id_val)) |tracked_sc| break :sc tracked_sc;
+                    // Fallback: check globals
+                    for (self.module.globals) |global| {
+                        if (global.result_id == base_id_val) break :sc global.storage_class;
                     }
-                }
+                    break :sc .function;
+                };
                 const ptr_type_id = try self.ensurePointerType(inst.ty, sc);
                 const result_id = resolved.result_id orelse return;
+                // Track the result pointer's storage class for chained access chains
+                try self.ptr_storage_class.put(self.alloc, result_id, sc);
                 // OpAccessChain indices: can be OpConstant or runtime scalar integer
                 const index_id: u32 = switch (resolved.operands[1]) {
                     .id => |v| v, // Runtime index — use the ID directly

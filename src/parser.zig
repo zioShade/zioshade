@@ -456,9 +456,9 @@ const Parser = struct {
             const member_name = self.current();
             if (member_name.tag != .identifier) return error.UnexpectedToken;
             _ = self.advance();
-            // Check for array size suffix: vec2 a[1]
+            // Check for array size suffix: vec2 a[1] (supports multi-dim: vec2 a[2][3])
             var member_ty_final = member_ty;
-            if (self.current().tag == .l_bracket) {
+            while (self.current().tag == .l_bracket) {
                 _ = self.advance();
                 const size_tok = self.current();
                 var arr_size: u32 = 0;
@@ -468,7 +468,7 @@ const Parser = struct {
                 }
                 _ = self.expect(.r_bracket) catch break;
                 const arr_base = try self.alloc.create(ast.Type);
-                arr_base.* = member_ty;
+                arr_base.* = member_ty_final;
                 member_ty_final = .{ .array = .{ .base = arr_base, .size = arr_size } };
             }
             _ = try self.expect(.semicolon);
@@ -502,9 +502,9 @@ const Parser = struct {
             const member_name = self.current();
             if (member_name.tag != .identifier) return error.UnexpectedToken;
             _ = self.advance();
-            // Check for array size suffix: vec2 a[1]
+            // Check for array size suffix: vec2 a[1] (supports multi-dim: vec2 a[2][3])
             var member_ty_final = member_ty;
-            if (self.current().tag == .l_bracket) {
+            while (self.current().tag == .l_bracket) {
                 _ = self.advance();
                 const size_tok = self.current();
                 var arr_size: u32 = 0;
@@ -514,7 +514,7 @@ const Parser = struct {
                 }
                 _ = self.expect(.r_bracket) catch break;
                 const arr_base = try self.alloc.create(ast.Type);
-                arr_base.* = member_ty;
+                arr_base.* = member_ty_final;
                 member_ty_final = .{ .array = .{ .base = arr_base, .size = arr_size } };
             }
             _ = try self.expect(.semicolon);

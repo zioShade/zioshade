@@ -895,6 +895,11 @@ const Analyzer = struct {
                             .operands = ac_operands,
                             .ty = sym.ty,
                         });
+                        // If the member is an array type, don't load — return the pointer
+                        // so that index_access can chain another access chain
+                        if (sym.ty == .array) {
+                            return .{ .ty = sym.ty, .id = ptr_id };
+                        }
                         // Then load from that pointer
                         const id = self.allocId();
                         const load_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
