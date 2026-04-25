@@ -1975,7 +1975,15 @@ const Analyzer = struct {
             },
             .member_access => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
-                const base_tid = try self.analyzeExpression(node.data.children[0]);
+                var base_tid = try self.analyzeExpression(node.data.children[0]);
+                // Auto-load pointer base
+                if (base_tid.is_ptr) {
+                    const ld = self.allocId();
+                    const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    ops[0] = .{ .id = base_tid.id };
+                    try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = base_tid.ty });
+                    base_tid = .{ .ty = base_tid.ty, .id = ld };
+                }
 
                 // Handle vector swizzles (e.g., vec4.x)
                 if (base_tid.ty.isVector()) return .{ .ty = .float, .id = self.allocId() };
