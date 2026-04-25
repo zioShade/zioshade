@@ -26,6 +26,7 @@ pub fn generate(
         .emitted_constants = .{},
         .emitted_func_types = .{},
         .sampled_image_inner_id = 0,
+        .sampler_buffer_inner_id = 0,
         .glsl_std_450_id = 0,
     };
     defer cg.deinit();
@@ -58,6 +59,7 @@ const Codegen = struct {
     emitted_constants: std.AutoHashMapUnmanaged(u64, u32), // (type_id << 32 | value) -> const_id
     emitted_func_types: std.AutoHashMapUnmanaged(u64, u32), // hash(ret+params) -> func_type_id
     sampled_image_inner_id: u32, // TypeImage (Sampled=1) for use with OpImage extraction
+    sampler_buffer_inner_id: u32, // TypeImage (Dim=Buffer, Sampled=1) for texelFetch
     glsl_std_450_id: u32,
 
     fn deinit(self: *Codegen) void {
@@ -101,6 +103,10 @@ const Codegen = struct {
         try self.emitWord(@intFromEnum(spirv.Capability.shader));
         try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
         try self.emitWord(@intFromEnum(spirv.Capability.image_query));
+        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+        try self.emitWord(@intFromEnum(spirv.Capability.sampled_buffer));
+        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+        try self.emitWord(@intFromEnum(spirv.Capability.image_buffer));
     }
 
     fn emitExtInstImport(self: *Codegen) !void {
@@ -276,6 +282,24 @@ const Codegen = struct {
                 try self.emitWord(id);
                 try self.emitWord(image_id);
             },
+            .sampler_buffer => {
+                // samplerBuffer → TypeImage with Dim=Buffer, then TypeSampledImage
+                const float_id = try self.ensureType(.float);
+                const image_id = self.allocId();
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(image_id);
+                try self.emitWord(float_id);
+                try self.emitWord(5); // Dim = Buffer
+                try self.emitWord(0); // Not depth
+                try self.emitWord(0); // Not arrayed
+                try self.emitWord(0); // Not multisampled
+                try self.emitWord(1); // Sampled = 1 (with sampler)
+                try self.emitWord(0); // ImageFormat = Unknown
+                self.sampler_buffer_inner_id = image_id;
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitWord(id);
+                try self.emitWord(image_id);
+            },
             .image2d => {
                 const float_id = try self.ensureType(.float);
                 try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
@@ -306,6 +330,18 @@ const Codegen = struct {
                 try self.emitWord(id);
                 try self.emitWord(uint_id);
                 try self.emitWord(1); // Dim = 2D
+                try self.emitWord(0); // Not depth
+                try self.emitWord(0); // Not arrayed
+                try self.emitWord(0); // Not multisampled
+                try self.emitWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitWord(0); // ImageFormat = Unknown
+            },
+            .image_buffer => {
+                const float_id = try self.ensureType(.float);
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(id);
+                try self.emitWord(float_id);
+                try self.emitWord(5); // Dim = Buffer
                 try self.emitWord(0); // Not depth
                 try self.emitWord(0); // Not arrayed
                 try self.emitWord(0); // Not multisampled
@@ -650,7 +686,7 @@ const Codegen = struct {
     fn emitInstruction(self: *Codegen, inst: ir.Instruction) !void {
         // Resolve null result_type from ast type
         var resolved = inst;
-        if (resolved.result_type == null and resolved.result_id != null) {
+        if (resolved.result_type == null and resolved.result_id != null and resolved.tag != .extract_image) {
             resolved.result_type = try self.ensureType(inst.ty);
         }
         switch (resolved.tag) {
@@ -861,7 +897,12 @@ const Codegen = struct {
             },
             .extract_image => {
                 // Result type must be the image type inside the sampled image (Sampled=1)
-                const result_type_id = self.sampled_image_inner_id;
+                // Choose the correct inner ID based on the source sampler type
+                const result_type_id: u32 = if (inst.ty == .sampler_buffer) blk: {
+                    break :blk self.sampler_buffer_inner_id;
+                } else blk: {
+                    break :blk self.sampled_image_inner_id;
+                };
                 if (result_type_id == 0) return; // No sampler emitted, can't extract
                 const result_id = resolved.result_id orelse return;
                 const sampled_image_id = self.operandId(resolved, 0);
