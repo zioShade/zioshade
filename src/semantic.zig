@@ -218,6 +218,12 @@ const Analyzer = struct {
             try self.globals.append(self.alloc, .{ .name = "gl_FrontFacing", .ty = .bool, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
             try self.declare("gl_FrontFacing", .{ .kind = .var_sym, .ty = .bool, .ir_id = id });
         }
+        // gl_HelperInvocation: Input, BuiltIn HelperInvocation (bool)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_HelperInvocation", .ty = .bool, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_HelperInvocation", .{ .kind = .var_sym, .ty = .bool, .ir_id = id });
+        }
         // gl_Position: Output, BuiltIn Position
         {
             const id = self.allocId();
@@ -2422,7 +2428,7 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "inversesqrt")) return 32; // InverseSqrt
         if (std.mem.eql(u8, name, "determinant")) return 33; // Determinant
         if (std.mem.eql(u8, name, "inverse")) return 34; // MatrixInverse
-        if (std.mem.eql(u8, name, "mod")) return 35; // Modf
+        if (std.mem.eql(u8, name, "mod")) return 31; // FMod
         if (std.mem.eql(u8, name, "modf")) return 36; // ModfStruct (returns struct)
         if (std.mem.eql(u8, name, "min")) return 37; // FMin
         if (std.mem.eql(u8, name, "max")) return 40; // FMax
