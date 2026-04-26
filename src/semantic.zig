@@ -1377,17 +1377,45 @@ const Analyzer = struct {
                     }
                     // textureSize(sampler, lod) → ivec2, uses OpImageQuerySizeLod
                     if (std.mem.eql(u8, node.data.name, "textureSize")) {
-                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
-                        for (arg_tids.items, 0..) |tid, i| {
-                            operands[i] = .{ .id = tid.id };
+                        // Extract image from sampler, then query size with lod
+                        var img_id = arg_tids.items[0].id;
+                        if (arg_tids.items[0].ty == .sampler2d and arg_tids.items.len >= 1) {
+                            const extracted = self.allocId();
+                            const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            ext_ops[0] = .{ .id = arg_tids.items[0].id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .extract_image,
+                                .result_type = null,
+                                .result_id = extracted,
+                                .operands = ext_ops,
+                                .ty = arg_tids.items[0].ty,
+                            });
+                            img_id = extracted;
                         }
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .image_query_size,
-                            .result_type = null,
-                            .result_id = result_id,
-                            .operands = operands,
-                            .ty = .ivec2,
-                        });
+                        if (arg_tids.items.len > 1) {
+                            // textureSize(sampler, lod) → OpImageQuerySizeLod
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            operands[0] = .{ .id = img_id };
+                            operands[1] = .{ .id = arg_tids.items[1].id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .image_query_size_lod,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = .ivec2,
+                            });
+                        } else {
+                            // textureSize(image) → OpImageQuerySize
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            operands[0] = .{ .id = img_id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .image_query_size,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = .ivec2,
+                            });
+                        }
                         return .{ .ty = .ivec2, .id = result_id };
                     }
                     // textureQueryLevels(sampler) → int, uses OpImageQueryLevels
