@@ -358,6 +358,20 @@ const Analyzer = struct {
             try self.declare("gl_InstanceIndex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
         }
 
+        // gl_DrawID: Input int
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_DrawID", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_DrawID", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
+        // gl_DrawIDARB: alias for gl_DrawID
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_DrawIDARB", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_DrawIDARB", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
         // Math functions that return float (or same type as primary argument)
         const float_return_funcs = .{
             "abs",   "acos",  "asin",      "atan",    "atan2",
