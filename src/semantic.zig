@@ -320,8 +320,11 @@ const Analyzer = struct {
         // gl_SampleMaskIn: Input, BuiltIn SampleMask (array of int)
         {
             const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_SampleMaskIn", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_SampleMaskIn", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+            const arr_base = try self.alloc.create(ast.Type);
+            arr_base.* = .int;
+            const sample_mask_ty: ast.Type = .{ .array = .{ .base = arr_base, .size = 1 } };
+            try self.globals.append(self.alloc, .{ .name = "gl_SampleMaskIn", .ty = sample_mask_ty, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_SampleMaskIn", .{ .kind = .var_sym, .ty = sample_mask_ty, .ir_id = id });
         }
 
         // gl_SamplePosition: Input, BuiltIn SamplePosition (vec2)
@@ -1147,7 +1150,10 @@ const Analyzer = struct {
                     }
                     if (sym.kind == .var_sym) {
                         // Variables (globals/locals) are pointers — need OpLoad to get value
-                        // Parameters are already values — no load needed
+                        // But array variables should NOT be loaded — return pointer for index_access
+                        if (sym.ty == .array) {
+                            return .{ .ty = sym.ty, .id = sym.ir_id, .is_ptr = true };
+                        }
                         const id = self.allocId();
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         operands[0] = .{ .id = sym.ir_id };
