@@ -2412,6 +2412,45 @@ const Analyzer = struct {
             },
             .member_access => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
+
+                // Optimization: for member access on a named type, check if the base
+                // is a simple identifier. If so, get the variable pointer directly
+                // instead of loading the whole struct then extracting.
+                const base_child = node.data.children[0];
+                if (base_child.tag == .identifier) {
+                    if (self.lookup(base_child.data.name)) |sym| {
+                        if (sym.kind == .var_sym and sym.ty == .named) {
+                            // Use the variable pointer directly for member access
+                            const struct_name = sym.ty.named;
+                            if (self.types.get(struct_name)) |td| {
+                                const member_name = node.data.name;
+                                var member_index: ?u32 = null;
+                                for (td.members, 0..) |member, i| {
+                                    if (std.mem.eql(u8, member.name, member_name)) {
+                                        member_index = @as(u32, @intCast(i));
+                                        break;
+                                    }
+                                }
+                                if (member_index) |idx| {
+                                    const member_ty = td.members[idx].ty;
+                                    const result_id = self.allocId();
+                                    const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                    operands[0] = .{ .id = sym.ir_id };
+                                    operands[1] = .{ .literal_int = idx };
+                                    try self.instructions.append(self.alloc, .{
+                                        .tag = .access_chain,
+                                        .result_type = null,
+                                        .result_id = result_id,
+                                        .operands = operands,
+                                        .ty = member_ty,
+                                    });
+                                    return .{ .ty = member_ty, .id = result_id, .is_ptr = true };
+                                }
+                            }
+                        }
+                    }
+                }
+
                 var base_tid = try self.analyzeExpression(node.data.children[0]);
 
                 // Handle vector swizzles (e.g., vec4.x)
