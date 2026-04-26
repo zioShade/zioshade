@@ -1232,6 +1232,15 @@ const Codegen = struct {
                 try self.emitWord(result_id);
                 try self.emitWord(val_id);
             },
+            .fwidth => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const val_id = self.operandId(resolved, 0);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Fwidth)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(val_id);
+            },
             .return_void => {
                 try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.Return)));
             },

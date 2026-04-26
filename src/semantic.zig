@@ -331,6 +331,9 @@ const Analyzer = struct {
         try self.declare("textureProj", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
         try self.declare("textureQueryLevels", .{ .kind = .func, .ty = .int, .ir_id = self.allocId() });
         try self.declare("texelFetch", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
+        try self.declare("dFdx", .{ .kind = .func, .ty = .float, .ir_id = self.allocId() });
+        try self.declare("dFdy", .{ .kind = .func, .ty = .float, .ir_id = self.allocId() });
+        try self.declare("fwidth", .{ .kind = .func, .ty = .float, .ir_id = self.allocId() });
     }
 
     fn collectTopLevel(self: *Analyzer, node: ast.Node) !void {
@@ -1606,6 +1609,19 @@ const Analyzer = struct {
                             .operands = operands,
                             .ty = result_ty,
                         });
+                    } else if (std.mem.eql(u8, node.data.name, "fwidth")) {
+                        // fwidth(p) = abs(dFdx(p)) + abs(dFdy(p)) → OpFwidth (opcode 209)
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .fwidth,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = result_ty,
+                        });
                     } else if (std.mem.eql(u8, node.data.name, "isnan") or std.mem.eql(u8, node.data.name, "isinf")) {
                         const is_nan = std.mem.eql(u8, node.data.name, "isnan");
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
@@ -2344,7 +2360,7 @@ const Analyzer = struct {
             "tan", "tanh", "transpose", "trunc",
             "texture", "texture2D", "textureLod", "textureProj", "texelFetch",
             "textureQueryLevels",
-            "dFdx", "dFdy",
+            "dFdx", "dFdy", "fwidth",
             "isnan", "isinf",
             // Additional GLSL builtins
             "inverse", "outerProduct",
@@ -2467,7 +2483,7 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "dot"))
             return null;
         // dFdx/dFdy are core SPIR-V ops (DPdx/DPdy), not GLSL.std.450
-        if (std.mem.eql(u8, name, "dFdx") or std.mem.eql(u8, name, "dFdy"))
+        if (std.mem.eql(u8, name, "dFdx") or std.mem.eql(u8, name, "dFdy") or std.mem.eql(u8, name, "fwidth"))
             return null;
         // isnan/isinf are core SPIR-V ops (OpIsNan/OpIsInf), not GLSL.std.450
         if (std.mem.eql(u8, name, "isnan") or std.mem.eql(u8, name, "isinf"))

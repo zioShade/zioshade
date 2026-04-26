@@ -89,6 +89,7 @@ pub const Op = enum(u16) {
     Dot = 148,
     DPdx = 207,
     DPdy = 208,
+    Fwidth = 209,
     LogicalOr = 166,
     LogicalAnd = 167,
     LogicalNot = 168,
