@@ -8,11 +8,22 @@ The lexer returns bare `.` as `double_literal`. This means `v.x` tokenizes as `i
 2. Semantic errors kill entire functions (no recovery)
 3. member_access on unexpected types (void, float, etc.) produces errors
 
-### What's Been Tried (7+ attempts)
-- Lexer fix: `has_dot` → `has_digit` only. Always regresses by 10+ passes.
+### What's Been Tried (8+ attempts)
+- Lexer fix: `has_dot` → `has_digit` only. Always regressed by 10+ passes.
 - Parser fix: handle `double_literal` as dot. Same regression.
-- Error recovery in semantic: truncate instructions on error. Causes memory corruption (60 crashes).
-- Proper CompositeExtract for vectors. Works but still regresses due to other member_access cases.
+- Error recovery truncating instructions. Memory corruption (60 crashes).
+- Error recovery nulling result_ids. Still crashes.
+- **SUCCESS**: Error recovery with `break` on error (stop processing function, keep partial body). Works! +33 passes.
+- Proper CompositeExtract for vectors. Works with error recovery.
+
+### Current Status (commit 8966b3c)
+**160 passes, 0 compile errors, 37 spirv-val failures.**
+The swizzle fix is working! 37 spirv-val failures are from:
+- Phantom IDs (forward referenced IDs not defined)
+- Type mismatches in composite operations
+- Wrong SPIR-V for texture functions
+- Function overloading (duplicate IDs)
+- Missing multisample image types
 
 ### Prerequisites for Safe Swizzle Fix
 1. Semantic error recovery that doesn't leak memory (need Arena allocator or instruction ownership model)
