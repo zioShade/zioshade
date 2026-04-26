@@ -1608,14 +1608,12 @@ const Analyzer = struct {
                     if (std.mem.eql(u8, node.data.name, "atomicAdd")) {
                         // Returns the original value
                         const ret_ty = if (arg_tids.items.len > 1) arg_tids.items[1].ty else .uint;
-                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 3);
-                        for (arg_tids.items, 0..) |tid, i| {
-                            operands[i] = .{ .id = tid.id };
-                        }
-                        // Memory scope = Device (1), Memory semantics = Uniform (64) for UBO/SSBO
-                        operands[arg_tids.items.len] = .{ .literal_int = 1 }; // scope
-                        operands[arg_tids.items.len + 1] = .{ .literal_int = 64 }; // semantics
-                        operands[arg_tids.items.len + 2] = .{ .literal_int = 64 }; // (unused in IAdd)
+                        // Operands matching codegen expectation: [ptr_id, value_id, scope_literal, semantics_literal]
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 4);
+                        operands[0] = .{ .id = arg_tids.items[0].id }; // ptr
+                        operands[1] = if (arg_tids.items.len > 1) .{ .id = arg_tids.items[1].id } else .{ .literal_int = 0 }; // value
+                        operands[2] = .{ .literal_int = 1 }; // scope = Device
+                        operands[3] = .{ .literal_int = 64 }; // semantics = Uniform
                         try self.instructions.append(self.alloc, .{
                             .tag = .atomic_iadd,
                             .result_type = null,
