@@ -1132,7 +1132,29 @@ const Parser = struct {
                         .data = .{ .children = try self.dupeNodes(&.{mm_base}) },
                     };
                 },
-                else => break,
+                else => {
+                    // Handle bare '.' tokenized as double_literal
+                    if (self.current().tag == .double_literal) {
+                        const tok_text = self.text(self.current());
+                        if (tok_text.len == 1 and tok_text[0] == '.') {
+                            const next_idx = self.pos + 1;
+                            if (next_idx < self.tokens.len and self.tokens[next_idx].tag == .identifier) {
+                                _ = self.advance(); // consume '.'
+                                const member_tok = self.current();
+                                _ = self.advance(); // consume member name
+                                const member_name = self.text(member_tok);
+                                const base = expr;
+                                expr = .{
+                                    .tag = .member_access,
+                                    .loc = base.loc,
+                                    .data = .{ .name = member_name, .children = try self.dupeNodes(&.{base}) },
+                                };
+                                continue;
+                            }
+                        }
+                    }
+                    break;
+                },
             }
         }
         return expr;

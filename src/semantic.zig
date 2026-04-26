@@ -674,7 +674,11 @@ const Analyzer = struct {
         // Note: instructions already contain param init stores, don't clear them
 
         for (node.data.children) |child| {
-            try self.analyzeStatement(child);
+            self.analyzeStatement(child) catch {
+                // Semantic error: stop processing this function but keep what we have
+                // Add a return and break out
+                break;
+            };
             // Stop processing after a return statement (dead code elimination)
             if (self.instructions.items.len > 0) {
                 const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
