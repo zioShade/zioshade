@@ -24,6 +24,7 @@ if [ ! -f "$CACHE" ]; then
             case "$bn" in
                 *.error.*) echo "SKIP $file" >> "$CACHE"; continue ;;
                 link.*)    echo "SKIP $file" >> "$CACHE"; continue ;;
+                *.asm.*)   echo "SKIP $file" >> "$CACHE"; continue ;;
             esac
             grep -q "// ERROR" "$file" 2>/dev/null && { echo "SKIP $file" >> "$CACHE"; continue; }
             # common.glsl is an include file, not standalone
