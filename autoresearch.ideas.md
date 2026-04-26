@@ -1,62 +1,69 @@
 # Autoresearch Ideas
 
-## High Priority
+## HIGH PRIORITY — Swizzle Fix (est. +15-20 passes if done right)
 
-### Swizzle / member access (THE BIG BLOCKER - ~30 files affected)
-**Key insight discovered**: `.` is tokenized as `double_literal` (len=1, text=".") by `tryParseNumber` because `has_dot=true, has_digit=false` returns non-null. This means `v.x` is parsed as `v` (identifier) + `.` (double_literal) + `x` (identifier). The `.dot` token handler in the parser is NEVER reached because `tryParseNumber` claims the `.` first.
+### Root Cause
+The tokenizer returns bare `.` as `double_literal` (len=1, text=".") because `tryParseNumber` returns non-null for `has_dot=true, has_digit=false`. This means `v.x` is tokenized as `v` (identifier) + `.` (double_literal) + `x` (identifier). The `.dot` handler in the parser is never reached.
 
-**The fix**: Make `tryParseNumber` return null for bare `.` (no digits). This makes `.` fall through to the operator handler → `.dot` token.
+### Parser Fix (verified working)
+In parsePostfix, add `.double_literal` to the `.dot` case. When the double_literal text is exactly ".", treat it as the dot operator:
+```zig
+.dot, .double_literal => {
+    if (self.current().tag == .double_literal) {
+        const tok_text = self.text(self.current());
+        if (tok_text.len != 1 or tok_text[0] != '.') break;
+    }
+    _ = self.advance(); // consume '.'
+    const member_tok = self.current();
+    _ = self.advance(); // consume member name
+    ...
+```
 
-**Why it regressed 30+ files**: Files that had `v.x` expressions previously had those statements SILENTLY DROPPED by the parser (parseBlock catches errors and skips). With the fix, the statements are properly parsed as member_access nodes. But:
-- Multi-component swizzle (`.xy`, `.xyz`) produces phantom IDs → spirv-val failures
-- Swizzle on complex types (mat2x2, function return values) may fail
-- The phantom IDs from multi-component swizzle cascade to other instructions
+### Semantic Fix (verified working)
+- Single-component swizzle (`.x`): OpCompositeExtract — WORKS, produces valid SPIR-V
+- Multi-component swizzle (`.xy`): OpVectorShuffle — WORKS, produces valid SPIR-V
+- Added `toVec2()`/`toVec3()` to ast.Type for VectorShuffle result types
 
-**Required for swizzle fix to succeed**:
-1. Lexer: bare `.` → `.dot` (simple change)
-2. Semantic: single-component swizzle → OpCompositeExtract (done, works)
-3. Semantic: multi-component swizzle → OpVectorShuffle (NOT done - currently phantom)
-4. Semantic: handle member_access on non-vector types (matrices, structs with vector members)
-5. Accept that some files that "passed" before (because swizzle statements were dropped) will now fail differently
+### Why it Regresses 12-17 passes
+Files that previously had swizzle statements SILENTLY DROPPED by parser error recovery now fail because:
+1. Swizzle on non-vector types (matrices, function return values) — semantic returns base_tid which may cause type mismatch
+2. Files using `gl_BaryCoordEXT` (vec3) which isn't declared as a variable
+3. Two files crash with "Invalid free" during deinit — memory corruption from codegen
 
-**Potential approach**: Instead of trying to fix ALL swizzle cases, what if the lexer fix only applies in certain contexts? E.g., only make `.` → `.dot` when the previous token is an identifier or `)`? This is a context-sensitive lexer change.
+### To Make It Work
+1. Fix the 2 crashes: `dowhile.comp` and `torture-loop.comp` — need to debug memory corruption
+2. Handle member_access on non-vector types gracefully (return appropriate type)
+3. Accept that some previously-passing files will now fail differently (net improvement should still be positive)
 
-**Alternative approach**: Fix it in the parser instead of the lexer. When parsePostfix encounters a `double_literal` token with text ".", treat it as `.dot` and look for an identifier next. This was attempted but had issues because the double_literal token for `.` has len=1 and text="." (doesn't include the identifier).
+### Experiment Results
+- Phantom IDs (no VectorShuffle): 120→103 (-17)
+- With VectorShuffle: 120→108 (-12)
+- With VectorShuffle + crash protection: 120→108 (-12) still crashes
 
-### Actually... the parser approach CAN work
-The `double_literal` token with text "." can be treated as `.dot` in parsePostfix:
-1. See `double_literal` token with text "."
-2. Consume it (advance)
-3. The next token is the member name (identifier)
-4. Advance past the identifier
-5. Create member_access node
-
-This is simpler than the lexer fix and doesn't affect any other part of the tokenizer.
-
-### Comma-separated declarators in parseLocalVarDecl
-Parser change works but exposes a bug in access_chain codegen when swizzle patterns appear in for-loop updates. The `i.x += 4` pattern triggers invalid `access_chain` operand. Reverted.
-
-## Medium Priority
+## MEDIUM PRIORITY
 
 ### Switch codegen (2 spirv-val failures)
-`cfg.comp` and `cfg-preserve-parameter.comp` — switch is a no-op, produces "block must end with branch". Need proper OpSwitch emission with case labels and branches. Break inside switch needs to branch to the switch merge label (requires a `switch_stack` similar to `loop_stack`).
+`cfg.comp` and `cfg-preserve-parameter.comp`. Need proper OpSwitch with case labels. Break inside switch needs a switch_stack (like loop_stack). Previous attempts all regressed 3+ files.
 
 ### Function overloading (2 spirv-val failures)
-`partial-write-preserve.frag` and `type-alias.comp` — same function name with different parameter types. Requires type-aware function dispatch.
+`partial-write-preserve.frag` and `type-alias.comp`. Need type-aware function dispatch — match function by parameter types.
 
-### Shadow samplers
-`texture-proj-shadow.desktop.frag` needs `sampler2DShadow` type support.
+### Shadow samplers (1 spirv-val failure)
+`texture-proj-shadow.desktop.frag` needs `sampler2DShadow` type.
 
-## Low Priority
+### Texture offset builtins
+Adding `textureLodOffset`, `texelFetchOffset` etc. caused 1 regression. Need to investigate why — might be that files using these functions now produce different (wrong) SPIR-V.
 
-### OpVectorShuffle for multi-component swizzle
-Needed for `.xy`, `.xyz`, `.xxyy` etc. Currently these produce phantom IDs which cause cascading failures.
+## LOW PRIORITY
 
-### More sampler types
-`sampler1D`, `sampler3D`, `samplerCube`, `sampler2DShadow`, `sampler1DShadow` — many files use these.
+### Scalar-from-vector type conversion
+`int(vec4)` and `float(vec4)` now extract first component via OpCompositeExtract. Committed at fc16688. No pass count improvement but correct behavior.
 
-### textureGather builtin
-Needs `OpImageGather` and shadow sampler support.
+### OpVectorShuffle infrastructure
+Working implementation exists — used for multi-component swizzle and matrix column shrinking. Proven to produce valid SPIR-V.
 
 ### Include inlining
-`inlineIncludes` in `tests/runner.zig` works for Ghostty files. But the included `common.glsl` has swizzle and other features that are blocked. The infrastructure is ready.
+`inlineIncludes` in `tests/runner.zig` works for Ghostty files. Blocked by swizzle (common.glsl has swizzle operations).
+
+### More sampler types
+`sampler1D`, `sampler3D`, `samplerCube`, `sampler2DShadow`
