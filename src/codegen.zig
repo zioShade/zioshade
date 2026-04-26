@@ -653,7 +653,7 @@ const Codegen = struct {
                             .literal_int => |v| v,
                             else => continue,
                         };
-                        const int_type_id = try self.ensureType(.int);
+                        const int_type_id = try self.ensureType(inst.ty);
                         try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
                         try self.emitWord(int_type_id);
                         try self.emitWord(result_id);
