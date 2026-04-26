@@ -2898,8 +2898,13 @@ const Analyzer = struct {
         return std.mem.eql(u8, name, "texture") or
             std.mem.eql(u8, name, "texture2D") or
             std.mem.eql(u8, name, "textureLod") or
+            std.mem.eql(u8, name, "textureLodOffset") or
             std.mem.eql(u8, name, "textureProj") or
-            std.mem.eql(u8, name, "texelFetch");
+            std.mem.eql(u8, name, "texelFetch") or
+            std.mem.eql(u8, name, "texelFetchOffset") or
+            std.mem.eql(u8, name, "textureOffset") or
+            std.mem.eql(u8, name, "textureGrad") or
+            std.mem.eql(u8, name, "textureGather");
     }
 
     fn isBarrierBuiltin(self: *Analyzer, name: []const u8) bool {

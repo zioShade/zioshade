@@ -1,45 +1,47 @@
 # Autoresearch Ideas
 
-## HIGH PRIORITY — Parser Dot Tokenization Bug
+## HIGH PRIORITY — Fix swizzle via parser-level error recovery
 
 ### Root Cause
-The tokenizer returns bare `.` as `double_literal` (len=1, text=".") because `tryParseNumber` returns non-null for `has_dot=true, has_digit=false`. This means `v.x` is tokenized as `v` (identifier) + `.` (double_literal) + `x` (identifier). The `.dot` handler in the parser is never reached.
+The lexer returns bare `.` as `double_literal`. This means `v.x` tokenizes as `identifier + double_literal + identifier`. Parser never creates `member_access` nodes. When fixed, ~20 compile errors would resolve, but ~10 previously-passing files regress because:
+1. Parse errors are recoverable (synchronize skips statement)
+2. Semantic errors kill entire functions (no recovery)
+3. member_access on unexpected types (void, float, etc.) produces errors
 
-### Why Parser-Only Fix Causes Regressions
-Fixing the parser to handle `double_literal` with text "." as the dot operator makes `ssbo1.a` parse correctly (member_access). Previously, `ssbo1.a` failed to parse (because `.` was `double_literal`, not `dot`) and the entire statement was dropped by error recovery. Files like `enhanced-layouts.comp` passed with empty main() functions.
+### What's Been Tried (7+ attempts)
+- Lexer fix: `has_dot` → `has_digit` only. Always regresses by 10+ passes.
+- Parser fix: handle `double_literal` as dot. Same regression.
+- Error recovery in semantic: truncate instructions on error. Causes memory corruption (60 crashes).
+- Proper CompositeExtract for vectors. Works but still regresses due to other member_access cases.
 
-With the parser fix, these statements now parse correctly, but the semantic analyzer fails because:
-1. `analyzeExpression` loads the entire struct variable as a value (OpLoad on the whole buffer block)
-2. Then tries composite_extract to get member — but SPIR-V can't load an entire buffer block
-3. The lvalue path for `ssbo1.a = val` also fails because the base is a loaded value, not a pointer
-
-### Prerequisites for Swizzle Fix
-Before applying the parser fix, we need to fix struct member access in the semantic analyzer:
-1. For `base.named` expressions where the base came from loading a pointer to a named type, use OpAccessChain instead of OpCompositeExtract
-2. For lvalue member access, keep the base as a pointer (don't load it)
-3. Only then apply the parser + semantic swizzle fix
-
-### Estimated Impact
-+11-20 net passes (11 new from swizzle, minus 0 regressions after prerequisites are fixed)
+### Prerequisites for Safe Swizzle Fix
+1. Semantic error recovery that doesn't leak memory (need Arena allocator or instruction ownership model)
+2. Handle ALL member_access cases: void, float, struct, vector, array, sampler, named types
+3. Handle multi-component swizzle (.xy, .xyz) with VectorShuffle
+4. Handle swizzle writes as l-values
 
 ## MEDIUM PRIORITY
 
-### Fix lexer: bare '.' should be dot, not double_literal
-Fix in lexer.zig `tryParseNumber`: return null when text is just "." (no digits). This is the cleaner fix but has same prerequisite as above.
+### Fix cfg.comp switch (1 spirv-val failure)
+Proper OpSwitch with case labels and SelectionMerge.
 
-### Switch codegen (2 spirv-val failures)
-`cfg.comp` and `cfg-preserve-parameter.comp`. Need proper OpSwitch.
+### Fix partial-write-preserve.frag and type-alias.comp (2 spirv-val failures)
+Function overloading support — both files have overloaded `overload(S0)` and `overload(S1)`.
 
-### Function overloading (2 spirv-val failures)
-`partial-write-preserve.frag` and `type-alias.comp`.
+### Fix texture-proj-shadow.desktop.frag (1 spirv-val failure)
+Shadow sampler types need separate SPIR-V type with Depth=2.
 
-### Shadow samplers (1 spirv-val failure)
-`texture-proj-shadow.desktop.frag` needs `sampler2DShadow`.
+### Fix texture-shadow-lod.frag (1 spirv-val failure)
+OpExtInst word count issue for texture functions with shadow samplers.
+
+### Add more missing GLSL builtins
+- textureSamples/imageSamples (opcode 107, implemented but needs multisample image types)
+- textureOffset, textureGather, etc.
 
 ## LOW PRIORITY
 
 ### Include inlining
 `inlineIncludes` in `tests/runner.zig` works for Ghostty files.
 
-### More sampler types
-`sampler1D`, `sampler3D`, `samplerCube`, `sampler2DShadow`
+### More image/sampler types with correct SPIR-V Dim/Multisampled/Depth parameters
+Currently mapped to sampler2d/image2d which is wrong for many types.
