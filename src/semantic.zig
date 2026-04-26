@@ -1717,6 +1717,33 @@ const Analyzer = struct {
                         });
                         return .{ .ty = .int, .id = result_id };
                     }
+                    // textureSamples(image) / imageSamples(image) → OpImageQuerySamples
+                    if (std.mem.eql(u8, node.data.name, "textureSamples") or std.mem.eql(u8, node.data.name, "imageSamples")) {
+                        var img_id = arg_tids.items[0].id;
+                        if (arg_tids.items[0].ty == .sampler2d) {
+                            const extracted = self.allocId();
+                            const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            ext_ops[0] = .{ .id = arg_tids.items[0].id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .extract_image,
+                                .result_type = null,
+                                .result_id = extracted,
+                                .operands = ext_ops,
+                                .ty = arg_tids.items[0].ty,
+                            });
+                            img_id = extracted;
+                        }
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = img_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_query_samples,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .int,
+                        });
+                        return .{ .ty = .int, .id = result_id };
+                    }
                     // outerProduct(vecN, vecM) → matNxM
                     // Not a GLSL.std.450 instruction — need to compute via VectorTimesScalar
                     if (std.mem.eql(u8, node.data.name, "outerProduct")) {
