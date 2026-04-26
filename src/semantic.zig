@@ -1429,6 +1429,16 @@ const Analyzer = struct {
                         });
                         return .{ .ty = ret_ty, .id = result_id };
                     }
+                    // imageAtomicAdd and other atomics — void stub for now
+                    if (std.mem.eql(u8, node.data.name, "imageAtomicAdd") or
+                        std.mem.eql(u8, node.data.name, "atomicAnd") or
+                        std.mem.eql(u8, node.data.name, "atomicOr") or
+                        std.mem.eql(u8, node.data.name, "atomicXor") or
+                        std.mem.eql(u8, node.data.name, "atomicMin") or
+                        std.mem.eql(u8, node.data.name, "atomicMax"))
+                    {
+                        return .{ .ty = .uint, .id = result_id };
+                    }
                     // imageSize returns ivec2, needs OpImageQuerySize
                     if (std.mem.eql(u8, node.data.name, "imageSize")) {
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
@@ -2436,8 +2446,13 @@ const Analyzer = struct {
             // Barrier/memory builtins (void, special handling)
             "barrier", "memoryBarrier", "memoryBarrierShared",
             "memoryBarrierImage", "memoryBarrierBuffer", "groupMemoryBarrier",
+            // Fragment shader interlock
+            "beginInvocationInterlockARB", "endInvocationInterlockARB",
             // Atomic builtins
             "atomicAdd",
+            "atomicAnd", "atomicOr", "atomicXor", "atomicMin", "atomicMax",
+            "atomicCounter", "atomicCounterIncrement",
+            "imageAtomicAdd",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
@@ -2461,7 +2476,9 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "memoryBarrierShared") or
             std.mem.eql(u8, name, "memoryBarrierImage") or
             std.mem.eql(u8, name, "memoryBarrierBuffer") or
-            std.mem.eql(u8, name, "groupMemoryBarrier");
+            std.mem.eql(u8, name, "groupMemoryBarrier") or
+            std.mem.eql(u8, name, "beginInvocationInterlockARB") or
+            std.mem.eql(u8, name, "endInvocationInterlockARB");
     }
 
     fn isImageSampleBuiltin(self: *Analyzer, name: []const u8) bool {
