@@ -212,6 +212,14 @@ const Analyzer = struct {
             try self.globals.append(self.alloc, .{ .name = "gl_FragColor", .ty = .vec4, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
             try self.declare("gl_FragColor", .{ .kind = .var_sym, .ty = .vec4, .ir_id = id });
         }
+
+        // gl_FragStencilRefARB: Output int (stencil export)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_FragStencilRefARB", .ty = .int, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
+            try self.declare("gl_FragStencilRefARB", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
         // gl_FrontFacing: Input, BuiltIn FrontFacing (bool)
         {
             const id = self.allocId();
