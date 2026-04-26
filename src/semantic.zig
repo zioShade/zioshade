@@ -2589,6 +2589,10 @@ const Analyzer = struct {
             "atomicAnd", "atomicOr", "atomicXor", "atomicMin", "atomicMax",
             "atomicCounter", "atomicCounterIncrement",
             "imageAtomicAdd",
+            // Subgroup / group vote
+            "allInvocationsARB", "anyInvocationARB", "allInvocationsEqualARB",
+            "allInvocations", "anyInvocation", "allInvocationsEqual",
+            "subgroupBarrier", "subgroupElect", "subgroupAll", "subgroupAny", "subgroupAllEqual",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
