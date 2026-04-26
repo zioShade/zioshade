@@ -1248,14 +1248,32 @@ const Analyzer = struct {
                     else => false,
                 };
 
+                // Override result type for matrix-vector multiplication
+                // vec(N) * mat(KxN) = vec(K), mat(MxN) * vec(N) = vec(M)
+                var final_result_ty = result_ty;
+                if (tag == .vec_mat_mul and right.ty.isMatrix()) {
+                    // vec * mat: result has number of columns, element type from the vec
+                    const num_cols = right.ty.numColumns();
+                    const elem = left.ty.elementType();
+                    final_result_ty = switch (num_cols) {
+                        2 => elem.toVec2(),
+                        3 => elem.toVec3(),
+                        4 => elem.toVec4(),
+                        else => result_ty,
+                    };
+                } else if (tag == .mat_vec_mul and left.ty.isMatrix()) {
+                    // mat * vec: result is a column vector (rows of the matrix)
+                    final_result_ty = left.ty.columnType();
+                }
+
                 try self.instructions.append(self.alloc, .{
                     .tag = tag,
                     .result_type = null,
                     .result_id = result_id,
                     .operands = operands,
-                    .ty = if (returns_bool) .bool else result_ty,
+                    .ty = if (returns_bool) .bool else final_result_ty,
                 });
-                return .{ .ty = if (returns_bool) .bool else result_ty, .id = result_id };
+                return .{ .ty = if (returns_bool) .bool else final_result_ty, .id = result_id };
             },
             .unary_op => {
                 if (node.data.children.len < 1) return error.SemanticFailed;

@@ -224,6 +224,35 @@ pub const Type = union(enum) {
             else => self,
         };
     }
+
+    /// For a scalar type, return the vector type with N components.
+    pub fn toVec2(self: Type) Type {
+        return switch (self) {
+            .float => .vec2,
+            .int => .ivec2,
+            .uint => .uvec2,
+            .bool => .bvec2,
+            else => self,
+        };
+    }
+    pub fn toVec3(self: Type) Type {
+        return switch (self) {
+            .float => .vec3,
+            .int => .ivec3,
+            .uint => .uvec3,
+            .bool => .bvec3,
+            else => self,
+        };
+    }
+    pub fn toVec4(self: Type) Type {
+        return switch (self) {
+            .float => .vec4,
+            .int => .ivec4,
+            .uint => .uvec4,
+            .bool => .bvec4,
+            else => self,
+        };
+    }
 };
 
 pub const Qualifier = packed struct {
