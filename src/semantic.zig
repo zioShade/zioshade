@@ -2612,7 +2612,49 @@ const Analyzer = struct {
                         });
                         return .{ .ty = elem_ty, .id = result_id };
                     }
-                    // Multi-component swizzle: for now, return base as fallback
+                    // Multi-component swizzle (e.g., .xyz, .xy, .xz)
+                    // Use OpVectorShuffle to select components
+                    const num_comps = member_name.len;
+                    if (num_comps >= 2 and num_comps <= 4) {
+                        // Determine result type based on component count
+                        const result_ty: ast.Type = switch (base_tid.ty) {
+                            .vec2, .vec3, .vec4 => switch (num_comps) {
+                                2 => .vec2,
+                                3 => .vec3,
+                                4 => .vec4,
+                                else => base_tid.ty,
+                            },
+                            .ivec2, .ivec3, .ivec4 => switch (num_comps) {
+                                2 => .ivec2,
+                                3 => .ivec3,
+                                4 => .ivec4,
+                                else => base_tid.ty,
+                            },
+                            .uvec2, .uvec3, .uvec4 => switch (num_comps) {
+                                2 => .uvec2,
+                                3 => .uvec3,
+                                4 => .uvec4,
+                                else => base_tid.ty,
+                            },
+                            else => base_tid.ty,
+                        };
+                        const result_id = self.allocId();
+                        // vector_shuffle operands: vec1, vec2, literal indices...
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2 + num_comps);
+                        operands[0] = .{ .id = base_tid.id }; // vec1
+                        operands[1] = .{ .id = base_tid.id }; // vec2 (same)
+                        for (member_name, 0..) |c, i| {
+                            operands[2 + i] = .{ .literal_int = self.swizzleIndex(c) };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .vector_shuffle,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = result_ty,
+                        });
+                        return .{ .ty = result_ty, .id = result_id };
+                    }
                     return base_tid;
                 }
 
