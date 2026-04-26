@@ -232,6 +232,28 @@ const Analyzer = struct {
             try self.globals.append(self.alloc, .{ .name = "gl_HelperInvocation", .ty = .bool, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
             try self.declare("gl_HelperInvocation", .{ .kind = .var_sym, .ty = .bool, .ir_id = id });
         }
+        // gl_BaryCoordEXT/gl_BaryCoordNoPerspEXT: Input, BuiltIn BaryCoord (vec3)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_BaryCoordEXT", .ty = .vec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_BaryCoordEXT", .{ .kind = .var_sym, .ty = .vec3, .ir_id = id });
+        }
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_BaryCoordNoPerspEXT", .ty = .vec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_BaryCoordNoPerspEXT", .{ .kind = .var_sym, .ty = .vec3, .ir_id = id });
+        }
+        // NV variants
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_BaryCoordNV", .ty = .vec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_BaryCoordNV", .{ .kind = .var_sym, .ty = .vec3, .ir_id = id });
+        }
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_BaryCoordNoPerspNV", .ty = .vec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_BaryCoordNoPerspNV", .{ .kind = .var_sym, .ty = .vec3, .ir_id = id });
+        }
         // gl_Position: Output, BuiltIn Position
         {
             const id = self.allocId();
@@ -1446,6 +1468,8 @@ const Analyzer = struct {
                     .vec4
                 else if (std.mem.eql(u8, node.data.name, "helperInvocationEXT"))
                     .bool
+                else if (self.isFloatReturnBuiltin(node.data.name))
+                    .float
                 else if (self.isGLSLBuiltin(node.data.name) and arg_tids.items.len > 0)
                     arg_tids.items[0].ty
                 else if (sym) |s| s.ty
@@ -2698,6 +2722,15 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "beginInvocationInterlockARB") or
             std.mem.eql(u8, name, "endInvocationInterlockARB") or
             std.mem.eql(u8, name, "demote");
+    }
+
+    fn isFloatReturnBuiltin(self: *Analyzer, name: []const u8) bool {
+        _ = self;
+        // Builtins that return float regardless of argument type
+        return std.mem.eql(u8, name, "length") or
+            std.mem.eql(u8, name, "distance") or
+            std.mem.eql(u8, name, "dot") or
+            std.mem.eql(u8, name, "determinant");
     }
 
     fn isImageSampleBuiltin(self: *Analyzer, name: []const u8) bool {
