@@ -596,6 +596,10 @@ const Codegen = struct {
 
     // Stub methods — implemented in subsequent tasks
     fn emitTypesAndConstants(self: *Codegen) !void {
+        // Pre-emit common constants needed by atomic operations
+        _ = try self.emitIntConstant(1); // Device scope
+        _ = try self.emitIntConstant(64); // Uniform semantics
+        _ = try self.emitIntConstant(0);
         // First, emit all named struct types from the module
         var type_iter = self.module.types.iterator();
         while (type_iter.next()) |entry| {
@@ -1172,14 +1176,15 @@ const Codegen = struct {
                 const result_id = resolved.result_id orelse return;
                 const ptr_id = self.operandId(resolved, 0);
                 const value_id = self.operandId(resolved, 1);
-                const scope: u32 = switch (resolved.operands[2]) { .literal_int => |v| v, else => 1 };
-                const semantics: u32 = switch (resolved.operands[3]) { .literal_int => |v| v, else => 64 };
+                // Scope and semantics must be IDs referencing OpConstant values
+                const scope_id = try self.emitIntConstant(1); // Device scope
+                const semantics_id = try self.emitIntConstant(64); // Uniform semantics
                 try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.AtomicIAdd)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(ptr_id);
-                try self.emitWord(scope);
-                try self.emitWord(semantics);
+                try self.emitWord(scope_id);
+                try self.emitWord(semantics_id);
                 try self.emitWord(value_id);
             },
             .transpose => {
