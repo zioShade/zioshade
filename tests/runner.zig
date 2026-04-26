@@ -20,6 +20,52 @@ fn log(comptime fmt: []const u8, args: anytype) void {
     std.debug.print(fmt, args);
 }
 
+fn inlineIncludes(alloc: std.mem.Allocator, path: []const u8, source: []const u8) ![]const u8 {
+    // Check if source has #include
+    const include_tag = "#include \"";
+    const start = std.mem.indexOf(u8, source, include_tag) orelse return source;
+
+    // Extract include filename
+    const filename_start = start + include_tag.len;
+    const quote_end = std.mem.indexOfPos(u8, source, filename_start, "\"") orelse return source;
+    const include_filename = source[filename_start..quote_end];
+
+    // Build path relative to the source file's directory
+    var dir_end = path.len;
+    while (dir_end > 0 and path[dir_end - 1] != '/' and path[dir_end - 1] != '\\') dir_end -= 1;
+    const dir = path[0..dir_end];
+
+    var include_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const include_path = std.fmt.bufPrint(&include_path_buf, "{s}{s}", .{ dir, include_filename }) catch return source;
+
+    // Read the include file
+    const include_file = std.fs.cwd().openFile(include_path, .{}) catch return source;
+    defer include_file.close();
+    const include_source = try include_file.readToEndAlloc(alloc, 1024 * 1024);
+    defer alloc.free(include_source);
+
+    // Strip #version line from include source
+    var include_content: []const u8 = include_source;
+    if (std.mem.startsWith(u8, include_content, "#version")) {
+        // Skip until newline
+        if (std.mem.indexOfScalar(u8, include_content, '\n')) |nl| {
+            include_content = include_content[nl + 1..];
+        }
+    }
+
+    // Find end of #include line
+    const line_end = std.mem.indexOfPos(u8, source, quote_end + 1, "\n") orelse source.len;
+
+    // Build result: before + include_content + after
+    const before = source[0..start];
+    const after = source[line_end..];
+    const result = try alloc.alloc(u8, before.len + include_content.len + after.len);
+    @memcpy(result[0..before.len], before);
+    @memcpy(result[before.len..][0..include_content.len], include_content);
+    @memcpy(result[before.len + include_content.len ..], after);
+    return result;
+}
+
 fn testShader(alloc: std.mem.Allocator, path: []const u8) !Result {
     const file = std.fs.cwd().openFile(path, .{}) catch return .skip;
     defer file.close();
@@ -29,7 +75,9 @@ fn testShader(alloc: std.mem.Allocator, path: []const u8) !Result {
     // Skip files that are error-validation tests (contain "// ERROR" markers)
     if (std.mem.indexOf(u8, source, "// ERROR") != null) return .skip;
 
-    const source_z = try alloc.dupeZ(u8, source);
+    // Inline #include directives (simple single-level include)
+    const final_source = inlineIncludes(alloc, path, source) catch source;
+    const source_z = try alloc.dupeZ(u8, final_source);
     defer alloc.free(source_z);
 
     // Detect stage from file extension
