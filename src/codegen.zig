@@ -1031,6 +1031,18 @@ const Codegen = struct {
                 try self.emitWord(2); // Image Operands Mask: Lod
                 try self.emitWord(lod_id);
             },
+            .image_sample_proj => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                // OpImageSampleProjImplicitLod: result_type, result, sampled_image, coordinate
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageSampleProjImplicitLod)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+            },
             .image_fetch => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
@@ -1064,6 +1076,15 @@ const Codegen = struct {
                 const result_id = resolved.result_id orelse return;
                 const image_id = self.operandId(resolved, 0);
                 try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.ImageQuerySize)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(image_id);
+            },
+            .image_query_levels => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const image_id = self.operandId(resolved, 0);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.ImageQueryLevels)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(image_id);
