@@ -339,7 +339,7 @@ const Parser = struct {
             .kw_mat4x3 => { _ = self.advance(); return .mat4x3; },
             .kw_mat4x4 => { _ = self.advance(); return .mat4x4; },
             .kw_sampler_buffer => { _ = self.advance(); return .sampler_buffer; },
-            .kw_sampler2d, .kw_isampler2d, .kw_usampler2d, .kw_sampler2d_array, .kw_sampler3d, .kw_sampler2d_ms, .kw_sampler_cube_array, .kw_isampler_cube, .kw_usampler_cube, .kw_isampler3d, .kw_usampler3d => { _ = self.advance(); return .sampler2d; },
+            .kw_sampler2d, .kw_isampler2d, .kw_usampler2d, .kw_sampler2d_array, .kw_sampler3d, .kw_sampler2d_ms, .kw_sampler_cube_array, .kw_isampler_cube, .kw_usampler_cube, .kw_isampler3d, .kw_usampler3d, .kw_sampler1d, .kw_isampler1d, .kw_usampler1d, .kw_sampler1d_shadow, .kw_sampler_cube_shadow, .kw_sampler2d_array_shadow, .kw_sampler1d_array_shadow, .kw_sampler2d_ms_array, .kw_isampler2d_array, .kw_usampler2d_array, .kw_isampler2d_ms, .kw_usampler2d_ms, .kw_isampler2d_ms_array, .kw_usampler2d_ms_array, .kw_isampler_cube_array, .kw_usampler_cube_array, .kw_sampler2d_rect, .kw_sampler2d_rect_shadow, .kw_sampler1d_array, .kw_isampler1d_array, .kw_usampler1d_array => { _ = self.advance(); return .sampler2d; },
             .kw_sampler2d_shadow => { _ = self.advance(); return .sampler2d; },
             .kw_image_buffer => { _ = self.advance(); return .image_buffer; },
             .kw_image2d => { _ = self.advance(); return .image2d; },

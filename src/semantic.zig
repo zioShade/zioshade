@@ -925,6 +925,11 @@ const Analyzer = struct {
                 try self.emitLoopMerge(merge_label, cond_label);
                 if (node.data.children.len > 0) try self.analyzeStatement(node.data.children[0]);
 
+                // Branch from body to continue/condition label (if body doesn't already return)
+                if (!self.lastInstructionIsReturn()) {
+                    try self.emitBranch(cond_label);
+                }
+
                 try self.emitLabel(cond_label);
                 const cond = try self.analyzeExpression(node.data.children[1]);
                 try self.emitBranchConditional(cond.id, body_label, merge_label);
@@ -2834,6 +2839,8 @@ const Analyzer = struct {
             "unpackSnorm2x16", "unpackUnorm2x16", "unpackHalf2x16",
             "unpackSnorm4x8", "unpackUnorm4x8",
             "imageSize", "imageLoad", "imageStore", "textureSize",
+            "textureSamples", "imageSamples", "textureOffset", "textureLodOffset", "texelFetchOffset", "textureGrad", "textureGather", "textureGatherOffsets",
+            "textureGradOffset", "textureProjLod", "textureProjGrad",
             // Barrier/memory builtins (void, special handling)
             "barrier", "memoryBarrier", "memoryBarrierShared",
             "memoryBarrierImage", "memoryBarrierBuffer", "groupMemoryBarrier",
