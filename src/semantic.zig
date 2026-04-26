@@ -2017,6 +2017,58 @@ const Analyzer = struct {
                 const result_ty = node.data.ty orelse .void;
                 const result_id = self.allocId();
 
+                // Handle scalar-from-vector: float(vec4) → extract first component
+                // This handles the case where .x swizzle was silently dropped
+                if (arg_tids.items.len == 1 and !result_ty.isVector() and !result_ty.isMatrix()) {
+                    const arg_ty = arg_tids.items[0].ty;
+                    if (arg_ty.isVector()) {
+                        // Extract first component from vector
+                        const element_ty = arg_ty.elementType();
+                        const extract_id = self.allocId();
+                        const extract_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        extract_ops[0] = .{ .id = arg_tids.items[0].id };
+                        extract_ops[1] = .{ .literal_int = 0 };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_extract,
+                            .result_type = null,
+                            .result_id = extract_id,
+                            .operands = extract_ops,
+                            .ty = element_ty,
+                        });
+                        // Convert element to target type if needed
+                        if (std.meta.eql(element_ty, result_ty)) {
+                            return .{ .ty = result_ty, .id = extract_id };
+                        }
+                        // Type conversion (e.g., float → int)
+                        const conv_tag: ir.Instruction.Tag = blk: {
+                            if (result_ty == .int) {
+                                if (element_ty == .float or element_ty == .double) break :blk .convert_ftoi;
+                                if (element_ty == .uint) break :blk .convert_uti;
+                            }
+                            if (result_ty == .uint) {
+                                if (element_ty == .float or element_ty == .double) break :blk .convert_ftou;
+                                if (element_ty == .int) break :blk .convert_iti;
+                            }
+                            if (result_ty == .float) {
+                                if (element_ty == .int) break :blk .convert_itof;
+                                if (element_ty == .uint) break :blk .convert_utof;
+                            }
+                            break :blk .convert_ftoi;
+                        };
+                        const conv_id = self.allocId();
+                        const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        conv_ops[0] = .{ .id = extract_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = conv_tag,
+                            .result_type = null,
+                            .result_id = conv_id,
+                            .operands = conv_ops,
+                            .ty = result_ty,
+                        });
+                        return .{ .ty = result_ty, .id = conv_id };
+                    }
+                }
+
                 // Handle scalar-to-vector splat: vec4(1.0) → CompositeConstruct with N copies
                 // Handle vector conversion: vec4(ivec4_var) → ConvertUToF / ConvertSToF
                 if (arg_tids.items.len == 1 and result_ty.isVector()) {
