@@ -2525,11 +2525,13 @@ const Analyzer = struct {
                 const lval = try self.analyzeLValue(node.data.children[0]);
                 // Load current value
                 const loaded_id = self.allocId();
+                const load_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                load_ops[0] = .{ .id = lval.id };
                 try self.instructions.append(self.alloc, .{
                     .tag = .load,
                     .result_type = null,
                     .result_id = loaded_id,
-                    .operands = &.{.{ .id = lval.id }},
+                    .operands = load_ops,
                     .ty = lval.ty,
                 });
                 // Create constant 1
