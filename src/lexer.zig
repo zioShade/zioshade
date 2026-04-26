@@ -128,6 +128,7 @@ pub const Token = struct {
         pp_pragma,
         pp_line,
         pp_extension,
+        pp_include,
 
         // Operators
         l_paren,
@@ -304,6 +305,7 @@ fn makePPDirectiveMap() PPDirectiveMap {
         .{ "pragma", .pp_pragma },
         .{ "line", .pp_line },
         .{ "extension", .pp_extension },
+        .{ "include", .pp_include },
     });
 }
 
