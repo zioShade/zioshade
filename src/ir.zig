@@ -84,6 +84,7 @@ pub const Instruction = struct {
         rem,
         fadd,
         fsub,
+        fmod,
         fmul,
         mat_vec_mul,
         vec_mat_mul,
