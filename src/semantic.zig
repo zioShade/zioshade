@@ -310,6 +310,13 @@ const Analyzer = struct {
             try self.declare("gl_NumWorkGroups", .{ .kind = .var_sym, .ty = .uvec3, .ir_id = id });
         }
 
+        // gl_WorkGroupSize: constant (from layout local_size_x/y/z)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_WorkGroupSize", .ty = .uvec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_WorkGroupSize", .{ .kind = .var_sym, .ty = .uvec3, .ir_id = id });
+        }
+
         // gl_LocalInvocationIndex: Input, BuiltIn LocalInvocationIndex (uint)
         {
             const id = self.allocId();
@@ -327,11 +334,42 @@ const Analyzer = struct {
             try self.declare("gl_SampleMaskIn", .{ .kind = .var_sym, .ty = sample_mask_ty, .ir_id = id });
         }
 
+        // gl_SampleMask: Output, BuiltIn SampleMask (array of int)
+        {
+            const id = self.allocId();
+            const sm_base = try self.alloc.create(ast.Type);
+            sm_base.* = .int;
+            const smask_ty: ast.Type = .{ .array = .{ .base = sm_base, .size = 1 } };
+            try self.globals.append(self.alloc, .{ .name = "gl_SampleMask", .ty = smask_ty, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
+            try self.declare("gl_SampleMask", .{ .kind = .var_sym, .ty = smask_ty, .ir_id = id });
+        }
+
         // gl_SamplePosition: Input, BuiltIn SamplePosition (vec2)
         {
             const id = self.allocId();
             try self.globals.append(self.alloc, .{ .name = "gl_SamplePosition", .ty = .vec2, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
             try self.declare("gl_SamplePosition", .{ .kind = .var_sym, .ty = .vec2, .ir_id = id });
+        }
+
+        // gl_SampleID: Input, BuiltIn SampleId (int)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_SampleID", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_SampleID", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
+        // gl_SubgroupInvocationID: Input, BuiltIn SubgroupLocalInvocationId (int)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_SubgroupInvocationID", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_SubgroupInvocationID", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
+        // gl_SubgroupSize: Input, BuiltIn SubgroupSize (int)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_SubgroupSize", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_SubgroupSize", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
         }
 
         // gl_ViewIndex: Input, BuiltIn ViewIndex (int)
@@ -1000,6 +1038,7 @@ const Analyzer = struct {
                 // Vector swizzle write (single component): v.x = val
                 if (base_lv.ty.isVector() and member_name.len == 1) {
                     const idx = self.swizzleIndex(member_name[0]);
+                    const elem_ty = base_lv.ty.elementType();
                     const ptr_id = self.allocId();
                     const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                     operands[0] = .{ .id = base_lv.id };
@@ -1009,9 +1048,9 @@ const Analyzer = struct {
                         .result_type = null,
                         .result_id = ptr_id,
                         .operands = operands,
-                        .ty = .float,
+                        .ty = elem_ty,
                     });
-                    return .{ .ty = .float, .id = ptr_id, .is_ptr = true };
+                    return .{ .ty = elem_ty, .id = ptr_id, .is_ptr = true };
                 }
                 last_error_ctx = "invalid-assign";
                 return error.InvalidAssignment;
@@ -2495,17 +2534,36 @@ const Analyzer = struct {
 
                 var base_tid = try self.analyzeExpression(node.data.children[0]);
 
-                // Handle vector swizzles (e.g., vec4.x)
-                // Only for value-based vectors (not pointers to vectors)
-                if (base_tid.ty.isVector() and !base_tid.is_ptr) return .{ .ty = .float, .id = self.allocId() };
-                // For pointer-to-vector, load first then extract
-                if (base_tid.ty.isVector() and base_tid.is_ptr) {
-                    const ld = self.allocId();
-                    const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                    ops[0] = .{ .id = base_tid.id };
-                    try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = base_tid.ty });
-                    base_tid = .{ .ty = base_tid.ty, .id = ld };
-                    return .{ .ty = .float, .id = self.allocId() };
+                // Handle vector swizzles (e.g., vec4.x, uvec3.y)
+                if (base_tid.ty.isVector()) {
+                    // If pointer to vector, load first
+                    if (base_tid.is_ptr) {
+                        const ld = self.allocId();
+                        const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        ops[0] = .{ .id = base_tid.id };
+                        try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = base_tid.ty });
+                        base_tid = .{ .ty = base_tid.ty, .id = ld };
+                    }
+                    const member_name = node.data.name;
+                    const elem_ty = base_tid.ty.elementType();
+                    // Single-component swizzle (e.g., .x, .y)
+                    if (member_name.len == 1) {
+                        const idx = self.swizzleIndex(member_name[0]);
+                        const result_id = self.allocId();
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        operands[0] = .{ .id = base_tid.id };
+                        operands[1] = .{ .literal_int = idx };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_extract,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = elem_ty,
+                        });
+                        return .{ .ty = elem_ty, .id = result_id };
+                    }
+                    // Multi-component swizzle: for now, return base as fallback
+                    return base_tid;
                 }
 
                 // Handle struct member access
