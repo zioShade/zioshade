@@ -1104,6 +1104,10 @@ const Analyzer = struct {
                     }
                     return .{ .ty = sym.ty, .id = sym.ir_id };
                 }
+                // Handle void builtins used as statements (e.g., demote)
+                if (self.isBarrierBuiltin(node.data.name)) {
+                    return .{ .ty = .void, .id = 0 };
+                }
                 last_error_ctx = node.data.name;
                 return error.UndeclaredIdentifier;
             },
@@ -1440,6 +1444,8 @@ const Analyzer = struct {
                     .vec4
                 else if (std.mem.eql(u8, node.data.name, "texelFetch"))
                     .vec4
+                else if (std.mem.eql(u8, node.data.name, "helperInvocationEXT"))
+                    .bool
                 else if (self.isGLSLBuiltin(node.data.name) and arg_tids.items.len > 0)
                     arg_tids.items[0].ty
                 else if (sym) |s| s.ty
@@ -1451,6 +1457,20 @@ const Analyzer = struct {
                     if (self.isBarrierBuiltin(node.data.name)) {
                         // Emit a no-op (void) — TODO: proper OpControlBarrier/OpMemoryBarrier
                         return .{ .ty = .void, .id = result_id };
+                    }
+                    // helperInvocationEXT() returns bool (constant false for now)
+                    if (std.mem.eql(u8, node.data.name, "helperInvocationEXT")) {
+                        const bool_val = self.allocId();
+                        const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        ops[0] = .{ .literal_int = 0 };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .constant_bool,
+                            .result_type = null,
+                            .result_id = bool_val,
+                            .operands = ops,
+                            .ty = .bool,
+                        });
+                        return .{ .ty = .bool, .id = bool_val };
                     }
                     // atomicAdd(ptr, value) → OpAtomicIAdd
                     if (std.mem.eql(u8, node.data.name, "atomicAdd")) {
@@ -2584,6 +2604,10 @@ const Analyzer = struct {
             "memoryBarrierImage", "memoryBarrierBuffer", "groupMemoryBarrier",
             // Fragment shader interlock
             "beginInvocationInterlockARB", "endInvocationInterlockARB",
+            // Demote helper invocation
+            "demote",
+            // Helper invocation query (returns bool)
+            "helperInvocationEXT",
             // Atomic builtins
             "atomicAdd",
             "atomicAnd", "atomicOr", "atomicXor", "atomicMin", "atomicMax",
@@ -2618,7 +2642,8 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "memoryBarrierBuffer") or
             std.mem.eql(u8, name, "groupMemoryBarrier") or
             std.mem.eql(u8, name, "beginInvocationInterlockARB") or
-            std.mem.eql(u8, name, "endInvocationInterlockARB");
+            std.mem.eql(u8, name, "endInvocationInterlockARB") or
+            std.mem.eql(u8, name, "demote");
     }
 
     fn isImageSampleBuiltin(self: *Analyzer, name: []const u8) bool {
