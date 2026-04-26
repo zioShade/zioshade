@@ -75,6 +75,7 @@ pub const Op = enum(u16) {
     FSub = 131,
     IMul = 132,
     FMul = 133,
+    FMod = 141,
     UDiv = 134,
     SDiv = 135,
     FDiv = 136,

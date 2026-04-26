@@ -839,6 +839,7 @@ const Codegen = struct {
             .rem => try self.emitBinOp(spirv.Op.SRem, resolved),
             .fadd => try self.emitBinOp(spirv.Op.FAdd, resolved),
             .fsub => try self.emitBinOp(spirv.Op.FSub, resolved),
+            .fmod => try self.emitBinOp(spirv.Op.FMod, resolved),
             .fmul => try self.emitBinOp(spirv.Op.FMul, resolved),
             .mat_vec_mul => try self.emitBinOp(spirv.Op.MatrixTimesVector, resolved),
             .vec_mat_mul => try self.emitBinOp(spirv.Op.VectorTimesMatrix, resolved),

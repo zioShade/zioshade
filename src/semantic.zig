@@ -1585,6 +1585,22 @@ const Analyzer = struct {
                 const result_id = self.allocId();
 
                 if (self.isGLSLBuiltin(node.data.name)) {
+                    // mod(x, y) → OpFMod (core SPIR-V, not GLSL.std.450)
+                    if (std.mem.eql(u8, node.data.name, "mod")) {
+                        const ret_ty = if (arg_tids.items.len > 0) arg_tids.items[0].ty else .float;
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .fmod,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = ret_ty,
+                        });
+                        return .{ .ty = ret_ty, .id = result_id };
+                    }
                     // Barrier/memory functions — void, no SPIR-V instruction needed for now
                     if (self.isBarrierBuiltin(node.data.name)) {
                         // Emit a no-op (void) — TODO: proper OpControlBarrier/OpMemoryBarrier
@@ -2971,7 +2987,7 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "inversesqrt")) return 32; // InverseSqrt
         if (std.mem.eql(u8, name, "determinant")) return 33; // Determinant
         if (std.mem.eql(u8, name, "inverse")) return 34; // MatrixInverse
-        if (std.mem.eql(u8, name, "mod")) return 31; // FMod
+        if (std.mem.eql(u8, name, "mod")) return 29; // Log2 (unused, mod has special handler)
         if (std.mem.eql(u8, name, "modf")) return 36; // ModfStruct (returns struct)
         if (std.mem.eql(u8, name, "min")) return 37; // FMin
         if (std.mem.eql(u8, name, "max")) return 40; // FMax
