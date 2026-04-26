@@ -322,6 +322,8 @@ const Analyzer = struct {
         try self.declare("texture", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
         try self.declare("texture2D", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
         try self.declare("textureLod", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
+        try self.declare("textureProj", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
+        try self.declare("textureQueryLevels", .{ .kind = .func, .ty = .int, .ir_id = self.allocId() });
         try self.declare("texelFetch", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
     }
 
@@ -1388,6 +1390,34 @@ const Analyzer = struct {
                         });
                         return .{ .ty = .ivec2, .id = result_id };
                     }
+                    // textureQueryLevels(sampler) → int, uses OpImageQueryLevels
+                    if (std.mem.eql(u8, node.data.name, "textureQueryLevels")) {
+                        // Need to extract image from sampler first
+                        var img_id = arg_tids.items[0].id;
+                        if (arg_tids.items[0].ty == .sampler2d) {
+                            const extracted = self.allocId();
+                            const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            ext_ops[0] = .{ .id = arg_tids.items[0].id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .extract_image,
+                                .result_type = null,
+                                .result_id = extracted,
+                                .operands = ext_ops,
+                                .ty = arg_tids.items[0].ty,
+                            });
+                            img_id = extracted;
+                        }
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = img_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_query_levels,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .int,
+                        });
+                        return .{ .ty = .int, .id = result_id };
+                    }
                     // outerProduct(vecN, vecM) → matNxM
                     // Not a GLSL.std.450 instruction — need to compute via VectorTimesScalar
                     if (std.mem.eql(u8, node.data.name, "outerProduct")) {
@@ -1425,7 +1455,8 @@ const Analyzer = struct {
                         if (self.isImageSampleBuiltin(node.data.name)) {
                             // texture(sampler, coord) → image_sample (implicit or explicit lod)
                             const is_explicit_lod = std.mem.eql(u8, node.data.name, "textureLod");
-                            const tag: ir.Instruction.Tag = if (is_explicit_lod) .image_sample_explicit_lod else .image_sample;
+                            const is_proj = std.mem.eql(u8, node.data.name, "textureProj");
+                            const tag: ir.Instruction.Tag = if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else .image_sample;
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                             for (arg_tids.items, 0..) |tid, i| {
                                 operands[i] = .{ .id = tid.id };
@@ -2277,7 +2308,8 @@ const Analyzer = struct {
             "mod", "normalize", "pow", "radians", "reflect", "refract",
             "round", "roundEven", "sign", "sin", "sinh", "smoothstep", "sqrt", "step",
             "tan", "tanh", "transpose", "trunc",
-            "texture", "texture2D", "textureLod", "texelFetch",
+            "texture", "texture2D", "textureLod", "textureProj", "texelFetch",
+            "textureQueryLevels",
             "dFdx", "dFdy",
             "isnan", "isinf",
             // Additional GLSL builtins
@@ -2308,6 +2340,7 @@ const Analyzer = struct {
         return std.mem.eql(u8, name, "texture") or
             std.mem.eql(u8, name, "texture2D") or
             std.mem.eql(u8, name, "textureLod") or
+            std.mem.eql(u8, name, "textureProj") or
             std.mem.eql(u8, name, "texelFetch");
     }
 
@@ -2325,7 +2358,8 @@ const Analyzer = struct {
         _ = self;
         return std.mem.eql(u8, name, "texture") or
             std.mem.eql(u8, name, "texture2D") or
-            std.mem.eql(u8, name, "textureLod");
+            std.mem.eql(u8, name, "textureLod") or
+            std.mem.eql(u8, name, "textureProj");
     }
 
     fn glslExtInstruction(self: *Analyzer, name: []const u8) ?u32 {
