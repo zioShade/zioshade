@@ -1,31 +1,30 @@
 const std = @import("std");
 const lexer = @import("src/lexer.zig");
 const parser = @import("src/parser.zig");
+const semantic_mod = @import("src/semantic.zig");
+const fs = std.fs;
 
 pub fn main() !void {
-    const source = "void main() { float a = 1.0; float b = 2.0; float c = a + b; }";
     const alloc = std.heap.page_allocator;
-    const tokens = try lexer.tokenize(alloc, source);
+    const file = try fs.cwd().openFile("tests/spirv-cross/pixel-interlock-ordered.frag", .{});
+    defer file.close();
+    const src = try file.readToEndAlloc(alloc, 10*1024*1024);
+    defer alloc.free(src);
+    const srcz = try alloc.dupeZ(u8, src);
+    defer alloc.free(srcz);
+
+    const tokens = try lexer.tokenize(alloc, srcz);
     defer alloc.free(tokens);
-    var root = try parser.parse(alloc, source, tokens);
-    defer parser.freeTree(alloc, &root);
-    
-    const func = root.body[0];
-    std.debug.print("Function has {} children\n", .{func.data.children.len});
-    
-    // Check third statement (float c = a + b;)
-    if (func.data.children.len >= 3) {
-        const stmt3 = func.data.children[2];
-        std.debug.print("Statement 3 tag: {}\n", .{stmt3.tag});
-        if (stmt3.data.children.len > 0) {
-            const init = stmt3.data.children[0];
-            std.debug.print("Initializer tag: {}\n", .{init.tag});
-            std.debug.print("Initializer children len: {}\n", .{init.data.children.len});
-            if (init.data.children.len >= 2) {
-                const left = init.data.children[0];
-                const right = init.data.children[1];
-                std.debug.print("Left tag: {}, Right tag: {}\n", .{left.tag, right.tag});
-            }
-        }
-    }
+    std.debug.print("Tokens: {d}\n", .{tokens.len});
+
+    var root_node = try parser.parse(alloc, srcz, tokens);
+    defer parser.freeTree(alloc, &root_node);
+    std.debug.print("AST body nodes: {d}\n", .{root_node.body.len});
+
+    var module = semantic_mod.analyze(alloc, &root_node) catch {
+        std.debug.print("\nSemantic FAILED: ctx={s} inner={s}\n", .{semantic_mod.last_error_ctx, semantic_mod.last_error_inner});
+        return;
+    };
+    defer module.deinit();
+    std.debug.print("\nSemantic SUCCESS!\n", .{});
 }
