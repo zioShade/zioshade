@@ -53,6 +53,7 @@ pub const Op = enum(u16) {
     ImageQuerySizeLod = 103,
     ImageQuerySize = 104,
     ImageQueryLevels = 106,
+    ImageQuerySamples = 107,
     ImageRead = 98,
     ImageWrite = 99,
     AtomicIAdd = 234,
