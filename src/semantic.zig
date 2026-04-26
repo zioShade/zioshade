@@ -366,6 +366,7 @@ const Analyzer = struct {
             "exp",   "exp2",  "floor", "fract",
             "inversesqrt", "length", "log", "log2",
             "max",   "min",   "mix",       "mod",
+            "min3", "max3", "mid3",
             "pow",   "radians", "round", "sign",
             "sin",       "sinh",
             "smoothstep", "sqrt", "step",  "tan",     "tanh",
@@ -1779,6 +1780,97 @@ const Analyzer = struct {
                                 .ty = result_ty,
                             });
                         }
+                    } else if (std.mem.eql(u8, node.data.name, "min3") or std.mem.eql(u8, node.data.name, "max3") or std.mem.eql(u8, node.data.name, "mid3")) {
+                        // min3(a, b, c) = min(min(a, b), c)
+                        // max3(a, b, c) = max(max(a, b), c)
+                        // mid3(a, b, c) = mid3 uses chained comparisons
+                        // Determine min/max instruction based on argument type
+                        const min_inst: u32 = switch (result_ty) {
+                            .int, .ivec2, .ivec3, .ivec4 => 39, // SMin
+                            .uint, .uvec2, .uvec3, .uvec4 => 38, // UMin
+                            else => 37, // FMin
+                        };
+                        const max_inst: u32 = switch (result_ty) {
+                            .int, .ivec2, .ivec3, .ivec4 => 42, // SMax
+                            .uint, .uvec2, .uvec3, .uvec4 => 41, // UMax
+                            else => 40, // FMax
+                        };
+                        const inner_inst: u32 = if (std.mem.eql(u8, node.data.name, "max3")) max_inst else min_inst;
+                        if (arg_tids.items.len >= 3) {
+                            // inner = min/max(a, b)
+                            const inner_id = self.allocId();
+                            const inner_ops = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                            inner_ops[0] = .{ .literal_int = inner_inst };
+                            inner_ops[1] = .{ .id = arg_tids.items[0].id };
+                            inner_ops[2] = .{ .id = arg_tids.items[1].id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .ext_inst,
+                                .result_type = null,
+                                .result_id = inner_id,
+                                .operands = inner_ops,
+                                .ty = result_ty,
+                            });
+                            if (std.mem.eql(u8, node.data.name, "mid3")) {
+                                // mid3(a,b,c): a < b ? (b < c ? b : (a < c ? c : a)) : (a < c ? a : (b < c ? c : b))
+                                // Simpler: min(max(a,b), c) where c = max(min(a,b), min(max(a,b),c))
+                                // Actually simplest: sort via min/max: mid = a + b + c - min(a,b,c) - max(a,b,c)
+                                // But SPIR-V doesn't have min3/max3. Let's use chained ops:
+                                // mid3(a,b,c) = max(min(a,b), min(max(a,b),c))
+                                const max_ab_id = self.allocId();
+                                const max_ab_ops = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                                max_ab_ops[0] = .{ .literal_int = max_inst }; // SMax/FMax
+                                max_ab_ops[1] = .{ .id = arg_tids.items[0].id };
+                                max_ab_ops[2] = .{ .id = arg_tids.items[1].id };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .ext_inst,
+                                    .result_type = null,
+                                    .result_id = max_ab_id,
+                                    .operands = max_ab_ops,
+                                    .ty = result_ty,
+                                });
+                                const min_ab_id = inner_id; // already computed min(a,b)
+                                const min_maxbc_id = self.allocId();
+                                const min_maxbc_ops = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                                min_maxbc_ops[0] = .{ .literal_int = min_inst }; // SMin/FMin
+                                min_maxbc_ops[1] = .{ .id = max_ab_id };
+                                min_maxbc_ops[2] = .{ .id = arg_tids.items[2].id };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .ext_inst,
+                                    .result_type = null,
+                                    .result_id = min_maxbc_id,
+                                    .operands = min_maxbc_ops,
+                                    .ty = result_ty,
+                                });
+                                // result = max(min_ab, min(max_ab, c))
+                                const mid_ops = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                                mid_ops[0] = .{ .literal_int = max_inst }; // SMax/FMax
+                                mid_ops[1] = .{ .id = min_ab_id };
+                                mid_ops[2] = .{ .id = min_maxbc_id };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .ext_inst,
+                                    .result_type = null,
+                                    .result_id = result_id,
+                                    .operands = mid_ops,
+                                    .ty = result_ty,
+                                });
+                            } else {
+                                // min3/max3: outer = min/max(inner, c)
+                                const outer_ops = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                                outer_ops[0] = .{ .literal_int = inner_inst };
+                                outer_ops[1] = .{ .id = inner_id };
+                                outer_ops[2] = .{ .id = arg_tids.items[2].id };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .ext_inst,
+                                    .result_type = null,
+                                    .result_id = result_id,
+                                    .operands = outer_ops,
+                                    .ty = result_ty,
+                                });
+                            }
+                        } else {
+                            return .{ .ty = result_ty, .id = result_id };
+                        }
+                        return .{ .ty = result_ty, .id = result_id };
                     } else if (std.mem.eql(u8, node.data.name, "modf") or std.mem.eql(u8, node.data.name, "frexp")) {
                         // modf(x, ptr) → GLSL.std.450 Modf (#35): returns fractional, stores int via ptr
                         // frexp(x, ptr) → GLSL.std.450 Frexp (#51): returns mantissa, stores exp via ptr
@@ -2446,6 +2538,7 @@ const Analyzer = struct {
             "cos", "cosh", "cross", "degrees", "determinant", "distance",
             "dot", "exp", "exp2", "faceforward", "floor", "fract",
             "inversesqrt", "length", "log", "log2", "max", "min", "mix",
+            "min3", "max3", "mid3",
             "mod", "normalize", "pow", "radians", "reflect", "refract",
             "round", "roundEven", "sign", "sin", "sinh", "smoothstep", "sqrt", "step",
             "tan", "tanh", "transpose", "trunc",
