@@ -535,6 +535,8 @@ const Codegen = struct {
                 // gl_FragColor is deprecated, no standard BuiltIn — skip decoration
             } else if (std.mem.eql(u8, global.name, "gl_FrontFacing")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.front_facing));
+            } else if (std.mem.eql(u8, global.name, "gl_HelperInvocation")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.helper_invocation));
             }
             if (std.mem.eql(u8, global.name, "gl_Position")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.position));

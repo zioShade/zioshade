@@ -150,6 +150,7 @@ pub const BuiltIn = enum(u32) {
     viewport_index = 10,
     frag_coord = 15,
     front_facing = 17,
+    helper_invocation = 23,
     num_workgroups = 24,
     workgroup_id = 26,
     global_invocation_id = 28,
