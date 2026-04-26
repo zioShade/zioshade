@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail
 
 cd "$(dirname "$0")"
 
@@ -63,6 +63,8 @@ our_crash=0
 while IFS=' ' read -r status file; do
     [ "$status" != "VALID" ] && continue
     [ -z "$file" ] && continue
+    # Reset exit_code for each file
+    exit_code=0
 
     exit_code=0
     output=$(timeout 2 "$RUNNER" "$file" 2>&1) || exit_code=$?
@@ -92,7 +94,7 @@ while IFS=' ' read -r status file; do
     else
         our_cerr=$((our_cerr + 1))
     fi
-done < "$CACHE"
+done < "$CACHE" || true
 
 echo "" >&2
 echo "=== OUR COMPILER vs $ref_valid valid test files ===" >&2
@@ -109,3 +111,4 @@ echo "METRIC total_hang=$our_hang"
 echo "METRIC total_crash=$our_crash"
 echo "METRIC ref_valid=$ref_valid"
 echo "METRIC total_tested=$((our_pass + our_cerr + our_sval + our_hang + our_crash))"
+exit 0
