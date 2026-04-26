@@ -553,7 +553,7 @@ const Codegen = struct {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.layer));
             }
             if (false and std.mem.eql(u8, global.name, "gl_ViewportIndex")) {
-                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.viewport_index));
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.view_index));
             }
             if (std.mem.eql(u8, global.name, "gl_GlobalInvocationID")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.global_invocation_id));
@@ -567,6 +567,15 @@ const Codegen = struct {
             if (std.mem.eql(u8, global.name, "gl_NumWorkGroups")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.num_workgroups));
             }
+            if (std.mem.eql(u8, global.name, "gl_LocalInvocationIndex")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.local_invocation_index));
+            }
+            // Skip BuiltIn decoration for builtins requiring extra capabilities
+            // gl_SampleMaskIn, gl_SamplePosition → SampleRateShading
+            // gl_ViewIndex → MultiView
+            // gl_DeviceIndex → DeviceGroup
+            // gl_BaseVertex, gl_BaseVertexARB → DrawParameters
+            // gl_VertexIndex → already covered by gl_VertexID
             // Decorate uniform block types with Block
             if (global.storage_class == .uniform) {
                 if (global.ty == .named) {
