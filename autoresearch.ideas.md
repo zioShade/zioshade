@@ -1,69 +1,45 @@
 # Autoresearch Ideas
 
-## HIGH PRIORITY — Swizzle Fix (est. +15-20 passes if done right)
+## HIGH PRIORITY — Parser Dot Tokenization Bug
 
 ### Root Cause
 The tokenizer returns bare `.` as `double_literal` (len=1, text=".") because `tryParseNumber` returns non-null for `has_dot=true, has_digit=false`. This means `v.x` is tokenized as `v` (identifier) + `.` (double_literal) + `x` (identifier). The `.dot` handler in the parser is never reached.
 
-### Parser Fix (verified working)
-In parsePostfix, add `.double_literal` to the `.dot` case. When the double_literal text is exactly ".", treat it as the dot operator:
-```zig
-.dot, .double_literal => {
-    if (self.current().tag == .double_literal) {
-        const tok_text = self.text(self.current());
-        if (tok_text.len != 1 or tok_text[0] != '.') break;
-    }
-    _ = self.advance(); // consume '.'
-    const member_tok = self.current();
-    _ = self.advance(); // consume member name
-    ...
-```
+### Why Parser-Only Fix Causes Regressions
+Fixing the parser to handle `double_literal` with text "." as the dot operator makes `ssbo1.a` parse correctly (member_access). Previously, `ssbo1.a` failed to parse (because `.` was `double_literal`, not `dot`) and the entire statement was dropped by error recovery. Files like `enhanced-layouts.comp` passed with empty main() functions.
 
-### Semantic Fix (verified working)
-- Single-component swizzle (`.x`): OpCompositeExtract — WORKS, produces valid SPIR-V
-- Multi-component swizzle (`.xy`): OpVectorShuffle — WORKS, produces valid SPIR-V
-- Added `toVec2()`/`toVec3()` to ast.Type for VectorShuffle result types
+With the parser fix, these statements now parse correctly, but the semantic analyzer fails because:
+1. `analyzeExpression` loads the entire struct variable as a value (OpLoad on the whole buffer block)
+2. Then tries composite_extract to get member — but SPIR-V can't load an entire buffer block
+3. The lvalue path for `ssbo1.a = val` also fails because the base is a loaded value, not a pointer
 
-### Why it Regresses 12-17 passes
-Files that previously had swizzle statements SILENTLY DROPPED by parser error recovery now fail because:
-1. Swizzle on non-vector types (matrices, function return values) — semantic returns base_tid which may cause type mismatch
-2. Files using `gl_BaryCoordEXT` (vec3) which isn't declared as a variable
-3. Two files crash with "Invalid free" during deinit — memory corruption from codegen
+### Prerequisites for Swizzle Fix
+Before applying the parser fix, we need to fix struct member access in the semantic analyzer:
+1. For `base.named` expressions where the base came from loading a pointer to a named type, use OpAccessChain instead of OpCompositeExtract
+2. For lvalue member access, keep the base as a pointer (don't load it)
+3. Only then apply the parser + semantic swizzle fix
 
-### To Make It Work
-1. Fix the 2 crashes: `dowhile.comp` and `torture-loop.comp` — need to debug memory corruption
-2. Handle member_access on non-vector types gracefully (return appropriate type)
-3. Accept that some previously-passing files will now fail differently (net improvement should still be positive)
-
-### Experiment Results
-- Phantom IDs (no VectorShuffle): 120→103 (-17)
-- With VectorShuffle: 120→108 (-12)
-- With VectorShuffle + crash protection: 120→108 (-12) still crashes
+### Estimated Impact
++11-20 net passes (11 new from swizzle, minus 0 regressions after prerequisites are fixed)
 
 ## MEDIUM PRIORITY
 
+### Fix lexer: bare '.' should be dot, not double_literal
+Fix in lexer.zig `tryParseNumber`: return null when text is just "." (no digits). This is the cleaner fix but has same prerequisite as above.
+
 ### Switch codegen (2 spirv-val failures)
-`cfg.comp` and `cfg-preserve-parameter.comp`. Need proper OpSwitch with case labels. Break inside switch needs a switch_stack (like loop_stack). Previous attempts all regressed 3+ files.
+`cfg.comp` and `cfg-preserve-parameter.comp`. Need proper OpSwitch.
 
 ### Function overloading (2 spirv-val failures)
-`partial-write-preserve.frag` and `type-alias.comp`. Need type-aware function dispatch — match function by parameter types.
+`partial-write-preserve.frag` and `type-alias.comp`.
 
 ### Shadow samplers (1 spirv-val failure)
-`texture-proj-shadow.desktop.frag` needs `sampler2DShadow` type.
-
-### Texture offset builtins
-Adding `textureLodOffset`, `texelFetchOffset` etc. caused 1 regression. Need to investigate why — might be that files using these functions now produce different (wrong) SPIR-V.
+`texture-proj-shadow.desktop.frag` needs `sampler2DShadow`.
 
 ## LOW PRIORITY
 
-### Scalar-from-vector type conversion
-`int(vec4)` and `float(vec4)` now extract first component via OpCompositeExtract. Committed at fc16688. No pass count improvement but correct behavior.
-
-### OpVectorShuffle infrastructure
-Working implementation exists — used for multi-component swizzle and matrix column shrinking. Proven to produce valid SPIR-V.
-
 ### Include inlining
-`inlineIncludes` in `tests/runner.zig` works for Ghostty files. Blocked by swizzle (common.glsl has swizzle operations).
+`inlineIncludes` in `tests/runner.zig` works for Ghostty files.
 
 ### More sampler types
 `sampler1D`, `sampler3D`, `samplerCube`, `sampler2DShadow`
