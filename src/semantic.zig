@@ -582,19 +582,55 @@ const Analyzer = struct {
         const func_sym = self.lookup(node.data.name);
         const func_ir_id = if (func_sym) |sym| sym.ir_id else self.allocId();
 
+        self.instructions.clearRetainingCapacity();
+
         var param_ids = std.ArrayListUnmanaged(u32){};
         defer param_ids.deinit(self.alloc);
         for (node.data.params) |param| {
             const pid = self.allocId();
             try param_ids.append(self.alloc, pid);
-            try self.declare(param.name, .{
-                .kind = .param,
-                .ty = param.ty,
-                .ir_id = pid,
-            });
+
+            const is_mutable = if (param.qualifier) |q| (q.is_inout or q.is_out) else false;
+
+            if (is_mutable) {
+                // For inout/out params: create a local variable and copy param value into it
+                // This makes the param mutable inside the function body
+                const var_id = self.allocId();
+                const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                sc_operands[0] = .{ .literal_int = 7 }; // Function storage class
+                try self.instructions.append(self.alloc, .{
+                    .tag = .local_variable,
+                    .result_type = null,
+                    .result_id = var_id,
+                    .operands = sc_operands,
+                    .ty = param.ty,
+                });
+                // Copy parameter value into the local variable
+                const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                store_ops[0] = .{ .id = var_id };
+                store_ops[1] = .{ .id = pid };
+                try self.instructions.append(self.alloc, .{
+                    .tag = .store,
+                    .result_type = null,
+                    .result_id = null,
+                    .operands = store_ops,
+                    .ty = param.ty,
+                });
+                try self.declare(param.name, .{
+                    .kind = .var_sym,
+                    .ty = param.ty,
+                    .ir_id = var_id,
+                });
+            } else {
+                try self.declare(param.name, .{
+                    .kind = .param,
+                    .ty = param.ty,
+                    .ir_id = pid,
+                });
+            }
         }
 
-        self.instructions.clearRetainingCapacity();
+        // Note: instructions already contain param init stores, don't clear them
 
         for (node.data.children) |child| {
             try self.analyzeStatement(child);
