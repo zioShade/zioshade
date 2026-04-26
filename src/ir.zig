@@ -125,6 +125,7 @@ pub const Instruction = struct {
         outer_product,
         dot,
         derivative,
+        fwidth,
         return_val,
         return_void,
         unreachable_inst,
