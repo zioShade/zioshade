@@ -116,6 +116,7 @@ pub const Instruction = struct {
         image_fetch,
         extract_image,
         image_query_size,
+        image_query_size_lod,
         image_query_levels,
         image_read,
         image_write,
