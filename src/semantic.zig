@@ -337,6 +337,27 @@ const Analyzer = struct {
             try self.declare("gl_VertexIndex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
         }
 
+        // gl_BaseInstance: Input int
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_BaseInstance", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_BaseInstance", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
+        // gl_BaseInstanceARB: alias for gl_BaseInstance
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_BaseInstanceARB", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_BaseInstanceARB", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
+        // gl_InstanceIndex: Input int (same as gl_InstanceID but different BuiltIn)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_InstanceIndex", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_InstanceIndex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
         // Math functions that return float (or same type as primary argument)
         const float_return_funcs = .{
             "abs",   "acos",  "asin",      "atan",    "atan2",
