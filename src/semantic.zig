@@ -876,8 +876,12 @@ const Analyzer = struct {
 
                 // Body
                 try self.emitLabel(body_label);
-                if (node.data.children.len > 3) try self.analyzeStatement(node.data.children[3]);
-                try self.emitBranch(continue_label); // body -> continue
+                if (node.data.children.len > 3) self.analyzeStatement(node.data.children[3]) catch {
+                    // Body failed, continue to emit branch to continue label
+                };
+                if (!self.lastInstructionIsReturn()) {
+                    try self.emitBranch(continue_label); // body -> continue
+                }
 
                 // Continue + update
                 try self.emitLabel(continue_label);
@@ -927,7 +931,21 @@ const Analyzer = struct {
 
                 try self.emitLabel(body_label);
                 try self.emitLoopMerge(merge_label, cond_label);
-                if (node.data.children.len > 0) try self.analyzeStatement(node.data.children[0]);
+                // If body has nested control flow, we need a separate body block
+                // so OpLoopMerge is immediately followed by OpBranch
+                const has_nested_cf = if (node.data.children.len > 0) blk: {
+                    const child = node.data.children[0];
+                    break :blk child.tag == .if_stmt or child.tag == .for_stmt or child.tag == .while_stmt or child.tag == .do_while_stmt or child.tag == .switch_stmt;
+                } else false;
+                if (has_nested_cf) {
+                    const inner_label = self.allocId();
+                    try self.emitBranch(inner_label);
+                    try self.emitLabel(inner_label);
+                }
+                if (node.data.children.len > 0) self.analyzeStatement(node.data.children[0]) catch {
+                    // Body analysis failed, but LoopMerge already emitted.
+                    // Continue to emit condition branch to keep SPIR-V valid.
+                };
 
                 // Branch from body to continue/condition label (if body doesn't already return)
                 if (!self.lastInstructionIsReturn()) {
