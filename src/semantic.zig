@@ -280,6 +280,63 @@ const Analyzer = struct {
             try self.declare("gl_NumWorkGroups", .{ .kind = .var_sym, .ty = .uvec3, .ir_id = id });
         }
 
+        // gl_LocalInvocationIndex: Input, BuiltIn LocalInvocationIndex (uint)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_LocalInvocationIndex", .ty = .uint, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_LocalInvocationIndex", .{ .kind = .var_sym, .ty = .uint, .ir_id = id });
+        }
+
+        // gl_SampleMaskIn: Input, BuiltIn SampleMask (array of int)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_SampleMaskIn", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_SampleMaskIn", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
+        // gl_SamplePosition: Input, BuiltIn SamplePosition (vec2)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_SamplePosition", .ty = .vec2, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_SamplePosition", .{ .kind = .var_sym, .ty = .vec2, .ir_id = id });
+        }
+
+        // gl_ViewIndex: Input, BuiltIn ViewIndex (int)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_ViewIndex", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_ViewIndex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
+        // gl_DeviceIndex: Input, BuiltIn DeviceIndex (int)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_DeviceIndex", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_DeviceIndex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
+        // gl_BaseVertex: Input, BuiltIn BaseVertex (int)
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_BaseVertex", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_BaseVertex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
+        // gl_BaseVertexARB: alias for gl_BaseVertex
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_BaseVertexARB", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_BaseVertexARB", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
+        // gl_VertexIndex: Input, BuiltIn VertexIndex (int)
+        // Note: glslang maps gl_VertexIndex to BuiltIn VertexIndex, separate from gl_VertexID
+        {
+            const id = self.allocId();
+            try self.globals.append(self.alloc, .{ .name = "gl_VertexIndex", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
+            try self.declare("gl_VertexIndex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
+        }
+
         // Math functions that return float (or same type as primary argument)
         const float_return_funcs = .{
             "abs",   "acos",  "asin",      "atan",    "atan2",
@@ -889,7 +946,10 @@ const Analyzer = struct {
     fn analyzeExpression(self: *Analyzer, node: ast.Node) Error!TypedId {
         errdefer {
             if (last_error_inner.len == 0) {
-                last_error_inner = @tagName(node.tag);
+                last_error_inner = switch (node.tag) {
+                    .identifier => node.data.name,
+                    else => @tagName(node.tag),
+                };
             }
             // Use the identifier/function name when available for better error messages
             last_error_ctx = switch (node.tag) {
