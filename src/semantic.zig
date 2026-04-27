@@ -1690,7 +1690,10 @@ const Analyzer = struct {
                 const sym = self.lookup(node.data.name);
                 // For GLSL builtins, infer result type from first argument (e.g., round(vec4) → vec4)
                 // Exception: texture functions return vec4
-                const result_ty: ast.Type = if (self.isImageSampleBuiltin(node.data.name))
+                const is_shadow_sample = self.isImageSampleBuiltin(node.data.name) and arg_tids.items.len > 0 and self.isShadowSamplerType(arg_tids.items[0].ty);
+                const result_ty: ast.Type = if (is_shadow_sample)
+                    .float
+                else if (self.isImageSampleBuiltin(node.data.name))
                     .vec4
                 else if (std.mem.eql(u8, node.data.name, "texelFetch"))
                     .vec4
@@ -1927,9 +1930,14 @@ const Analyzer = struct {
                     if (self.isTextureBuiltin(node.data.name)) {
                         if (self.isImageSampleBuiltin(node.data.name) and !self.isTexelFetchBuiltin(node.data.name)) {
                             // texture(sampler, coord) → image_sample (implicit or explicit lod)
-                            const is_explicit_lod = std.mem.eql(u8, node.data.name, "textureLod");
+                            const is_explicit_lod = std.mem.eql(u8, node.data.name, "textureLod") or std.mem.eql(u8, node.data.name, "textureLodOffset");
                             const is_proj = std.mem.eql(u8, node.data.name, "textureProj");
-                            const tag: ir.Instruction.Tag = if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else .image_sample;
+                            // Shadow samplers use Dref instructions that return float
+                            const tag: ir.Instruction.Tag = if (is_shadow_sample) (
+                                if (is_explicit_lod) .image_sample_dref_explicit_lod
+                                else if (is_proj) .image_sample_dref_proj
+                                else .image_sample_dref
+                            ) else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else .image_sample;
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                             for (arg_tids.items, 0..) |tid, i| {
                                 operands[i] = .{ .id = tid.id };
@@ -3344,6 +3352,11 @@ const Analyzer = struct {
         _ = self;
         return std.mem.eql(u8, name, "texelFetch") or
             std.mem.eql(u8, name, "texelFetchOffset");
+    }
+
+    fn isShadowSamplerType(self: *Analyzer, ty: ast.Type) bool {
+        _ = self;
+        return ty == .sampler2d_shadow or ty == .sampler_cube_shadow or ty == .sampler2d_array_shadow;
     }
 
     fn isImageSampleBuiltin(self: *Analyzer, name: []const u8) bool {
