@@ -112,7 +112,17 @@ const Analyzer = struct {
         {
             var it = self.overloads.iterator();
             while (it.next()) |entry| {
+                for (entry.value_ptr.items) |*overload| {
+                    if (overload.param_types.len > 0) {
+                        self.alloc.free(overload.param_types);
+                    }
+                }
                 entry.value_ptr.deinit(self.alloc);
+            }
+            // Free the owned name keys
+            var key_it = self.overloads.keyIterator();
+            while (key_it.next()) |key_ptr| {
+                self.alloc.free(key_ptr.*);
             }
             self.overloads.deinit(self.alloc);
         }
