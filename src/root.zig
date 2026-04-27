@@ -61,7 +61,13 @@ pub fn compileToSPIRV(
     };
     defer alloc.free(tokens);
 
-    var root_node = parser.parse(alloc, source, tokens) catch {
+    // Run preprocessor to handle #define, #if, #ifdef, etc.
+    var pp = preprocessor.Preprocessor.init(alloc);
+    defer pp.deinit();
+    const pp_tokens = pp.process(source, tokens) catch tokens;
+    defer if (pp_tokens.ptr != tokens.ptr) alloc.free(pp_tokens);
+
+    var root_node = parser.parse(alloc, source, pp_tokens) catch {
         last_compile_detail = .parse_failed;
         return error.ParseFailed;
     };

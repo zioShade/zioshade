@@ -1148,6 +1148,35 @@ const Analyzer = struct {
                         });
                         return .{ .ty = sym.ty, .id = ptr_id };
                     }
+                    if (sym.kind == .param) {
+                        // Writing to a function parameter — create a local variable for mutability
+                        const var_id = self.allocId();
+                        const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        sc_operands[0] = .{ .literal_int = 7 }; // Function storage class
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .local_variable,
+                            .result_type = null,
+                            .result_id = var_id,
+                            .operands = sc_operands,
+                            .ty = sym.ty,
+                        });
+                        const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        store_ops[0] = .{ .id = var_id };
+                        store_ops[1] = .{ .id = sym.ir_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .store,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = store_ops,
+                            .ty = sym.ty,
+                        });
+                        try self.declare(node.data.name, .{
+                            .kind = .var_sym,
+                            .ty = sym.ty,
+                            .ir_id = var_id,
+                        });
+                        return .{ .ty = sym.ty, .id = var_id };
+                    }
                     return .{ .ty = sym.ty, .id = sym.ir_id };
                 }
                 last_error_ctx = node.data.name;
