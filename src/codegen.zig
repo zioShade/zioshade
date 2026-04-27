@@ -910,7 +910,7 @@ const Codegen = struct {
     fn emitInstruction(self: *Codegen, inst: ir.Instruction) !void {
         // Resolve null result_type from ast type
         var resolved = inst;
-        if (resolved.result_type == null and resolved.result_id != null and resolved.tag != .extract_image and resolved.tag != .image_sample_dref and resolved.tag != .image_sample_dref_explicit_lod and resolved.tag != .image_sample_dref_proj and resolved.tag != .image_dref_gather and resolved.tag != .image_texel_pointer) {
+        if (resolved.result_type == null and resolved.result_id != null and resolved.tag != .extract_image and resolved.tag != .image_sample_dref and resolved.tag != .image_sample_dref_explicit_lod and resolved.tag != .image_sample_dref_proj and resolved.tag != .image_dref_gather) {
             resolved.result_type = try self.ensureType(inst.ty);
         }
         // For Dref instructions, result type is always float
@@ -1428,27 +1428,6 @@ const Codegen = struct {
                 try self.emitWord(result_id);
                 try self.emitWord(image_id);
             },
-            .image_texel_pointer => {
-                // OpImageTexelPointer: result_type(pointer), result, image, coordinate, sample
-                const result_type_id = resolved.result_type orelse return;
-                const result_id = resolved.result_id orelse return;
-                const image_id = self.operandId(resolved, 0);
-                const coord_id = self.operandId(resolved, 1);
-                const sample_id: u32 = if (resolved.operands.len > 2) switch (resolved.operands[2]) { .literal_int => |v| v, else => 0 } else 0;
-                // Create pointer type: OpTypePointer(storage_class, element_type)
-                const elem_type_id = try self.ensureType(inst.ty);
-                const ptr_type_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
-                try self.emitWord(ptr_type_id);
-                try self.emitWord(2); // Uniform storage class
-                try self.emitWord(elem_type_id);
-                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageTexelPointer)));
-                try self.emitWord(ptr_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(image_id);
-                try self.emitWord(coord_id);
-                try self.emitWord(sample_id);
-            },
             .image_read => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
@@ -1495,74 +1474,20 @@ const Codegen = struct {
                     try self.emitWord(value_id);
                 }
             },
-            .atomic_iadd, .atomic_ior, .atomic_ixor, .atomic_iand,
-            .atomic_smin, .atomic_smax, .atomic_umin, .atomic_umax,
-            .atomic_exchange => {
-                const result_type_id = resolved.result_type orelse return;
-                const result_id = resolved.result_id orelse return;
-                const spv_op: spirv.Op = switch (resolved.tag) {
-                    .atomic_iadd => .AtomicIAdd,
-                    .atomic_ior => .AtomicOr,
-                    .atomic_ixor => .AtomicXor,
-                    .atomic_iand => .AtomicAnd,
-                    .atomic_smin => .AtomicSMin,
-                    .atomic_smax => .AtomicSMax,
-                    .atomic_umin => .AtomicUMin,
-                    .atomic_umax => .AtomicUMax,
-                    .atomic_exchange => .AtomicExchange,
-                    else => .AtomicIAdd,
-                };
-                if (resolved.operands.len >= 4 and resolved.operands[1] == .literal_int) {
-                    // Image atomic: operands are [ptr, scope_literal, semantics_literal, value]
-                    const ptr_id = self.operandId(resolved, 0);
-                    const scope_id = try self.emitIntConstant(resolved.operands[1].literal_int);
-                    const semantics_id = try self.emitIntConstant(resolved.operands[2].literal_int);
-                    const value_id = self.operandId(resolved, 3);
-                    try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spv_op)));
-                    try self.emitWord(result_type_id);
-                    try self.emitWord(result_id);
-                    try self.emitWord(ptr_id);
-                    try self.emitWord(scope_id);
-                    try self.emitWord(semantics_id);
-                    try self.emitWord(value_id);
-                } else {
-                    // Buffer atomic: operands are [ptr, value] (scope/semantics hardcoded)
-                    const ptr_id = self.operandId(resolved, 0);
-                    const value_id = self.operandId(resolved, 1);
-                    const scope_id = try self.emitIntConstant(1); // Device scope
-                    const semantics_id = try self.emitIntConstant(64); // Uniform semantics
-                    try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spv_op)));
-                    try self.emitWord(result_type_id);
-                    try self.emitWord(result_id);
-                    try self.emitWord(ptr_id);
-                    try self.emitWord(scope_id);
-                    try self.emitWord(semantics_id);
-                    try self.emitWord(value_id);
-                }
-            },
-            .atomic_comp_swap => {
+            .atomic_iadd => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const ptr_id = self.operandId(resolved, 0);
-                const scope_id = if (resolved.operands.len >= 5 and resolved.operands[1] == .literal_int)
-                    try self.emitIntConstant(resolved.operands[1].literal_int)
-                else try self.emitIntConstant(1);
-                const semantics_id = if (resolved.operands.len >= 5 and resolved.operands[1] == .literal_int)
-                    try self.emitIntConstant(resolved.operands[2].literal_int)
-                else try self.emitIntConstant(64);
-                const comparator_id = if (resolved.operands.len >= 5) self.operandId(resolved, 3) else self.operandId(resolved, 1);
-                const value_id = if (resolved.operands.len >= 5) self.operandId(resolved, 4) else self.operandId(resolved, 2);
-                // OpAtomicCompareExchange: result_type, result, ptr, scope, semantics, unequal_semantics, comparator, value
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.AtomicCompareExchange)));
+                const value_id = self.operandId(resolved, 1);
+                // Scope and semantics must be IDs referencing OpConstant values
+                const scope_id = try self.emitIntConstant(1); // Device scope
+                const semantics_id = try self.emitIntConstant(64); // Uniform semantics
+                try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.AtomicIAdd)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(ptr_id);
                 try self.emitWord(scope_id);
-                // Memory and Unequal semantics
-                const mem_sem = semantics_id;
-                try self.emitWord(mem_sem);
-                try self.emitWord(mem_sem); // unequal semantics (same)
-                try self.emitWord(comparator_id);
+                try self.emitWord(semantics_id);
                 try self.emitWord(value_id);
             },
             .transpose => {
