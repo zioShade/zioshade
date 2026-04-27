@@ -76,4 +76,8 @@ pub fn build(b: *std.Build) void {
         }
     }
     conformance_step.dependOn(&run_conformance.step);
+
+    // "build-runner" step: just compile the runner, don't run it
+    const build_runner_step = b.step("build-runner", "Build the conformance runner executable");
+    build_runner_step.dependOn(&runner_exe.step);
 }
