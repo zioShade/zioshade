@@ -1,58 +1,52 @@
 # Autoresearch Ideas
 
-## HIGH PRIORITY — Fix swizzle via parser-level error recovery
+## CURRENT STATUS: 180 passes, 0 compile errors, 17 spirv-val failures
 
-### Root Cause
-The lexer returns bare `.` as `double_literal`. This means `v.x` tokenizes as `identifier + double_literal + identifier`. Parser never creates `member_access` nodes. When fixed, ~20 compile errors would resolve, but ~10 previously-passing files regress because:
-1. Parse errors are recoverable (synchronize skips statement)
-2. Semantic errors kill entire functions (no recovery)
-3. member_access on unexpected types (void, float, etc.) produces errors
+### Remaining 17 spirv-val failures:
+1. **newTexture.frag** — FAdd float+vec4 (swizzle `.x` dropped after texture call)
+2. **spv.newTexture.frag** — Sampled Image type mismatch
+3. **atomic.comp** — Undefined ID %110 (phantom ID)
+4. **casts.comp** — OpCompositeConstruct constituents count (bvec4 from int)
+5. **fp-atomic.nocompat.vk.comp** — AtomicIAdd on float (needs OpAtomicFAddEXT)
+6. **generate_height.comp** — Duplicate ID (function overloading or other)
+7. **ground.frag** — No OpEntryPoint (error recovery kills main function)
+8. **mod.comp** — SRem on v4float (floatBitsToInt returns wrong type)
+9. **partial-write-preserve.frag** — Duplicate IDs (function overloading)
+10. **read-from-row-major-array.vert** — Constituents count for matrix construction
+11. **sampler-ms-query.desktop.frag** — Image MS flag wrong
+12. **shader_group_vote.comp** — ARB extension functions → Round (need OpGroupAll/Any)
+13. **texture-proj-shadow.desktop.frag** — OpStore type mismatch (vec4 stored to float)
+14. **texture-shadow-lod-bias.frag** — FAdd float+vec4 (shadow sampler returns vec4 not float)
+15. **texture-shadow-lod.frag** — FAdd float+vec4 (same as above)
+16. **torture-loop.comp** — Continue construct structural domination
+17. **type-alias.comp** — Duplicate IDs (function overloading)
 
-### What's Been Tried (8+ attempts)
-- Lexer fix: `has_dot` → `has_digit` only. Always regressed by 10+ passes.
-- Parser fix: handle `double_literal` as dot. Same regression.
-- Error recovery truncating instructions. Memory corruption (60 crashes).
-- Error recovery nulling result_ids. Still crashes.
-- **SUCCESS**: Error recovery with `break` on error (stop processing function, keep partial body). Works! +33 passes.
-- Proper CompositeExtract for vectors. Works with error recovery.
+## HIGH PRIORITY
 
-### Current Status (commit 8966b3c)
-**160 passes, 0 compile errors, 37 spirv-val failures.**
-The swizzle fix is working! 37 spirv-val failures are from:
-- Phantom IDs (forward referenced IDs not defined)
-- Type mismatches in composite operations
-- Wrong SPIR-V for texture functions
-- Function overloading (duplicate IDs)
-- Missing multisample image types
+### Swizzle on function call results (affects 3+ files)
+The `.` after function calls like `texture(sampler, coord).x` is tokenized as double_literal.
+This causes vec4 to be used where float was expected (the `.x` is dropped).
+Fix requires lexer change for bare `.` which has been tried 10+ times and always regresses.
 
-### Prerequisites for Safe Swizzle Fix
-1. Semantic error recovery that doesn't leak memory (need Arena allocator or instruction ownership model)
-2. Handle ALL member_access cases: void, float, struct, vector, array, sampler, named types
-3. Handle multi-component swizzle (.xy, .xyz) with VectorShuffle
-4. Handle swizzle writes as l-values
+### Function overloading (affects 3 files: partial-write-preserve, type-alias, generate_height)
+Our compiler uses name-only lookup, so overloaded functions get duplicate IDs.
+Need signature-based function resolution.
 
 ## MEDIUM PRIORITY
 
-### Fix cfg.comp switch (1 spirv-val failure)
-Proper OpSwitch with case labels and SelectionMerge.
+### Fix torture-loop.comp continue construct
+Structural domination issue in loop control flow.
 
-### Fix partial-write-preserve.frag and type-alias.comp (2 spirv-val failures)
-Function overloading support — both files have overloaded `overload(S0)` and `overload(S1)`.
+### Fix ground.frag No OpEntryPoint
+The error recovery "break on error" kills the main function because `#if` preprocessor
+doesn't recursively expand macros in expressions (e.g., `#if GLOBAL_RENDERER == DEFERRED`
+where both are #defined constants).
 
-### Fix texture-proj-shadow.desktop.frag (1 spirv-val failure)
-Shadow sampler types need separate SPIR-V type with Depth=2.
-
-### Fix texture-shadow-lod.frag (1 spirv-val failure)
-OpExtInst word count issue for texture functions with shadow samplers.
-
-### Add more missing GLSL builtins
-- textureSamples/imageSamples (opcode 107, implemented but needs multisample image types)
-- textureOffset, textureGather, etc.
+### Shadow sampler texture functions return float not vec4
+textureLod on sampler2DShadow should return float. Currently returns vec4.
 
 ## LOW PRIORITY
 
-### Include inlining
-`inlineIncludes` in `tests/runner.zig` works for Ghostty files.
-
-### More image/sampler types with correct SPIR-V Dim/Multisampled/Depth parameters
-Currently mapped to sampler2d/image2d which is wrong for many types.
+### Fix fp-atomic (needs SPV_EXT_shader_atomic_float)
+### Fix sampler-ms-query (sampler2DMS type needs Multisampled=1)
+### Fix casts.comp bvec4(int) — need int→bool conversion + splat
