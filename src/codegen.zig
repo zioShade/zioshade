@@ -910,8 +910,12 @@ const Codegen = struct {
     fn emitInstruction(self: *Codegen, inst: ir.Instruction) !void {
         // Resolve null result_type from ast type
         var resolved = inst;
-        if (resolved.result_type == null and resolved.result_id != null and resolved.tag != .extract_image) {
+        if (resolved.result_type == null and resolved.result_id != null and resolved.tag != .extract_image and resolved.tag != .image_sample_dref and resolved.tag != .image_sample_dref_explicit_lod and resolved.tag != .image_sample_dref_proj) {
             resolved.result_type = try self.ensureType(inst.ty);
+        }
+        // For Dref instructions, result type is always float
+        if (resolved.result_type == null and resolved.result_id != null and (resolved.tag == .image_sample_dref or resolved.tag == .image_sample_dref_explicit_lod or resolved.tag == .image_sample_dref_proj)) {
+            resolved.result_type = try self.ensureType(.float);
         }
         switch (resolved.tag) {
             .constant_int, .constant_float, .constant_bool => return,
@@ -1171,72 +1175,133 @@ const Codegen = struct {
                 try self.emitWord(coord_id);
             },
             .image_sample_dref => {
-                // OpImageSampleDrefImplicitLod: result_type(float), result, sampled_image, coordinate, Dref
+                // OpImageSampleDrefImplicitLod: result_type(float), result, sampled_image, coordinate_without_dref, Dref
+                // GLSL coord has Dref as last component; SPIR-V needs it separate
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const sampled_image_id = self.operandId(resolved, 0);
                 const coord_id = self.operandId(resolved, 1);
-                // Extract Dref from coord's last component (.w for vec4)
                 const float_id = try self.ensureType(.float);
+                // Extract Dref from last component of coord
                 const dref_id = self.allocId();
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
                 try self.emitWord(float_id);
                 try self.emitWord(dref_id);
                 try self.emitWord(coord_id);
-                try self.emitWord(3); // Extract .w component
+                // Determine last component index based on sampler type
+                const last_idx: u32 = switch (inst.ty) {
+                    .sampler2d_shadow => 2, // vec3(u,v,dref) → extract [2]
+                    .sampler2d_array_shadow => 3, // vec4(u,v,layer,dref) → extract [3]
+                    .sampler_cube_shadow => 3, // vec4(u,v,z,dref) → extract [3]
+                    else => 3,
+                };
+                try self.emitWord(last_idx);
+                // Shrink coordinate: use VectorShuffle to drop last component
+                const shrink_ty: ast.Type = switch (inst.ty) {
+                    .sampler2d_shadow => .vec2, // vec3 → vec2
+                    .sampler2d_array_shadow => .vec3, // vec4 → vec3
+                    .sampler_cube_shadow => .vec3, // vec4 → vec3
+                    else => .vec3,
+                };
+                const shrink_type_id = try self.ensureType(shrink_ty);
+                const shrunk_coord_id = self.allocId();
+                const num_comp: u32 = switch (shrink_ty) {
+                    .vec2 => 2,
+                    .vec3 => 3,
+                    else => 3,
+                };
+                try self.emitWord(spirv.encodeInstructionHeader(@as(u16, @intCast(5 + num_comp)), @intFromEnum(spirv.Op.VectorShuffle)));
+                try self.emitWord(shrink_type_id);
+                try self.emitWord(shrunk_coord_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(coord_id);
+                for (0..num_comp) |i| try self.emitWord(@intCast(i));
+                // Emit the Dref instruction
                 try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageSampleDrefImplicitLod)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(sampled_image_id);
-                try self.emitWord(coord_id);
+                try self.emitWord(shrunk_coord_id);
                 try self.emitWord(dref_id);
             },
             .image_sample_dref_explicit_lod => {
-                // OpImageSampleDrefExplicitLod: result_type(float), result, sampled_image, coordinate, Dref, ImageOperands(Lod)
+                // OpImageSampleDrefExplicitLod: result_type(float), result, sampled_image, coord_without_dref, Dref, ImageOperands(Lod)
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const sampled_image_id = self.operandId(resolved, 0);
                 const coord_id = self.operandId(resolved, 1);
-                // For textureLod on shadow: args are (sampler, coord, lod)
-                // coord includes Dref as last component, lod is explicit
-                // Extract Dref from coord's last component
                 const float_id = try self.ensureType(.float);
-                const dref_id_raw = self.allocId();
+                // Extract Dref from last component of coord
+                const dref_id = self.allocId();
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
                 try self.emitWord(float_id);
-                try self.emitWord(dref_id_raw);
+                try self.emitWord(dref_id);
                 try self.emitWord(coord_id);
-                try self.emitWord(3); // Extract .w component (4th component = index 3)
+                const last_idx: u32 = switch (inst.ty) {
+                    .sampler2d_shadow => 2,
+                    .sampler2d_array_shadow => 3,
+                    .sampler_cube_shadow => 3,
+                    else => 3,
+                };
+                try self.emitWord(last_idx);
+                // Shrink coordinate
+                const shrink_ty: ast.Type = switch (inst.ty) {
+                    .sampler2d_shadow => .vec2,
+                    .sampler2d_array_shadow => .vec3,
+                    .sampler_cube_shadow => .vec3,
+                    else => .vec3,
+                };
+                const shrink_type_id = try self.ensureType(shrink_ty);
+                const shrunk_coord_id = self.allocId();
+                const num_comp: u32 = switch (shrink_ty) {
+                    .vec2 => 2,
+                    .vec3 => 3,
+                    else => 3,
+                };
+                try self.emitWord(spirv.encodeInstructionHeader(@as(u16, @intCast(5 + num_comp)), @intFromEnum(spirv.Op.VectorShuffle)));
+                try self.emitWord(shrink_type_id);
+                try self.emitWord(shrunk_coord_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(coord_id);
+                for (0..num_comp) |i| try self.emitWord(@intCast(i));
                 const lod_id = if (resolved.operands.len >= 3) self.operandId(resolved, 2) else return;
                 // Image Operand Lod mask = bit 1 (0x2)
                 try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleDrefExplicitLod)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(sampled_image_id);
-                try self.emitWord(coord_id);
-                try self.emitWord(dref_id_raw);
+                try self.emitWord(shrunk_coord_id);
+                try self.emitWord(dref_id);
                 try self.emitWord(2); // Image Operand Lod mask (bit 1)
                 try self.emitWord(lod_id);
             },
             .image_sample_dref_proj => {
-                // OpImageSampleProjDrefImplicitLod: result_type(float), result, sampled_image, coordinate, Dref
+                // OpImageSampleProjDrefImplicitLod: result_type(float), result, sampled_image, coordinate_with_proj, Dref
+                // For Proj, the coordinate includes the projection divisor as the last component
+                // The Dref is the component before that.
+                // For sampler2DShadow: coord is vec4(u,v,dref,proj) — Dref at index 2
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const sampled_image_id = self.operandId(resolved, 0);
                 const coord_id = self.operandId(resolved, 1);
                 const float_id = try self.ensureType(.float);
-                const dref_id_raw = self.allocId();
+                // For proj shadow, extract Dref: for sampler2DShadow with vec4, dref is at index 2
+                const dref_idx: u32 = switch (inst.ty) {
+                    .sampler2d_shadow => 2, // vec4(u,v,dref,proj)
+                    else => 3,
+                };
+                const dref_id = self.allocId();
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
                 try self.emitWord(float_id);
-                try self.emitWord(dref_id_raw);
+                try self.emitWord(dref_id);
                 try self.emitWord(coord_id);
-                try self.emitWord(3); // Extract .w component
+                try self.emitWord(dref_idx);
                 try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageSampleProjDrefImplicitLod)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(sampled_image_id);
                 try self.emitWord(coord_id);
-                try self.emitWord(dref_id_raw);
+                try self.emitWord(dref_id);
             },
             .image_fetch, .image_fetch_ms => {
                 const result_type_id = resolved.result_type orelse return;
