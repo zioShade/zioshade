@@ -26,6 +26,7 @@ pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
         .instructions = .{},
         .errors = .{},
         .loop_stack = .empty,
+        .overloads = .empty,
     };
     defer analyzer.deinit();
 
@@ -66,6 +67,11 @@ const LoopContext = struct {
     continue_label: u32,
 };
 
+const OverloadEntry = struct {
+    param_types: []const ast.Type,
+    ir_id: u32,
+};
+
 const Scope = std.StringHashMapUnmanaged(Symbol);
 
 const Analyzer = struct {
@@ -82,6 +88,8 @@ const Analyzer = struct {
     instructions: std.ArrayListUnmanaged(ir.Instruction),
     errors: std.ArrayListUnmanaged([]const u8),
     loop_stack: std.ArrayListUnmanaged(LoopContext),
+    // Function overloads: maps function name to list of (param_types, ir_id)
+    overloads: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(OverloadEntry)),
     next_id: u32 = 1,
     local_size: ?ir.LocalSize = null,
 
@@ -101,6 +109,13 @@ const Analyzer = struct {
         for (self.errors.items) |msg| self.alloc.free(msg);
         self.errors.deinit(self.alloc);
         self.loop_stack.deinit(self.alloc);
+        {
+            var it = self.overloads.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit(self.alloc);
+            }
+            self.overloads.deinit(self.alloc);
+        }
         for (self.instructions.items) |inst| {
             if (inst.operands.len > 0) {
                 self.alloc.free(inst.operands);
@@ -607,11 +622,56 @@ const Analyzer = struct {
                 });
             },
             .function_decl, .function_prototype => {
-                try self.declare(node.data.name, .{
-                    .kind = .func,
-                    .ty = node.data.ty orelse .void,
-                    .ir_id = self.allocId(),
-                });
+                const func_ir_id = self.allocId();
+                // Collect parameter types
+                var param_types = std.ArrayListUnmanaged(ast.Type){};
+                for (node.data.params) |param| {
+                    try param_types.append(self.alloc, param.ty);
+                }
+                const existing = self.lookup(node.data.name);
+                if (existing != null and existing.?.kind == .func) {
+                    // Function overload: store in overload map
+                    const owned_name = try self.alloc.dupe(u8, node.data.name);
+                    const gop = try self.overloads.getOrPut(self.alloc, owned_name);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = .{};
+                        // Store the original function with its param types from the first declaration
+                        // We need to recover the original param types — but we don't have them
+                        // Use the scope symbol's ir_id
+                        try gop.value_ptr.append(self.alloc, .{
+                            .param_types = &.{}, // placeholder — will be resolved at call site
+                            .ir_id = existing.?.ir_id,
+                        });
+                    }
+                    const owned_pts = try self.alloc.dupe(ast.Type, param_types.items);
+                    try gop.value_ptr.append(self.alloc, .{
+                        .param_types = owned_pts,
+                        .ir_id = func_ir_id,
+                    });
+                    // Update the scope to point to latest declaration
+                    try self.declare(node.data.name, .{
+                        .kind = .func,
+                        .ty = node.data.ty orelse .void,
+                        .ir_id = func_ir_id,
+                    });
+                } else {
+                    // First declaration of this function name
+                    const owned_name = try self.alloc.dupe(u8, node.data.name);
+                    const gop = try self.overloads.getOrPut(self.alloc, owned_name);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = .{};
+                    }
+                    const owned_pts = try self.alloc.dupe(ast.Type, param_types.items);
+                    try gop.value_ptr.append(self.alloc, .{
+                        .param_types = owned_pts,
+                        .ir_id = func_ir_id,
+                    });
+                    try self.declare(node.data.name, .{
+                        .kind = .func,
+                        .ty = node.data.ty orelse .void,
+                        .ir_id = func_ir_id,
+                    });
+                }
             },
             else => {},
         }
@@ -620,8 +680,32 @@ const Analyzer = struct {
     fn analyzeFunction(self: *Analyzer, node: ast.Node) !void {
         try self.pushScope();
 
+        // For overloaded functions, resolve the correct ir_id based on param types
+        var func_ir_id: u32 = 0;
         const func_sym = self.lookup(node.data.name);
-        const func_ir_id = if (func_sym) |sym| sym.ir_id else self.allocId();
+        if (func_sym) |sym| {
+            func_ir_id = sym.ir_id;
+            // Check if this is an overloaded function
+            if (self.overloads.get(node.data.name)) |overload_list| {
+                const node_params = node.data.params;
+                for (overload_list.items) |overload| {
+                    if (overload.param_types.len != node_params.len) continue;
+                    var match = true;
+                    for (overload.param_types, 0..) |pt, i| {
+                        if (!self.typesCompatible(pt, node_params[i].ty)) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) {
+                        func_ir_id = overload.ir_id;
+                        break;
+                    }
+                }
+            }
+        } else {
+            func_ir_id = self.allocId();
+        }
 
         self.instructions.clearRetainingCapacity();
 
@@ -1687,7 +1771,29 @@ const Analyzer = struct {
                     }
                     try arg_tids.append(self.alloc, tid);
                 }
-                const sym = self.lookup(node.data.name);
+                const sym_raw = self.lookup(node.data.name);
+                // Resolve function overloads
+                var resolved_sym = sym_raw;
+                if (sym_raw != null and sym_raw.?.kind == .func) {
+                    if (self.overloads.get(node.data.name)) |overload_list| {
+                        // Try to match argument types against overload parameter types
+                        for (overload_list.items) |overload| {
+                            if (overload.param_types.len != arg_tids.items.len) continue;
+                            var match = true;
+                            for (overload.param_types, 0..) |pt, i| {
+                                if (!self.typesCompatible(pt, arg_tids.items[i].ty)) {
+                                    match = false;
+                                    break;
+                                }
+                            }
+                            if (match) {
+                                resolved_sym = .{ .kind = .func, .ty = sym_raw.?.ty, .ir_id = overload.ir_id };
+                                break;
+                            }
+                        }
+                    }
+                }
+                const sym = resolved_sym;
                 // For GLSL builtins, infer result type from first argument (e.g., round(vec4) → vec4)
                 // Exception: texture functions return vec4
                 const is_shadow_sample = self.isImageSampleBuiltin(node.data.name) and arg_tids.items.len > 0 and self.isShadowSamplerType(arg_tids.items[0].ty);
