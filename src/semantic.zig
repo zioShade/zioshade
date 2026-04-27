@@ -2065,6 +2065,18 @@ const Analyzer = struct {
                             .ty = bvec_ty,
                         });
                         return .{ .ty = bvec_ty, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "any") or std.mem.eql(u8, node.data.name, "all")) {
+                        // any/all: OpAny/OpAll, returns bool
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = if (std.mem.eql(u8, node.data.name, "any")) .any else .all,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .bool,
+                        });
+                        return .{ .ty = .bool, .id = result_id };
                     } else if (std.mem.eql(u8, node.data.name, "dot")) {
                         // dot(a, b) → OpDot (core SPIR-V, not GLSL.std.450)
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
