@@ -1,50 +1,44 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 185 passes, 0 compile errors, 12 spirv-val failures
+## CURRENT STATUS: 189 passes, 1 compile error, 7 spirv-val failures
 
-### Remaining 12 spirv-val failures:
-1. **newTexture.frag** — FAdd float+vec4 (swizzle `.y`/`.x` dropped after shadow texture calls)
-2. **spv.newTexture.frag** — Sampled Image type mismatch (integer samplers use float sampled type)
-3. **atomic.comp** — Undefined ID %110 (phantom ID from imageAtomic ops)
-4. **fp-atomic.nocompat.vk.comp** — AtomicIAdd on float (needs OpAtomicFAddEXT)
-5. **generate_height.comp** — Duplicate ID (function overloading)
+### Remaining 7 spirv-val failures:
+1. **spv.newTexture.frag** — Sampled Image type mismatch (integer samplers use float sampled type)
+2. **atomic.comp** — Undefined ID %110 (phantom ID from imageAtomic ops)
+3. **fp-atomic.nocompat.vk.comp** — AtomicIAdd on float (needs OpAtomicFAddEXT)
+4. **gather-dref.frag** — Vector out of bounds (textureGather on shadow sampler needs OpImageDrefGather)
+5. **generate_height.comp** — PackHalf2x16 returns wrong type (was duplicate IDs, now fixed by overloading)
 6. **ground.frag** — No OpEntryPoint (preprocessor #if needs multi-level macro expansion)
-7. **partial-write-preserve.frag** — Duplicate IDs (function overloading)
-8. **texture-proj-shadow.desktop.frag** — OpStore vec4→float (shadow sampler returns vec4 not float + dropped `.x`)
-9. **texture-shadow-lod-bias.frag** — FAdd float+vec4 (shadow sampler returns vec4 not float)
-10. **texture-shadow-lod.frag** — FAdd float+vec4 (shadow sampler returns vec4 not float)
-11. **torture-loop.comp** — Continue construct structural domination
-12. **type-alias.comp** — Duplicate IDs (function overloading)
+7. **texture-proj-shadow.desktop.frag** — Coordinate too small for textureProj (non-shadow textureProj issue)
 
-## HIGH PRIORITY — Requires shadow sampler types + Dref instructions
-For shadow samplers (sampler2DShadow etc.), need:
-1. Add `sampler2d_shadow` type to ast.zig (tried, reverted due to OpImageSampleImplicitLod needing vec4 result)
-2. Use `OpImageSampleDrefImplicitLod` for shadow textures (returns scalar float + takes depth ref)
-3. Similarly: `OpImageSampleDrefExplicitLod` for textureLod on shadow samplers
-4. This would fix 3 files: texture-shadow-lod, texture-shadow-lod-bias, texture-proj-shadow
+### New compile error (1 file):
+- Unknown which file. Likely GPA leak from overload map allocations causing non-zero exit. Need to investigate.
 
-## HIGH PRIORITY — Requires integer sampler types
+## HIGH PRIORITY — Integer sampler types
 Add `isampler2d`/`usampler2d` types with int/uint sampled type in TypeImage.
-Would fix spv.newTexture.frag. Similar to how we added sampler2d_ms.
+Would fix spv.newTexture.frag. Similar to how we added sampler2d_ms and shadow types.
 
 ## MEDIUM PRIORITY
 
-### Swizzle on function call results (affects 4+ files)
-The `.` after function calls is tokenized as double_literal. Needs lexer fix + semantic member_access.
-Previous attempts always regress. Need arena-based error recovery.
+### Fix textureGather on shadow samplers (gather-dref.frag)
+Need OpImageDrefGather instruction. Currently textureGather on shadow samplers dispatches to image_sample_dref which tries to extract Dref from vec2 coordinate — out of bounds.
 
-### Function overloading (affects 3 files: partial-write-preserve, type-alias, generate_height)
-Our compiler uses name-only lookup. Need signature-based function resolution.
-
-### Fix torture-loop.comp continue construct
-Structural domination issue in loop control flow.
+### Fix generate_height.comp PackHalf2x16
+The GLSL.std.450 PackHalf2x16 instruction returns uint, but our codegen might return float. Need to check the ext_inst dispatch.
 
 ### Fix ground.frag No OpEntryPoint
-Preprocessor already has single-level macro resolution for #if. Needs multi-level resolution.
+Preprocessor #if needs multi-level macro resolution.
 
 ### Fix atomic.comp phantom IDs
-imageAtomicAdd etc. on image types need proper image variable handling.
+imageAtomicAdd etc. on image types need proper image variable handling (was attempted in previous session but reverted).
+
+### Fix texture-proj-shadow.desktop.frag
+Non-shadow textureProj(uSampler1D, vClip2) has vec2 coord which is too small. textureProj on 1D sampler needs vec2 (u, proj_divisor).
 
 ## LOW PRIORITY
 
 ### Fix fp-atomic (needs SPV_EXT_shader_atomic_float)
+Requires extension support for float atomics.
+
+### Fix the 1 compile error regression
+Investigate which file causes the compile error. May be GPA leak from overload map allocations.
