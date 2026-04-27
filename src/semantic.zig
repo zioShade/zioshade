@@ -2609,6 +2609,48 @@ const Analyzer = struct {
                     return .{ .ty = result_ty, .id = result_id };
                 }
 
+                // Matrix construction from individual scalars: mat2x3(a,b,c,d,e,f) → construct column vectors then matrix
+                if (result_ty.isMatrix() and arg_tids.items.len > 1 and arg_tids.items[0].ty.isScalar()) {
+                    const col_type = result_ty.columnType();
+                    const num_cols = result_ty.numColumns();
+                    const col_n = col_type.numComponents();
+                    // Group scalars into column vectors
+                    const col_ids = try self.alloc.alloc(u32, num_cols);
+                    for (0..num_cols) |col| {
+                        const vec_result_id = self.allocId();
+                        const vec_ops = try self.alloc.alloc(ir.Instruction.Operand, col_n);
+                        for (0..col_n) |row| {
+                            const idx = col * col_n + row;
+                            if (idx < arg_tids.items.len) {
+                                vec_ops[row] = .{ .id = arg_tids.items[idx].id };
+                            } else {
+                                vec_ops[row] = .{ .id = arg_tids.items[arg_tids.items.len - 1].id };
+                            }
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_construct,
+                            .result_type = null,
+                            .result_id = vec_result_id,
+                            .operands = vec_ops,
+                            .ty = col_type,
+                        });
+                        col_ids[col] = vec_result_id;
+                    }
+                    // Construct matrix from column vectors
+                    const mat_ops = try self.alloc.alloc(ir.Instruction.Operand, num_cols);
+                    for (col_ids, 0..) |cid, i| {
+                        mat_ops[i] = .{ .id = cid };
+                    }
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .composite_construct,
+                        .result_type = null,
+                        .result_id = result_id,
+                        .operands = mat_ops,
+                        .ty = result_ty,
+                    });
+                    return .{ .ty = result_ty, .id = result_id };
+                }
+
                 // Convert arguments to match result component type if needed
                 const result_scalar: ast.Type = switch (result_ty) {
                     .vec2, .vec3, .vec4 => .float,
