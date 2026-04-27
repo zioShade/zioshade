@@ -1769,10 +1769,20 @@ const Analyzer = struct {
                     std.mem.eql(u8, node.data.name, "atomicMax") or
                     std.mem.eql(u8, node.data.name, "atomicExchange") or
                     std.mem.eql(u8, node.data.name, "atomicCompSwap");
+                const is_image_atomic_fn = std.mem.eql(u8, node.data.name, "imageAtomicAdd") or
+                    std.mem.eql(u8, node.data.name, "imageAtomicOr") or
+                    std.mem.eql(u8, node.data.name, "imageAtomicXor") or
+                    std.mem.eql(u8, node.data.name, "imageAtomicAnd") or
+                    std.mem.eql(u8, node.data.name, "imageAtomicMin") or
+                    std.mem.eql(u8, node.data.name, "imageAtomicMax") or
+                    std.mem.eql(u8, node.data.name, "imageAtomicExchange") or
+                    std.mem.eql(u8, node.data.name, "imageAtomicCompSwap");
                 for (node.data.children, 0..) |arg, i| {
                     var tid = try self.analyzeExpression(arg);
                     // Atomic functions need pointer arg, don't auto-load first arg
-                    if (tid.is_ptr and !(is_atomic_fn and i == 0)) {
+                    // Image atomics also need the image pointer (not loaded value)
+                    const skip_load = (is_atomic_fn and i == 0) or (is_image_atomic_fn and i == 0);
+                    if (tid.is_ptr and !skip_load) {
                         const ld = self.allocId();
                         const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         ops[0] = .{ .id = tid.id };
@@ -1865,27 +1875,63 @@ const Analyzer = struct {
                         });
                         return .{ .ty = .bool, .id = bool_val };
                     }
-                    // atomicAdd(ptr, value) → OpAtomicIAdd
-                    if (std.mem.eql(u8, node.data.name, "atomicAdd")) {
-                        // Returns the original value. First arg must be a pointer (l-value).
-                        const ret_ty = if (arg_tids.items.len > 1) arg_tids.items[1].ty else .uint;
-                        // Use analyzeLValue for first arg to get pointer, not loaded value
+                    // === Buffer/SSBO atomics (atomicAdd/Or/Xor/And/Min/Max/Exchange/CompSwap) ===
+                    const is_buffer_atomic = std.mem.eql(u8, node.data.name, "atomicAdd") or
+                        std.mem.eql(u8, node.data.name, "atomicAnd") or
+                        std.mem.eql(u8, node.data.name, "atomicOr") or
+                        std.mem.eql(u8, node.data.name, "atomicXor") or
+                        std.mem.eql(u8, node.data.name, "atomicMin") or
+                        std.mem.eql(u8, node.data.name, "atomicMax") or
+                        std.mem.eql(u8, node.data.name, "atomicExchange");
+                    if (is_buffer_atomic) {
+                        // Return type should match the pointed-to type, not the value arg type
+                        var ret_ty: ast.Type = .uint;
                         var ptr_tid = arg_tids.items[0];
                         if (node.data.children.len > 0) {
                             if (self.analyzeLValue(node.data.children[0])) |lval| {
                                 ptr_tid = lval;
-                            } else |_| {
-                                // Fall back to expression result
-                            }
+                                ret_ty = lval.ty; // use pointed-to type
+                            } else |_| {}
                         }
-                        // Operands matching codegen expectation: [ptr_id, value_id, scope_literal, semantics_literal]
-                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 4);
-                        operands[0] = .{ .id = ptr_tid.id }; // ptr
-                        operands[1] = if (arg_tids.items.len > 1) .{ .id = arg_tids.items[1].id } else .{ .literal_int = 0 }; // value
-                        operands[2] = .{ .literal_int = 1 }; // scope = Device
-                        operands[3] = .{ .literal_int = 64 }; // semantics = Uniform
+                        const atomic_tag: ir.Instruction.Tag =
+                            if (std.mem.eql(u8, node.data.name, "atomicAdd") and ret_ty == .float) .atomic_fadd else
+                            if (std.mem.eql(u8, node.data.name, "atomicAdd")) .atomic_iadd else
+                            if (std.mem.eql(u8, node.data.name, "atomicAnd")) .atomic_and else
+                            if (std.mem.eql(u8, node.data.name, "atomicOr")) .atomic_or else
+                            if (std.mem.eql(u8, node.data.name, "atomicXor")) .atomic_xor else
+                            if (std.mem.eql(u8, node.data.name, "atomicMin")) blk: {
+                                break :blk if (ret_ty == .int) .atomic_smin else .atomic_umin;
+                            } else
+                            if (std.mem.eql(u8, node.data.name, "atomicMax")) blk: {
+                                break :blk if (ret_ty == .int) .atomic_smax else .atomic_umax;
+                            } else
+                            .atomic_exchange;
+                        // Convert value to match return type if needed
+                        var value_id = if (arg_tids.items.len > 1) arg_tids.items[1].id else 0;
+                        if (arg_tids.items.len > 1 and !std.meta.eql(arg_tids.items[1].ty, ret_ty)) {
+                            const converted = self.allocId();
+                            const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            conv_ops[0] = .{ .id = arg_tids.items[1].id };
+                            const conv_tag: ir.Instruction.Tag = blk: {
+                                if (ret_ty == .uint and arg_tids.items[1].ty == .int) break :blk .convert_iti;
+                                if (ret_ty == .int and arg_tids.items[1].ty == .uint) break :blk .convert_uti;
+                                if (ret_ty == .float) break :blk .convert_itof;
+                                break :blk .bitcast;
+                            };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = conv_tag,
+                                .result_type = null,
+                                .result_id = converted,
+                                .operands = conv_ops,
+                                .ty = ret_ty,
+                            });
+                            value_id = converted;
+                        }
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        operands[0] = .{ .id = ptr_tid.id };
+                        operands[1] = if (arg_tids.items.len > 1) .{ .id = value_id } else .{ .literal_int = 0 };
                         try self.instructions.append(self.alloc, .{
-                            .tag = .atomic_iadd,
+                            .tag = atomic_tag,
                             .result_type = null,
                             .result_id = result_id,
                             .operands = operands,
@@ -1893,15 +1939,105 @@ const Analyzer = struct {
                         });
                         return .{ .ty = ret_ty, .id = result_id };
                     }
-                    // imageAtomicAdd and other atomics — void stub for now
-                    if (std.mem.eql(u8, node.data.name, "imageAtomicAdd") or
-                        std.mem.eql(u8, node.data.name, "atomicAnd") or
-                        std.mem.eql(u8, node.data.name, "atomicOr") or
-                        std.mem.eql(u8, node.data.name, "atomicXor") or
-                        std.mem.eql(u8, node.data.name, "atomicMin") or
-                        std.mem.eql(u8, node.data.name, "atomicMax"))
-                    {
-                        return .{ .ty = .uint, .id = result_id };
+                    if (std.mem.eql(u8, node.data.name, "atomicCompSwap")) {
+                        const ret_ty = if (arg_tids.items.len > 2) arg_tids.items[2].ty else .uint;
+                        var ptr_tid = arg_tids.items[0];
+                        if (node.data.children.len > 0) {
+                            if (self.analyzeLValue(node.data.children[0])) |lval| {
+                                ptr_tid = lval;
+                            } else |_| {}
+                        }
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                        operands[0] = .{ .id = ptr_tid.id };
+                        operands[1] = .{ .id = arg_tids.items[1].id }; // comparator
+                        operands[2] = .{ .id = arg_tids.items[2].id }; // value
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .atomic_comp_swap,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = ret_ty,
+                        });
+                        return .{ .ty = ret_ty, .id = result_id };
+                    }
+                    // === Image atomics (imageAtomicAdd/Or/Xor/And/Min/Max/Exchange/CompSwap) ===
+                    const is_image_atomic = std.mem.eql(u8, node.data.name, "imageAtomicAdd") or
+                        std.mem.eql(u8, node.data.name, "imageAtomicOr") or
+                        std.mem.eql(u8, node.data.name, "imageAtomicXor") or
+                        std.mem.eql(u8, node.data.name, "imageAtomicAnd") or
+                        std.mem.eql(u8, node.data.name, "imageAtomicMin") or
+                        std.mem.eql(u8, node.data.name, "imageAtomicMax") or
+                        std.mem.eql(u8, node.data.name, "imageAtomicExchange") or
+                        std.mem.eql(u8, node.data.name, "imageAtomicCompSwap");
+                    if (is_image_atomic) {
+                        // imageAtomic*(image, coord, value[, comparator])
+                        // 1. Get image variable pointer (NOT loaded value)
+                        // 2. Emit OpImageTexelPointer(image_ptr, coord, sample=0)
+                        // 3. Emit atomic op on the texel pointer
+                        const image_ty = if (arg_tids.items.len > 0) arg_tids.items[0].ty else .uimage2d;
+                        const ret_ty: ast.Type = switch (image_ty) {
+                            .uimage2d => .uint,
+                            .iimage2d => .int,
+                            .image2d => .float,
+                            else => .uint,
+                        };
+                        // Get image variable pointer via LValue
+                        var image_ptr_id = arg_tids.items[0].id;
+                        if (node.data.children.len > 0) {
+                            if (self.analyzeLValue(node.data.children[0])) |lval| {
+                                image_ptr_id = lval.id;
+                            } else |_| {}
+                        }
+                        const texel_ptr_id = self.allocId();
+                        const tp_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        tp_ops[0] = .{ .id = image_ptr_id }; // image pointer
+                        tp_ops[1] = .{ .id = arg_tids.items[1].id }; // coord
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_texel_pointer,
+                            .result_type = null,
+                            .result_id = texel_ptr_id,
+                            .operands = tp_ops,
+                            .ty = ret_ty,
+                        });
+                        if (std.mem.eql(u8, node.data.name, "imageAtomicCompSwap")) {
+                            // imageAtomicCompSwap(image, coord, comparator, value)
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                            operands[0] = .{ .id = texel_ptr_id };
+                            operands[1] = .{ .id = arg_tids.items[2].id }; // comparator
+                            operands[2] = .{ .id = arg_tids.items[3].id }; // value
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .atomic_comp_swap,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = ret_ty,
+                            });
+                        } else {
+                            const atomic_tag: ir.Instruction.Tag =
+                                if (std.mem.eql(u8, node.data.name, "imageAtomicAdd") and ret_ty == .float) .atomic_fadd else
+                                if (std.mem.eql(u8, node.data.name, "imageAtomicAdd")) .atomic_iadd else
+                                if (std.mem.eql(u8, node.data.name, "imageAtomicAnd")) .atomic_and else
+                                if (std.mem.eql(u8, node.data.name, "imageAtomicOr")) .atomic_or else
+                                if (std.mem.eql(u8, node.data.name, "imageAtomicXor")) .atomic_xor else
+                                if (std.mem.eql(u8, node.data.name, "imageAtomicMin")) blk: {
+                                    break :blk if (ret_ty == .int) .atomic_smin else .atomic_umin;
+                                } else
+                                if (std.mem.eql(u8, node.data.name, "imageAtomicMax")) blk: {
+                                    break :blk if (ret_ty == .int) .atomic_smax else .atomic_umax;
+                                } else
+                                .atomic_exchange;
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            operands[0] = .{ .id = texel_ptr_id };
+                            operands[1] = .{ .id = arg_tids.items[2].id }; // value
+                            try self.instructions.append(self.alloc, .{
+                                .tag = atomic_tag,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = ret_ty,
+                            });
+                        }
+                        return .{ .ty = ret_ty, .id = result_id };
                     }
                     // imageSize returns ivec2, needs OpImageQuerySize
                     if (std.mem.eql(u8, node.data.name, "imageSize")) {
@@ -3447,8 +3583,12 @@ const Analyzer = struct {
             // Atomic builtins
             "atomicAdd",
             "atomicAnd", "atomicOr", "atomicXor", "atomicMin", "atomicMax",
+            "atomicExchange", "atomicCompSwap",
             "atomicCounter", "atomicCounterIncrement",
             "imageAtomicAdd",
+            "imageAtomicOr", "imageAtomicXor", "imageAtomicAnd",
+            "imageAtomicMin", "imageAtomicMax",
+            "imageAtomicExchange", "imageAtomicCompSwap",
             // Subgroup / group vote
             "allInvocationsARB", "anyInvocationARB", "allInvocationsEqualARB",
             "allInvocations", "anyInvocation", "allInvocationsEqual",
