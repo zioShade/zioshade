@@ -771,10 +771,37 @@ const Analyzer = struct {
                     if (!self.typesCompatible(ty, init.ty)) {
                         return error.TypeMismatch;
                     }
+                    // Convert initializer type to match declared type if needed
+                    var init_id = init.id;
+                    if (!std.meta.eql(ty, init.ty)) {
+                        const conv_tag: ?ir.Instruction.Tag = blk: {
+                            // int <-> uint same width: use bitcast
+                            if (ty == .uint and init.ty == .int) break :blk .bitcast;
+                            if (ty == .int and init.ty == .uint) break :blk .bitcast;
+                            if (ty == .float and init.ty == .int) break :blk .convert_itof;
+                            if (ty == .float and init.ty == .uint) break :blk .convert_utof;
+                            if (ty == .int and init.ty == .float) break :blk .convert_ftoi;
+                            if (ty == .uint and init.ty == .float) break :blk .convert_ftou;
+                            break :blk null;
+                        };
+                        if (conv_tag) |tag| {
+                            const conv_id = self.allocId();
+                            const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            conv_ops[0] = .{ .id = init.id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = tag,
+                                .result_type = null,
+                                .result_id = conv_id,
+                                .operands = conv_ops,
+                                .ty = ty,
+                            });
+                            init_id = conv_id;
+                        }
+                    }
                     // Emit store: target <- value
                     const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                     store_operands[0] = .{ .id = ir_id };
-                    store_operands[1] = .{ .id = init.id };
+                    store_operands[1] = .{ .id = init_id };
                     try self.instructions.append(self.alloc, .{
                         .tag = .store,
                         .result_type = null,
@@ -1451,9 +1478,36 @@ const Analyzer = struct {
                     });
                     value = .{ .ty = value.ty, .id = loaded_id };
                 }
+                // Convert value type to match target type if compatible but different
+                var value_id = value.id;
+                if (!std.meta.eql(target.ty, value.ty)) {
+                    const conv_tag: ?ir.Instruction.Tag = blk: {
+                        // int <-> uint same width: use bitcast (same bits, different type)
+                        if (target.ty == .uint and value.ty == .int) break :blk .bitcast;
+                        if (target.ty == .int and value.ty == .uint) break :blk .bitcast;
+                        if (target.ty == .float and value.ty == .int) break :blk .convert_itof;
+                        if (target.ty == .float and value.ty == .uint) break :blk .convert_utof;
+                        if (target.ty == .int and value.ty == .float) break :blk .convert_ftoi;
+                        if (target.ty == .uint and value.ty == .float) break :blk .convert_ftou;
+                        break :blk null;
+                    };
+                    if (conv_tag) |tag| {
+                        const conv_id = self.allocId();
+                        const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        conv_ops[0] = .{ .id = value.id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = tag,
+                            .result_type = null,
+                            .result_id = conv_id,
+                            .operands = conv_ops,
+                            .ty = target.ty,
+                        });
+                        value_id = conv_id;
+                    }
+                }
                 const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 store_operands[0] = .{ .id = target.id };
-                store_operands[1] = .{ .id = value.id };
+                store_operands[1] = .{ .id = value_id };
                 try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
