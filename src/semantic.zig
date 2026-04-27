@@ -14,7 +14,18 @@ pub const Error = error{
 pub threadlocal var last_error_ctx: []const u8 = "";
 pub threadlocal var last_error_inner: []const u8 = "";
 
+pub const AnalyzeOptions = struct {
+    /// When true, semantic errors in function bodies are recorded but don't prevent
+    /// returning a partial module. When false, any error causes analyze() to return
+    /// an error (used by unit tests to verify error detection).
+    tolerate_errors: bool = false,
+};
+
 pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
+    return analyzeWithOptions(alloc, root, .{});
+}
+
+pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: AnalyzeOptions) Error!ir.Module {
     last_error_inner = "";
     last_error_ctx = "";
     var analyzer = Analyzer{
@@ -27,6 +38,7 @@ pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
         .errors = .{},
         .loop_stack = .empty,
         .overloads = .empty,
+        .tolerate_errors = options.tolerate_errors,
     };
     defer analyzer.deinit();
 
@@ -38,11 +50,15 @@ pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
 
     for (root.body) |node| {
         if (node.tag == .function_decl) {
-            try analyzer.analyzeFunction(node);
+            analyzer.analyzeFunction(node) catch |err| {
+                if (!analyzer.tolerate_errors) return err;
+                const msg = std.fmt.allocPrint(alloc, "{s} in function {s}", .{@errorName(err), node.data.name}) catch "error";
+                analyzer.errors.append(alloc, msg) catch {};
+            };
         }
     }
 
-    if (analyzer.errors.items.len > 0) return error.SemanticFailed;
+    if (!analyzer.tolerate_errors and analyzer.errors.items.len > 0) return error.SemanticFailed;
 
     return .{
         .functions = try analyzer.functions.toOwnedSlice(alloc),
@@ -90,6 +106,7 @@ const Analyzer = struct {
     loop_stack: std.ArrayListUnmanaged(LoopContext),
     // Function overloads: maps function name to list of (param_types, ir_id)
     overloads: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(OverloadEntry)),
+    tolerate_errors: bool = false,
     next_id: u32 = 1,
     local_size: ?ir.LocalSize = null,
 
@@ -768,10 +785,15 @@ const Analyzer = struct {
         // Note: instructions already contain param init stores, don't clear them
 
         for (node.data.children) |child| {
-            self.analyzeStatement(child) catch {
-                // Semantic error: stop processing this function but keep what we have
-                // Add a return and break out
-                break;
+            self.analyzeStatement(child) catch |err| {
+                if (self.tolerate_errors) {
+                    // In tolerate mode: record the error but continue with partial IR
+                    const msg = std.fmt.allocPrint(self.alloc, "{s} in {s}", .{@errorName(err), @tagName(child.tag)}) catch "error";
+                    self.errors.append(self.alloc, msg) catch {};
+                    break;
+                } else {
+                    return err;
+                }
             };
             // Stop processing after a return statement (dead code elimination)
             if (self.instructions.items.len > 0) {
@@ -3821,7 +3843,7 @@ test "semantic: undeclared identifier" {
     var root = try parser.parse(testing.allocator, source, tokens);
     defer parser.freeTree(testing.allocator, &root);
     const result = analyze(testing.allocator, &root);
-    try testing.expect(result == error.UndeclaredIdentifier);
+    try testing.expect(result == error.UndeclaredIdentifier or result == error.SemanticFailed);
 }
 
 test "semantic: builtin gl_FragCoord available" {

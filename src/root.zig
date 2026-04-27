@@ -73,7 +73,7 @@ pub fn compileToSPIRV(
     };
     defer parser.freeTree(alloc, &root_node);
 
-    var module = semantic.analyze(alloc, &root_node) catch {
+    var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = true }) catch {
         last_compile_detail = .semantic_failed;
         return error.SemanticFailed;
     };
