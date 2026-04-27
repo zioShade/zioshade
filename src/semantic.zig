@@ -545,7 +545,7 @@ const Analyzer = struct {
                     .in_decl => .input,
                     .out_decl => .output,
                     .uniform_decl => .uniform,
-                    .var_decl => .private,
+                    .var_decl => if (node.data.qualifier != null and node.data.qualifier.?.is_shared) .workgroup else .private,
                     else => .private,
                 };
                 try self.globals.append(self.alloc, .{
