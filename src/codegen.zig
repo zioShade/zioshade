@@ -130,21 +130,64 @@ const Codegen = struct {
         try self.emitWord(@intFromEnum(spirv.Capability.group_vote));
         try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
         try self.emitWord(@intFromEnum(spirv.Capability.subgroup_vote_khr));
+        // Check if float atomics are used
+        var has_float_atomic = false;
+        for (self.module.functions) |func| {
+            for (func.body) |inst| {
+                if (inst.tag == .atomic_fadd) {
+                    has_float_atomic = true;
+                    break;
+                }
+            }
+            if (has_float_atomic) break;
+        }
+        if (has_float_atomic) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.atomic_float32_add_ext));
+        }
     }
 
     fn emitExtensions(self: *Codegen) !void {
-        const ext_name = "SPV_KHR_subgroup_vote";
-        const ext_word_count: u16 = 1 + @as(u16, @intCast(std.math.divCeil(usize, ext_name.len + 1, 4) catch unreachable));
-        try self.emitWord(spirv.encodeInstructionHeader(ext_word_count, @intFromEnum(spirv.Op.Extension)));
-        const num_words = std.math.divCeil(usize, ext_name.len + 1, 4) catch unreachable;
-        const ext_words = try self.alloc.alloc(u32, num_words);
-        @memset(ext_words, 0);
-        for (ext_name, 0..) |byte, idx| {
-            const word_idx = idx / 4;
-            const byte_idx = idx % 4;
-            ext_words[word_idx] |= @as(u32, byte) << @intCast(byte_idx * 8);
+        // SPV_KHR_subgroup_vote
+        {
+            const ext_name = "SPV_KHR_subgroup_vote";
+            const ext_word_count: u16 = 1 + @as(u16, @intCast(std.math.divCeil(usize, ext_name.len + 1, 4) catch unreachable));
+            try self.emitWord(spirv.encodeInstructionHeader(ext_word_count, @intFromEnum(spirv.Op.Extension)));
+            const num_words = std.math.divCeil(usize, ext_name.len + 1, 4) catch unreachable;
+            const ext_words = try self.alloc.alloc(u32, num_words);
+            @memset(ext_words, 0);
+            for (ext_name, 0..) |byte, idx| {
+                const word_idx = idx / 4;
+                const byte_idx = idx % 4;
+                ext_words[word_idx] |= @as(u32, byte) << @intCast(byte_idx * 8);
+            }
+            for (ext_words) |w| try self.emitWord(w);
         }
-        for (ext_words) |w| try self.emitWord(w);
+        // Check if float atomics are used — need SPV_EXT_shader_atomic_float_add
+        var has_float_atomic = false;
+        for (self.module.functions) |func| {
+            for (func.body) |inst| {
+                if (inst.tag == .atomic_fadd) {
+                    has_float_atomic = true;
+                    break;
+                }
+            }
+            if (has_float_atomic) break;
+        }
+        if (has_float_atomic) {
+            const ext_name = "SPV_EXT_shader_atomic_float_add";
+            const ext_word_count: u16 = 1 + @as(u16, @intCast(std.math.divCeil(usize, ext_name.len + 1, 4) catch unreachable));
+            try self.emitWord(spirv.encodeInstructionHeader(ext_word_count, @intFromEnum(spirv.Op.Extension)));
+            const num_words = std.math.divCeil(usize, ext_name.len + 1, 4) catch unreachable;
+            const ext_words = try self.alloc.alloc(u32, num_words);
+            @memset(ext_words, 0);
+            for (ext_name, 0..) |byte, idx| {
+                const word_idx = idx / 4;
+                const byte_idx = idx % 4;
+                ext_words[word_idx] |= @as(u32, byte) << @intCast(byte_idx * 8);
+            }
+            for (ext_words) |w| try self.emitWord(w);
+        }
     }
 
     fn emitExtInstImport(self: *Codegen) !void {
@@ -627,6 +670,22 @@ const Codegen = struct {
         return const_id;
     }
 
+    fn emitAtomicOp(self: *Codegen, inst: ir.Instruction, op: spirv.Op) !void {
+        const result_type_id = if (inst.result_type) |rt| rt else try self.ensureType(inst.ty);
+        const result_id = inst.result_id orelse return;
+        const ptr_id = self.operandId(inst, 0);
+        const value_id = self.operandId(inst, 1);
+        const scope_id = try self.emitIntConstant(1); // Device scope
+        const semantics_id = try self.emitIntConstant(64); // Uniform semantics
+        try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(op)));
+        try self.emitWord(result_type_id);
+        try self.emitWord(result_id);
+        try self.emitWord(ptr_id);
+        try self.emitWord(scope_id);
+        try self.emitWord(semantics_id);
+        try self.emitWord(value_id);
+    }
+
     fn emitFloatConstant(self: *Codegen, val: f32) error{OutOfMemory}!u32 {
         const float_type_id = try self.ensureType(.float);
         const val_bits: u32 = @bitCast(val);
@@ -829,6 +888,10 @@ const Codegen = struct {
                         try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(op)));
                         try self.emitWord(bool_type_id);
                         try self.emitWord(result_id);
+                    },
+                    .image_texel_pointer => {
+                        // Pre-emit pointer type for the texel pointer result
+                        _ = try self.ensurePointerType(inst.ty, .image);
                     },
                     else => {},
                 }
@@ -1536,21 +1599,76 @@ const Codegen = struct {
                     try self.emitWord(value_id);
                 }
             },
+            .image_texel_pointer => {
+                // OpImageTexelPointer: produces a pointer to the texel
+                // Result type must be OpTypePointer(image_storage_class, texel_type)
+                const result_type_id = try self.ensurePointerType(inst.ty, .image);
+                const result_id = resolved.result_id orelse return;
+                const image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const sample_id = try self.emitIntConstant(0); // sample = 0
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageTexelPointer)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(sample_id);
+                // Register as pointer in UniformConstant storage class
+                try self.ptr_storage_class.put(self.alloc, result_id, .image);
+            },
             .atomic_iadd => {
+                try self.emitAtomicOp(resolved, spirv.Op.AtomicIAdd);
+            },
+            .atomic_isub => {
+                try self.emitAtomicOp(resolved, spirv.Op.AtomicISub);
+            },
+            .atomic_smin => {
+                try self.emitAtomicOp(resolved, spirv.Op.AtomicSMin);
+            },
+            .atomic_umin => {
+                try self.emitAtomicOp(resolved, spirv.Op.AtomicUMin);
+            },
+            .atomic_smax => {
+                try self.emitAtomicOp(resolved, spirv.Op.AtomicSMax);
+            },
+            .atomic_umax => {
+                try self.emitAtomicOp(resolved, spirv.Op.AtomicUMax);
+            },
+            .atomic_and => {
+                try self.emitAtomicOp(resolved, spirv.Op.AtomicAnd);
+            },
+            .atomic_or => {
+                try self.emitAtomicOp(resolved, spirv.Op.AtomicOr);
+            },
+            .atomic_xor => {
+                try self.emitAtomicOp(resolved, spirv.Op.AtomicXor);
+            },
+            .atomic_exchange => {
+                try self.emitAtomicOp(resolved, spirv.Op.AtomicExchange);
+            },
+            .atomic_fadd => {
+                try self.emitAtomicOp(resolved, spirv.Op.AtomicFAddEXT);
+            },
+            .atomic_comp_swap => {
+                // OpAtomicCompareExchange: 9 words
+                // result_type, result, ptr, scope, semantics(unequal), semantics(equal), unequal_value, equal_value
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const ptr_id = self.operandId(resolved, 0);
-                const value_id = self.operandId(resolved, 1);
-                // Scope and semantics must be IDs referencing OpConstant values
-                const scope_id = try self.emitIntConstant(1); // Device scope
-                const semantics_id = try self.emitIntConstant(64); // Uniform semantics
-                try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.AtomicIAdd)));
+                const comparator_id = self.operandId(resolved, 1);
+                const value_id = self.operandId(resolved, 2);
+                const scope_id = try self.emitIntConstant(1); // Device
+                const sem_ne_id = try self.emitIntConstant(64); // Uniform
+                const sem_eq_id = try self.emitIntConstant(64); // Uniform
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.AtomicCompareExchange)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(ptr_id);
                 try self.emitWord(scope_id);
-                try self.emitWord(semantics_id);
+                try self.emitWord(sem_ne_id);
+                try self.emitWord(sem_eq_id);
                 try self.emitWord(value_id);
+                try self.emitWord(comparator_id);
             },
             .transpose => {
                 const result_type_id = resolved.result_type orelse return;
