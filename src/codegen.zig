@@ -29,6 +29,8 @@ pub fn generate(
         .emitted_func_types = .{},
         .ptr_storage_class = .{},
         .sampled_image_inner_id = 0,
+        .sampled_image_ms_inner_id = 0,
+        .sampled_image_ms_array_inner_id = 0,
         .sampler_buffer_inner_id = 0,
         .glsl_std_450_id = 0,
     };
@@ -36,6 +38,7 @@ pub fn generate(
 
     try cg.emitHeader(spirv_version);
     try cg.emitCapabilities();
+    try cg.emitExtensions();
     try cg.emitExtInstImport();
     try cg.emitMemoryModel();
     try cg.emitEntryPoint(stage);
@@ -65,6 +68,8 @@ const Codegen = struct {
     emitted_func_types: std.AutoHashMapUnmanaged(u64, u32), // hash(ret+params) -> func_type_id
     ptr_storage_class: std.AutoHashMapUnmanaged(u32, ir.SPIRVStorageClass), // result_id -> storage class for pointers
     sampled_image_inner_id: u32, // TypeImage (Sampled=1) for use with OpImage extraction
+    sampled_image_ms_inner_id: u32, // TypeImage (Multisampled=1, Sampled=1)
+    sampled_image_ms_array_inner_id: u32, // TypeImage (Multisampled=1, Arrayed=1, Sampled=1)
     sampler_buffer_inner_id: u32, // TypeImage (Dim=Buffer, Sampled=1) for texelFetch
     glsl_std_450_id: u32,
 
@@ -119,6 +124,25 @@ const Codegen = struct {
         try self.emitWord(@intFromEnum(spirv.Capability.image_ms_array));
         try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
         try self.emitWord(@intFromEnum(spirv.Capability.storage_image_multisample));
+        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+        try self.emitWord(@intFromEnum(spirv.Capability.group_vote));
+        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+        try self.emitWord(@intFromEnum(spirv.Capability.subgroup_vote_khr));
+    }
+
+    fn emitExtensions(self: *Codegen) !void {
+        const ext_name = "SPV_KHR_subgroup_vote";
+        const ext_word_count: u16 = 1 + @as(u16, @intCast(std.math.divCeil(usize, ext_name.len + 1, 4) catch unreachable));
+        try self.emitWord(spirv.encodeInstructionHeader(ext_word_count, @intFromEnum(spirv.Op.Extension)));
+        const num_words = std.math.divCeil(usize, ext_name.len + 1, 4) catch unreachable;
+        const ext_words = try self.alloc.alloc(u32, num_words);
+        @memset(ext_words, 0);
+        for (ext_name, 0..) |byte, idx| {
+            const word_idx = idx / 4;
+            const byte_idx = idx % 4;
+            ext_words[word_idx] |= @as(u32, byte) << @intCast(byte_idx * 8);
+        }
+        for (ext_words) |w| try self.emitWord(w);
     }
 
     fn emitExtInstImport(self: *Codegen) !void {
@@ -396,6 +420,40 @@ const Codegen = struct {
                 try self.emitWord(0);
                 try self.emitWord(1);
                 try self.emitWord(0);
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitWord(id);
+                try self.emitWord(image_id);
+            },
+            .sampler2d_ms => {
+                const float_id = try self.ensureType(.float);
+                const image_id = self.allocId();
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(image_id);
+                try self.emitWord(float_id);
+                try self.emitWord(1); // Dim = 2D
+                try self.emitWord(0); // Not depth
+                try self.emitWord(0); // Not arrayed
+                try self.emitWord(1); // Multisampled = 1
+                try self.emitWord(1); // Sampled = 1 (with sampler)
+                try self.emitWord(0); // ImageFormat = Unknown
+                self.sampled_image_ms_inner_id = image_id;
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitWord(id);
+                try self.emitWord(image_id);
+            },
+            .sampler2d_ms_array => {
+                const float_id = try self.ensureType(.float);
+                const image_id = self.allocId();
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(image_id);
+                try self.emitWord(float_id);
+                try self.emitWord(1); // Dim = 2D
+                try self.emitWord(0); // Not depth
+                try self.emitWord(1); // Arrayed = 1
+                try self.emitWord(1); // Multisampled = 1
+                try self.emitWord(1); // Sampled = 1 (with sampler)
+                try self.emitWord(0); // ImageFormat = Unknown
+                self.sampled_image_ms_array_inner_id = image_id;
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitWord(id);
                 try self.emitWord(image_id);
@@ -716,6 +774,7 @@ const Codegen = struct {
         _ = try self.emitFloatConstant(1.0);
         _ = try self.emitIntConstant(0);
         _ = try self.emitIntConstant(1);
+        _ = try self.emitIntConstant(3); // Workgroup scope for group operations
     }
     fn emitGlobals(self: *Codegen) !void {
         for (self.module.globals) |global| {
@@ -803,7 +862,7 @@ const Codegen = struct {
     fn emitInstruction(self: *Codegen, inst: ir.Instruction) !void {
         // Resolve null result_type from ast type
         var resolved = inst;
-        if (resolved.result_type == null and resolved.result_id != null and resolved.tag != .extract_image) {
+        if (resolved.result_type == null and resolved.result_id != null and resolved.tag != .extract_image and resolved.tag != .image_fetch_ms) {
             resolved.result_type = try self.ensureType(inst.ty);
         }
         switch (resolved.tag) {
@@ -1063,23 +1122,38 @@ const Codegen = struct {
                 try self.emitWord(sampled_image_id);
                 try self.emitWord(coord_id);
             },
-            .image_fetch => {
+            .image_fetch, .image_fetch_ms => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const image_id = self.operandId(resolved, 0);
                 const coord_id = self.operandId(resolved, 1);
-                // If operand was a sampler, image_id is already the extracted image
-                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageFetch)));
-                try self.emitWord(result_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(image_id);
-                try self.emitWord(coord_id);
+                // For MS images, add Image Operand Sample with 3rd arg
+                if (resolved.tag == .image_fetch_ms and resolved.operands.len >= 3) {
+                    const sample_id = self.operandId(resolved, 2);
+                    try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageFetch)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(64); // Image Operand Sample mask (bit 6)
+                    try self.emitWord(sample_id);
+                } else {
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageFetch)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(image_id);
+                    try self.emitWord(coord_id);
+                }
             },
             .extract_image => {
                 // Result type must be the image type inside the sampled image (Sampled=1)
                 // Choose the correct inner ID based on the source sampler type
                 const result_type_id: u32 = if (inst.ty == .sampler_buffer) blk: {
                     break :blk self.sampler_buffer_inner_id;
+                } else if (inst.ty == .image2d_ms or inst.ty == .sampler2d_ms) blk: {
+                    break :blk self.sampled_image_ms_inner_id;
+                } else if (inst.ty == .image2d_ms_array or inst.ty == .sampler2d_ms_array) blk: {
+                    break :blk self.sampled_image_ms_array_inner_id;
                 } else blk: {
                     break :blk self.sampled_image_inner_id;
                 };
@@ -1340,6 +1414,26 @@ const Codegen = struct {
                 for (resolved.operands[1..]) |op| {
                     try self.emitWord(self.operandValue(op));
                 }
+            },
+            .group_all => {
+                // OpSubgroupAllKHR: predicate → bool (no scope needed)
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const predicate_id = self.operandId(resolved, 0);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.SubgroupAllKHR)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(predicate_id);
+            },
+            .group_any => {
+                // OpSubgroupAnyKHR: predicate → bool (no scope needed)
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const predicate_id = self.operandId(resolved, 0);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.SubgroupAnyKHR)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(predicate_id);
             },
         }
     }

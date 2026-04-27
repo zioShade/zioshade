@@ -7,6 +7,7 @@ pub const Op = enum(u16) {
     Name = 5,
     MemberName = 6,
     ExtInstImport = 11,
+    Extension = 10,
     ExtInst = 12,
     MemoryModel = 14,
     EntryPoint = 15,
@@ -121,6 +122,9 @@ pub const Op = enum(u16) {
     BitwiseXor = 198,
     BitwiseAnd = 199,
     Not = 200,
+    SubgroupAllKHR = 4428,
+    SubgroupAnyKHR = 4429,
+    SubgroupAllEqualKHR = 4430,
     LoopMerge = 246,
     SelectionMerge = 247,
     Label = 248,
@@ -143,6 +147,8 @@ pub const Capability = enum(u32) {
     image_buffer = 47,
     image_ms_array = 48,
     storage_image_multisample = 27,
+    group_vote = 44,
+    subgroup_vote_khr = 4431,
     _,
 };
 
