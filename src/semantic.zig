@@ -60,7 +60,8 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
 
     if (!analyzer.tolerate_errors and analyzer.errors.items.len > 0) return error.SemanticFailed;
 
-    return .{
+    // Transfer ownership to module; clear analyzer fields so defer deinit doesn't double-free
+    const mod: ir.Module = .{
         .functions = try analyzer.functions.toOwnedSlice(alloc),
         .globals = try analyzer.globals.toOwnedSlice(alloc),
         .types = analyzer.types,
@@ -68,7 +69,15 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .next_id_start = analyzer.next_id,
         .alloc = alloc,
         .local_size = analyzer.local_size,
+        .heap_types = try analyzer.heap_types.toOwnedSlice(alloc),
     };
+    // Clear transferred fields before defer deinit runs
+    analyzer.types = .{};
+    analyzer.functions = .{};
+    analyzer.globals = .{};
+    analyzer.heap_types = .{};
+    analyzer.instructions.clearRetainingCapacity();
+    return mod;
 }
 
 const Symbol = struct {
@@ -109,8 +118,16 @@ const Analyzer = struct {
     tolerate_errors: bool = false,
     next_id: u32 = 1,
     local_size: ?ir.LocalSize = null,
+    // Heap-allocated AST types that transfer to Module for cleanup
+    heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
 
     fn deinit(self: *Analyzer) void {
+        // Free heap-allocated AST types (if not transferred to Module)
+        for (self.heap_types.items) |ptr| {
+            self.alloc.destroy(ptr);
+        }
+        self.heap_types.deinit(self.alloc);
+
         for (self.scopes.items) |*scope| scope.deinit(self.alloc);
         self.scopes.deinit(self.alloc);
         self.globals.deinit(self.alloc);
@@ -371,6 +388,7 @@ const Analyzer = struct {
             const id = self.allocId();
             const arr_base = try self.alloc.create(ast.Type);
             arr_base.* = .int;
+            try self.heap_types.append(self.alloc, arr_base);
             const sample_mask_ty: ast.Type = .{ .array = .{ .base = arr_base, .size = 1 } };
             try self.globals.append(self.alloc, .{ .name = "gl_SampleMaskIn", .ty = sample_mask_ty, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
             try self.declare("gl_SampleMaskIn", .{ .kind = .var_sym, .ty = sample_mask_ty, .ir_id = id });
@@ -381,6 +399,7 @@ const Analyzer = struct {
             const id = self.allocId();
             const sm_base = try self.alloc.create(ast.Type);
             sm_base.* = .int;
+            try self.heap_types.append(self.alloc, sm_base);
             const smask_ty: ast.Type = .{ .array = .{ .base = sm_base, .size = 1 } };
             try self.globals.append(self.alloc, .{ .name = "gl_SampleMask", .ty = smask_ty, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
             try self.declare("gl_SampleMask", .{ .kind = .var_sym, .ty = smask_ty, .ir_id = id });
@@ -3208,6 +3227,7 @@ const Analyzer = struct {
                 for (converted_ids, 0..) |cid, i| {
                     operands[i] = .{ .id = cid };
                 }
+                self.alloc.free(converted_ids);
 
                 try self.instructions.append(self.alloc, .{
                     .tag = .composite_construct,

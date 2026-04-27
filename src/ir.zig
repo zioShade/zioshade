@@ -11,6 +11,8 @@ pub const Module = struct {
     next_id_start: u32 = 1,
     alloc: std.mem.Allocator,
     local_size: ?LocalSize = null,
+    // Heap-allocated AST types that must be freed with the module
+    heap_types: []*ast.Type = &.{},
 
     pub fn deinit(self: *Module) void {
         for (self.functions) |func| {
@@ -29,6 +31,13 @@ pub const Module = struct {
             self.alloc.free(entry.value_ptr.members);
         }
         self.types.deinit(self.alloc);
+        // Free heap-allocated AST types
+        for (self.heap_types) |ptr| {
+            self.alloc.destroy(ptr);
+        }
+        if (self.heap_types.len > 0) {
+            self.alloc.free(self.heap_types);
+        }
     }
 };
 

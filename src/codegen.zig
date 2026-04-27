@@ -178,6 +178,7 @@ const Codegen = struct {
                 ext_words[word_idx] |= @as(u32, byte) << @intCast(byte_idx * 8);
             }
             for (ext_words) |w| try self.emitWord(w);
+            self.alloc.free(ext_words);
         }
         // Check if float atomics are used — need SPV_EXT_shader_atomic_float_add
         var has_float_atomic = false;
@@ -203,6 +204,7 @@ const Codegen = struct {
                 ext_words[word_idx] |= @as(u32, byte) << @intCast(byte_idx * 8);
             }
             for (ext_words) |w| try self.emitWord(w);
+            self.alloc.free(ext_words);
         }
     }
 
