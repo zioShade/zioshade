@@ -121,6 +121,8 @@ pub const Instruction = struct {
         image_sample_dref,
         image_sample_dref_explicit_lod,
         image_sample_dref_proj,
+        image_gather,
+        image_dref_gather,
         image_fetch,
         image_fetch_ms,
         extract_image,

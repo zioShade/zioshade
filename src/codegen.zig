@@ -910,12 +910,16 @@ const Codegen = struct {
     fn emitInstruction(self: *Codegen, inst: ir.Instruction) !void {
         // Resolve null result_type from ast type
         var resolved = inst;
-        if (resolved.result_type == null and resolved.result_id != null and resolved.tag != .extract_image and resolved.tag != .image_sample_dref and resolved.tag != .image_sample_dref_explicit_lod and resolved.tag != .image_sample_dref_proj) {
+        if (resolved.result_type == null and resolved.result_id != null and resolved.tag != .extract_image and resolved.tag != .image_sample_dref and resolved.tag != .image_sample_dref_explicit_lod and resolved.tag != .image_sample_dref_proj and resolved.tag != .image_dref_gather) {
             resolved.result_type = try self.ensureType(inst.ty);
         }
         // For Dref instructions, result type is always float
         if (resolved.result_type == null and resolved.result_id != null and (resolved.tag == .image_sample_dref or resolved.tag == .image_sample_dref_explicit_lod or resolved.tag == .image_sample_dref_proj)) {
             resolved.result_type = try self.ensureType(.float);
+        }
+        // For DrefGather, result type is always vec4
+        if (resolved.result_type == null and resolved.result_id != null and resolved.tag == .image_dref_gather) {
+            resolved.result_type = try self.ensureType(.vec4);
         }
         switch (resolved.tag) {
             .constant_int, .constant_float, .constant_bool => return,
@@ -1297,6 +1301,46 @@ const Codegen = struct {
                 try self.emitWord(coord_id);
                 try self.emitWord(dref_idx);
                 try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageSampleProjDrefImplicitLod)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(dref_id);
+            },
+            .image_gather => {
+                // OpImageGather: result_type(vec4), result, sampled_image, coordinate, component
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                // Component index (arg 2) or default 0
+                const component_id = if (resolved.operands.len > 2) self.operandId(resolved, 2) else try self.emitIntConstant(0);
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageGather)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(component_id);
+            },
+            .image_dref_gather => {
+                // OpImageDrefGather: result_type(vec4), result, sampled_image, coordinate, dref
+                // GLSL: textureGather(sampler, coord.xy, dref) — dref is separate arg
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const dref_id = if (resolved.operands.len > 2) self.operandId(resolved, 2) else dref: {
+                    // Fallback: extract last component from coord
+                    const float_id = try self.ensureType(.float);
+                    const ext_id = self.allocId();
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
+                    try self.emitWord(float_id);
+                    try self.emitWord(ext_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(2);
+                    break :dref ext_id;
+                };
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageDrefGather)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(sampled_image_id);
