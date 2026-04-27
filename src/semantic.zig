@@ -1599,9 +1599,18 @@ const Analyzer = struct {
             .func_call => {
                 var arg_tids = std.ArrayListUnmanaged(TypedId){};
                 defer arg_tids.deinit(self.alloc);
-                for (node.data.children) |arg| {
+                const is_atomic_fn = std.mem.eql(u8, node.data.name, "atomicAdd") or
+                    std.mem.eql(u8, node.data.name, "atomicAnd") or
+                    std.mem.eql(u8, node.data.name, "atomicOr") or
+                    std.mem.eql(u8, node.data.name, "atomicXor") or
+                    std.mem.eql(u8, node.data.name, "atomicMin") or
+                    std.mem.eql(u8, node.data.name, "atomicMax") or
+                    std.mem.eql(u8, node.data.name, "atomicExchange") or
+                    std.mem.eql(u8, node.data.name, "atomicCompSwap");
+                for (node.data.children, 0..) |arg, i| {
                     var tid = try self.analyzeExpression(arg);
-                    if (tid.is_ptr) {
+                    // Atomic functions need pointer arg, don't auto-load first arg
+                    if (tid.is_ptr and !(is_atomic_fn and i == 0)) {
                         const ld = self.allocId();
                         const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         ops[0] = .{ .id = tid.id };
@@ -1665,11 +1674,20 @@ const Analyzer = struct {
                     }
                     // atomicAdd(ptr, value) → OpAtomicIAdd
                     if (std.mem.eql(u8, node.data.name, "atomicAdd")) {
-                        // Returns the original value
+                        // Returns the original value. First arg must be a pointer (l-value).
                         const ret_ty = if (arg_tids.items.len > 1) arg_tids.items[1].ty else .uint;
+                        // Use analyzeLValue for first arg to get pointer, not loaded value
+                        var ptr_tid = arg_tids.items[0];
+                        if (node.data.children.len > 0) {
+                            if (self.analyzeLValue(node.data.children[0])) |lval| {
+                                ptr_tid = lval;
+                            } else |_| {
+                                // Fall back to expression result
+                            }
+                        }
                         // Operands matching codegen expectation: [ptr_id, value_id, scope_literal, semantics_literal]
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 4);
-                        operands[0] = .{ .id = arg_tids.items[0].id }; // ptr
+                        operands[0] = .{ .id = ptr_tid.id }; // ptr
                         operands[1] = if (arg_tids.items.len > 1) .{ .id = arg_tids.items[1].id } else .{ .literal_int = 0 }; // value
                         operands[2] = .{ .literal_int = 1 }; // scope = Device
                         operands[3] = .{ .literal_int = 64 }; // semantics = Uniform
