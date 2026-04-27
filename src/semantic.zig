@@ -1381,7 +1381,12 @@ const Analyzer = struct {
                         break :blk if (is_float) .fmul else .mul;
                     },
                     .div => if (is_float) .fdiv else .div,
-                    .mod => .rem,
+                    .mod => blk: {
+                        if (is_float) break :blk .fmod;
+                        // Check if unsigned int type
+                        const is_uint = left.ty == .uint or left.ty == .uvec2 or left.ty == .uvec3 or left.ty == .uvec4;
+                        break :blk if (is_uint) .umod else .rem;
+                    },
                     .eq => if (is_float) .compare_feq else .compare_eq,
                     .neq => if (is_float) .compare_fneq else .compare_neq,
                     .lt => if (is_float) .compare_flt else .compare_lt,
@@ -2429,6 +2434,98 @@ const Analyzer = struct {
 
                     if (arg_ty.isVector() and arg_n == n) {
                         // Same-size vector conversion
+                        // Special case: int/uint vector → bvec via INotEqual with zero
+                        if (result_ty == .bvec2 or result_ty == .bvec3 or result_ty == .bvec4) {
+                            // For bvecN(ivecN), emit composite_construct with per-element bool conversion
+                            // Each component: (component != 0) → bool
+                            const bool_ops = try self.alloc.alloc(ir.Instruction.Operand, n);
+                            const zero_id = self.allocId();
+                            const zero_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            zero_ops[0] = .{ .literal_int = 0 };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .constant_int,
+                                .result_type = null,
+                                .result_id = zero_id,
+                                .operands = zero_ops,
+                                .ty = .int,
+                            });
+                            for (0..n) |i| {
+                                const elem_id = self.allocId();
+                                const elem_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                elem_ops[0] = .{ .id = arg_tids.items[0].id };
+                                elem_ops[1] = .{ .literal_int = @intCast(i) };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .composite_extract,
+                                    .result_type = null,
+                                    .result_id = elem_id,
+                                    .operands = elem_ops,
+                                    .ty = .int,
+                                });
+                                const cmp_id = self.allocId();
+                                const cmp_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                cmp_ops[0] = .{ .id = elem_id };
+                                cmp_ops[1] = .{ .id = zero_id };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .compare_neq,
+                                    .result_type = null,
+                                    .result_id = cmp_id,
+                                    .operands = cmp_ops,
+                                    .ty = .bool,
+                                });
+                                bool_ops[i] = .{ .id = cmp_id };
+                            }
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .composite_construct,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = bool_ops,
+                                .ty = result_ty,
+                            });
+                            return .{ .ty = result_ty, .id = result_id };
+                        }
+                        // Special case: bvec → int/uint/float vector via OpSelect per component
+                        if (arg_ty == .bvec2 or arg_ty == .bvec3 or arg_ty == .bvec4) {
+                            const elem_ty: ast.Type = if (result_ty == .ivec2 or result_ty == .ivec3 or result_ty == .ivec4) .int else if (result_ty == .uvec2 or result_ty == .uvec3 or result_ty == .uvec4) .uint else .float;
+                            // Emit constants 0 and 1
+                            const zero_id = self.allocId();
+                            const zero_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            if (elem_ty == .float) {
+                                zero_ops[0] = .{ .literal_float = 0.0 };
+                                try self.instructions.append(self.alloc, .{ .tag = .constant_float, .result_type = null, .result_id = zero_id, .operands = zero_ops, .ty = .float });
+                            } else {
+                                zero_ops[0] = .{ .literal_int = 0 };
+                                try self.instructions.append(self.alloc, .{ .tag = .constant_int, .result_type = null, .result_id = zero_id, .operands = zero_ops, .ty = elem_ty });
+                            }
+                            const one_id = self.allocId();
+                            const one_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            if (elem_ty == .float) {
+                                one_ops[0] = .{ .literal_float = 1.0 };
+                                try self.instructions.append(self.alloc, .{ .tag = .constant_float, .result_type = null, .result_id = one_id, .operands = one_ops, .ty = .float });
+                            } else {
+                                one_ops[0] = .{ .literal_int = 1 };
+                                try self.instructions.append(self.alloc, .{ .tag = .constant_int, .result_type = null, .result_id = one_id, .operands = one_ops, .ty = elem_ty });
+                            }
+                            const result_ops = try self.alloc.alloc(ir.Instruction.Operand, n);
+                            for (0..n) |i| {
+                                // Extract bool component
+                                const bool_id = self.allocId();
+                                const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                ext_ops[0] = .{ .id = arg_tids.items[0].id };
+                                ext_ops[1] = .{ .literal_int = @intCast(i) };
+                                try self.instructions.append(self.alloc, .{ .tag = .composite_extract, .result_type = null, .result_id = bool_id, .operands = ext_ops, .ty = .bool });
+                                // OpSelect: cond=true_id, true=one_id, false=zero_id
+                                const sel_id = self.allocId();
+                                const sel_ops = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                                sel_ops[0] = .{ .id = bool_id };
+                                sel_ops[1] = .{ .id = one_id };
+                                sel_ops[2] = .{ .id = zero_id };
+                                try self.instructions.append(self.alloc, .{ .tag = .select, .result_type = null, .result_id = sel_id, .operands = sel_ops, .ty = elem_ty });
+                                result_ops[i] = .{ .id = sel_id };
+                            }
+                            try self.instructions.append(self.alloc, .{ .tag = .composite_construct, .result_type = null, .result_id = result_id, .operands = result_ops, .ty = result_ty });
+                            return .{ .ty = result_ty, .id = result_id };
+                        }
+
                         const conv_tag: ir.Instruction.Tag = blk: {
                             // int/uint vector → float vector
                             if (result_ty == .vec2 or result_ty == .vec3 or result_ty == .vec4) {
