@@ -659,7 +659,7 @@ const ExpressionEvaluator = struct {
     fn parseEquality(self: *ExpressionEvaluator) ExprEvalError!i64 {
         var left = try self.parseRelational();
         while (self.peek()) |tok| {
-            if (tok.tag == .eq) {
+            if (tok.tag == .eq_eq) {
                 self.pos += 1;
                 const right = try self.parseRelational();
                 left = if (left == right) 1 else 0;
