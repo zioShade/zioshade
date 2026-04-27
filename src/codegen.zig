@@ -862,7 +862,7 @@ const Codegen = struct {
     fn emitInstruction(self: *Codegen, inst: ir.Instruction) !void {
         // Resolve null result_type from ast type
         var resolved = inst;
-        if (resolved.result_type == null and resolved.result_id != null and resolved.tag != .extract_image and resolved.tag != .image_fetch_ms) {
+        if (resolved.result_type == null and resolved.result_id != null and resolved.tag != .extract_image) {
             resolved.result_type = try self.ensureType(inst.ty);
         }
         switch (resolved.tag) {
