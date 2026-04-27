@@ -2051,6 +2051,23 @@ const Analyzer = struct {
                     // Texture functions use different SPIR-V ops, not GLSL.std.450
                     if (self.isTextureBuiltin(node.data.name)) {
                         if (self.isImageSampleBuiltin(node.data.name) and !self.isTexelFetchBuiltin(node.data.name)) {
+                            // textureGather has its own IR tags
+                            const is_gather = std.mem.eql(u8, node.data.name, "textureGather");
+                            if (is_gather) {
+                                // textureGather: non-shadow → image_gather, shadow → image_dref_gather
+                                const gather_tag: ir.Instruction.Tag = if (is_shadow_sample) .image_dref_gather else .image_gather;
+                                const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                                for (arg_tids.items, 0..) |tid, i| {
+                                    operands[i] = .{ .id = tid.id };
+                                }
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = gather_tag,
+                                    .result_type = null,
+                                    .result_id = result_id,
+                                    .operands = operands,
+                                    .ty = if (is_shadow_sample) arg_tids.items[0].ty else result_ty,
+                                });
+                            } else {
                             // texture(sampler, coord) → image_sample (implicit or explicit lod)
                             const is_explicit_lod = std.mem.eql(u8, node.data.name, "textureLod") or std.mem.eql(u8, node.data.name, "textureLodOffset");
                             const is_proj = std.mem.eql(u8, node.data.name, "textureProj");
@@ -2071,6 +2088,7 @@ const Analyzer = struct {
                                 .operands = operands,
                                 .ty = if (is_shadow_sample) arg_tids.items[0].ty else result_ty,
                             });
+                            }
                         } else {
                             // texelFetch etc → image_fetch as fallback
                             // If first arg is a sampler, extract image first
