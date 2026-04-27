@@ -1,36 +1,23 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 189 passes, 1 compile error (GPA leak), 7 spirv-val failures
+## CURRENT STATUS: 192 passes, 0 compile errors, 5 spirv-val failures
 
-### Remaining 7 spirv-val failures:
-1. **spv.newTexture.frag** — Sampled Image type mismatch (integer samplers use float sampled type)
-2. **atomic.comp** — Undefined ID %110 (phantom ID from imageAtomic ops)
-3. **fp-atomic.nocompat.vk.comp** — AtomicIAdd on float (needs OpAtomicFAddEXT)
-4. **gather-dref.frag** — Vector out of bounds (textureGather on shadow sampler needs OpImageDrefGather)
-5. **generate_height.comp** — PackHalf2x16 returns vec2 not uint (simple result type fix)
-6. **ground.frag** — No OpEntryPoint (preprocessor #if needs multi-level macro expansion)
-7. **texture-proj-shadow.desktop.frag** — Coordinate too small for textureProj
+### Remaining 5 spirv-val failures:
+1. **spv.newTexture.frag** — Integer samplers (isampler2D etc) treated as sampler2D. Need full integer sampler type system. Complex refactor.
+2. **atomic.comp** — Phantom ID %110 from imageAtomicAdd inside ivec4(imageAtomicAdd(...)). The texel pointer + atomic instructions aren't being emitted for the nested call. Debug needed.
+3. **fp-atomic.nocompat.vk.comp** — AtomicIAdd on float (needs OpAtomicFAddEXT or similar)
+4. **ground.frag** — No OpEntryPoint. Preprocessor #if works in standalone test but not in runner binary. Mystery discrepancy between standalone test (559 words, has main) and runner binary (no functions). Possibly a Zig caching or compilation unit issue.
+5. **texture-proj-shadow.desktop.frag** — sampler1D mapped to sampler2D causes coordinate dimension mismatch for textureProj
 
-### 1 compile error (intermittent GPA leak):
-- `partial-write-preserve.frag` — exits 0 with PASS but GPA leak sometimes causes classification as compile error
-- Root cause: overload map's `dupe` allocations for param types leak when module is freed
+### Key insights:
+- The runner binary produces different results than standalone test with same source — UNEXLORED ROOT CAUSE
+- Integer sampler support requires adding ~20 new AST types + codegen — attempted but reverted due to regressions
+- The preprocessor == fix is correct but doesn't fix ground.frag
+- Image atomics need OpImageTexelPointer before OpAtomic* — partially implemented
 
-## COMPLETED THIS SESSION
-- Shadow sampler types + Dref instructions (texture-shadow-lod, newTexture fixed)
-- Function overloading support (type-alias.comp, partial-write-preserve.frag fixed)
-- Fixed autoresearch.sh build script (direct zig build-exe)
-
-## HIGH PRIORITY — Fix generate_height.comp (simple)
-PackHalf2x16 result type should be uint not vec2. Add case to result_ty inference.
-BUT: adding the fix causes 2 compile errors (up from 1) due to GPA leak interaction. 
-The fix itself is correct but the leak amplification needs investigation.
-
-## MEDIUM PRIORITY
-- Integer sampler types (isampler2d/usampler2d) for spv.newTexture.frag
-- OpImageDrefGather for gather-dref.frag
-- ground.frag preprocessor multi-level macros
-
-## LOW PRIORITY
-- atomic.comp phantom IDs
-- fp-atomic float atomics
-- texture-proj-shadow coord size
+### Completed this session:
+- GPA leak fix in overload map deinit (+1)
+- Pack/unpack return type fix (+1)
+- textureGather/textureGatherDref (+1)
+- Preprocessor == operator fix (no pass change)
+- Image atomic operation framework (WIP, not yet working)
