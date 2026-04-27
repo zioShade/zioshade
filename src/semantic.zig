@@ -1893,14 +1893,60 @@ const Analyzer = struct {
                         });
                         return .{ .ty = ret_ty, .id = result_id };
                     }
-                    // imageAtomicAdd and other atomics — void stub for now
-                    if (std.mem.eql(u8, node.data.name, "imageAtomicAdd") or
-                        std.mem.eql(u8, node.data.name, "atomicAnd") or
-                        std.mem.eql(u8, node.data.name, "atomicOr") or
-                        std.mem.eql(u8, node.data.name, "atomicXor") or
-                        std.mem.eql(u8, node.data.name, "atomicMin") or
-                        std.mem.eql(u8, node.data.name, "atomicMax"))
-                    {
+                    // imageAtomic*(image, coord, value) → OpImageTexelPointer + OpAtomic*
+                    if (std.mem.startsWith(u8, node.data.name, "imageAtomic")) {
+                        if (arg_tids.items.len >= 3) {
+                            const img_result_ty: ast.Type = if (arg_tids.items[0].ty == .uimage2d) .uint else .int;
+                            // Emit OpImageTexelPointer
+                            const texel_ptr_id = self.allocId();
+                            const tp_operands = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                            tp_operands[0] = .{ .id = arg_tids.items[0].id }; // image
+                            tp_operands[1] = .{ .id = arg_tids.items[1].id }; // coordinate
+                            tp_operands[2] = .{ .literal_int = 0 }; // sample
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .image_texel_pointer,
+                                .result_type = null,
+                                .result_id = texel_ptr_id,
+                                .operands = tp_operands,
+                                .ty = img_result_ty,
+                            });
+                            // Emit atomic instruction with texel pointer
+                            const is_comp_swap = std.mem.eql(u8, node.data.name, "imageAtomicCompSwap");
+                            const atomic_operands = if (is_comp_swap) blk: {
+                                // CompSwap: ptr, scope, semantics, comparator, value
+                                const ops = try self.alloc.alloc(ir.Instruction.Operand, 5);
+                                ops[0] = .{ .id = texel_ptr_id };
+                                ops[1] = .{ .literal_int = 1 }; // Device scope
+                                ops[2] = .{ .literal_int = 0x100 }; // Uniform semantics
+                                ops[3] = .{ .id = arg_tids.items[2].id }; // comparator
+                                ops[4] = .{ .id = arg_tids.items[3].id }; // value
+                                break :blk ops;
+                            } else blk: {
+                                const ops = try self.alloc.alloc(ir.Instruction.Operand, 4);
+                                ops[0] = .{ .id = texel_ptr_id };
+                                ops[1] = .{ .literal_int = 1 }; // Device scope
+                                ops[2] = .{ .literal_int = 0x100 }; // Uniform semantics
+                                ops[3] = .{ .id = arg_tids.items[2].id }; // value
+                                break :blk ops;
+                            };
+                            const atomic_tag: ir.Instruction.Tag = if (std.mem.eql(u8, node.data.name, "imageAtomicAdd")) .atomic_iadd
+                                else if (std.mem.eql(u8, node.data.name, "imageAtomicOr")) .atomic_ior
+                                else if (std.mem.eql(u8, node.data.name, "imageAtomicXor")) .atomic_ixor
+                                else if (std.mem.eql(u8, node.data.name, "imageAtomicAnd")) .atomic_iand
+                                else if (std.mem.eql(u8, node.data.name, "imageAtomicMin")) .atomic_smin
+                                else if (std.mem.eql(u8, node.data.name, "imageAtomicMax")) .atomic_smax
+                                else if (std.mem.eql(u8, node.data.name, "imageAtomicExchange")) .atomic_exchange
+                                else if (is_comp_swap) .atomic_comp_swap
+                                else .atomic_iadd;
+                            try self.instructions.append(self.alloc, .{
+                                .tag = atomic_tag,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = atomic_operands,
+                                .ty = img_result_ty,
+                            });
+                            return .{ .ty = img_result_ty, .id = result_id };
+                        }
                         return .{ .ty = .uint, .id = result_id };
                     }
                     // imageSize returns ivec2, needs OpImageQuerySize
@@ -3441,6 +3487,9 @@ const Analyzer = struct {
             "atomicAnd", "atomicOr", "atomicXor", "atomicMin", "atomicMax",
             "atomicCounter", "atomicCounterIncrement",
             "imageAtomicAdd",
+            "imageAtomicOr", "imageAtomicXor", "imageAtomicAnd",
+            "imageAtomicMin", "imageAtomicMax",
+            "imageAtomicExchange", "imageAtomicCompSwap",
             // Subgroup / group vote
             "allInvocationsARB", "anyInvocationARB", "allInvocationsEqualARB",
             "allInvocations", "anyInvocation", "allInvocationsEqual",
