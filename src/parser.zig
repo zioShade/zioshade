@@ -63,6 +63,15 @@ pub fn parse(alloc: std.mem.Allocator, source: [:0]const u8, tokens: []const lex
         try body.append(alloc, node);
     }
 
+    // Free struct_names HashMap keys (dupe'd names) and deinit
+    {
+        var it = p.struct_names.keyIterator();
+        while (it.next()) |key| {
+            alloc.free(key.*);
+        }
+        p.struct_names.deinit(alloc);
+    }
+
     return .{
         .version = null,
         .body = try body.toOwnedSlice(alloc),
