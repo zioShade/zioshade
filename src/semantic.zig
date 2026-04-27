@@ -923,22 +923,31 @@ const Analyzer = struct {
             .while_stmt => {
                 const header_label = self.allocId();
                 const body_label = self.allocId();
+                const continue_label = self.allocId();
                 const merge_label = self.allocId();
 
                 try self.emitBranch(header_label);
 
                 try self.loop_stack.append(self.alloc, .{
                     .merge_label = merge_label,
-                    .continue_label = header_label,
+                    .continue_label = continue_label,
                 });
 
+                // Header: condition check, LoopMerge, branch
                 try self.emitLabel(header_label);
                 const cond = try self.analyzeExpression(node.data.children[0]);
-                try self.emitLoopMerge(merge_label, header_label);
+                try self.emitLoopMerge(merge_label, continue_label);
                 try self.emitBranchConditional(cond.id, body_label, merge_label);
 
+                // Body
                 try self.emitLabel(body_label);
                 if (node.data.children.len > 1) try self.analyzeStatement(node.data.children[1]);
+                if (!self.lastInstructionIsReturn()) {
+                    try self.emitBranch(continue_label);
+                }
+
+                // Continue: branch back to header for re-evaluation
+                try self.emitLabel(continue_label);
                 try self.emitBranch(header_label);
 
                 _ = self.loop_stack.pop();
