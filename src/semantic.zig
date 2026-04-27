@@ -1911,7 +1911,7 @@ const Analyzer = struct {
                     }
                     // Texture functions use different SPIR-V ops, not GLSL.std.450
                     if (self.isTextureBuiltin(node.data.name)) {
-                        if (self.isImageSampleBuiltin(node.data.name)) {
+                        if (self.isImageSampleBuiltin(node.data.name) and !self.isTexelFetchBuiltin(node.data.name)) {
                             // texture(sampler, coord) → image_sample (implicit or explicit lod)
                             const is_explicit_lod = std.mem.eql(u8, node.data.name, "textureLod");
                             const is_proj = std.mem.eql(u8, node.data.name, "textureProj");
@@ -3165,6 +3165,12 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "distance") or
             std.mem.eql(u8, name, "dot") or
             std.mem.eql(u8, name, "determinant");
+    }
+
+    fn isTexelFetchBuiltin(self: *Analyzer, name: []const u8) bool {
+        _ = self;
+        return std.mem.eql(u8, name, "texelFetch") or
+            std.mem.eql(u8, name, "texelFetchOffset");
     }
 
     fn isImageSampleBuiltin(self: *Analyzer, name: []const u8) bool {
