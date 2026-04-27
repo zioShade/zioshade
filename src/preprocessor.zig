@@ -175,6 +175,7 @@ pub const Preprocessor = struct {
 
         // Check for built-in macros
         if (std.mem.eql(u8, name, "__LINE__")) {
+            index.* += 1;
             const line_num = identifier_tok.loc.line;
             var buf: [20]u8 = undefined;
             const line_str = try std.fmt.bufPrintZ(&buf, "{}", .{line_num});
@@ -188,6 +189,7 @@ pub const Preprocessor = struct {
         }
 
         if (std.mem.eql(u8, name, "__FILE__")) {
+            index.* += 1;
             // Empty string for __FILE__
             try self.output.append(self.alloc, .{
                 .tag = .string_literal,
@@ -199,6 +201,7 @@ pub const Preprocessor = struct {
         }
 
         if (std.mem.eql(u8, name, "__VERSION__")) {
+            index.* += 1;
             var buf: [20]u8 = undefined;
             const ver_str = try std.fmt.bufPrintZ(&buf, "{}", .{self.version});
             try self.output.append(self.alloc, .{
