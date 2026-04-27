@@ -831,9 +831,27 @@ const ExpressionEvaluator = struct {
                                     const text = self.preprocessor.getTokenText(body_tok);
                                     return std.fmt.parseInt(i64, text, 10);
                                 }
+                                // If body is an identifier, recursively resolve it
+                                if (body_tok.tag == .identifier) {
+                                    const inner_name = self.preprocessor.getTokenText(body_tok);
+                                    if (self.preprocessor.defines.get(inner_name)) |inner_macro| {
+                                        switch (inner_macro) {
+                                            .object => |inner_body| {
+                                                if (inner_body.len > 0) {
+                                                    const inner_tok = inner_body[0];
+                                                    if (inner_tok.tag == .int_literal or inner_tok.tag == .uint_literal) {
+                                                        const text = self.preprocessor.getTokenText(inner_tok);
+                                                        return std.fmt.parseInt(i64, text, 10);
+                                                    }
+                                                }
+                                            },
+                                            .function => {},
+                                        }
+                                    }
+                                }
                             }
                         },
-                        .function => undefined,
+                        .function => {},
                     }
                 }
 
