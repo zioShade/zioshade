@@ -1788,7 +1788,7 @@ const Analyzer = struct {
                     if (std.mem.eql(u8, node.data.name, "textureSize")) {
                         // Extract image from sampler, then query size with lod
                         var img_id = arg_tids.items[0].id;
-                        if (arg_tids.items[0].ty == .sampler2d and arg_tids.items.len >= 1) {
+                        if (arg_tids.items[0].ty == .sampler2d or arg_tids.items[0].ty == .sampler2d_ms or arg_tids.items[0].ty == .sampler2d_ms_array) {
                             const extracted = self.allocId();
                             const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ext_ops[0] = .{ .id = arg_tids.items[0].id };
@@ -1858,7 +1858,7 @@ const Analyzer = struct {
                     // textureSamples(image) / imageSamples(image) → OpImageQuerySamples
                     if (std.mem.eql(u8, node.data.name, "textureSamples") or std.mem.eql(u8, node.data.name, "imageSamples")) {
                         var img_id = arg_tids.items[0].id;
-                        if (arg_tids.items[0].ty == .sampler2d) {
+                        if (arg_tids.items[0].ty == .sampler2d or arg_tids.items[0].ty == .sampler2d_ms or arg_tids.items[0].ty == .sampler2d_ms_array) {
                             const extracted = self.allocId();
                             const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ext_ops[0] = .{ .id = arg_tids.items[0].id };
@@ -1936,7 +1936,7 @@ const Analyzer = struct {
                             // texelFetch etc → image_fetch as fallback
                             // If first arg is a sampler, extract image first
                             const fetch_args = arg_tids.items;
-                            if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler_cube or fetch_args[0].ty == .sampler_buffer)) {
+                            if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array or fetch_args[0].ty == .sampler_cube or fetch_args[0].ty == .sampler_buffer)) {
                                 const extracted_id = self.allocId();
                                 const extract_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                                 extract_operands[0] = .{ .id = fetch_args[0].id };
@@ -1945,7 +1945,7 @@ const Analyzer = struct {
                                     .result_type = null,
                                     .result_id = extracted_id,
                                     .operands = extract_operands,
-                                    .ty = if (fetch_args[0].ty == .sampler_buffer) .sampler_buffer else .image2d, // extracted image type
+                                    .ty = if (fetch_args[0].ty == .sampler_buffer) .sampler_buffer else if (fetch_args[0].ty == .sampler2d_ms) .image2d_ms else if (fetch_args[0].ty == .sampler2d_ms_array) .image2d_ms_array else .image2d, // extracted image type
                                 });
                                 // Replace first arg with extracted image
                                 var new_args = try self.alloc.alloc(ir.Instruction.Operand, fetch_args.len);
@@ -1953,10 +1953,11 @@ const Analyzer = struct {
                                 for (1..fetch_args.len) |i| {
                                     new_args[i] = .{ .id = fetch_args[i].id };
                                 }
+                                const is_ms = fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array;
                                 const operands = try self.alloc.alloc(ir.Instruction.Operand, fetch_args.len);
                                 for (operands, 0..) |*op, i| op.* = new_args[i];
                                 try self.instructions.append(self.alloc, .{
-                                    .tag = .image_fetch,
+                                    .tag = if (is_ms) .image_fetch_ms else .image_fetch,
                                     .result_type = null,
                                     .result_id = result_id,
                                     .operands = operands,
@@ -2076,6 +2077,30 @@ const Analyzer = struct {
                         operands[0] = .{ .id = arg_tids.items[0].id };
                         try self.instructions.append(self.alloc, .{
                             .tag = if (std.mem.eql(u8, node.data.name, "any")) .any else .all,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .bool,
+                        });
+                        return .{ .ty = .bool, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "allInvocationsARB") or std.mem.eql(u8, node.data.name, "allInvocations") or std.mem.eql(u8, node.data.name, "allInvocationsEqualARB") or std.mem.eql(u8, node.data.name, "allInvocationsEqual")) {
+                        // Group vote: allInvocations → OpGroupAll
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .group_all,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .bool,
+                        });
+                        return .{ .ty = .bool, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "anyInvocationARB") or std.mem.eql(u8, node.data.name, "anyInvocation")) {
+                        // Group vote: anyInvocation → OpGroupAny
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .group_any,
                             .result_type = null,
                             .result_id = result_id,
                             .operands = operands,

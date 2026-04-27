@@ -119,6 +119,7 @@ pub const Instruction = struct {
         image_sample_explicit_lod,
         image_sample_proj,
         image_fetch,
+        image_fetch_ms,
         extract_image,
         image_query_size,
         image_query_size_lod,
@@ -164,6 +165,8 @@ pub const Instruction = struct {
         ext_inst,
         select,
         function_call,
+        group_all,
+        group_any,
     };
 
     pub const Operand = union(enum) {
