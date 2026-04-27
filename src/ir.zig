@@ -203,4 +203,5 @@ pub const SPIRVStorageClass = enum(u32) {
     function = 7,
     image = 11,
     push_constant = 9,
+    workgroup = 4,
 };
