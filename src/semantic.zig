@@ -1947,7 +1947,7 @@ const Analyzer = struct {
                                 .result_type = null,
                                 .result_id = result_id,
                                 .operands = operands,
-                                .ty = result_ty,
+                                .ty = if (is_shadow_sample) arg_tids.items[0].ty else result_ty,
                             });
                         } else {
                             // texelFetch etc → image_fetch as fallback
