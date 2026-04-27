@@ -1,44 +1,36 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 189 passes, 1 compile error, 7 spirv-val failures
+## CURRENT STATUS: 189 passes, 1 compile error (GPA leak), 7 spirv-val failures
 
 ### Remaining 7 spirv-val failures:
 1. **spv.newTexture.frag** — Sampled Image type mismatch (integer samplers use float sampled type)
 2. **atomic.comp** — Undefined ID %110 (phantom ID from imageAtomic ops)
 3. **fp-atomic.nocompat.vk.comp** — AtomicIAdd on float (needs OpAtomicFAddEXT)
 4. **gather-dref.frag** — Vector out of bounds (textureGather on shadow sampler needs OpImageDrefGather)
-5. **generate_height.comp** — PackHalf2x16 returns wrong type (was duplicate IDs, now fixed by overloading)
+5. **generate_height.comp** — PackHalf2x16 returns vec2 not uint (simple result type fix)
 6. **ground.frag** — No OpEntryPoint (preprocessor #if needs multi-level macro expansion)
-7. **texture-proj-shadow.desktop.frag** — Coordinate too small for textureProj (non-shadow textureProj issue)
+7. **texture-proj-shadow.desktop.frag** — Coordinate too small for textureProj
 
-### New compile error (1 file):
-- Unknown which file. Likely GPA leak from overload map allocations causing non-zero exit. Need to investigate.
+### 1 compile error (intermittent GPA leak):
+- `partial-write-preserve.frag` — exits 0 with PASS but GPA leak sometimes causes classification as compile error
+- Root cause: overload map's `dupe` allocations for param types leak when module is freed
 
-## HIGH PRIORITY — Integer sampler types
-Add `isampler2d`/`usampler2d` types with int/uint sampled type in TypeImage.
-Would fix spv.newTexture.frag. Similar to how we added sampler2d_ms and shadow types.
+## COMPLETED THIS SESSION
+- Shadow sampler types + Dref instructions (texture-shadow-lod, newTexture fixed)
+- Function overloading support (type-alias.comp, partial-write-preserve.frag fixed)
+- Fixed autoresearch.sh build script (direct zig build-exe)
+
+## HIGH PRIORITY — Fix generate_height.comp (simple)
+PackHalf2x16 result type should be uint not vec2. Add case to result_ty inference.
+BUT: adding the fix causes 2 compile errors (up from 1) due to GPA leak interaction. 
+The fix itself is correct but the leak amplification needs investigation.
 
 ## MEDIUM PRIORITY
-
-### Fix textureGather on shadow samplers (gather-dref.frag)
-Need OpImageDrefGather instruction. Currently textureGather on shadow samplers dispatches to image_sample_dref which tries to extract Dref from vec2 coordinate — out of bounds.
-
-### Fix generate_height.comp PackHalf2x16
-The GLSL.std.450 PackHalf2x16 instruction returns uint, but our codegen might return float. Need to check the ext_inst dispatch.
-
-### Fix ground.frag No OpEntryPoint
-Preprocessor #if needs multi-level macro resolution.
-
-### Fix atomic.comp phantom IDs
-imageAtomicAdd etc. on image types need proper image variable handling (was attempted in previous session but reverted).
-
-### Fix texture-proj-shadow.desktop.frag
-Non-shadow textureProj(uSampler1D, vClip2) has vec2 coord which is too small. textureProj on 1D sampler needs vec2 (u, proj_divisor).
+- Integer sampler types (isampler2d/usampler2d) for spv.newTexture.frag
+- OpImageDrefGather for gather-dref.frag
+- ground.frag preprocessor multi-level macros
 
 ## LOW PRIORITY
-
-### Fix fp-atomic (needs SPV_EXT_shader_atomic_float)
-Requires extension support for float atomics.
-
-### Fix the 1 compile error regression
-Investigate which file causes the compile error. May be GPA leak from overload map allocations.
+- atomic.comp phantom IDs
+- fp-atomic float atomics
+- texture-proj-shadow coord size
