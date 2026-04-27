@@ -1362,7 +1362,7 @@ const Analyzer = struct {
                     }
                 }
 
-                const is_float = result_ty == .float or result_ty == .double or result_ty.isVector() or result_ty.isMatrix();
+                const is_float = result_ty == .float or result_ty == .double or result_ty == .vec2 or result_ty == .vec3 or result_ty == .vec4 or result_ty.isMatrix();
                 const op = node.data.op orelse .add;
 
 
