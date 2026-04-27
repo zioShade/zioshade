@@ -29,6 +29,7 @@ pub fn generate(
         .emitted_func_types = .{},
         .ptr_storage_class = .{},
         .sampled_image_inner_id = 0,
+        .sampled_image_1d_inner_id = 0,
         .sampled_image_ms_inner_id = 0,
         .sampled_image_ms_array_inner_id = 0,
         .sampler_buffer_inner_id = 0,
@@ -68,6 +69,7 @@ const Codegen = struct {
     emitted_func_types: std.AutoHashMapUnmanaged(u64, u32), // hash(ret+params) -> func_type_id
     ptr_storage_class: std.AutoHashMapUnmanaged(u32, ir.SPIRVStorageClass), // result_id -> storage class for pointers
     sampled_image_inner_id: u32, // TypeImage (Sampled=1) for use with OpImage extraction
+    sampled_image_1d_inner_id: u32,
     sampled_image_ms_inner_id: u32, // TypeImage (Multisampled=1, Sampled=1)
     sampled_image_ms_array_inner_id: u32, // TypeImage (Multisampled=1, Arrayed=1, Sampled=1)
     sampler_buffer_inner_id: u32, // TypeImage (Dim=Buffer, Sampled=1) for texelFetch
@@ -318,6 +320,39 @@ const Codegen = struct {
                 try self.emitWord(id);
                 try self.emitWord(image_id);
             },
+            .sampler1d => {
+                const float_id = try self.ensureType(.float);
+                const image_id = self.allocId();
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(image_id);
+                try self.emitWord(float_id);
+                try self.emitWord(0); // Dim = 1D
+                try self.emitWord(0); // Not depth
+                try self.emitWord(0); // Not arrayed
+                try self.emitWord(0); // Not multisampled
+                try self.emitWord(1); // Sampled = 1 (yes)
+                try self.emitWord(0); // ImageFormat = Unknown
+                self.sampled_image_1d_inner_id = image_id;
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitWord(id);
+                try self.emitWord(image_id);
+            },
+            .sampler1d_shadow => {
+                const float_id = try self.ensureType(.float);
+                const image_id = self.allocId();
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(image_id);
+                try self.emitWord(float_id);
+                try self.emitWord(0); // Dim = 1D
+                try self.emitWord(1); // Depth = 1
+                try self.emitWord(0); // Not arrayed
+                try self.emitWord(0); // Not multisampled
+                try self.emitWord(1); // Sampled = 1 (yes)
+                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitWord(id);
+                try self.emitWord(image_id);
+            },
             .sampler_buffer => {
                 // samplerBuffer → TypeImage with Dim=Buffer, then TypeSampledImage
                 const float_id = try self.ensureType(.float);
@@ -468,6 +503,7 @@ const Codegen = struct {
                 try self.emitWord(0); // Not multisampled
                 try self.emitWord(1); // Sampled = 1
                 try self.emitWord(0); // ImageFormat = Unknown
+                self.sampled_image_1d_inner_id = image_id;
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitWord(id);
                 try self.emitWord(image_id);
@@ -1197,6 +1233,7 @@ const Codegen = struct {
                     .sampler2d_shadow => 2, // vec3(u,v,dref) → extract [2]
                     .sampler2d_array_shadow => 3, // vec4(u,v,layer,dref) → extract [3]
                     .sampler_cube_shadow => 3, // vec4(u,v,z,dref) → extract [3]
+                    .sampler1d_shadow => 1, // vec2(u,dref) → extract [1]
                     else => 3,
                 };
                 try self.emitWord(last_idx);
@@ -1205,21 +1242,32 @@ const Codegen = struct {
                     .sampler2d_shadow => .vec2, // vec3 → vec2
                     .sampler2d_array_shadow => .vec3, // vec4 → vec3
                     .sampler_cube_shadow => .vec3, // vec4 → vec3
+                    .sampler1d_shadow => .float, // vec2 → float
                     else => .vec3,
                 };
                 const shrink_type_id = try self.ensureType(shrink_ty);
                 const shrunk_coord_id = self.allocId();
-                const num_comp: u32 = switch (shrink_ty) {
-                    .vec2 => 2,
-                    .vec3 => 3,
-                    else => 3,
-                };
-                try self.emitWord(spirv.encodeInstructionHeader(@as(u16, @intCast(5 + num_comp)), @intFromEnum(spirv.Op.VectorShuffle)));
-                try self.emitWord(shrink_type_id);
-                try self.emitWord(shrunk_coord_id);
-                try self.emitWord(coord_id);
-                try self.emitWord(coord_id);
-                for (0..num_comp) |i| try self.emitWord(@intCast(i));
+                if (shrink_ty == .float) {
+                    // 1D shadow: extract scalar coordinate from vec2
+                    const float_type_id = try self.ensureType(.float);
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
+                    try self.emitWord(float_type_id);
+                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(0); // extract first component
+                } else {
+                    const num_comp: u32 = switch (shrink_ty) {
+                        .vec2 => 2,
+                        .vec3 => 3,
+                        else => 3,
+                    };
+                    try self.emitWord(spirv.encodeInstructionHeader(@as(u16, @intCast(5 + num_comp)), @intFromEnum(spirv.Op.VectorShuffle)));
+                    try self.emitWord(shrink_type_id);
+                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(coord_id);
+                    for (0..num_comp) |i| try self.emitWord(@intCast(i));
+                }
                 // Emit the Dref instruction
                 try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageSampleDrefImplicitLod)));
                 try self.emitWord(result_type_id);
@@ -1245,6 +1293,7 @@ const Codegen = struct {
                     .sampler2d_shadow => 2,
                     .sampler2d_array_shadow => 3,
                     .sampler_cube_shadow => 3,
+                    .sampler1d_shadow => 1,
                     else => 3,
                 };
                 try self.emitWord(last_idx);
@@ -1253,21 +1302,31 @@ const Codegen = struct {
                     .sampler2d_shadow => .vec2,
                     .sampler2d_array_shadow => .vec3,
                     .sampler_cube_shadow => .vec3,
+                    .sampler1d_shadow => .float,
                     else => .vec3,
                 };
                 const shrink_type_id = try self.ensureType(shrink_ty);
                 const shrunk_coord_id = self.allocId();
-                const num_comp: u32 = switch (shrink_ty) {
-                    .vec2 => 2,
-                    .vec3 => 3,
-                    else => 3,
-                };
-                try self.emitWord(spirv.encodeInstructionHeader(@as(u16, @intCast(5 + num_comp)), @intFromEnum(spirv.Op.VectorShuffle)));
-                try self.emitWord(shrink_type_id);
-                try self.emitWord(shrunk_coord_id);
-                try self.emitWord(coord_id);
-                try self.emitWord(coord_id);
-                for (0..num_comp) |i| try self.emitWord(@intCast(i));
+                if (shrink_ty == .float) {
+                    const float_type_id = try self.ensureType(.float);
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
+                    try self.emitWord(float_type_id);
+                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(0);
+                } else {
+                    const num_comp: u32 = switch (shrink_ty) {
+                        .vec2 => 2,
+                        .vec3 => 3,
+                        else => 3,
+                    };
+                    try self.emitWord(spirv.encodeInstructionHeader(@as(u16, @intCast(5 + num_comp)), @intFromEnum(spirv.Op.VectorShuffle)));
+                    try self.emitWord(shrink_type_id);
+                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(coord_id);
+                    for (0..num_comp) |i| try self.emitWord(@intCast(i));
+                }
                 const lod_id = if (resolved.operands.len >= 3) self.operandId(resolved, 2) else return;
                 // Image Operand Lod mask = bit 1 (0x2)
                 try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleDrefExplicitLod)));
@@ -1292,6 +1351,7 @@ const Codegen = struct {
                 // For proj shadow, extract Dref: for sampler2DShadow with vec4, dref is at index 2
                 const dref_idx: u32 = switch (inst.ty) {
                     .sampler2d_shadow => 2, // vec4(u,v,dref,proj)
+                    .sampler1d_shadow => 1, // vec4(s,dref,proj,pad)
                     else => 3,
                 };
                 const dref_id = self.allocId();
@@ -1379,6 +1439,8 @@ const Codegen = struct {
                     break :blk self.sampled_image_ms_inner_id;
                 } else if (inst.ty == .image2d_ms_array or inst.ty == .sampler2d_ms_array) blk: {
                     break :blk self.sampled_image_ms_array_inner_id;
+                } else if (inst.ty == .sampler1d or inst.ty == .sampler1d_shadow) blk: {
+                    break :blk self.sampled_image_1d_inner_id;
                 } else blk: {
                     break :blk self.sampled_image_inner_id;
                 };
