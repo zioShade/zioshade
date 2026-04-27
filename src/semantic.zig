@@ -1266,12 +1266,44 @@ const Analyzer = struct {
                 const result_ty = self.promoteTypes(left.ty, right.ty) orelse return error.TypeMismatch;
                 const result_id = self.allocId();
 
+                // Convert int/uint to float if needed for mixed comparisons/arithmetic
+                var left_conv_id: ?u32 = null;
+                var right_conv_id: ?u32 = null;
+                if (left.ty == .int and (result_ty == .float or result_ty == .double)) {
+                    const cvt_id = self.allocId();
+                    const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    cvt_ops[0] = .{ .id = left.id };
+                    try self.instructions.append(self.alloc, .{ .tag = .convert_itof, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = .float });
+                    left_conv_id = cvt_id;
+                }
+                if (right.ty == .int and (result_ty == .float or result_ty == .double)) {
+                    const cvt_id = self.allocId();
+                    const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    cvt_ops[0] = .{ .id = right.id };
+                    try self.instructions.append(self.alloc, .{ .tag = .convert_itof, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = .float });
+                    right_conv_id = cvt_id;
+                }
+                if (left.ty == .uint and (result_ty == .float or result_ty == .double)) {
+                    const cvt_id = self.allocId();
+                    const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    cvt_ops[0] = .{ .id = left.id };
+                    try self.instructions.append(self.alloc, .{ .tag = .convert_utof, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = .float });
+                    left_conv_id = cvt_id;
+                }
+                if (right.ty == .uint and (result_ty == .float or result_ty == .double)) {
+                    const cvt_id = self.allocId();
+                    const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    cvt_ops[0] = .{ .id = right.id };
+                    try self.instructions.append(self.alloc, .{ .tag = .convert_utof, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = .float });
+                    right_conv_id = cvt_id;
+                }
+
                 // Track if we splatted so we can use regular ops
                 var did_splat = false;
 
                 // Splat scalar to vector if needed for arithmetic ops
-                var left_id = left.id;
-                var right_id = right.id;
+                var left_id: u32 = if (left_conv_id) |id| id else left.id;
+                var right_id: u32 = if (right_conv_id) |id| id else right.id;
                 if (result_ty.isVector()) {
                     if (left.ty.isScalar() and !right.ty.isScalar()) {
                         // Splat left scalar to vector
@@ -1279,7 +1311,7 @@ const Analyzer = struct {
                         const splat_id = self.allocId();
                         const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
                         for (0..num_comps) |i| {
-                            splat_operands[i] = .{ .id = left.id };
+                            splat_operands[i] = .{ .id = left_id };
                         }
                         try self.instructions.append(self.alloc, .{
                             .tag = .composite_construct,
@@ -1296,7 +1328,7 @@ const Analyzer = struct {
                         const splat_id = self.allocId();
                         const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
                         for (0..num_comps) |i| {
-                            splat_operands[i] = .{ .id = right.id };
+                            splat_operands[i] = .{ .id = right_id };
                         }
                         try self.instructions.append(self.alloc, .{
                             .tag = .composite_construct,
@@ -1999,12 +2031,30 @@ const Analyzer = struct {
                             });
                         } else {
                             // Regular FMix
+                            // If third arg (alpha) is scalar but result is vector, splat alpha
+                            var alpha_id = arg_tids.items[2].id;
+                            if (result_ty.isVector() and !arg_tids.items[2].ty.isVector()) {
+                                const num_comps = result_ty.numComponents();
+                                const splat_id = self.allocId();
+                                const splat_ops = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
+                                for (0..num_comps) |i| {
+                                    splat_ops[i] = .{ .id = alpha_id };
+                                }
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .composite_construct,
+                                    .result_type = null,
+                                    .result_id = splat_id,
+                                    .operands = splat_ops,
+                                    .ty = result_ty,
+                                });
+                                alpha_id = splat_id;
+                            }
                             const glsl_id: u32 = 46;
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
                             operands[0] = .{ .literal_int = glsl_id };
-                            for (arg_tids.items, 0..) |tid, i| {
-                                operands[i + 1] = .{ .id = tid.id };
-                            }
+                            operands[1] = .{ .id = arg_tids.items[0].id };
+                            operands[2] = .{ .id = arg_tids.items[1].id };
+                            operands[3] = .{ .id = alpha_id };
                             try self.instructions.append(self.alloc, .{
                                 .tag = .ext_inst,
                                 .result_type = null,
