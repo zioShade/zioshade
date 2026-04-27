@@ -2077,6 +2077,39 @@ const Analyzer = struct {
                             .ty = .bool,
                         });
                         return .{ .ty = .bool, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "lessThan") or std.mem.eql(u8, node.data.name, "greaterThan") or std.mem.eql(u8, node.data.name, "lessThanEqual") or std.mem.eql(u8, node.data.name, "greaterThanEqual") or std.mem.eql(u8, node.data.name, "equal") or std.mem.eql(u8, node.data.name, "notEqual")) {
+                        // Vector comparison builtins → same as binary comparison operators
+                        if (arg_tids.items.len >= 2) {
+                            const left_ty = arg_tids.items[0].ty;
+                            const is_float = left_ty == .float or left_ty == .vec2 or left_ty == .vec3 or left_ty == .vec4;
+                            const tag: ir.Instruction.Tag = if (std.mem.eql(u8, node.data.name, "lessThan"))
+                                if (is_float) .compare_flt else .compare_lt
+                            else if (std.mem.eql(u8, node.data.name, "greaterThan"))
+                                if (is_float) .compare_fgt else .compare_gt
+                            else if (std.mem.eql(u8, node.data.name, "lessThanEqual"))
+                                if (is_float) .compare_flte else .compare_lte
+                            else if (std.mem.eql(u8, node.data.name, "greaterThanEqual"))
+                                if (is_float) .compare_fgte else .compare_gte
+                            else if (std.mem.eql(u8, node.data.name, "equal"))
+                                if (is_float) .compare_feq else .compare_eq
+                            else
+                                if (is_float) .compare_fneq else .compare_neq;
+                            // Result type: bvec with same dimension
+                            const bvec_ty: ast.Type = if (left_ty.isVector()) switch (left_ty.numComponents()) {
+                                2 => .bvec2, 3 => .bvec3, 4 => .bvec4, else => .bool,
+                            } else .bool;
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            operands[0] = .{ .id = arg_tids.items[0].id };
+                            operands[1] = .{ .id = arg_tids.items[1].id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = tag,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = bvec_ty,
+                            });
+                            return .{ .ty = bvec_ty, .id = result_id };
+                        }
                     } else if (std.mem.eql(u8, node.data.name, "dot")) {
                         // dot(a, b) → OpDot (core SPIR-V, not GLSL.std.450)
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
@@ -3139,7 +3172,15 @@ const Analyzer = struct {
         return std.mem.eql(u8, name, "texture") or
             std.mem.eql(u8, name, "texture2D") or
             std.mem.eql(u8, name, "textureLod") or
-            std.mem.eql(u8, name, "textureProj");
+            std.mem.eql(u8, name, "textureProj") or
+            std.mem.eql(u8, name, "textureLodOffset") or
+            std.mem.eql(u8, name, "textureOffset") or
+            std.mem.eql(u8, name, "textureGrad") or
+            std.mem.eql(u8, name, "textureGather") or
+            std.mem.eql(u8, name, "texelFetchOffset") or
+            std.mem.eql(u8, name, "textureProjLod") or
+            std.mem.eql(u8, name, "textureProjGrad") or
+            std.mem.eql(u8, name, "textureGradOffset");
     }
 
     fn glslExtInstruction(self: *Analyzer, name: []const u8) ?u32 {
