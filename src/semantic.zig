@@ -1918,11 +1918,19 @@ const Analyzer = struct {
                         });
                         return .{ .ty = .ivec2, .id = result_id };
                     }
-                    // textureSize(sampler, lod) → ivec2, uses OpImageQuerySizeLod
+                    // textureSize(sampler, lod) → varies by sampler type
                     if (std.mem.eql(u8, node.data.name, "textureSize")) {
+                        // Determine result type based on sampler type
+                        const size_ty: ast.Type = if (arg_tids.items.len > 0) switch (arg_tids.items[0].ty) {
+                            .sampler1d, .sampler1d_shadow => .int,
+                            .sampler2d, .sampler2d_shadow, .sampler2d_ms, .sampler_cube, .sampler_cube_shadow, .sampler2d_ms_array => .ivec2,
+                            .sampler2d_array_shadow => .ivec3,
+                            .sampler_buffer => .int,
+                            else => .ivec2,
+                        } else .ivec2;
                         // Extract image from sampler, then query size with lod
                         var img_id = arg_tids.items[0].id;
-                        if (arg_tids.items[0].ty == .sampler2d or arg_tids.items[0].ty == .sampler2d_ms or arg_tids.items[0].ty == .sampler2d_ms_array) {
+                        if (arg_tids.items[0].ty == .sampler2d or arg_tids.items[0].ty == .sampler2d_ms or arg_tids.items[0].ty == .sampler2d_ms_array or arg_tids.items[0].ty == .sampler1d) {
                             const extracted = self.allocId();
                             const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ext_ops[0] = .{ .id = arg_tids.items[0].id };
@@ -1945,7 +1953,7 @@ const Analyzer = struct {
                                 .result_type = null,
                                 .result_id = result_id,
                                 .operands = operands,
-                                .ty = .ivec2,
+                                .ty = size_ty,
                             });
                         } else {
                             // textureSize(image) → OpImageQuerySize
@@ -1956,7 +1964,7 @@ const Analyzer = struct {
                                 .result_type = null,
                                 .result_id = result_id,
                                 .operands = operands,
-                                .ty = .ivec2,
+                                .ty = size_ty,
                             });
                         }
                         return .{ .ty = .ivec2, .id = result_id };
@@ -2093,7 +2101,7 @@ const Analyzer = struct {
                             // texelFetch etc → image_fetch as fallback
                             // If first arg is a sampler, extract image first
                             const fetch_args = arg_tids.items;
-                            if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array or fetch_args[0].ty == .sampler_cube or fetch_args[0].ty == .sampler_buffer)) {
+                            if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array or fetch_args[0].ty == .sampler_cube or fetch_args[0].ty == .sampler_buffer or fetch_args[0].ty == .sampler1d)) {
                                 const extracted_id = self.allocId();
                                 const extract_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                                 extract_operands[0] = .{ .id = fetch_args[0].id };
@@ -3496,7 +3504,7 @@ const Analyzer = struct {
 
     fn isShadowSamplerType(self: *Analyzer, ty: ast.Type) bool {
         _ = self;
-        return ty == .sampler2d_shadow or ty == .sampler_cube_shadow or ty == .sampler2d_array_shadow;
+        return ty == .sampler2d_shadow or ty == .sampler_cube_shadow or ty == .sampler2d_array_shadow or ty == .sampler1d_shadow;
     }
 
     fn isImageSampleBuiltin(self: *Analyzer, name: []const u8) bool {

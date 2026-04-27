@@ -106,6 +106,8 @@ pub const Type = union(enum) {
     mat3x2, mat3x3, mat3x4,
     mat4x2, mat4x3, mat4x4,
     sampler2d,
+    sampler1d,
+    sampler1d_shadow,
     sampler2d_ms,
     sampler2d_ms_array,
     sampler_buffer,
@@ -128,7 +130,7 @@ pub const Type = union(enum) {
             .int, .uint => 4,
             .float => 4,
             .double => 8,
-            .void, .sampler2d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .sampler2d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube, .named, .array => 0,
+            .void, .sampler2d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube, .named, .array => 0,
             else => 4,
         };
     }
@@ -146,7 +148,7 @@ pub const Type = union(enum) {
             .mat2x3 => 6, .mat2x4 => 8,
             .mat3x2 => 6, .mat3x4 => 12,
             .mat4x2 => 8, .mat4x3 => 12,
-            .sampler2d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .sampler2d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube, .named, .array => 0,
+            .sampler2d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube, .named, .array => 0,
         };
     }
 
@@ -210,7 +212,7 @@ pub const Type = union(enum) {
 
     pub fn isSampler(self: Type) bool {
         return switch (self) {
-            .sampler2d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .sampler2d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube => true,
+            .sampler2d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube => true,
             else => false,
         };
     }
