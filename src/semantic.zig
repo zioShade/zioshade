@@ -1817,6 +1817,12 @@ const Analyzer = struct {
                     .bool
                 else if (self.isFloatReturnBuiltin(node.data.name))
                     .float
+                // Pack functions return uint
+                else if (std.mem.startsWith(u8, node.data.name, "pack"))
+                    .uint
+                // Unpack functions return vec2 (or vec4 for unpackSnorm4x8/unpackUnorm4x8)
+                else if (std.mem.startsWith(u8, node.data.name, "unpack"))
+                    if (std.mem.endsWith(u8, node.data.name, "4x8")) .vec4 else .vec2
                 else if (self.isGLSLBuiltin(node.data.name) and arg_tids.items.len > 0)
                     arg_tids.items[0].ty
                 else if (sym) |s| s.ty
