@@ -16,36 +16,31 @@
 11. **torture-loop.comp** — Continue construct structural domination
 12. **type-alias.comp** — Duplicate IDs (function overloading)
 
-## HIGH PRIORITY
+## HIGH PRIORITY — Requires shadow sampler types + Dref instructions
+For shadow samplers (sampler2DShadow etc.), need:
+1. Add `sampler2d_shadow` type to ast.zig (tried, reverted due to OpImageSampleImplicitLod needing vec4 result)
+2. Use `OpImageSampleDrefImplicitLod` for shadow textures (returns scalar float + takes depth ref)
+3. Similarly: `OpImageSampleDrefExplicitLod` for textureLod on shadow samplers
+4. This would fix 3 files: texture-shadow-lod, texture-shadow-lod-bias, texture-proj-shadow
 
-### Shadow sampler texture functions return float not vec4 (affects 3+ files)
-textureLod/textureOffset on sampler2DShadow etc. should return float, not vec4.
-**Blocker**: shadow sampler types (sampler2DShadow, etc.) are all parsed as .sampler2d in the parser.
-Need to either: (a) add distinct shadow sampler types, or (b) track "shadow" flag separately.
-
-### Swizzle on function call results (affects 4+ files including newTexture, texture-proj-shadow)
-The `.` after function calls like `texture(sampler, coord).x` is tokenized as double_literal.
-This causes vec4 to be used where float was expected (the `.x` is dropped).
-Fix requires lexer change for bare `.` which has been tried 10+ times and always regresses.
-**Previous attempts**: Always regress because the semantic analyzer can't handle the flood of new member_access nodes.
-Need arena-based error recovery for safe semantic error handling.
-
-### Function overloading (affects 3 files: partial-write-preserve, type-alias, generate_height)
-Our compiler uses name-only lookup, so overloaded functions get duplicate IDs.
-Need signature-based function resolution.
+## HIGH PRIORITY — Requires integer sampler types
+Add `isampler2d`/`usampler2d` types with int/uint sampled type in TypeImage.
+Would fix spv.newTexture.frag. Similar to how we added sampler2d_ms.
 
 ## MEDIUM PRIORITY
 
-### Fix integer sampler types (isampler2D, usampler2D → int/uint sampled type)
-Currently parsed as .sampler2d, but SPIR-V TypeImage needs int/uint sampled type.
-Affects spv.newTexture.frag.
+### Swizzle on function call results (affects 4+ files)
+The `.` after function calls is tokenized as double_literal. Needs lexer fix + semantic member_access.
+Previous attempts always regress. Need arena-based error recovery.
+
+### Function overloading (affects 3 files: partial-write-preserve, type-alias, generate_height)
+Our compiler uses name-only lookup. Need signature-based function resolution.
 
 ### Fix torture-loop.comp continue construct
 Structural domination issue in loop control flow.
 
 ### Fix ground.frag No OpEntryPoint
-The preprocessor already has single-level macro resolution for #if.
-Needs multi-level: `#if GLOBAL_RENDERER == DEFERRED` → resolve GLOBAL_RENDERER→DEFERRED→1, DEFERRED→1, then evaluate.
+Preprocessor already has single-level macro resolution for #if. Needs multi-level resolution.
 
 ### Fix atomic.comp phantom IDs
 imageAtomicAdd etc. on image types need proper image variable handling.
@@ -53,4 +48,3 @@ imageAtomicAdd etc. on image types need proper image variable handling.
 ## LOW PRIORITY
 
 ### Fix fp-atomic (needs SPV_EXT_shader_atomic_float)
-### Fix complex-expression-in-access-chain.frag (was regressed by MS image_fetch, now fixed)
