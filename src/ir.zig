@@ -107,6 +107,8 @@ pub const Instruction = struct {
         convert_utof,
         is_nan,
         is_inf,
+        any,
+        all,
         vector_shuffle,
         composite_construct,
         composite_extract,
