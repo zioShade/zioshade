@@ -120,7 +120,30 @@ pub const Type = union(enum) {
     sampler2d_shadow,
     sampler_cube_shadow,
     sampler2d_array_shadow,
+    sampler_cube_array_shadow,
     sampler_cube,
+    // Integer samplers (return ivec4 from texture ops)
+    isampler2d,
+    isampler3d,
+    isampler_cube,
+    isampler2d_array,
+    isampler2d_ms,
+    isampler2d_ms_array,
+    isampler_cube_array,
+    isampler1d,
+    isampler1d_array,
+    isampler_buffer,
+    // Unsigned samplers (return uvec4 from texture ops)
+    usampler2d,
+    usampler3d,
+    usampler_cube,
+    usampler2d_array,
+    usampler2d_ms,
+    usampler2d_ms_array,
+    usampler_cube_array,
+    usampler1d,
+    usampler1d_array,
+    usampler_buffer,
     named: []const u8,
     array: struct { base: *const Type, size: u32 },
 
@@ -130,7 +153,7 @@ pub const Type = union(enum) {
             .int, .uint => 4,
             .float => 4,
             .double => 8,
-            .void, .sampler2d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube, .named, .array => 0,
+            .void, .sampler2d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer, .named, .array => 0,
             else => 4,
         };
     }
@@ -148,7 +171,7 @@ pub const Type = union(enum) {
             .mat2x3 => 6, .mat2x4 => 8,
             .mat3x2 => 6, .mat3x4 => 12,
             .mat4x2 => 8, .mat4x3 => 12,
-            .sampler2d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube, .named, .array => 0,
+            .sampler2d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer, .named, .array => 0,
         };
     }
 
@@ -212,7 +235,7 @@ pub const Type = union(enum) {
 
     pub fn isSampler(self: Type) bool {
         return switch (self) {
-            .sampler2d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube => true,
+            .sampler2d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer => true,
             else => false,
         };
     }
@@ -259,6 +282,28 @@ pub const Type = union(enum) {
             .bool => .bvec4,
             else => self,
         };
+    }
+
+    /// Returns the scalar base type for sampler types (float for regular, int for isampler, uint for usampler)
+    pub fn samplerBaseType(self: Type) Type {
+        return switch (self) {
+            .sampler2d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer,
+            .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow,
+            .sampler_cube_array_shadow,
+            .sampler_cube, .image2d, .image_buffer, .image2d_ms, .image2d_ms_array => .float,
+            .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms,
+            .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array,
+            .isampler_buffer, .iimage2d => .int,
+            .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms,
+            .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array,
+            .usampler_buffer, .uimage2d => .uint,
+            else => .float,
+        };
+    }
+
+    /// Returns the texel result type for sampler types (vec4, ivec4, or uvec4)
+    pub fn samplerResultType(self: Type) Type {
+        return self.samplerBaseType().toVec4();
     }
 };
 

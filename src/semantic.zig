@@ -1820,9 +1820,9 @@ const Analyzer = struct {
                 const result_ty: ast.Type = if (is_shadow_sample)
                     .float
                 else if (self.isImageSampleBuiltin(node.data.name))
-                    .vec4
+                    if (arg_tids.items.len > 0) arg_tids.items[0].ty.samplerResultType() else .vec4
                 else if (std.mem.eql(u8, node.data.name, "texelFetch"))
-                    .vec4
+                    if (arg_tids.items.len > 0) arg_tids.items[0].ty.samplerResultType() else .vec4
                 else if (std.mem.eql(u8, node.data.name, "helperInvocationEXT"))
                     .bool
                 else if (self.isFloatReturnBuiltin(node.data.name))
@@ -2058,15 +2058,18 @@ const Analyzer = struct {
                     if (std.mem.eql(u8, node.data.name, "textureSize")) {
                         // Determine result type based on sampler type
                         const size_ty: ast.Type = if (arg_tids.items.len > 0) switch (arg_tids.items[0].ty) {
-                            .sampler1d, .sampler1d_shadow => .int,
-                            .sampler2d, .sampler2d_shadow, .sampler2d_ms, .sampler_cube, .sampler_cube_shadow, .sampler2d_ms_array => .ivec2,
-                            .sampler2d_array_shadow => .ivec3,
-                            .sampler_buffer => .int,
+                            .sampler1d, .sampler1d_shadow, .isampler1d, .usampler1d => .int,
+                            .sampler2d, .sampler2d_shadow, .sampler2d_ms, .sampler_cube, .sampler_cube_shadow, .sampler2d_ms_array,
+                            .isampler2d, .usampler2d, .isampler3d, .usampler3d, .isampler_cube, .usampler_cube,
+                            .isampler2d_ms, .usampler2d_ms, .isampler2d_ms_array, .usampler2d_ms_array => .ivec2,
+                            .sampler2d_array_shadow, .isampler2d_array, .usampler2d_array,
+                            .isampler_cube_array, .usampler_cube_array => .ivec3,
+                            .sampler_buffer, .isampler_buffer, .usampler_buffer => .int,
                             else => .ivec2,
                         } else .ivec2;
                         // Extract image from sampler, then query size with lod
                         var img_id = arg_tids.items[0].id;
-                        if (arg_tids.items[0].ty == .sampler2d or arg_tids.items[0].ty == .sampler2d_ms or arg_tids.items[0].ty == .sampler2d_ms_array or arg_tids.items[0].ty == .sampler1d) {
+                        if (arg_tids.items[0].ty == .sampler2d or arg_tids.items[0].ty == .sampler2d_ms or arg_tids.items[0].ty == .sampler2d_ms_array or arg_tids.items[0].ty == .sampler1d or arg_tids.items[0].ty == .isampler2d or arg_tids.items[0].ty == .usampler2d or arg_tids.items[0].ty == .isampler3d or arg_tids.items[0].ty == .usampler3d or arg_tids.items[0].ty == .isampler_cube or arg_tids.items[0].ty == .usampler_cube or arg_tids.items[0].ty == .isampler2d_ms or arg_tids.items[0].ty == .usampler2d_ms or arg_tids.items[0].ty == .isampler2d_ms_array or arg_tids.items[0].ty == .usampler2d_ms_array or arg_tids.items[0].ty == .isampler1d or arg_tids.items[0].ty == .usampler1d) {
                             const extracted = self.allocId();
                             const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ext_ops[0] = .{ .id = arg_tids.items[0].id };
@@ -2237,7 +2240,7 @@ const Analyzer = struct {
                             // texelFetch etc → image_fetch as fallback
                             // If first arg is a sampler, extract image first
                             const fetch_args = arg_tids.items;
-                            if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array or fetch_args[0].ty == .sampler_cube or fetch_args[0].ty == .sampler_buffer or fetch_args[0].ty == .sampler1d)) {
+                            if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array or fetch_args[0].ty == .sampler_cube or fetch_args[0].ty == .sampler_buffer or fetch_args[0].ty == .sampler1d or fetch_args[0].ty == .isampler2d or fetch_args[0].ty == .usampler2d or fetch_args[0].ty == .isampler3d or fetch_args[0].ty == .usampler3d or fetch_args[0].ty == .isampler_cube or fetch_args[0].ty == .usampler_cube or fetch_args[0].ty == .isampler2d_array or fetch_args[0].ty == .usampler2d_array or fetch_args[0].ty == .isampler2d_ms or fetch_args[0].ty == .usampler2d_ms or fetch_args[0].ty == .isampler2d_ms_array or fetch_args[0].ty == .usampler2d_ms_array or fetch_args[0].ty == .isampler_buffer or fetch_args[0].ty == .usampler_buffer or fetch_args[0].ty == .isampler1d or fetch_args[0].ty == .usampler1d)) {
                                 const extracted_id = self.allocId();
                                 const extract_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                                 extract_operands[0] = .{ .id = fetch_args[0].id };
@@ -2246,7 +2249,7 @@ const Analyzer = struct {
                                     .result_type = null,
                                     .result_id = extracted_id,
                                     .operands = extract_operands,
-                                    .ty = if (fetch_args[0].ty == .sampler_buffer) .sampler_buffer else if (fetch_args[0].ty == .sampler2d_ms) .image2d_ms else if (fetch_args[0].ty == .sampler2d_ms_array) .image2d_ms_array else .image2d, // extracted image type
+                                    .ty = fetch_args[0].ty, // pass sampler type so codegen can find correct inner image ID
                                 });
                                 // Replace first arg with extracted image
                                 var new_args = try self.alloc.alloc(ir.Instruction.Operand, fetch_args.len);
@@ -2254,7 +2257,7 @@ const Analyzer = struct {
                                 for (1..fetch_args.len) |i| {
                                     new_args[i] = .{ .id = fetch_args[i].id };
                                 }
-                                const is_ms = fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array;
+                                const is_ms = fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array or fetch_args[0].ty == .isampler2d_ms or fetch_args[0].ty == .usampler2d_ms or fetch_args[0].ty == .isampler2d_ms_array or fetch_args[0].ty == .usampler2d_ms_array;
                                 const operands = try self.alloc.alloc(ir.Instruction.Operand, fetch_args.len);
                                 for (operands, 0..) |*op, i| op.* = new_args[i];
                                 try self.instructions.append(self.alloc, .{
@@ -3644,7 +3647,7 @@ const Analyzer = struct {
 
     fn isShadowSamplerType(self: *Analyzer, ty: ast.Type) bool {
         _ = self;
-        return ty == .sampler2d_shadow or ty == .sampler_cube_shadow or ty == .sampler2d_array_shadow or ty == .sampler1d_shadow;
+        return ty == .sampler2d_shadow or ty == .sampler_cube_shadow or ty == .sampler2d_array_shadow or ty == .sampler1d_shadow or ty == .sampler_cube_array_shadow;
     }
 
     fn isImageSampleBuiltin(self: *Analyzer, name: []const u8) bool {
@@ -3660,7 +3663,8 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "texelFetchOffset") or
             std.mem.eql(u8, name, "textureProjLod") or
             std.mem.eql(u8, name, "textureProjGrad") or
-            std.mem.eql(u8, name, "textureGradOffset");
+            std.mem.eql(u8, name, "textureGradOffset") or
+            std.mem.eql(u8, name, "textureProjOffset");
     }
 
     fn glslExtInstruction(self: *Analyzer, name: []const u8) ?u32 {
