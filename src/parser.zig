@@ -619,6 +619,23 @@ const Parser = struct {
 
     fn parseStatement(self: *Parser) Error!ast.Node {
         const cur = self.current().tag;
+
+        // Skip preprocessor directives inside function bodies
+        switch (cur) {
+            .pp_define, .pp_undef, .pp_if, .pp_ifdef, .pp_ifndef, .pp_elif, .pp_else, .pp_endif, .pp_error, .pp_pragma, .pp_line, .pp_extension, .pp_include => {
+                const start_line = self.current().loc.line;
+                while (self.current().tag != .eof and self.current().loc.line == start_line) {
+                    _ = self.advance();
+                }
+                return .{
+                    .tag = .expr_stmt,
+                    .loc = .{ .line = @intCast(start_line), .column = 0 },
+                    .data = .{ .children = &.{} },
+                };
+            },
+            else => {},
+        }
+
         const nxt = self.peek().tag;
 
         // Local variable declaration: type identifier ...
