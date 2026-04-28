@@ -838,7 +838,9 @@ const Analyzer = struct {
                         .named, .array => false,
                         else => true, // scalar, vector, matrix types
                     };
-                    const ir_id = if (can_ssa) self.allocId() else blk: {
+                    // For SSA vars, reuse init_id as ir_id (no separate allocation needed)
+                    // If the var is later written to, a new ID is allocated for the OpVariable
+                    const ir_id = if (can_ssa) init_id else blk: {
                         // Must create OpVariable for struct/array types
                         const id = self.allocId();
                         const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
@@ -1164,8 +1166,8 @@ const Analyzer = struct {
                     }
                     if (sym.kind == .var_sym and sym.is_ssa) {
                         // SSA variable being written to — materialize as real OpVariable
-                        // Emit OpVariable + OpStore(init_value)
-                        const var_id = sym.ir_id;
+                        // Allocate a new ID for the OpVariable (ir_id was reused from init_value)
+                        const var_id = self.allocId();
                         const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         sc_operands[0] = .{ .literal_int = 7 };
                         try self.instructions.append(self.alloc, .{
@@ -1187,8 +1189,9 @@ const Analyzer = struct {
                                 .ty = .void,
                             });
                         }
-                        // Clear SSA flag so future reads use load
+                        // Update symbol with new var_id and clear SSA flag
                         if (self.lookupMut(node.data.name)) |mut_sym| {
+                            mut_sym.ir_id = var_id;
                             mut_sym.is_ssa = false;
                             mut_sym.init_value = null;
                         }
