@@ -21,9 +21,12 @@ pub fn generate(
         .stage = stage,
         .words = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .type_section = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
+        .decoration_section = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .next_id = module.next_id_start,
         .emitted_types = .{},
         .emitted_array_types = .{},
+        .emitted_array_stride = .{},
+        .emitted_struct_layout = .{},
         .emitted_named_types = .{},
         .emitted_ptr_types = .{},
         .emitted_constants = .{},
@@ -57,7 +60,18 @@ pub fn generate(
     try cg.emitEntryPoint(stage);
     try cg.emitNames();
     try cg.emitDecorations();
+    const decorations_end_pos = cg.words.items.len;
     try cg.emitTypesAndConstants();
+    // Splice struct layout decorations (Block, Offset, ArrayStride)
+    // These are accumulated in decoration_section during emitTypesAndConstants.
+    // They must go in the annotation section (between emitDecorations and types).
+    if (cg.decoration_section.items.len > 0) {
+        const type_words = try cg.allocator().dupe(u32, cg.words.items[decorations_end_pos..]);
+        cg.words.shrinkRetainingCapacity(decorations_end_pos);
+        try cg.words.appendSlice(cg.allocator(), cg.decoration_section.items);
+        try cg.words.appendSlice(cg.allocator(), type_words);
+        cg.allocator().free(type_words);
+    }
     try cg.emitGlobals();
     try cg.emitFunctions(stage);
 
@@ -73,10 +87,13 @@ const Codegen = struct {
     stage: Stage,
     words: std.ArrayList(u32),
     type_section: std.ArrayList(u32), // Types/constants emitted during function codegen
+    decoration_section: std.ArrayList(u32), // Struct layout decorations (Block, Offset, ArrayStride)
     in_functions: bool = false,
     next_id: u32,
     emitted_types: std.AutoHashMapUnmanaged(u32, u32), // @intFromEnum(ty) -> type_id
     emitted_array_types: std.AutoHashMapUnmanaged(u64, u32), // hash -> type_id
+    emitted_array_stride: std.AutoHashMapUnmanaged(u32, void), // array type_ids with ArrayStride already emitted
+    emitted_struct_layout: std.AutoHashMapUnmanaged(u32, void), // struct type_ids with layout decorations already emitted
     emitted_named_types: std.StringHashMapUnmanaged(u32), // struct name -> type_id
     emitted_ptr_types: std.AutoHashMapUnmanaged(u64, u32), // (type_key << 32 | sc) -> ptr_type_id
     emitted_constants: std.AutoHashMapUnmanaged(u64, u32), // (type_id << 32 | value) -> const_id
@@ -103,6 +120,8 @@ const Codegen = struct {
     fn deinit(self: *Codegen) void {
         self.emitted_types.deinit(self.alloc);
         self.emitted_array_types.deinit(self.alloc);
+        self.emitted_array_stride.deinit(self.alloc);
+        self.emitted_struct_layout.deinit(self.alloc);
         self.emitted_named_types.deinit(self.alloc);
         self.emitted_ptr_types.deinit(self.alloc);
         self.emitted_constants.deinit(self.alloc);
@@ -110,6 +129,7 @@ const Codegen = struct {
         self.ptr_storage_class.deinit(self.alloc);
         self.words.deinit(self.alloc);
         self.type_section.deinit(self.alloc);
+        self.decoration_section.deinit(self.alloc);
     }
 
     fn allocId(self: *Codegen) u32 {
@@ -1190,6 +1210,16 @@ const Codegen = struct {
                 for (member_ids.items) |mid| {
                     try self.emitTypeWord(mid);
                 }
+                // Emit UBO/SSBO decorations: Block + Offset/MatrixStride/ArrayStride
+                // Check if this named type is used as a uniform/storage buffer global
+                for (self.module.globals) |global| {
+                    if (global.storage_class != .uniform and global.storage_class != .storage_buffer) continue;
+                    if (global.ty != .named) continue;
+                    if (!std.mem.eql(u8, global.ty.named, name)) continue;
+                    try self.emitDecorationSectionDecorateNoExtra(id, @intFromEnum(spirv.Decoration.block));
+                    try self.emitNestedStructLayout(id, td.members);
+                    break;
+                }
             },
             .array => |arr| {
                 // Check cache for duplicate array types
@@ -1356,14 +1386,8 @@ const Codegen = struct {
             // gl_DeviceIndex → DeviceGroup
             // gl_BaseVertex, gl_BaseVertexARB → DrawParameters
             // gl_VertexIndex → already covered by gl_VertexID
-            // Decorate uniform block types with Block
-            if (global.storage_class == .uniform) {
-                if (global.ty == .named) {
-                    // Find the type ID for this struct and decorate it with Block
-                    // We need to decorate the struct type, not the variable
-                    // For now, emit Block decoration on the variable's type
-                }
-            }
+            // Decorate uniform/storage buffer struct types with Block/BufferBlock + Offset
+            // (emitted inline in ensureType for named structs)
         }
     }
 
@@ -1372,6 +1396,208 @@ const Codegen = struct {
         try self.emitWord(target_id);
         try self.emitWord(decoration);
         try self.emitWord(extra);
+    }
+
+    fn emitMemberDecorate(self: *Codegen, struct_type_id: u32, member_index: u32, decoration: u32, extra: u32) !void {
+        try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.MemberDecorate)));
+        try self.emitWord(struct_type_id);
+        try self.emitWord(member_index);
+        try self.emitWord(decoration);
+        try self.emitWord(extra);
+    }
+
+    fn emitDecorateNoExtra(self: *Codegen, target_id: u32, decoration: u32) !void {
+        try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.Decorate)));
+        try self.emitWord(target_id);
+        try self.emitWord(decoration);
+    }
+
+    // Decoration section variants (emitted before types)
+    fn emitDecorationSectionDecorate(self: *Codegen, target_id: u32, decoration: u32, extra: u32) !void {
+        try self.decoration_section.append(self.alloc, spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Decorate)));
+        try self.decoration_section.append(self.alloc, target_id);
+        try self.decoration_section.append(self.alloc, decoration);
+        try self.decoration_section.append(self.alloc, extra);
+    }
+
+    fn emitDecorationSectionDecorateNoExtra(self: *Codegen, target_id: u32, decoration: u32) !void {
+        try self.decoration_section.append(self.alloc, spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.Decorate)));
+        try self.decoration_section.append(self.alloc, target_id);
+        try self.decoration_section.append(self.alloc, decoration);
+    }
+
+    fn emitDecorationSectionMemberDecorate(self: *Codegen, struct_type_id: u32, member_index: u32, decoration: u32, extra: u32) !void {
+        try self.decoration_section.append(self.alloc, spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.MemberDecorate)));
+        try self.decoration_section.append(self.alloc, struct_type_id);
+        try self.decoration_section.append(self.alloc, member_index);
+        try self.decoration_section.append(self.alloc, decoration);
+        try self.decoration_section.append(self.alloc, extra);
+    }
+
+    fn emitDecorationSectionMemberDecorateNoExtra(self: *Codegen, struct_type_id: u32, member_index: u32, decoration: u32) !void {
+        try self.decoration_section.append(self.alloc, spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.MemberDecorate)));
+        try self.decoration_section.append(self.alloc, struct_type_id);
+        try self.decoration_section.append(self.alloc, member_index);
+        try self.decoration_section.append(self.alloc, decoration);
+    }
+
+    /// Compute std140 alignment for a type
+    fn std140Alignment(self: *Codegen, ty: ast.Type) u32 {
+        _ = self;
+        return switch (ty) {
+            .float, .int, .uint, .bool => 4,
+            .vec2 => 8,
+            .vec3, .vec4 => 16,
+            .ivec2 => 8,
+            .ivec3, .ivec4 => 16,
+            .uvec2 => 8,
+            .uvec3, .uvec4 => 16,
+            .mat2, .mat2x2 => 16, // same as vec4 (column alignment)
+            .mat3, .mat3x3 => 16,
+            .mat4, .mat4x4 => 16,
+            .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 16,
+            .array => 16, // std140: array alignment is vec4 (16)
+            .named => 16, // struct alignment is largest member (max 16)
+            else => 4,
+        };
+    }
+
+    /// Compute std140 size for a type
+    fn std140Size(self: *Codegen, ty: ast.Type) u32 {
+        return switch (ty) {
+            .float, .int, .uint, .bool => 4,
+            .vec2 => 8,
+            .vec3 => 12,
+            .vec4 => 16,
+            .ivec2 => 8,
+            .ivec3 => 12,
+            .ivec4 => 16,
+            .uvec2 => 8,
+            .uvec3 => 12,
+            .uvec4 => 16,
+            .mat2, .mat2x2 => 2 * 16, // 2 columns * vec4 aligned
+            .mat3, .mat3x3 => 3 * 16,
+            .mat4, .mat4x4 => 4 * 16,
+            .mat2x3 => 2 * 16, // 2 columns, each vec3 padded to vec4
+            .mat2x4 => 2 * 16,
+            .mat3x2 => 3 * 16,
+            .mat3x4 => 3 * 16,
+            .mat4x2 => 4 * 16,
+            .mat4x3 => 4 * 16,
+            .array => |arr| blk: {
+                const elem_size = self.std140Size(arr.base.*);
+                const elem_align = self.std140Alignment(arr.base.*);
+                const rounded_elem = std.mem.alignForward(u32, elem_size, elem_align);
+                // std140: array stride rounds element up to vec4 (16) alignment
+                const stride = std.mem.alignForward(u32, rounded_elem, 16);
+                break :blk stride * arr.size;
+            },
+            .named => |name| blk: {
+                const td = self.module.types.get(name) orelse break :blk 0;
+                var sz: u32 = 0;
+                for (td.members) |member| {
+                    const alignment = self.std140Alignment(member.ty);
+                    sz = std.mem.alignForward(u32, sz, alignment);
+                    sz += self.std140Size(member.ty);
+                }
+                // Pad to struct alignment
+                const struct_align = self.std140Alignment(.{ .named = name });
+                break :blk std.mem.alignForward(u32, sz, struct_align);
+            },
+            else => 4,
+        };
+    }
+
+    /// Compute std140 array stride
+    fn std140ArrayStride(self: *Codegen, ty: ast.Type) u32 {
+        const arr = ty.array;
+        const elem_size = self.std140Size(arr.base.*);
+        const elem_align = self.std140Alignment(arr.base.*);
+        const rounded_elem = std.mem.alignForward(u32, elem_size, elem_align);
+        return std.mem.alignForward(u32, rounded_elem, 16);
+    }
+
+    /// Emit Offset/ColMajor/MatrixStride/ArrayStride for struct members, recursing into nested structs
+    fn emitNestedStructLayout(self: *Codegen, struct_type_id: u32, members: []const ast.StructMember) !void {
+        // Prevent decorating the same struct twice
+        if (self.emitted_struct_layout.contains(struct_type_id)) return;
+        try self.emitted_struct_layout.put(self.alloc, struct_type_id, {});
+        var offset: u32 = 0;
+        for (members, 0..) |member, i| {
+            const alignment = self.std140Alignment(member.ty);
+            offset = std.mem.alignForward(u32, offset, alignment);
+            try self.emitDecorationSectionMemberDecorate(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.offset), offset);
+            const size = self.std140Size(member.ty);
+            offset += size;
+            // ColMajor + MatrixStride for matrix members (direct or element of array)
+            var effective_ty = member.ty;
+            while (effective_ty == .array) effective_ty = effective_ty.array.base.*;
+            if (self.isMatrixType(effective_ty)) {
+                try self.emitDecorationSectionMemberDecorateNoExtra(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.col_major));
+                try self.emitDecorationSectionMemberDecorate(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.matrix_stride), 16);
+            }
+            // ArrayStride for array members (all nesting levels)
+            if (member.ty == .array) {
+                try self.emitArrayStrideRecursive(member.ty);
+                // Recurse into nested struct arrays: emit Offset for the element struct members
+                if (effective_ty == .named) {
+                    const elem_td = self.module.types.get(effective_ty.named) orelse continue;
+                    const elem_type_id = self.emitted_named_types.get(effective_ty.named) orelse continue;
+                    try self.emitNestedStructLayout(elem_type_id, elem_td.members);
+                }
+            }
+            // Recurse into direct nested struct members
+            if (member.ty == .named) {
+                const nested_td = self.module.types.get(member.ty.named) orelse continue;
+                const nested_type_id = self.emitted_named_types.get(member.ty.named) orelse continue;
+                try self.emitNestedStructLayout(nested_type_id, nested_td.members);
+            }
+        }
+    }
+
+    fn isMatrixType(self: *Codegen, ty: ast.Type) bool {
+        _ = self;
+        return switch (ty) {
+            .mat2, .mat2x2, .mat2x3, .mat2x4,
+            .mat3, .mat3x2, .mat3x3, .mat3x4,
+            .mat4, .mat4x2, .mat4x3, .mat4x4 => true,
+            else => false,
+        };
+    }
+
+    /// Emit ArrayStride for array types at all nesting levels
+    fn emitArrayStrideRecursive(self: *Codegen, ty: ast.Type) !void {
+        if (ty != .array) return;
+        const arr = ty.array;
+        const base_type_id = try self.ensureType(arr.base.*);
+        const cache_key = (@as(u64, base_type_id) << 32) | @as(u64, arr.size);
+        if (self.emitted_array_types.get(cache_key)) |array_type_id| {
+            if (!self.emitted_array_stride.contains(array_type_id)) {
+                const stride = self.std140ArrayStride(ty);
+                try self.emitDecorationSectionDecorate(array_type_id, @intFromEnum(spirv.Decoration.array_stride), stride);
+                try self.emitted_array_stride.put(self.alloc, array_type_id, {});
+            }
+        }
+        // Recurse into nested arrays
+        if (arr.base.* == .array) {
+            try self.emitArrayStrideRecursive(arr.base.*);
+        }
+    }
+
+    fn matrixColumnCount(self: *Codegen, ty: ast.Type) u32 {
+        _ = self;
+        return switch (ty) {
+            .mat2, .mat2x2 => 2,
+            .mat2x3 => 2,
+            .mat2x4 => 2,
+            .mat3, .mat3x2 => 3,
+            .mat3x3 => 3,
+            .mat3x4 => 3,
+            .mat4, .mat4x2 => 4,
+            .mat4x3 => 4,
+            .mat4x4 => 4,
+            else => 0,
+        };
     }
 
     // Stub methods — implemented in subsequent tasks
