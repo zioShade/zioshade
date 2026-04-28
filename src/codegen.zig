@@ -31,6 +31,7 @@ pub fn generate(
         .emitted_named_types = .{},
         .emitted_ptr_types = .{},
         .emitted_constants = .{},
+        .constant_alias = .{},
         .emitted_func_types = .{},
         .ptr_storage_class = .{},
         .sampled_image_inner_id = 0,
@@ -111,6 +112,7 @@ const Codegen = struct {
     emitted_named_types: std.StringHashMapUnmanaged(u32), // struct name -> type_id
     emitted_ptr_types: std.AutoHashMapUnmanaged(u64, u32), // (type_key << 32 | sc) -> ptr_type_id
     emitted_constants: std.AutoHashMapUnmanaged(u64, u32), // (type_id << 32 | value) -> const_id
+    constant_alias: std.AutoHashMapUnmanaged(u32, u32), // IR result_id -> actual constant_id (dedup)
     emitted_func_types: std.AutoHashMapUnmanaged(u64, u32), // hash(ret+params) -> func_type_id
     ptr_storage_class: std.AutoHashMapUnmanaged(u32, ir.SPIRVStorageClass), // result_id -> storage class for pointers
     sampled_image_inner_id: u32, // TypeImage (Sampled=1) for use with OpImage extraction
@@ -139,6 +141,7 @@ const Codegen = struct {
         self.emitted_named_types.deinit(self.alloc);
         self.emitted_ptr_types.deinit(self.alloc);
         self.emitted_constants.deinit(self.alloc);
+        self.constant_alias.deinit(self.alloc);
         self.emitted_func_types.deinit(self.alloc);
         self.ptr_storage_class.deinit(self.alloc);
         self.words.deinit(self.alloc);
@@ -1983,10 +1986,22 @@ const Codegen = struct {
                             else => return,
                         };
                         const int_type_id = try self.ensureType(resolved.ty);
+                        const cache_key = (@as(u64, int_type_id) << 32) | @as(u64, val);
+                        // Check if pre-scan already emitted this constant
+                        if (self.emitted_constants.get(cache_key)) |existing_id| {
+                            // Map IR result_id to existing constant for operand resolution
+                            const ir_id = resolved.result_id orelse return;
+                            if (ir_id != existing_id) {
+                                try self.constant_alias.put(self.alloc, ir_id, existing_id);
+                            }
+                            return;
+                        }
+                        const ir_id = resolved.result_id orelse return;
                         try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
                         try self.emitTypeWord(int_type_id);
-                        try self.emitTypeWord(resolved.result_id orelse return);
+                        try self.emitTypeWord(ir_id);
                         try self.emitTypeWord(val);
+                        try self.emitted_constants.put(self.alloc, cache_key, ir_id);
                     },
                     .constant_float => {
                         const val: f32 = switch (resolved.operands[0]) {
@@ -2193,7 +2208,7 @@ const Codegen = struct {
                 try self.ptr_storage_class.put(self.alloc, result_id, sc);
                 // OpAccessChain indices: can be OpConstant or runtime scalar integer
                 const index_id: u32 = switch (resolved.operands[1]) {
-                    .id => |v| v, // Runtime index — use the ID directly
+                    .id => |v| self.constant_alias.get(v) orelse v, // Runtime index — use the ID directly (may be aliased)
                     .literal_int => |v| try self.emitSignedIntConstant(v), // Literal — emit signed constant (matches glslang)
                     else => try self.emitSignedIntConstant(0),
                 };
@@ -2890,11 +2905,11 @@ const Codegen = struct {
     }
 
     fn operandId(self: *Codegen, inst: ir.Instruction, index: usize) u32 {
-        _ = self;
-        return switch (inst.operands[index]) {
+        const raw_id = switch (inst.operands[index]) {
             .id => |id| id,
             else => @panic("operandId: expected id operand"),
         };
+        return self.constant_alias.get(raw_id) orelse raw_id;
     }
 
     fn operandInt(self: *Codegen, inst: ir.Instruction, index: usize) u32 {
@@ -2906,9 +2921,8 @@ const Codegen = struct {
     }
 
     fn operandValue(self: *Codegen, op: ir.Instruction.Operand) u32 {
-        _ = self;
         return switch (op) {
-            .id => |v| v,
+            .id => |v| self.constant_alias.get(v) orelse v,
             .literal_int => |v| v,
             .literal_float => |v| @as(u32, @bitCast(v)),
             .literal_string => |_| 0,
