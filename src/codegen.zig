@@ -1419,9 +1419,38 @@ const Codegen = struct {
         if (needs_vec2) _ = try self.ensureType(.vec2);
         if (needs_vec3) _ = try self.ensureType(.vec3);
         // First, emit all named struct types from the module
+        // Only emit named types that are actually referenced by globals or instructions
+        // Collect referenced type names first
+        var referenced_names = std.StringHashMapUnmanaged(void).empty;
+        defer referenced_names.deinit(self.alloc);
+        for (self.module.globals) |global| {
+            if (global.ty == .named) {
+                try referenced_names.put(self.alloc, global.ty.named, {});
+                // Also reference members' types
+                if (self.module.types.get(global.ty.named)) |td| {
+                    for (td.members) |member| {
+                        if (member.ty == .named) try referenced_names.put(self.alloc, member.ty.named, {});
+                        if (member.ty == .array) {
+                            if (member.ty.array.base.* == .named) try referenced_names.put(self.alloc, member.ty.array.base.*.named, {});
+                        }
+                    }
+                }
+            }
+        }
+        for (self.module.functions) |func| {
+            if (func.return_type == .named) try referenced_names.put(self.alloc, func.return_type.named, {});
+            for (func.params) |param| {
+                if (param.ty == .named) try referenced_names.put(self.alloc, param.ty.named, {});
+            }
+            for (func.body) |inst| {
+                if (inst.ty == .named) try referenced_names.put(self.alloc, inst.ty.named, {});
+            }
+        }
         var type_iter = self.module.types.iterator();
         while (type_iter.next()) |entry| {
-            _ = try self.ensureType(.{ .named = entry.key_ptr.* });
+            if (referenced_names.contains(entry.key_ptr.*)) {
+                _ = try self.ensureType(.{ .named = entry.key_ptr.* });
+            }
         }
         for (self.module.globals) |global| {
             _ = try self.ensureType(global.ty);
