@@ -1478,6 +1478,10 @@ const Codegen = struct {
             // gl_VertexIndex → already covered by gl_VertexID
             // Decorate uniform/storage buffer struct types with Block/BufferBlock + Offset
             // (emitted inline in ensureType for named structs)
+            // Emit Flat decoration for flat-qualified IO variables
+            if (global.qualifier.is_flat and (global.storage_class == .input or global.storage_class == .output)) {
+                try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.flat));
+            }
             // Emit NonWritable/NonReadable for readonly/writeonly buffer variables
             if (global.storage_class == .storage_buffer) {
                 if (global.qualifier.is_readonly) {

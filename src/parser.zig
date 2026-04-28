@@ -285,6 +285,7 @@ const Parser = struct {
                     switch (self.current().tag) {
                         .kw_readonly => q.is_readonly = true,
                         .kw_writeonly => q.is_writeonly = true,
+                        .kw_flat => q.is_flat = true,
                         else => {},
                     }
                     _ = self.advance(); found = true;
