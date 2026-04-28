@@ -114,6 +114,7 @@ const LoopContext = struct {
 const OverloadEntry = struct {
     param_types: []const ast.Type,
     ir_id: u32,
+    return_type: ast.Type = .void,
 };
 
 const Scope = std.StringHashMapUnmanaged(Symbol);
@@ -597,12 +598,14 @@ const Analyzer = struct {
                         try gop.value_ptr.append(self.alloc, .{
                             .param_types = &.{}, // placeholder — will be resolved at call site
                             .ir_id = existing.?.ir_id,
+                            .return_type = existing.?.ty,
                         });
                     }
                     const owned_pts = try self.alloc.dupe(ast.Type, param_types.items);
                     try gop.value_ptr.append(self.alloc, .{
                         .param_types = owned_pts,
                         .ir_id = func_ir_id,
+                        .return_type = node.data.ty orelse .void,
                     });
                     // Update the scope to point to latest declaration
                     try self.declare(node.data.name, .{
@@ -621,6 +624,7 @@ const Analyzer = struct {
                     try gop.value_ptr.append(self.alloc, .{
                         .param_types = owned_pts,
                         .ir_id = func_ir_id,
+                        .return_type = node.data.ty orelse .void,
                     });
                     try self.declare(node.data.name, .{
                         .kind = .func,
@@ -1508,6 +1512,25 @@ const Analyzer = struct {
                 // Splat scalar to vector if needed for arithmetic ops
                 var left_id: u32 = if (left_conv_id) |id| id else left.id;
                 var right_id: u32 = if (right_conv_id) |id| id else right.id;
+                // Convert int/uint vectors to float vectors when needed
+                if (result_ty.isVector() and result_ty.isFloatVector()) {
+                    if (left.ty.isVector() and left.ty.isIntVector()) {
+                        const conv_tag: ir.Instruction.Tag = if (left.ty == .uvec2 or left.ty == .uvec3 or left.ty == .uvec4) .convert_utof else .convert_itof;
+                        const cvt_id = self.allocId();
+                        const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        cvt_ops[0] = .{ .id = left_id };
+                        try self.instructions.append(self.alloc, .{ .tag = conv_tag, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = result_ty });
+                        left_id = cvt_id;
+                    }
+                    if (right.ty.isVector() and right.ty.isIntVector()) {
+                        const conv_tag: ir.Instruction.Tag = if (right.ty == .uvec2 or right.ty == .uvec3 or right.ty == .uvec4) .convert_utof else .convert_itof;
+                        const cvt_id = self.allocId();
+                        const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        cvt_ops[0] = .{ .id = right_id };
+                        try self.instructions.append(self.alloc, .{ .tag = conv_tag, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = result_ty });
+                        right_id = cvt_id;
+                    }
+                }
                 if (result_ty.isVector()) {
                     if (left.ty.isScalar() and !right.ty.isScalar()) {
                         // Splat left scalar to vector
@@ -1797,6 +1820,21 @@ const Analyzer = struct {
                     });
                     value_id = conv_id;
                     value_ty = .float;
+                } else if (target.ty.isFloatVector() and value_ty.isIntVector()) {
+                    // int vector → float vector (e.g., vec2 /= ivec2)
+                    const conv_tag: ir.Instruction.Tag = if (value_ty == .uvec2 or value_ty == .uvec3 or value_ty == .uvec4) .convert_utof else .convert_itof;
+                    const conv_id = self.allocId();
+                    const conv_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    conv_operands[0] = .{ .id = value.id };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = conv_tag,
+                        .result_type = null,
+                        .result_id = conv_id,
+                        .operands = conv_operands,
+                        .ty = target.ty,
+                    });
+                    value_id = conv_id;
+                    value_ty = target.ty;
                 }
                 // Compute result
                 const result_ty_2 = target.ty;
@@ -1888,7 +1926,7 @@ const Analyzer = struct {
                                 }
                             }
                             if (match) {
-                                resolved_sym = .{ .kind = .func, .ty = sym_raw.?.ty, .ir_id = overload.ir_id };
+                                resolved_sym = .{ .kind = .func, .ty = overload.return_type, .ir_id = overload.ir_id };
                                 break;
                             }
                         }
@@ -1909,10 +1947,10 @@ const Analyzer = struct {
                 else if (self.isFloatReturnBuiltin(node.data.name))
                     .float
                 // Pack functions return uint
-                else if (std.mem.startsWith(u8, node.data.name, "pack"))
+                else if (self.isPackBuiltin(node.data.name))
                     .uint
                 // Unpack functions return vec2 (or vec4 for unpackSnorm4x8/unpackUnorm4x8)
-                else if (std.mem.startsWith(u8, node.data.name, "unpack"))
+                else if (self.isUnpackBuiltin(node.data.name))
                     if (std.mem.endsWith(u8, node.data.name, "4x8")) .vec4 else .vec2
                 else if (self.isGLSLBuiltin(node.data.name) and arg_tids.items.len > 0)
                     arg_tids.items[0].ty
@@ -2758,6 +2796,44 @@ const Analyzer = struct {
                     const s = sym orelse return error.UndeclaredIdentifier;
                     // If the symbol is a type_sym, treat as struct constructor (OpCompositeConstruct)
                     if (s.kind == .type_sym) {
+                        // For single-argument scalar constructors, may need type conversion
+                        if (arg_tids.items.len == 1 and !result_ty.isVector() and !result_ty.isMatrix()) {
+                            const arg_ty = arg_tids.items[0].ty;
+                            if (!std.meta.eql(arg_ty, result_ty)) {
+                                // Type mismatch — try conversion
+                                const conv_tag: ?ir.Instruction.Tag = blk: {
+                                    if (result_ty == .float) {
+                                        if (arg_ty == .bool) break :blk .bool_to_float;
+                                        if (arg_ty == .int) break :blk .convert_itof;
+                                        if (arg_ty == .uint) break :blk .convert_utof;
+                                    }
+                                    if (result_ty == .int) {
+                                        if (arg_ty == .bool) break :blk .bool_to_int;
+                                        if (arg_ty == .float) break :blk .convert_ftoi;
+                                        if (arg_ty == .uint) break :blk .convert_uti;
+                                    }
+                                    if (result_ty == .uint) {
+                                        if (arg_ty == .bool) break :blk .bool_to_uint;
+                                        if (arg_ty == .float) break :blk .convert_ftou;
+                                        if (arg_ty == .int) break :blk .convert_iti;
+                                    }
+                                    break :blk null;
+                                };
+                                if (conv_tag) |tag| {
+                                    const conv_id = self.allocId();
+                                    const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                    conv_ops[0] = .{ .id = arg_tids.items[0].id };
+                                    try self.instructions.append(self.alloc, .{
+                                        .tag = tag,
+                                        .result_type = null,
+                                        .result_id = conv_id,
+                                        .operands = conv_ops,
+                                        .ty = result_ty,
+                                    });
+                                    return .{ .ty = result_ty, .id = conv_id };
+                                }
+                            }
+                        }
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                         for (arg_tids.items, 0..) |tid, i| {
                             operands[i] = .{ .id = tid.id };
@@ -3026,14 +3102,17 @@ const Analyzer = struct {
                         const from = arg_tids.items[0].ty;
                         const to = result_ty;
                         if (to == .float or to == .double) {
+                            if (from == .bool) break :blk .bool_to_float;
                             if (from == .int or from == .ivec2) break :blk .convert_itof;
                             if (from == .uint or from == .uvec2) break :blk .convert_utof;
                         }
                         if (to == .int) {
+                            if (from == .bool) break :blk .bool_to_int;
                             if (from == .float or from == .double) break :blk .convert_ftoi;
                             if (from == .uint) break :blk .convert_uti;
                         }
                         if (to == .uint) {
+                            if (from == .bool) break :blk .bool_to_uint;
                             if (from == .float or from == .double) break :blk .convert_ftou;
                             if (from == .int) break :blk .convert_iti;
                         }
@@ -3175,14 +3254,17 @@ const Analyzer = struct {
                         // Need type conversion
                         const conv_tag: ir.Instruction.Tag = blk: {
                             if (result_scalar == .float) {
+                                if (arg_scalar == .bool) break :blk .bool_to_float;
                                 if (arg_scalar == .int) break :blk .convert_itof;
                                 if (arg_scalar == .uint) break :blk .convert_utof;
                             }
                             if (result_scalar == .int) {
+                                if (arg_scalar == .bool) break :blk .bool_to_int;
                                 if (arg_scalar == .float) break :blk .convert_ftoi;
                                 if (arg_scalar == .uint) break :blk .convert_uti;
                             }
                             if (result_scalar == .uint) {
+                                if (arg_scalar == .bool) break :blk .bool_to_uint;
                                 if (arg_scalar == .float) break :blk .convert_ftou;
                                 if (arg_scalar == .int) break :blk .convert_iti;
                             }
@@ -3694,6 +3776,26 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "distance") or
             std.mem.eql(u8, name, "dot") or
             std.mem.eql(u8, name, "determinant");
+    }
+
+    fn isPackBuiltin(self: *Analyzer, name: []const u8) bool {
+        _ = self;
+        return std.mem.eql(u8, name, "packSnorm4x8") or
+            std.mem.eql(u8, name, "packUnorm4x8") or
+            std.mem.eql(u8, name, "packSnorm2x16") or
+            std.mem.eql(u8, name, "packUnorm2x16") or
+            std.mem.eql(u8, name, "packHalf2x16") or
+            std.mem.eql(u8, name, "packDouble2x32");
+    }
+
+    fn isUnpackBuiltin(self: *Analyzer, name: []const u8) bool {
+        _ = self;
+        return std.mem.eql(u8, name, "unpackSnorm2x16") or
+            std.mem.eql(u8, name, "unpackUnorm2x16") or
+            std.mem.eql(u8, name, "unpackHalf2x16") or
+            std.mem.eql(u8, name, "unpackSnorm4x8") or
+            std.mem.eql(u8, name, "unpackUnorm4x8") or
+            std.mem.eql(u8, name, "unpackDouble2x32");
     }
 
     fn isTexelFetchBuiltin(self: *Analyzer, name: []const u8) bool {
