@@ -23,6 +23,7 @@ pub fn generate(
         .stage = stage,
         .glsl_version = glsl_version,
         .is_essl = is_essl,
+        .spirv_version = spirv_version,
         .words = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .type_section = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .decoration_section = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
@@ -105,6 +106,7 @@ const Codegen = struct {
     stage: Stage,
     glsl_version: u32,
     is_essl: bool,
+    spirv_version: SPIRVVersion,
     words: std.ArrayList(u32),
     type_section: std.ArrayList(u32), // Types/constants emitted during function codegen
     decoration_section: std.ArrayList(u32), // Struct layout decorations (Block, Offset, ArrayStride)
@@ -376,10 +378,14 @@ const Codegen = struct {
 
         // Collect interface variable IDs
         // SPIR-V 1.4+ requires ALL globals used by the entry point to be listed
+        // SPIR-V 1.0-1.3: only Input/Output storage class variables
         var interface_ids = std.ArrayList(u32).initCapacity(self.alloc, 0) catch unreachable;
         defer interface_ids.deinit(self.alloc);
+        const list_all = @intFromEnum(self.spirv_version) >= 4; // 1.4+
         for (self.module.globals) |global| {
-            interface_ids.append(self.alloc, global.result_id) catch unreachable;
+            if (list_all or global.storage_class == .input or global.storage_class == .output) {
+                interface_ids.append(self.alloc, global.result_id) catch unreachable;
+            }
         }
 
         const name_words = @as(u16, @intCast(std.math.divCeil(usize, name.len + 1, 4) catch unreachable));
