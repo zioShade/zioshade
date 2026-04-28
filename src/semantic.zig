@@ -521,7 +521,7 @@ const Analyzer = struct {
                 else if (qual.is_out)
                     .output
                 else if (qual.is_buffer)
-                    .uniform // TODO: add StorageBuffer storage class
+                    .storage_buffer
                 else
                     .uniform;
 
