@@ -1822,24 +1822,11 @@ const Codegen = struct {
             }
         }
 
-        // Pre-emit commonly needed constants so they're in the types section
-        // (not inside function bodies where they'd violate SPIR-V section ordering)
-        // Scan all instructions for literal constants used as indices
-        for (self.module.functions) |func| {
-            for (func.body) |inst| {
-                switch (inst.tag) {
-                    .access_chain, .composite_extract, .vector_shuffle => {
-                        for (inst.operands) |op| {
-                            switch (op) {
-                                .literal_int => |v| _ = try self.emitIntConstant(v),
-                                else => {},
-                            }
-                        }
-                    },
-                    else => {},
-                }
-            }
-        }
+        // Note: constant pre-emission for access_chain/composite_extract/vector_shuffle
+        // indices is no longer needed — the two-buffer system (type_section) handles
+        // on-demand constant emission during function codegen, splicing before functions.
+        // Previously this caused spurious uint constants (e.g., uint_0 for literal 0
+        // that was actually emitted as signed int_0 by AccessChain codegen).
         // Pre-emit float/int constants only when the types are used
         // and specific instructions reference them.
         // These are lazy — emitIntConstant/emitFloatConstant handle dedup.
