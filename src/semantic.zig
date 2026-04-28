@@ -13,6 +13,21 @@ pub const Error = error{
 
 pub threadlocal var last_error_ctx: []const u8 = "";
 pub threadlocal var last_error_inner: []const u8 = "";
+pub threadlocal var last_error_line: u32 = 0;
+pub threadlocal var last_error_column: u32 = 0;
+
+/// Format a human-readable error message from the last compile error.
+/// Caller must free the returned slice with `alloc.free`.
+pub fn formatLastError(alloc: std.mem.Allocator) error{OutOfMemory}!?[]const u8 {
+    if (last_error_line == 0 and last_error_ctx.len == 0) return null;
+    const detail = @import("root.zig").last_compile_detail orelse return null;
+    return std.fmt.allocPrint(alloc, "line {d}: {s} ({s}: {s})", .{
+        last_error_line,
+        @tagName(detail),
+        last_error_ctx,
+        last_error_inner,
+    });
+}
 
 pub const AnalyzeOptions = struct {
     /// When true, semantic errors in function bodies are recorded but don't prevent
@@ -28,6 +43,8 @@ pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
 pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: AnalyzeOptions) Error!ir.Module {
     last_error_inner = "";
     last_error_ctx = "";
+    last_error_line = 0;
+    last_error_column = 0;
     var analyzer = Analyzer{
         .alloc = alloc,
         .scopes = .empty,
@@ -867,6 +884,10 @@ const Analyzer = struct {
     fn analyzeStatement(self: *Analyzer, node: ast.Node) !void {
         errdefer {
             if (last_error_ctx.len == 0) last_error_ctx = @tagName(node.tag);
+            if (last_error_line == 0) {
+                last_error_line = node.loc.line;
+                last_error_column = node.loc.column;
+            }
         }
         switch (node.tag) {
             .var_decl => {
@@ -1320,6 +1341,10 @@ const Analyzer = struct {
                 .identifier, .func_call => node.data.name,
                 else => @tagName(node.tag),
             };
+            if (last_error_line == 0) {
+                last_error_line = node.loc.line;
+                last_error_column = node.loc.column;
+            }
         }
         switch (node.tag) {
             .int_literal => {
