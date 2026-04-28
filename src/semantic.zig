@@ -2780,16 +2780,7 @@ const Analyzer = struct {
                             // For bvecN(ivecN), emit composite_construct with per-element bool conversion
                             // Each component: (component != 0) → bool
                             const bool_ops = try self.alloc.alloc(ir.Instruction.Operand, n);
-                            const zero_id = self.allocId();
-                            const zero_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                            zero_ops[0] = .{ .literal_int = 0 };
-                            try self.instructions.append(self.alloc, .{
-                                .tag = .constant_int,
-                                .result_type = null,
-                                .result_id = zero_id,
-                                .operands = zero_ops,
-                                .ty = .int,
-                            });
+                            const zero_id = try self.getConstInt(0, .int);
                             for (0..n) |i| {
                                 const elem_id = self.allocId();
                                 const elem_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
@@ -2828,24 +2819,8 @@ const Analyzer = struct {
                         if (arg_ty == .bvec2 or arg_ty == .bvec3 or arg_ty == .bvec4) {
                             const elem_ty: ast.Type = if (result_ty == .ivec2 or result_ty == .ivec3 or result_ty == .ivec4) .int else if (result_ty == .uvec2 or result_ty == .uvec3 or result_ty == .uvec4) .uint else .float;
                             // Emit constants 0 and 1
-                            const zero_id = self.allocId();
-                            const zero_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                            if (elem_ty == .float) {
-                                zero_ops[0] = .{ .literal_float = 0.0 };
-                                try self.instructions.append(self.alloc, .{ .tag = .constant_float, .result_type = null, .result_id = zero_id, .operands = zero_ops, .ty = .float });
-                            } else {
-                                zero_ops[0] = .{ .literal_int = 0 };
-                                try self.instructions.append(self.alloc, .{ .tag = .constant_int, .result_type = null, .result_id = zero_id, .operands = zero_ops, .ty = elem_ty });
-                            }
-                            const one_id = self.allocId();
-                            const one_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                            if (elem_ty == .float) {
-                                one_ops[0] = .{ .literal_float = 1.0 };
-                                try self.instructions.append(self.alloc, .{ .tag = .constant_float, .result_type = null, .result_id = one_id, .operands = one_ops, .ty = .float });
-                            } else {
-                                one_ops[0] = .{ .literal_int = 1 };
-                                try self.instructions.append(self.alloc, .{ .tag = .constant_int, .result_type = null, .result_id = one_id, .operands = one_ops, .ty = elem_ty });
-                            }
+                            const zero_id: u32 = if (elem_ty == .float) try self.getConstFloat(0.0) else try self.getConstInt(0, elem_ty);
+                            const one_id: u32 = if (elem_ty == .float) try self.getConstFloat(1.0) else try self.getConstInt(1, elem_ty);
                             const result_ops = try self.alloc.alloc(ir.Instruction.Operand, n);
                             for (0..n) |i| {
                                 // Extract bool component
@@ -3467,27 +3442,7 @@ const Analyzer = struct {
                     .ty = lval.ty,
                 });
                 // Create constant 1
-                const one_id = self.allocId();
-                const one_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                if (lval.ty == .int or lval.ty.isVector()) {
-                    one_ops[0] = .{ .literal_int = 1 };
-                    try self.instructions.append(self.alloc, .{
-                        .tag = .constant_int,
-                        .result_type = null,
-                        .result_id = one_id,
-                        .operands = one_ops,
-                        .ty = .int,
-                    });
-                } else {
-                    one_ops[0] = .{ .literal_float = 1.0 };
-                    try self.instructions.append(self.alloc, .{
-                        .tag = .constant_float,
-                        .result_type = null,
-                        .result_id = one_id,
-                        .operands = one_ops,
-                        .ty = .float,
-                    });
-                }
+                const one_id: u32 = if (lval.ty == .int or lval.ty.isVector()) try self.getConstInt(1, .int) else try self.getConstFloat(1.0);
                 // Compute new value
                 const new_val_id = self.allocId();
                 const is_add = node.tag == .post_increment or node.tag == .pre_increment;
