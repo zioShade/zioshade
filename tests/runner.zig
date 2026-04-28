@@ -66,7 +66,7 @@ fn inlineIncludes(alloc: std.mem.Allocator, path: []const u8, source: []const u8
     return result;
 }
 
-fn testShader(alloc: std.mem.Allocator, path: []const u8) !Result {
+fn testShader(alloc: std.mem.Allocator, path: []const u8, save_spv: ?[]const u8) !Result {
     const file = std.fs.cwd().openFile(path, .{}) catch return .skip;
     defer file.close();
     const source = file.readToEndAllocOptions(alloc, 10 * 1024 * 1024, null, .of(u8), 0) catch return .skip;
@@ -99,9 +99,11 @@ fn testShader(alloc: std.mem.Allocator, path: []const u8) !Result {
     };
     defer alloc.free(words);
 
-    // Write to temp file
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&buf, ".zig-cache/conformance-{}.spv", .{std.crypto.random.int(u64)}) catch return .skip;
+    // Write to temp file or specified path
+    const tmp_path: []const u8 = if (save_spv) |sp| sp else blk: {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        break :blk std.fmt.bufPrint(&buf, ".zig-cache/conformance-{}.spv", .{std.crypto.random.int(u64)}) catch return .skip;
+    };
     const tmp_file = std.fs.cwd().createFile(tmp_path, .{}) catch return .skip;
     defer {
         tmp_file.close();
@@ -152,7 +154,7 @@ fn runDir(alloc: std.mem.Allocator, dir_path: []const u8, stats: *Stats) !void {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
 
-        const result = testShader(alloc, full_path) catch .skip;
+        const result = testShader(alloc, full_path, null) catch .skip;
         switch (result) {
             .pass => {
                 stats.pass += 1;
@@ -182,6 +184,19 @@ pub fn main() !void {
     defer std.process.argsFree(alloc, args);
 
     var stats = Stats{};
+    var save_spv_path: ?[]const u8 = null;
+
+    // Parse --save-spv argument
+    var target_arg: ?[]const u8 = null;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--save-spv") and i + 1 < args.len) {
+            save_spv_path = args[i + 1];
+            i += 1;
+        } else {
+            target_arg = args[i];
+        }
+    }
 
     const all_suites = .{
         .{ "glslang-430", "tests/glslang-430" },
@@ -189,9 +204,7 @@ pub fn main() !void {
         .{ "ghostty", "tests/ghostty" },
     };
 
-    if (args.len > 1) {
-        // args[1] can be a suite name ("glslang-430") or a file/dir path
-        const target = args[1];
+    if (target_arg) |target| {
         var matched_suite = false;
         inline for (all_suites) |suite| {
             if (std.mem.eql(u8, target, suite.@"0")) {
@@ -207,7 +220,7 @@ pub fn main() !void {
             if (std.mem.eql(u8, ext, ".frag") or std.mem.eql(u8, ext, ".vert") or
                 std.mem.eql(u8, ext, ".comp") or std.mem.eql(u8, ext, ".glsl"))
             {
-                const result = testShader(alloc, target) catch .skip;
+                const result = testShader(alloc, target, save_spv_path) catch .skip;
                 switch (result) {
                     .pass => {
                         stats.pass += 1;
