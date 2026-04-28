@@ -1,6 +1,6 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 197/197 conformance, SPIR-V output optimization
+## CURRENT STATUS: 197/197 conformance, SPIR-V output at glslang parity
 
 ### Metrics progress:
 | Iteration | our_bound | ref_bound | overhead | our_vars | ref_vars |
@@ -9,17 +9,19 @@
 | Lazy builtins | 21979 | 10159     | 2.16x    | 879      | 1010     |
 | Type pre-emit | 20563 | 10159     | 2.02x    | 879      | 1010     |
 | Conditional   | 19810 | 10159     | 1.95x    | 879      | 1010     |
+| Precise caps  | 19145 | 10159     | 1.88x    | 879      | 1010     |
+| ID waste fix  | 10015 | 10159     | 0.99x ✅ | 879      | 1010     |
 
-### Key changes made:
-1. **Lazy builtin injection** (semantic.zig): gl_* vars only created when referenced
-2. **Minimal capabilities** (codegen.zig): conditional ImageQuery/SubgroupVoteKHR
-3. **Conditional extensions** (codegen.zig): SPV_KHR_subgroup_vote only when needed
-4. **Conditional type/constant pre-emit**: only emit types/constants that are actually used
-5. **Fixed spirv.zig**: group_vote was wrong value (44=Image1D), use subgroup_vote_khr=4431
+### Key breakthrough: Function builtin IR IDs
+50+ function builtins (abs, sin, cos, texture, dFdx, etc.) each called `allocId()` 
+during semantic analysis, wasting SPIR-V IDs. Codegen never uses these IDs.
+Fix: set `ir_id = 0` for all function builtins. front-facing.frag: 22 vs 22 (exact parity).
 
-### Next opportunities (remaining 1.95x overhead):
-1. **Constant deduplication**: emitIntConstant already dedupes, but emitFloatConstant may not
-2. **Dead instruction elimination**: IR may have unused instructions that emit ops
-3. **Type dedup for int/uint**: int and uint are separate types in SPIR-V but many constants could share
-4. **Reduce param var creation**: Only create OpVariable for params that are actually written to
-5. **Function inlining**: Small helper functions (saturate, etc.) could be inlined to reduce call overhead
+### Remaining opportunities (minor):
+1. **Our bound is BELOW glslang's**: We may be missing some necessary IDs, or our
+   variable count (879 vs 1010) suggests we're not creating enough variables.
+   Need to investigate if this is correct or a bug.
+2. **Variable count delta**: We have fewer variables than glslang (879 vs 1010).
+   This might mean some params aren't getting proper storage.
+3. **Per-shader analysis**: Some shaders may still have overhead. Run differential
+   comparison to find outliers.
