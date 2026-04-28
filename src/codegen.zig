@@ -1470,19 +1470,8 @@ const Codegen = struct {
             _ = try self.ensurePointerType(global.ty, global.storage_class);
             // Track storage class for this global's result_id
             try self.ptr_storage_class.put(self.alloc, global.result_id, global.storage_class);
-            // Also pre-emit pointer types for struct members
-            if (global.ty == .named) {
-                const td = self.module.types.get(global.ty.named) orelse continue;
-                for (td.members) |member| {
-                    _ = try self.ensureType(member.ty);
-                    _ = try self.ensurePointerType(member.ty, global.storage_class);
-                    // For array members, also emit element type pointer
-                    if (member.ty == .array) {
-                        _ = try self.ensureType(member.ty.array.base.*);
-                        _ = try self.ensurePointerType(member.ty.array.base.*, global.storage_class);
-                    }
-                }
-            }
+            // Struct member types are emitted on-demand during function codegen via two-buffer
+            // (no pre-scan needed)
         }
         for (self.module.functions) |func| {
             _ = try self.ensureType(func.return_type);
