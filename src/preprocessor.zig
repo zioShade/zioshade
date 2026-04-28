@@ -9,6 +9,7 @@ pub const Preprocessor = struct {
     source: [:0]const u8 = "",
     version: u32 = 430,
     expanding: std.ArrayListUnmanaged([]const u8),
+    extra_strings: std.ArrayListUnmanaged(u8),
 
     pub fn init(alloc: std.mem.Allocator) Preprocessor {
         return .{
@@ -17,6 +18,7 @@ pub const Preprocessor = struct {
             .if_stack = .{},
             .output = .{},
             .expanding = .{},
+            .extra_strings = .{},
         };
     }
 
@@ -37,6 +39,7 @@ pub const Preprocessor = struct {
         self.if_stack.deinit(self.alloc);
         self.output.deinit(self.alloc);
         self.expanding.deinit(self.alloc);
+        self.extra_strings.deinit(self.alloc);
     }
 
     pub fn addDefine(self: *Preprocessor, name: []const u8, value: []const lexer.Token) !void {
@@ -57,6 +60,11 @@ pub const Preprocessor = struct {
     }
 
     fn getTokenText(self: *const Preprocessor, tok: lexer.Token) []const u8 {
+        if (tok.start >= self.source.len) {
+            // Synthetic token — text is in extra_strings
+            const start = tok.start - self.source.len;
+            return self.extra_strings.items[start..][0..tok.len];
+        }
         return self.source[tok.start..tok.start + tok.len];
     }
 
@@ -267,13 +275,15 @@ pub const Preprocessor = struct {
                 // Substitute and expand
                 const func_macro = Macro{ .function = f };
                 try self.substituteAndExpand(func_macro, args);
+
+                // Skip past closing ')'
+                index.* += 1;
             },
         }
     }
 
     fn parseMacroArguments(self: *Preprocessor, tokens: []const lexer.Token, index: *usize) ![][]lexer.Token {
         var args = std.ArrayListUnmanaged([]lexer.Token){};
-        index.* += 1; // skip '('
 
         var current_arg = std.ArrayListUnmanaged(lexer.Token){};
         var paren_depth: u32 = 1;
@@ -351,10 +361,13 @@ pub const Preprocessor = struct {
                                     len += arg_text.len;
                                 }
                                 buf[len] = '"'; len += 1;
+                                // Store in extra_strings so getTokenText works
+                                const str_start = self.extra_strings.items.len;
+                                try self.extra_strings.appendSlice(self.alloc, buf[0..len]);
                                 try self.output.append(self.alloc, .{
                                     .tag = .string_literal,
                                     .loc = tok.loc,
-                                    .start = 0,
+                                    .start = @intCast(self.source.len + str_start),
                                     .len = @intCast(len),
                                 });
                             }
