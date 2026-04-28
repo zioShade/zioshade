@@ -1455,11 +1455,12 @@ const Codegen = struct {
                     },
                     .access_chain => {
                         _ = try self.ensurePointerType(inst.ty, .function);
-                        _ = try self.ensurePointerType(inst.ty, .uniform);
-                        _ = try self.ensurePointerType(inst.ty, .output);
-                        _ = try self.ensurePointerType(inst.ty, .input);
-                        _ = try self.ensurePointerType(inst.ty, .private);
-                        _ = try self.ensurePointerType(inst.ty, .push_constant);
+                        // Pre-emit pointer types only for storage classes that have globals
+                        for (self.module.globals) |global| {
+                            if (global.storage_class != .function) {
+                                _ = try self.ensurePointerType(inst.ty, global.storage_class);
+                            }
+                        }
                         // Pre-emit the index constant so it's available during codegen
                         if (inst.operands.len > 1) {
                             const idx = switch (inst.operands[1]) {
