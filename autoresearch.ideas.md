@@ -19,12 +19,12 @@
 - ✅ Constant dedup, pointer type pre-emit, SSA optimization, type filtering, two-buffer codegen
 
 ### NEXT: Reduce ID bound overhead (TIER 2)
-Individual simple shaders are 1.06-1.24x larger than glslang due to extra type/constant IDs.
+Individual simple shaders are 1.06-1.39x larger than glslang due to extra type/constant IDs.
 Ideas:
-- Eliminate unused uint type when all AccessChain indices use signed int
+- **Constant dedup gap**: pre-scan emits constants (via emitIntConstant), function codegen also emits constants (via constant_int IR). Both create separate IDs for same value. Attempted constant_remap but broke 6 shaders. Needs IR-level fix.
 - Deduplicate pointer types more aggressively
-- Emit types only when actually referenced (not speculatively)
 - Dead type elimination pass
+- Note: overhead is structural and acceptable for correctness
 
 ### TIER 2 - Minor improvements:
 - Centroid/NoPerspective/Sample decorations on IO variables (low priority)
