@@ -29,6 +29,8 @@ pub fn generate(
         .emitted_func_types = .{},
         .ptr_storage_class = .{},
         .sampled_image_inner_id = 0,
+        .sampled_image_3d_inner_id = 0,
+        .sampled_image_2d_array_inner_id = 0,
         .sampled_image_1d_inner_id = 0,
         .sampled_image_ms_inner_id = 0,
         .sampled_image_ms_array_inner_id = 0,
@@ -77,6 +79,8 @@ const Codegen = struct {
     emitted_func_types: std.AutoHashMapUnmanaged(u64, u32), // hash(ret+params) -> func_type_id
     ptr_storage_class: std.AutoHashMapUnmanaged(u32, ir.SPIRVStorageClass), // result_id -> storage class for pointers
     sampled_image_inner_id: u32, // TypeImage (Sampled=1) for use with OpImage extraction
+    sampled_image_3d_inner_id: u32,
+    sampled_image_2d_array_inner_id: u32,
     sampled_image_1d_inner_id: u32,
     sampled_image_ms_inner_id: u32, // TypeImage (Multisampled=1, Sampled=1)
     sampled_image_ms_array_inner_id: u32, // TypeImage (Multisampled=1, Arrayed=1, Sampled=1)
@@ -377,6 +381,40 @@ const Codegen = struct {
                 try self.emitWord(1); // Sampled = 1 (yes)
                 try self.emitWord(0); // ImageFormat = Unknown
                 self.sampled_image_inner_id = image_id; // Save for OpImage extraction
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitWord(id);
+                try self.emitWord(image_id);
+            },
+            .sampler2d_array => {
+                const float_id = try self.ensureType(.float);
+                const image_id = self.allocId();
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(image_id);
+                try self.emitWord(float_id);
+                try self.emitWord(1); // Dim = 2D
+                try self.emitWord(0); // Not depth
+                try self.emitWord(1); // Arrayed = 1
+                try self.emitWord(0); // Not multisampled
+                try self.emitWord(1); // Sampled = 1 (yes)
+                try self.emitWord(0); // ImageFormat = Unknown
+                self.sampled_image_2d_array_inner_id = image_id;
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitWord(id);
+                try self.emitWord(image_id);
+            },
+            .sampler3d => {
+                const float_id = try self.ensureType(.float);
+                const image_id = self.allocId();
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitWord(image_id);
+                try self.emitWord(float_id);
+                try self.emitWord(2); // Dim = 3D
+                try self.emitWord(0); // Not depth
+                try self.emitWord(0); // Not arrayed
+                try self.emitWord(0); // Not multisampled
+                try self.emitWord(1); // Sampled = 1 (yes)
+                try self.emitWord(0); // ImageFormat = Unknown
+                self.sampled_image_3d_inner_id = image_id;
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitWord(id);
                 try self.emitWord(image_id);
@@ -1786,6 +1824,10 @@ const Codegen = struct {
                 // Choose the correct inner ID based on the source sampler type
                 const result_type_id: u32 = if (inst.ty == .sampler_buffer) blk: {
                     break :blk self.sampler_buffer_inner_id;
+                } else if (inst.ty == .sampler3d) blk: {
+                    break :blk if (self.sampled_image_3d_inner_id != 0) self.sampled_image_3d_inner_id else self.sampled_image_inner_id;
+                } else if (inst.ty == .sampler2d_array) blk: {
+                    break :blk if (self.sampled_image_2d_array_inner_id != 0) self.sampled_image_2d_array_inner_id else self.sampled_image_inner_id;
                 } else if (inst.ty == .image2d_ms or inst.ty == .sampler2d_ms) blk: {
                     break :blk self.sampled_image_ms_inner_id;
                 } else if (inst.ty == .image2d_ms_array or inst.ty == .sampler2d_ms_array) blk: {

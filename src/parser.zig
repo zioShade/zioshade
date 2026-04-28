@@ -358,10 +358,10 @@ const Parser = struct {
             .kw_sampler2d => { _ = self.advance(); return .sampler2d; },
             .kw_isampler2d => { _ = self.advance(); return .isampler2d; },
             .kw_usampler2d => { _ = self.advance(); return .usampler2d; },
-            .kw_sampler2d_array => { _ = self.advance(); return .sampler2d; },  // 2D array uses same base type (arrayed flag in codegen)
+            .kw_sampler2d_array => { _ = self.advance(); return .sampler2d_array; },
             .kw_isampler2d_array => { _ = self.advance(); return .isampler2d_array; },
             .kw_usampler2d_array => { _ = self.advance(); return .usampler2d_array; },
-            .kw_sampler3d => { _ = self.advance(); return .sampler2d; },  // 3D uses same base type as 2D
+            .kw_sampler3d => { _ = self.advance(); return .sampler3d; },
             .kw_isampler3d => { _ = self.advance(); return .isampler3d; },
             .kw_usampler3d => { _ = self.advance(); return .usampler3d; },
             .kw_sampler_cube_array => { _ = self.advance(); return .sampler_cube; },
