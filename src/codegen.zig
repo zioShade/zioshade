@@ -1247,7 +1247,8 @@ const Codegen = struct {
                     if (global.ty != .named) continue;
                     if (!std.mem.eql(u8, global.ty.named, name)) continue;
                     try self.emitDecorationSectionDecorateNoExtra(id, @intFromEnum(spirv.Decoration.block));
-                    try self.emitNestedStructLayout(id, td.members);
+                    const is_std430 = if (global.layout) |l| l.std430 else false;
+                    try self.emitNestedStructLayout(id, td.members, is_std430);
                     break;
                 }
             },
@@ -1530,93 +1531,87 @@ const Codegen = struct {
         try self.decoration_section.append(self.alloc, decoration);
     }
 
-    /// Compute std140 alignment for a type
-    fn std140Alignment(self: *Codegen, ty: ast.Type) u32 {
-        _ = self;
+    /// Compute alignment for a type (std140 or std430)
+    fn layoutAlignment(self: *Codegen, ty: ast.Type, is_std430: bool) u32 {
+        if (is_std430) {
+            return switch (ty) {
+                .float, .int, .uint, .bool => 4,
+                .vec2, .ivec2, .uvec2 => 8,
+                .vec3, .vec4, .ivec3, .ivec4, .uvec3, .uvec4 => 16,
+                .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
+                .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 16,
+                .array => |arr| self.layoutAlignment(arr.base.*, is_std430), // std430: array alignment = element alignment
+                .named => 16, // struct alignment is largest member
+                else => 4,
+            };
+        }
         return switch (ty) {
             .float, .int, .uint, .bool => 4,
-            .vec2 => 8,
-            .vec3, .vec4 => 16,
-            .ivec2 => 8,
-            .ivec3, .ivec4 => 16,
-            .uvec2 => 8,
-            .uvec3, .uvec4 => 16,
-            .mat2, .mat2x2 => 16, // same as vec4 (column alignment)
-            .mat3, .mat3x3 => 16,
-            .mat4, .mat4x4 => 16,
+            .vec2, .ivec2, .uvec2 => 8,
+            .vec3, .vec4, .ivec3, .ivec4, .uvec3, .uvec4 => 16,
+            .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
             .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 16,
             .array => 16, // std140: array alignment is vec4 (16)
-            .named => 16, // struct alignment is largest member (max 16)
+            .named => 16,
             else => 4,
         };
     }
 
-    /// Compute std140 size for a type
-    fn std140Size(self: *Codegen, ty: ast.Type) u32 {
+    /// Compute size for a type (std140 or std430)
+    fn layoutSize(self: *Codegen, ty: ast.Type, is_std430: bool) u32 {
         return switch (ty) {
             .float, .int, .uint, .bool => 4,
-            .vec2 => 8,
-            .vec3 => 12,
-            .vec4 => 16,
-            .ivec2 => 8,
-            .ivec3 => 12,
-            .ivec4 => 16,
-            .uvec2 => 8,
-            .uvec3 => 12,
-            .uvec4 => 16,
-            .mat2, .mat2x2 => 2 * 16, // 2 columns * vec4 aligned
+            .vec2, .ivec2, .uvec2 => 8,
+            .vec3, .ivec3, .uvec3 => 12,
+            .vec4, .ivec4, .uvec4 => 16,
+            .mat2, .mat2x2 => 2 * 16,
             .mat3, .mat3x3 => 3 * 16,
             .mat4, .mat4x4 => 4 * 16,
-            .mat2x3 => 2 * 16, // 2 columns, each vec3 padded to vec4
-            .mat2x4 => 2 * 16,
-            .mat3x2 => 3 * 16,
-            .mat3x4 => 3 * 16,
-            .mat4x2 => 4 * 16,
-            .mat4x3 => 4 * 16,
+            .mat2x3, .mat2x4 => 2 * 16,
+            .mat3x2, .mat3x4 => 3 * 16,
+            .mat4x2, .mat4x3 => 4 * 16,
             .array => |arr| blk: {
-                const elem_size = self.std140Size(arr.base.*);
-                const elem_align = self.std140Alignment(arr.base.*);
-                const rounded_elem = std.mem.alignForward(u32, elem_size, elem_align);
-                // std140: array stride rounds element up to vec4 (16) alignment
-                const stride = std.mem.alignForward(u32, rounded_elem, 16);
+                const stride = self.layoutArrayStride(ty, is_std430);
                 break :blk stride * arr.size;
             },
             .named => |name| blk: {
                 const td = self.module.types.get(name) orelse break :blk 0;
                 var sz: u32 = 0;
                 for (td.members) |member| {
-                    const alignment = self.std140Alignment(member.ty);
+                    const alignment = self.layoutAlignment(member.ty, is_std430);
                     sz = std.mem.alignForward(u32, sz, alignment);
-                    sz += self.std140Size(member.ty);
+                    sz += self.layoutSize(member.ty, is_std430);
                 }
-                // Pad to struct alignment
-                const struct_align = self.std140Alignment(.{ .named = name });
+                const struct_align = self.layoutAlignment(.{ .named = name }, is_std430);
                 break :blk std.mem.alignForward(u32, sz, struct_align);
             },
             else => 4,
         };
     }
 
-    /// Compute std140 array stride
-    fn std140ArrayStride(self: *Codegen, ty: ast.Type) u32 {
+    /// Compute array stride (std140 or std430)
+    fn layoutArrayStride(self: *Codegen, ty: ast.Type, is_std430: bool) u32 {
         const arr = ty.array;
-        const elem_size = self.std140Size(arr.base.*);
-        const elem_align = self.std140Alignment(arr.base.*);
+        const elem_size = self.layoutSize(arr.base.*, is_std430);
+        const elem_align = self.layoutAlignment(arr.base.*, is_std430);
         const rounded_elem = std.mem.alignForward(u32, elem_size, elem_align);
-        return std.mem.alignForward(u32, rounded_elem, 16);
+        if (is_std430) {
+            return rounded_elem; // std430: no extra rounding to 16
+        }
+        return std.mem.alignForward(u32, rounded_elem, 16); // std140: round up to vec4
     }
 
     /// Emit Offset/ColMajor/MatrixStride/ArrayStride for struct members, recursing into nested structs
-    fn emitNestedStructLayout(self: *Codegen, struct_type_id: u32, members: []const ast.StructMember) !void {
+    fn emitNestedStructLayout(self: *Codegen, struct_type_id: u32, members: []const ast.StructMember, is_std430: bool) !void {
         // Prevent decorating the same struct twice
         if (self.emitted_struct_layout.contains(struct_type_id)) return;
         try self.emitted_struct_layout.put(self.alloc, struct_type_id, {});
         var offset: u32 = 0;
         for (members, 0..) |member, i| {
-            const alignment = self.std140Alignment(member.ty);
+            const alignment = self.layoutAlignment(member.ty, is_std430);
             offset = std.mem.alignForward(u32, offset, alignment);
             try self.emitDecorationSectionMemberDecorate(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.offset), offset);
-            const size = self.std140Size(member.ty);
+            const size = self.layoutSize(member.ty, is_std430);
             offset += size;
             // ColMajor + MatrixStride for matrix members (direct or element of array)
             var effective_ty = member.ty;
@@ -1627,19 +1622,19 @@ const Codegen = struct {
             }
             // ArrayStride for array members (all nesting levels)
             if (member.ty == .array) {
-                try self.emitArrayStrideRecursive(member.ty);
+                try self.emitArrayStrideRecursive(member.ty, is_std430);
                 // Recurse into nested struct arrays: emit Offset for the element struct members
                 if (effective_ty == .named) {
                     const elem_td = self.module.types.get(effective_ty.named) orelse continue;
                     const elem_type_id = self.emitted_named_types.get(effective_ty.named) orelse continue;
-                    try self.emitNestedStructLayout(elem_type_id, elem_td.members);
+                    try self.emitNestedStructLayout(elem_type_id, elem_td.members, is_std430);
                 }
             }
             // Recurse into direct nested struct members
             if (member.ty == .named) {
                 const nested_td = self.module.types.get(member.ty.named) orelse continue;
                 const nested_type_id = self.emitted_named_types.get(member.ty.named) orelse continue;
-                try self.emitNestedStructLayout(nested_type_id, nested_td.members);
+                try self.emitNestedStructLayout(nested_type_id, nested_td.members, is_std430);
             }
         }
     }
@@ -1655,21 +1650,21 @@ const Codegen = struct {
     }
 
     /// Emit ArrayStride for array types at all nesting levels
-    fn emitArrayStrideRecursive(self: *Codegen, ty: ast.Type) !void {
+    fn emitArrayStrideRecursive(self: *Codegen, ty: ast.Type, is_std430: bool) !void {
         if (ty != .array) return;
         const arr = ty.array;
         const base_type_id = try self.ensureType(arr.base.*);
         const cache_key = (@as(u64, base_type_id) << 32) | @as(u64, arr.size);
         if (self.emitted_array_types.get(cache_key)) |array_type_id| {
             if (!self.emitted_array_stride.contains(array_type_id)) {
-                const stride = self.std140ArrayStride(ty);
+                const stride = self.layoutArrayStride(ty, is_std430);
                 try self.emitDecorationSectionDecorate(array_type_id, @intFromEnum(spirv.Decoration.array_stride), stride);
                 try self.emitted_array_stride.put(self.alloc, array_type_id, {});
             }
         }
         // Recurse into nested arrays
         if (arr.base.* == .array) {
-            try self.emitArrayStrideRecursive(arr.base.*);
+            try self.emitArrayStrideRecursive(arr.base.*, is_std430);
         }
     }
 
