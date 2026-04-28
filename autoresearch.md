@@ -1,87 +1,50 @@
 # Autoresearch: Maximize GLSL-to-SPIR-V Conformance
 
 ## Objective
-Maximize the number of shaders that pass through the full pipeline (lexer → preprocessor → parser → semantic → codegen) and validate with spirv-val. The compiler is glslpp, a GLSL-to-SPIR-V compiler in Zig (~6500 LOC). Currently only 1 shader passes (minimal_test.frag). Goal: maximize pass count across all 3 test suites.
+Achieve functional equivalency with glslangValidator for the glslpp GLSL-to-SPIR-V compiler,
+targeting replacement of the C++ glslang pipeline in the deblasis/wintty (windows branch) project.
+The compiler must produce valid SPIR-V that matches glslang's output while potentially being faster/more compact.
+Maintaining 197/197 spirv-val conformance is a hard requirement.
+
+## Current State (197/197 conformance, 9/10 Ghostty)
+- 197/197 spirv-val conformance ✅
+- 9/10 Ghostty shaders pass (common.glsl is include-only, excluded)
+- Proper std140 layout: Block, Offset, ColMajor, MatrixStride, ArrayStride decorations
+- StorageBuffer storage class for SSBOs (modern SPIR-V 1.1+ approach)
+- Default DescriptorSet=0 for UBO/SSBO variables
+- Compute shader LocalSize execution mode
+- OpSource GLSL 450 directive
+- OpName/OpMemberName for struct types
+- Bound optimization: ~0.73x glslang (27% smaller)
 
 ## Metrics
 - **Primary**: total_pass (unitless, higher is better) — total shaders passing spirv-val
-- **Secondary**: total_compile_error, total_fail (spirv-val), total_skip, total_hang — independent monitors
+- **Secondary**: total_compile_error, total_fail (spirv-val), total_skip, total_hang
 
 ## How to Run
 `./autoresearch.sh` — outputs `METRIC name=number` lines.
 
-The script compiles the runner, then runs each test suite with per-file timeouts to avoid hangs. Reports structured metrics.
-
 ## Files in Scope
-- `src/parser.zig` (~1340 lines): Pratt parser. Main source of hangs on unexpected constructs.
-- `src/semantic.zig` (~1377 lines): Symbol resolution, type checking, IR emission.
-- `src/codegen.zig` (~898 lines): IR → SPIR-V binary emission.
-- `src/preprocessor.zig` (~1228 lines): #define, #ifdef, macro expansion. Missing #include.
-- `src/lexer.zig` (~900 lines): Tokenizer.
-- `src/ast.zig` (~217 lines): AST node definitions, type system.
-- `src/ir.zig` (~144 lines): IR instruction tags and Module/Function/Global definitions.
-- `src/spirv.zig` (~251 lines): SPIR-V opcodes, capabilities, decorations.
-- `tests/runner.zig` (~160 lines): Conformance test runner.
-- `build.zig` (~165 lines): Build configuration.
+- `src/parser.zig`: Pratt parser
+- `src/semantic.zig`: Symbol resolution, type checking, IR emission
+- `src/codegen.zig`: IR → SPIR-V binary emission
+- `src/preprocessor.zig`: #define, #ifdef, macro expansion
+- `src/lexer.zig`: Tokenizer
+- `src/ast.zig`: AST node definitions, type system
+- `src/ir.zig`: IR instruction tags and Module/Function/Global definitions
+- `src/spirv.zig`: SPIR-V opcodes, capabilities, decorations
 
 ## Off Limits
 - `src/root.zig` public API (`compileToSPIRV` signature) — don't break callers
-- Don't run `zig build test` — causes OOM (>2GB RAM per instance)
+- Don't run `zig build test` — causes OOM
 - Don't modify the test shader files in tests/
 
 ## Constraints
 - All changes must compile with Zig 0.15.2
-- No new external dependencies
 - Must not introduce regressions on already-passing shaders
-- Must handle hangs gracefully (per-file timeouts)
 
-## What's Been Tried
-
-### Baseline (commit 9088390)
-True baseline: **2 pass / 101 compile_error / 15 spirv-val fail / 79 hang / 0 crash** out of 197 valid test files.
-Used glslangValidator to classify: 197 valid, 136 invalid, 20 skipped out of 353 total.
-
-### Current state (commit 483e72f) — 22 passes
-Key wins:
-- Fixed parser hangs (synchronize consumes r_brace) → 79→0 hangs
-- Fixed OpEntryPoint interface variables → +4 passes
-- Fixed struct member double-free → +2 passes, 0 crashes
-- Added GL builtins as proper globals → +1 pass
-- Scalar-to-vector splat, GLSL builtin type inference → +3 passes
-- Sampler type encoding fix, top-level var storage class → +5 passes
-- Uniform block member access, in/out block support
-- Buffer/readonly/writeonly/coherent/restrict keywords
-
-Key blockers for 132 compile errors:
-- All errors are in semantic analysis stage (not lex/parse)
-- Most common: UndeclaredIdentifier (missing builtins), TypeMismatch, InvalidAssignment
-- UBO member access produces wrong types (void instead of mat4) — AST nesting issue
-
-Key blockers for 43 spirv-val failures:
-- Undefined IDs (from block member access chains or wrong storage class)
-- Wrong result types (void instead of proper types)
-- OpVariable not first in block (local vars after instructions)
-
-Key discoveries:
-- PASS detection was broken (summary "PASS: 0" line matched grep → ~214 false positives)
-- struct-varying.legacy.frag appears as PASS but has double-free memory corruption (GPA prints error but exits 0)
-- Ghostty .glsl files need -S frag/vert for glslangValidator
-- common.glsl is include-only, not standalone
-
-### Architecture Notes
-- Pipeline: source → lexer.tokenize() → parser.parse() → semantic.analyze() → codegen.generate() → SPIR-V words
-- The runner.zig calls `glslpp.compileToSPIRV()` and then writes the result to a temp file and runs spirv-val
-- Stage detection is NOT in runner.zig — it always uses `.fragment` stage. This is wrong for .vert and .comp files.
-- Many hangs likely caused by parser infinite loops on unrecognized constructs
-- The `synchronize()` method in parser tries to recover from errors by skipping to semicolons/r-brace/type keywords
-
-### Key Bugs to Fix (Priority Order)
-1. **Parser hangs**: FIXED — synchronize() now consumes r_brace.
-2. **OpEntryPoint interface variables**: FIXED — Input/Output globals listed as operands.
-3. **Double-free in struct members**: FIXED — TypeDef duplicates members slice.
-4. **GL builtins not emitted as globals**: FIXED — gl_Position etc now registered as proper globals.
-5. **Compile errors (132 files)**: Missing language features + type promotion gaps.
-6. **spirv-val failures (43 files)**: Wrong SPIR-V output — type mismatches, undefined IDs.
-7. **#include preprocessor**: Needed for Ghostty shaders (10 files).
-8. **Uniform blocks**: Basic support added, member access chains need storage class fix.
-9. **Switch statements**: No parser support yet.
+## Remaining for full glslang equivalency
+- gl_PerVertex Block wrapping (structurally different, functionally equivalent)
+- Signed int for AccessChain indices
+- SPIR-V version detection from #version directive
+- NonWritable/NonReadable decorations for readonly/writeonly buffers

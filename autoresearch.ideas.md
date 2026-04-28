@@ -2,35 +2,31 @@
 
 ## CURRENT STATUS: 197/197 spirv-val, 9/10 Ghostty shaders pass
 
-## GOAL: Replace glslang C++ pipeline in deblasis/wintty with pure Zig implementation
+## GOAL: Replace glslang C++ pipeline in deblisis/wintty with pure Zig implementation
 
 ### DONE this session:
-- ✅ Function overload resolution: return_type stored in OverloadEntry (linearize bug)
-- ✅ Bool-to-float/int/uint: OpSelect-based conversion for type constructors
-- ✅ Int vector → float vector conversion in binary ops and compound assignments
-- ✅ pack/unpack builtin detection: exact name matching instead of prefix
-- ✅ Ghostty shaders: 1/10 → 9/10 (only common.glsl fails — include-only file)
+- ✅ UBO/SSBO layout decorations: Block, Offset, ColMajor, MatrixStride, ArrayStride (recursive for nested structs/arrays)
+- ✅ StorageBuffer storage class for SSBOs (no more deprecated BufferBlock)
+- ✅ Default DescriptorSet=0 for UBO/SSBO with binding
+- ✅ Standalone layout(local_size_x=N) in; parsing for compute LocalSize
+- ✅ OpSource GLSL 450 directive
+- ✅ OpName/OpMemberName for struct types (named structs instead of _struct_N)
 
-### NEXT: Layout decorations (critical for GPU correctness)
-TIER 1 - Required for correct UBO/SSBO memory layout:
-- Offset member decorations for UBO/SSBO struct members (std140/std430 layout rules)
-- Block/BufferBlock decorations on uniform/storage buffer struct types
-- ArrayStride decorations on array types in buffers
-- ColMajor/RowMajor + MatrixStride for matrix members
+### REMAINING for full glslang equivalency:
+TIER 1 - Structural differences (functionally equivalent but different structure):
+- gl_PerVertex Block wrapping: glslang wraps gl_Position/gl_PointSize in gl_PerVertex struct with Block + BuiltIn decorations
+  - Our approach (standalone gl_Position with BuiltIn) works for spirv-val but differs from glslang
+  - Medium effort, high visual equivalency impact
 
-TIER 2 - Important for feature parity:
-- DescriptorSet decorations on samplers/images
-- NonReadable/NonWritable on images/SSBOs
-- OpExecutionMode LocalSize for compute shaders
-- OpSource directive
-- Flat/Centroid/Component on IO variables
+TIER 2 - Minor improvements:
+- Index type for AccessChain: use int (signed) instead of uint for struct member indices
+- SPIR-V version: emit 1.0 for ESSL targets, 1.3+ for Vulkan
+- Generator ID: could set to custom value
+- NonWritable/NonReadable decorations for readonly/writeonly buffers
+- Flat/Centroid/Component decorations on IO variables
+- OpSource version detection from #version directive
 
-### Equivalency metrics (166 both-valid shaders):
-| Metric     | Ours  | Ref   | Ratio |
-|------------|-------|-------|-------|
-| ID Bound   | 7,446 | 10,159| 0.73x |
-| Total lines| 9,554 | 17,381| 0.55x |
-| Functions  | 235   | 225   | 1.04x |
-| Types      | 1,951 | 2,616 | 0.75x |
-| Constants  | 567   | 1,103 | 0.51x |
-| Variables  | 640   | 1,010 | 0.63x |
+TIER 3 - Performance (already good at 0.73x bound):
+- Function inlining (high effort)
+- Dead type elimination
+- Constant folding
