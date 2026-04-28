@@ -1768,6 +1768,28 @@ const Codegen = struct {
             .convert_itof => try self.emitUnaryOp(spirv.Op.ConvertSToF, resolved),
             .bitcast => try self.emitUnaryOp(spirv.Op.Bitcast, resolved),
             .convert_utof => try self.emitUnaryOp(spirv.Op.ConvertUToF, resolved),
+            .bool_to_float, .bool_to_int, .bool_to_uint => {
+                // bool → numeric: use OpSelect(T, bool, T(1), T(0))
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const cond_id = self.operandId(resolved, 0);
+                const one_id: u32 = switch (resolved.tag) {
+                    .bool_to_float => try self.emitFloatConstant(1.0),
+                    .bool_to_int, .bool_to_uint => try self.emitIntConstant(1),
+                    else => return,
+                };
+                const zero_id: u32 = switch (resolved.tag) {
+                    .bool_to_float => try self.emitFloatConstant(0.0),
+                    .bool_to_int, .bool_to_uint => try self.emitIntConstant(0),
+                    else => return,
+                };
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.Select)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(cond_id);
+                try self.emitWord(one_id);
+                try self.emitWord(zero_id);
+            },
             .is_nan => try self.emitUnaryOp(spirv.Op.IsNan, resolved),
             .is_inf => try self.emitUnaryOp(spirv.Op.IsInf, resolved),
             .any => try self.emitUnaryOp(spirv.Op.Any, resolved),
