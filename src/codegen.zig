@@ -1827,24 +1827,8 @@ const Codegen = struct {
         // on-demand constant emission during function codegen, splicing before functions.
         // Previously this caused spurious uint constants (e.g., uint_0 for literal 0
         // that was actually emitted as signed int_0 by AccessChain codegen).
-        // Pre-emit float/int constants only when the types are used
-        // and specific instructions reference them.
-        // These are lazy — emitIntConstant/emitFloatConstant handle dedup.
-        // But float_0 is needed by image_sample codegen which emits OpConstant
-        // during function bodies — pre-emit it to avoid section ordering violations.
-        var has_image_sample = false;
-        for (self.module.functions) |func| {
-            for (func.body) |inst| {
-                if (inst.tag == .image_sample or inst.tag == .image_sample_proj) {
-                    has_image_sample = true;
-                    break;
-                }
-            }
-            if (has_image_sample) break;
-        }
-        if (has_image_sample) {
-            _ = try self.emitFloatConstant(0.0);
-        }
+        // Note: float_0 pre-emission for image_sample removed — the two-buffer
+        // system handles on-demand emission via type_section.
     }
     fn emitGlobals(self: *Codegen) !void {
         for (self.module.globals) |global| {
@@ -1997,10 +1981,20 @@ const Codegen = struct {
                             else => return,
                         };
                         const float_type_id = try self.ensureType(.float);
+                        const cache_key = (@as(u64, float_type_id) << 32) | @as(u64, @as(u32, @bitCast(val)));
+                        if (self.emitted_constants.get(cache_key)) |existing_id| {
+                            const ir_id = resolved.result_id orelse return;
+                            if (ir_id != existing_id) {
+                                try self.constant_alias.put(self.alloc, ir_id, existing_id);
+                            }
+                            return;
+                        }
+                        const ir_id = resolved.result_id orelse return;
                         try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
                         try self.emitTypeWord(float_type_id);
-                        try self.emitTypeWord(resolved.result_id orelse return);
+                        try self.emitTypeWord(ir_id);
                         try self.emitTypeWord(@as(u32, @bitCast(val)));
+                        try self.emitted_constants.put(self.alloc, cache_key, ir_id);
                     },
                     .constant_bool => {
                         const val: u32 = switch (resolved.operands[0]) {
