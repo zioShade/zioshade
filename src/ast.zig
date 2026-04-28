@@ -216,6 +216,21 @@ pub const Type = union(enum) {
         };
     }
 
+    pub fn isFloatVector(self: Type) bool {
+        return switch (self) {
+            .vec2, .vec3, .vec4 => true,
+            else => false,
+        };
+    }
+
+    pub fn isIntVector(self: Type) bool {
+        return switch (self) {
+            .ivec2, .ivec3, .ivec4,
+            .uvec2, .uvec3, .uvec4 => true,
+            else => false,
+        };
+    }
+
     pub fn isMatrix(self: Type) bool {
         return switch (self) {
             .mat2, .mat3, .mat4,
