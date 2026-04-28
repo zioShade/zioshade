@@ -1176,15 +1176,8 @@ const Codegen = struct {
         // during function emission. Only emit if the module uses them.
         // We must emit them before functions to satisfy SPIR-V layout rules.
         _ = try self.ensureType(.float);
-        _ = try self.ensureType(.int);
-        _ = try self.ensureType(.uint);
         _ = try self.ensureType(.bool);
         _ = try self.ensureType(.void);
-        // Pre-emit vector types — VectorShuffle/CompositeExtract may create them
-        // lazily during function emission which violates SPIR-V layout rules.
-        _ = try self.ensureType(.vec2);
-        _ = try self.ensureType(.vec3);
-        _ = try self.ensureType(.vec4);
         // First, emit all named struct types from the module
         var type_iter = self.module.types.iterator();
         while (type_iter.next()) |entry| {
