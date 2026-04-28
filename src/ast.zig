@@ -242,6 +242,17 @@ pub const Type = union(enum) {
         };
     }
 
+    /// True for combined image-sampler types (need OpImage extraction)
+    pub fn isCombinedSampler(self: Type) bool {
+        return switch (self) {
+            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .sampler_cube,
+            .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow,
+            .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer,
+            .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer => true,
+            else => false,
+        };
+    }
+
     pub fn elementType(self: Type) Type {
         return switch (self) {
             .vec2, .vec3, .vec4 => .float,
