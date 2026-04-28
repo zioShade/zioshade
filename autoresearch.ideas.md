@@ -1,27 +1,28 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 197/197 conformance, SPIR-V output at glslang parity
+## CURRENT STATUS: 197/197 conformance, SPIR-V output ~glslang parity (0.99x)
 
 ### Metrics progress:
 | Iteration | our_bound | ref_bound | overhead | our_vars | ref_vars |
 |-----------|-----------|-----------|----------|----------|----------|
 | Baseline  | 29142     | 10159     | 2.87x    | 6782     | 1010     |
-| Lazy builtins | 21979 | 10159     | 2.16x    | 879      | 1010     |
-| Type pre-emit | 20563 | 10159     | 2.02x    | 879      | 1010     |
-| Conditional   | 19810 | 10159     | 1.95x    | 879      | 1010     |
-| Precise caps  | 19145 | 10159     | 1.88x    | 879      | 1010     |
-| ID waste fix  | 10015 | 10159     | 0.99x ✅ | 879      | 1010     |
+| ID waste fix | 10015 | 10159     | 0.99x ✅ | 879      | 1010     |
+| Image query fix | 10044 | 10159 | 0.99x    | 884      | 1010     |
 
-### Key breakthrough: Function builtin IR IDs
-50+ function builtins (abs, sin, cos, texture, dFdx, etc.) each called `allocId()` 
-during semantic analysis, wasting SPIR-V IDs. Codegen never uses these IDs.
-Fix: set `ir_id = 0` for all function builtins. front-facing.frag: 22 vs 22 (exact parity).
+### Key insight: bound BELOW glslang means missing functionality
+- our_vars=884 vs ref_vars=1010: We're creating fewer variables than glslang
+- image-query.desktop.frag: We generate 6/28 OpImageQuery ops
+- Missing sampler types (sampler_cube_array as non-shadow), missing image types (image1D, image3D, imageCube)
+- Parser maps image3D/imageCube/image2DArray → image2d (fallback)
 
-### Remaining opportunities (minor):
-1. **Our bound is BELOW glslang's**: We may be missing some necessary IDs, or our
-   variable count (879 vs 1010) suggests we're not creating enough variables.
-   Need to investigate if this is correct or a bug.
-2. **Variable count delta**: We have fewer variables than glslang (879 vs 1010).
-   This might mean some params aren't getting proper storage.
-3. **Per-shader analysis**: Some shaders may still have overhead. Run differential
-   comparison to find outliers.
+### Opportunities for functional completeness:
+1. **Add missing image types**: image1D, image3D, imageCube, imageCubeArray, image2DArray
+   to ast.zig, lexer.zig, parser.zig — needed for image-query.desktop.frag
+2. **Add sampler_cube_array (non-shadow)**: ast.zig type + lexer + parser + codegen
+3. **More complete extract_image in codegen**: isampler/isampler_cube/isampler_cube_array
+   extract_image needs int-type inner IDs for cube variants
+4. **imageSize support for all image types**: Needs the image types to exist first
+
+### Optimization (minor, diminishing returns):
+5. **Per-shader bound reduction**: Some shaders still 1.04x glslang (1 extra ID)
+6. **OpVariable count**: 884 vs 1010 — some shaders may need more variables for correctness
