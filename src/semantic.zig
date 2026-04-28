@@ -102,6 +102,8 @@ const Symbol = struct {
     ty: ast.Type,
     ir_id: u32,
     member_index: u32 = 0, // For block_member: index into the parent block
+    init_value: ?u32 = null, // For var_sym: if set, use this SSA value instead of load
+    is_ssa: bool = false, // true if this var can be used as SSA (never reassigned)
 };
 
 const LoopContext = struct {
@@ -312,6 +314,15 @@ const Analyzer = struct {
         // Lazy builtin variable injection for gl_* names
         if (name.len > 3 and name[0] == 'g' and name[1] == 'l' and name[2] == '_') {
             return self.ensureBuiltinVar(name);
+        }
+        return null;
+    }
+
+    fn lookupMut(self: *Analyzer, name: []const u8) ?*Symbol {
+        var i: usize = self.scopes.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.scopes.items[i].getPtr(name)) |sym_ptr| return sym_ptr;
         }
         return null;
     }
@@ -771,24 +782,9 @@ const Analyzer = struct {
         }
         switch (node.tag) {
             .var_decl => {
-                const ir_id = self.allocId();
                 const ty = node.data.ty orelse .void;
-                try self.declare(node.data.name, .{
-                    .kind = .var_sym,
-                    .ty = ty,
-                    .ir_id = ir_id,
-                });
-                // Emit local variable declaration (function storage class = 7)
-                const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                sc_operands[0] = .{ .literal_int = 7 };
-                try self.instructions.append(self.alloc, .{
-                    .tag = .local_variable,
-                    .result_type = null,
-                    .result_id = ir_id,
-                    .operands = sc_operands,
-                    .ty = ty,
-                });
                 if (node.data.children.len > 0) {
+                    // Has initializer — try SSA path first
                     var init = try self.analyzeExpression(node.data.children[0]);
                     // If the initializer is a pointer (from access chain), load it first
                     if (init.is_ptr) {
@@ -834,16 +830,63 @@ const Analyzer = struct {
                             init_id = conv_id;
                         }
                     }
-                    // Emit store: target <- value
-                    const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                    store_operands[0] = .{ .id = ir_id };
-                    store_operands[1] = .{ .id = init_id };
+                    // Declare as SSA — init_value is used directly, no OpVariable/OpStore
+                    // Only SSA-ify simple types (scalar, vector, matrix)
+                    // Struct/array types need OpVariable for member access chains
+                    const can_ssa = switch (ty) {
+                        .void => false,
+                        .named, .array => false,
+                        else => true, // scalar, vector, matrix types
+                    };
+                    const ir_id = if (can_ssa) self.allocId() else blk: {
+                        // Must create OpVariable for struct/array types
+                        const id = self.allocId();
+                        const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        sc_operands[0] = .{ .literal_int = 7 };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .local_variable,
+                            .result_type = null,
+                            .result_id = id,
+                            .operands = sc_operands,
+                            .ty = ty,
+                        });
+                        // Store init value
+                        const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        store_operands[0] = .{ .id = id };
+                        store_operands[1] = .{ .id = init_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .store,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = store_operands,
+                            .ty = .void,
+                        });
+                        break :blk id;
+                    };
+                    try self.declare(node.data.name, .{
+                        .kind = .var_sym,
+                        .ty = ty,
+                        .ir_id = ir_id,
+                        .init_value = if (can_ssa) init_id else null,
+                        .is_ssa = can_ssa,
+                    });
+                } else {
+                    // No initializer — must use OpVariable
+                    const ir_id = self.allocId();
+                    try self.declare(node.data.name, .{
+                        .kind = .var_sym,
+                        .ty = ty,
+                        .ir_id = ir_id,
+                    });
+                    // Emit local variable declaration (function storage class = 7)
+                    const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    sc_operands[0] = .{ .literal_int = 7 };
                     try self.instructions.append(self.alloc, .{
-                        .tag = .store,
+                        .tag = .local_variable,
                         .result_type = null,
-                        .result_id = null,
-                        .operands = store_operands,
-                        .ty = .void,
+                        .result_id = ir_id,
+                        .operands = sc_operands,
+                        .ty = ty,
                     });
                 }
             },
@@ -1119,6 +1162,38 @@ const Analyzer = struct {
                         });
                         return .{ .ty = sym.ty, .id = var_id };
                     }
+                    if (sym.kind == .var_sym and sym.is_ssa) {
+                        // SSA variable being written to — materialize as real OpVariable
+                        // Emit OpVariable + OpStore(init_value)
+                        const var_id = sym.ir_id;
+                        const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        sc_operands[0] = .{ .literal_int = 7 };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .local_variable,
+                            .result_type = null,
+                            .result_id = var_id,
+                            .operands = sc_operands,
+                            .ty = sym.ty,
+                        });
+                        if (sym.init_value) |init_val| {
+                            const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            store_ops[0] = .{ .id = var_id };
+                            store_ops[1] = .{ .id = init_val };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .store,
+                                .result_type = null,
+                                .result_id = null,
+                                .operands = store_ops,
+                                .ty = .void,
+                            });
+                        }
+                        // Clear SSA flag so future reads use load
+                        if (self.lookupMut(node.data.name)) |mut_sym| {
+                            mut_sym.is_ssa = false;
+                            mut_sym.init_value = null;
+                        }
+                        return .{ .ty = sym.ty, .id = var_id };
+                    }
                     return .{ .ty = sym.ty, .id = sym.ir_id };
                 }
                 last_error_ctx = node.data.name;
@@ -1330,6 +1405,10 @@ const Analyzer = struct {
                         return .{ .ty = sym.ty, .id = id };
                     }
                     if (sym.kind == .var_sym) {
+                        // SSA variable — use init_value directly instead of load
+                        if (sym.is_ssa and sym.init_value != null) {
+                            return .{ .ty = sym.ty, .id = sym.init_value.? };
+                        }
                         // Variables (globals/locals) are pointers — need OpLoad to get value
                         // But array variables should NOT be loaded — return pointer for index_access
                         if (sym.ty == .array) {
