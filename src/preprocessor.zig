@@ -8,6 +8,7 @@ pub const Preprocessor = struct {
     output: std.ArrayListUnmanaged(lexer.Token),
     source: [:0]const u8 = "",
     version: u32 = 430,
+    is_essl: bool = false,
     expanding: std.ArrayListUnmanaged([]const u8),
     extra_strings: std.ArrayListUnmanaged(u8),
 
@@ -471,6 +472,18 @@ pub const Preprocessor = struct {
         if (ver_tok.tag == .int_literal) {
             const ver_str = self.getTokenText(ver_tok);
             self.version = try std.fmt.parseInt(u32, ver_str, 10);
+        }
+
+        // Check for 'es' profile indicator
+        if (index.* + 1 < tokens.len) {
+            const next_tok = tokens[index.* + 1];
+            if (next_tok.tag == .identifier) {
+                const text = self.getTokenText(next_tok);
+                if (std.mem.eql(u8, text, "es")) {
+                    self.is_essl = true;
+                    index.* += 1; // consume 'es'
+                }
+            }
         }
 
         // Skip to end of line
