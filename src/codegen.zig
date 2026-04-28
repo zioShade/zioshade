@@ -1160,7 +1160,7 @@ const Codegen = struct {
         var has_atomics = false;
         for (self.module.functions) |func| {
             for (func.body) |inst| {
-                if (inst.tag == .atomic_fadd or inst.tag == .atomic_add or inst.tag == .atomic_load or inst.tag == .atomic_store) {
+                if (inst.tag == .atomic_fadd or inst.tag == .atomic_iadd or inst.tag == .atomic_isub or inst.tag == .atomic_smin or inst.tag == .atomic_umin or inst.tag == .atomic_smax or inst.tag == .atomic_umax or inst.tag == .atomic_and or inst.tag == .atomic_or or inst.tag == .atomic_xor or inst.tag == .atomic_exchange or inst.tag == .atomic_comp_swap) {
                     has_atomics = true;
                     break;
                 }
@@ -1178,6 +1178,32 @@ const Codegen = struct {
         _ = try self.ensureType(.float);
         _ = try self.ensureType(.bool);
         _ = try self.ensureType(.void);
+        // Pre-emit vector types when texture/image ops are present.
+        // Codegen emits VectorShuffle for coordinate shrinking during function
+        // emission, which creates types after OpFunction — violating SPIR-V layout.
+        var needs_vector_types = false;
+        for (self.module.functions) |func| {
+            for (func.body) |inst| {
+                if (inst.tag == .vector_shuffle or inst.tag == .image_sample or inst.tag == .image_sample_explicit_lod or inst.tag == .image_sample_dref or inst.tag == .image_sample_dref_explicit_lod or inst.tag == .image_fetch) {
+                    needs_vector_types = true;
+                    break;
+                }
+            }
+            if (needs_vector_types) break;
+        }
+        if (!needs_vector_types) {
+            for (self.module.globals) |global| {
+                if (global.ty.isSampler()) {
+                    needs_vector_types = true;
+                    break;
+                }
+            }
+        }
+        if (needs_vector_types) {
+            _ = try self.ensureType(.vec2);
+            _ = try self.ensureType(.vec3);
+            _ = try self.ensureType(.vec4);
+        }
         // First, emit all named struct types from the module
         var type_iter = self.module.types.iterator();
         while (type_iter.next()) |entry| {
