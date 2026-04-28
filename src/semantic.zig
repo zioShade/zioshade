@@ -135,6 +135,7 @@ const Analyzer = struct {
     // Function overloads: maps function name to list of (param_types, ir_id)
     overloads: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(OverloadEntry)),
     tolerate_errors: bool = false,
+    has_returned: bool = false, // Dead code suppression after return
     next_id: u32 = 1,
     // Constant dedup: (type_tag << 32 | value_bits) -> ir_id
     const_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
@@ -632,6 +633,7 @@ const Analyzer = struct {
     }
 
     fn analyzeFunction(self: *Analyzer, node: ast.Node) !void {
+        self.has_returned = false;
         try self.pushScope();
 
         // For overloaded functions, resolve the correct ir_id based on param types
@@ -773,6 +775,8 @@ const Analyzer = struct {
     }
 
     fn analyzeStatement(self: *Analyzer, node: ast.Node) !void {
+        // Dead code elimination: skip instructions after return
+        if (self.has_returned) return;
         errdefer {
             if (last_error_ctx.len == 0) last_error_ctx = @tagName(node.tag);
             if (last_error_line == 0) {
@@ -1088,6 +1092,7 @@ const Analyzer = struct {
                         .operands = ret_operands,
                         .ty = val.ty,
                     });
+                    self.has_returned = true;
                 } else {
                     try self.instructions.append(self.alloc, .{
                         .tag = .return_void,
@@ -1096,6 +1101,7 @@ const Analyzer = struct {
                         .operands = &.{},
                         .ty = .void,
                     });
+                    self.has_returned = true;
                 }
             },
             .discard_stmt => {},
