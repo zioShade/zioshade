@@ -1493,7 +1493,7 @@ const Codegen = struct {
                 _ = try self.ensureType(inst.ty);
                 switch (inst.tag) {
                     .local_variable => {
-                        _ = try self.ensurePointerType(inst.ty, .function);
+                        // Pointer type emitted on-demand during function codegen
                     },
                     .access_chain => {
                         // Pointer types are now emitted on-demand during function codegen
