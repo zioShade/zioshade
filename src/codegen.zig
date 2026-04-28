@@ -1702,22 +1702,9 @@ const Codegen = struct {
 
     // Stub methods — implemented in subsequent tasks
     fn emitTypesAndConstants(self: *Codegen) !void {
-        // Pre-emit constants needed by atomic operations (only if atomics are used)
-        var has_atomics = false;
-        for (self.module.functions) |func| {
-            for (func.body) |inst| {
-                if (inst.tag == .atomic_fadd or inst.tag == .atomic_iadd or inst.tag == .atomic_isub or inst.tag == .atomic_smin or inst.tag == .atomic_umin or inst.tag == .atomic_smax or inst.tag == .atomic_umax or inst.tag == .atomic_and or inst.tag == .atomic_or or inst.tag == .atomic_xor or inst.tag == .atomic_exchange or inst.tag == .atomic_comp_swap) {
-                    has_atomics = true;
-                    break;
-                }
-            }
-            if (has_atomics) break;
-        }
-        if (has_atomics) {
-            _ = try self.emitIntConstant(1); // Device scope
-            _ = try self.emitIntConstant(64); // Uniform semantics
-            _ = try self.emitIntConstant(0);
-        }
+        // Note: atomic constant pre-emission removed — two-buffer handles it.
+        // emitAtomicOp uses emitIntConstant during function codegen, which emits
+        // to type_section and is spliced before functions.
         // Pre-emit base types that might be needed by shuffle/extract ops
         // during function emission. Only emit if the module uses them.
         // We must emit them before functions to satisfy SPIR-V layout rules.
