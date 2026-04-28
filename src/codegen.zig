@@ -139,24 +139,12 @@ const Codegen = struct {
         try self.emitWord(@intFromEnum(spirv.Capability.shader));
 
         // Only emit additional capabilities if the module actually uses them
-        var has_image_ops = false;
         var has_subgroup_vote = false;
         var has_float_atomic = false;
 
         for (self.module.functions) |func| {
             for (func.body) |inst| {
                 switch (inst.tag) {
-                    .image_sample,
-                    .image_sample_explicit_lod,
-                    .image_sample_proj,
-                    .image_sample_dref,
-                    .image_fetch,
-                    .image_fetch_ms,
-                    .image_query_size,
-                    .image_query_size_lod,
-                    .image_query_levels,
-                    .image_query_samples,
-                    => has_image_ops = true,
                     .group_all, .group_any => has_subgroup_vote = true,
                     .atomic_fadd => has_float_atomic = true,
                     else => {},
@@ -164,32 +152,59 @@ const Codegen = struct {
             }
         }
 
-        // Check if sampler types are used in globals
-        if (!has_image_ops) {
-            for (self.module.globals) |global| {
-                if (global.ty.isSampler()) {
-                    has_image_ops = true;
-                    break;
+        // Check for specific image-related capabilities based on actual usage
+        var has_image_query = false;
+        var has_sampler1d = false;
+        var has_sampler_buffer = false;
+        var has_sampler2d_ms_array = false;
+
+        for (self.module.functions) |func| {
+            for (func.body) |inst| {
+                switch (inst.tag) {
+                    .image_query_size, .image_query_size_lod,
+                    .image_query_levels, .image_query_samples,
+                    => has_image_query = true,
+                    else => {},
                 }
             }
         }
 
-        if (has_image_ops) {
+        // Check global sampler types for type-specific capabilities
+        var has_storage_image_ms = false;
+        for (self.module.globals) |global| {
+            switch (global.ty) {
+                .sampler1d, .isampler1d, .usampler1d => has_sampler1d = true,
+                .sampler_buffer, .isampler_buffer, .usampler_buffer => has_sampler_buffer = true,
+                .sampler2d_ms_array, .isampler2d_ms_array, .usampler2d_ms_array, .image2d_ms_array => {
+                    has_sampler2d_ms_array = true;
+                    has_storage_image_ms = true;
+                },
+                .image2d_ms, .sampler2d_ms, .isampler2d_ms, .usampler2d_ms => has_storage_image_ms = true,
+                else => {},
+            }
+        }
+
+        if (has_image_query) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.image_query));
-            // Emit all image-related capabilities conservatively
-            // These are needed for various sampler/image types
+        }
+        if (has_sampler1d) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.image_1d));
+        }
+        if (has_sampler_buffer) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.sampled_buffer));
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.image_buffer));
+        }
+        if (has_sampler2d_ms_array) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.image_ms_array));
+        }
+        if (has_storage_image_ms) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.storage_image_multisample));
-            // Image1D = 44, not in spirv.zig as a named value
-            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
-            try self.emitWord(@intFromEnum(spirv.Capability.image_1d));
         }
         if (has_subgroup_vote) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
@@ -1176,34 +1191,41 @@ const Codegen = struct {
         // during function emission. Only emit if the module uses them.
         // We must emit them before functions to satisfy SPIR-V layout rules.
         _ = try self.ensureType(.float);
-        _ = try self.ensureType(.bool);
         _ = try self.ensureType(.void);
-        // Pre-emit vector types when texture/image ops are present.
+        // Pre-emit vector types when shadow sampler ops are present.
         // Codegen emits VectorShuffle for coordinate shrinking during function
         // emission, which creates types after OpFunction — violating SPIR-V layout.
-        var needs_vector_types = false;
+        var needs_vec3 = false;
+        var needs_vec2 = false;
         for (self.module.functions) |func| {
             for (func.body) |inst| {
-                if (inst.tag == .vector_shuffle or inst.tag == .image_sample or inst.tag == .image_sample_explicit_lod or inst.tag == .image_sample_dref or inst.tag == .image_sample_dref_explicit_lod or inst.tag == .image_fetch) {
-                    needs_vector_types = true;
-                    break;
+                if (inst.tag == .vector_shuffle) {
+                    // IR shuffle — result type tells us what vectors are needed
+                    switch (inst.ty) {
+                        .vec2 => needs_vec2 = true,
+                        .vec3 => needs_vec3 = true,
+                        else => {},
+                    }
+                }
+                // dref samples generate VectorShuffle during codegen
+                if (inst.tag == .image_sample_dref or inst.tag == .image_sample_dref_explicit_lod or inst.tag == .image_sample_dref_proj or inst.tag == .image_dref_gather) {
+                    switch (inst.ty) {
+                        .sampler2d_shadow, .sampler1d_shadow => needs_vec2 = true,
+                        .sampler2d_array_shadow, .sampler_cube_shadow, .sampler_cube_array_shadow => needs_vec3 = true,
+                        else => {},
+                    }
+                }
+                if (inst.tag == .image_sample_explicit_lod) {
+                    // explicit_lod can shrink coords for array samplers
+                    switch (inst.ty) {
+                        .sampler2d_array, .sampler2d_array_shadow => needs_vec3 = true,
+                        else => {},
+                    }
                 }
             }
-            if (needs_vector_types) break;
         }
-        if (!needs_vector_types) {
-            for (self.module.globals) |global| {
-                if (global.ty.isSampler()) {
-                    needs_vector_types = true;
-                    break;
-                }
-            }
-        }
-        if (needs_vector_types) {
-            _ = try self.ensureType(.vec2);
-            _ = try self.ensureType(.vec3);
-            _ = try self.ensureType(.vec4);
-        }
+        if (needs_vec2) _ = try self.ensureType(.vec2);
+        if (needs_vec3) _ = try self.ensureType(.vec3);
         // First, emit all named struct types from the module
         var type_iter = self.module.types.iterator();
         while (type_iter.next()) |entry| {
@@ -1319,15 +1341,23 @@ const Codegen = struct {
                 }
             }
         }
-        // Pre-emit float constants only if float type is used
-        if (self.emitted_types.get(@intFromEnum(ast.Type.float)) != null) {
-            _ = try self.emitFloatConstant(0.0);
-            _ = try self.emitFloatConstant(1.0);
+        // Pre-emit float/int constants only when the types are used
+        // and specific instructions reference them.
+        // These are lazy — emitIntConstant/emitFloatConstant handle dedup.
+        // But float_0 is needed by image_sample codegen which emits OpConstant
+        // during function bodies — pre-emit it to avoid section ordering violations.
+        var has_image_sample = false;
+        for (self.module.functions) |func| {
+            for (func.body) |inst| {
+                if (inst.tag == .image_sample or inst.tag == .image_sample_proj) {
+                    has_image_sample = true;
+                    break;
+                }
+            }
+            if (has_image_sample) break;
         }
-        if (self.emitted_types.get(@intFromEnum(ast.Type.uint)) != null) {
-            _ = try self.emitIntConstant(0);
-            _ = try self.emitIntConstant(1);
-            _ = try self.emitIntConstant(3); // Workgroup scope for group operations
+        if (has_image_sample) {
+            _ = try self.emitFloatConstant(0.0);
         }
     }
     fn emitGlobals(self: *Codegen) !void {
