@@ -1309,6 +1309,19 @@ const Codegen = struct {
         return const_id;
     }
 
+    fn emitSignedIntConstant(self: *Codegen, val: u32) error{OutOfMemory}!u32 {
+        const int_type_id = try self.ensureType(.int);
+        const key = (@as(u64, int_type_id) << 32) | @as(u64, val);
+        if (self.emitted_constants.get(key)) |cached| return cached;
+        const const_id = self.allocId();
+        try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+        try self.emitTypeWord(int_type_id);
+        try self.emitTypeWord(const_id);
+        try self.emitTypeWord(val);
+        try self.emitted_constants.put(self.alloc, key, const_id);
+        return const_id;
+    }
+
     fn emitAtomicOp(self: *Codegen, inst: ir.Instruction, op: spirv.Op) !void {
         const result_type_id = if (inst.result_type) |rt| rt else try self.ensureType(inst.ty);
         const result_id = inst.result_id orelse return;
@@ -2173,8 +2186,8 @@ const Codegen = struct {
                 // OpAccessChain indices: can be OpConstant or runtime scalar integer
                 const index_id: u32 = switch (resolved.operands[1]) {
                     .id => |v| v, // Runtime index — use the ID directly
-                    .literal_int => |v| try self.emitIntConstant(v), // Literal — emit constant
-                    else => try self.emitIntConstant(0),
+                    .literal_int => |v| try self.emitSignedIntConstant(v), // Literal — emit signed constant (matches glslang)
+                    else => try self.emitSignedIntConstant(0),
                 };
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
                 try self.emitWord(ptr_type_id);
@@ -2198,7 +2211,7 @@ const Codegen = struct {
                 const result_id = resolved.result_id orelse return;
                 const base_id = self.operandId(resolved, 0);
                 const member_idx = self.operandInt(resolved, 1);
-                const index_const_id = try self.emitIntConstant(member_idx);
+                const index_const_id = try self.emitSignedIntConstant(member_idx);
                 try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
