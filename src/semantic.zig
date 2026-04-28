@@ -487,6 +487,8 @@ const Analyzer = struct {
                         }
                     }
                 }
+                // Skip creating a global for standalone layout qualifiers (e.g. layout(local_size_x=1) in;)
+                if (node.data.name.len > 0) {
                 const ir_id = self.allocId();
                 const storage_class: ir.SPIRVStorageClass = switch (node.tag) {
                     .in_decl => .input,
@@ -508,6 +510,7 @@ const Analyzer = struct {
                     .ty = node.data.ty orelse .void,
                     .ir_id = ir_id,
                 });
+                } // end if name.len > 0
             },
             .uniform_block => {
                 const name = node.data.name;
