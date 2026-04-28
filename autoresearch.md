@@ -45,6 +45,5 @@ Maintaining 197/197 spirv-val conformance is a hard requirement.
 
 ## Remaining for full glslang equivalency
 - gl_PerVertex Block wrapping (structurally different, functionally equivalent)
-- Signed int for AccessChain indices
 - SPIR-V version detection from #version directive
-- NonWritable/NonReadable decorations for readonly/writeonly buffers
+- Centroid/NoPerspective decorations for IO variables
