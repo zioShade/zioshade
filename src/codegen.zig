@@ -1482,54 +1482,11 @@ const Codegen = struct {
                         // Pointer type emitted on-demand during function codegen
                     },
                     .access_chain => {
-                        // Pointer types are now emitted on-demand during function codegen
-                        // via emitTypeWord → type_section buffer
-                        // Only pre-emit the index constant
-                        if (inst.operands.len > 1) {
-                            const idx = switch (inst.operands[1]) {
-                                .literal_int => |v| v,
-                                else => 0,
-                            };
-                            _ = try self.emitIntConstant(idx);
-                        }
+                        // Pointer types and index constants emitted on-demand via two-buffer
                     },
-                    .constant_int => {
-                        const result_id = inst.result_id orelse continue;
-                        const val: u32 = switch (inst.operands[0]) {
-                            .literal_int => |v| v,
-                            else => continue,
-                        };
-                        const int_type_id = try self.ensureType(inst.ty);
-                        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
-                        try self.emitWord(int_type_id);
-                        try self.emitWord(result_id);
-                        try self.emitWord(val);
-                    },
-                    .constant_float => {
-                        const result_id = inst.result_id orelse continue;
-                        const val: f32 = switch (inst.operands[0]) {
-                            .literal_float => |v| v,
-                            .literal_int => |v| @floatFromInt(v),
-                            else => continue,
-                        };
-                        const float_type_id = try self.ensureType(.float);
-                        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
-                        try self.emitWord(float_type_id);
-                        try self.emitWord(result_id);
-                        try self.emitWord(@as(u32, @bitCast(val)));
-                    },
-                    .constant_bool => {
-                        const result_id = inst.result_id orelse continue;
-                        const val: u32 = switch (inst.operands[0]) {
-                            .literal_int => |v| v,
-                            else => continue,
-                        };
-                        const bool_type_id = try self.ensureType(.bool);
-                        const op: spirv.Op = if (val != 0) .ConstantTrue else .ConstantFalse;
-                        try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(op)));
-                        try self.emitWord(bool_type_id);
-                        try self.emitWord(result_id);
-                    },
+                    .constant_int => {},
+                    .constant_float => {},
+                    .constant_bool => {},
                     .image_texel_pointer => {
                         // Pre-emit pointer type for the texel pointer result
                         _ = try self.ensurePointerType(inst.ty, .image);
@@ -1694,7 +1651,47 @@ const Codegen = struct {
             resolved.result_type = try self.ensureType(.vec4);
         }
         switch (resolved.tag) {
-            .constant_int, .constant_float, .constant_bool => return,
+            .constant_int, .constant_float, .constant_bool => {
+                // Emit constants via type section when in functions
+                switch (resolved.tag) {
+                    .constant_int => {
+                        const val: u32 = switch (resolved.operands[0]) {
+                            .literal_int => |v| v,
+                            else => return,
+                        };
+                        const int_type_id = try self.ensureType(resolved.ty);
+                        try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+                        try self.emitTypeWord(int_type_id);
+                        try self.emitTypeWord(resolved.result_id orelse return);
+                        try self.emitTypeWord(val);
+                    },
+                    .constant_float => {
+                        const val: f32 = switch (resolved.operands[0]) {
+                            .literal_float => |v| v,
+                            .literal_int => |v| @floatFromInt(v),
+                            else => return,
+                        };
+                        const float_type_id = try self.ensureType(.float);
+                        try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+                        try self.emitTypeWord(float_type_id);
+                        try self.emitTypeWord(resolved.result_id orelse return);
+                        try self.emitTypeWord(@as(u32, @bitCast(val)));
+                    },
+                    .constant_bool => {
+                        const val: u32 = switch (resolved.operands[0]) {
+                            .literal_int => |v| v,
+                            else => return,
+                        };
+                        const bool_type_id = try self.ensureType(.bool);
+                        const op: spirv.Op = if (val != 0) .ConstantTrue else .ConstantFalse;
+                        try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(op)));
+                        try self.emitTypeWord(bool_type_id);
+                        try self.emitTypeWord(resolved.result_id orelse return);
+                    },
+                    else => {},
+                }
+                return;
+            },
             .local_variable => {
                 const ptr_type_id = try self.ensurePointerType(resolved.ty, .function);
                 const result_id = resolved.result_id orelse return;
