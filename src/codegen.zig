@@ -134,32 +134,66 @@ const Codegen = struct {
     }
 
     fn emitCapabilities(self: *Codegen) !void {
+        // Always emit Shader capability
         try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
         try self.emitWord(@intFromEnum(spirv.Capability.shader));
-        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
-        try self.emitWord(@intFromEnum(spirv.Capability.image_query));
-        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
-        try self.emitWord(@intFromEnum(spirv.Capability.sampled_buffer));
-        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
-        try self.emitWord(@intFromEnum(spirv.Capability.image_buffer));
-        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
-        try self.emitWord(@intFromEnum(spirv.Capability.image_ms_array));
-        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
-        try self.emitWord(@intFromEnum(spirv.Capability.storage_image_multisample));
-        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
-        try self.emitWord(@intFromEnum(spirv.Capability.group_vote));
-        try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
-        try self.emitWord(@intFromEnum(spirv.Capability.subgroup_vote_khr));
-        // Check if float atomics are used
+
+        // Only emit additional capabilities if the module actually uses them
+        var has_image_ops = false;
+        var has_subgroup_vote = false;
         var has_float_atomic = false;
+
         for (self.module.functions) |func| {
             for (func.body) |inst| {
-                if (inst.tag == .atomic_fadd) {
-                    has_float_atomic = true;
+                switch (inst.tag) {
+                    .image_sample,
+                    .image_sample_explicit_lod,
+                    .image_sample_proj,
+                    .image_sample_dref,
+                    .image_fetch,
+                    .image_fetch_ms,
+                    .image_query_size,
+                    .image_query_size_lod,
+                    .image_query_levels,
+                    .image_query_samples,
+                    => has_image_ops = true,
+                    .group_all, .group_any => has_subgroup_vote = true,
+                    .atomic_fadd => has_float_atomic = true,
+                    else => {},
+                }
+            }
+        }
+
+        // Check if sampler types are used in globals
+        if (!has_image_ops) {
+            for (self.module.globals) |global| {
+                if (global.ty.isSampler()) {
+                    has_image_ops = true;
                     break;
                 }
             }
-            if (has_float_atomic) break;
+        }
+
+        if (has_image_ops) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.image_query));
+            // Emit all image-related capabilities conservatively
+            // These are needed for various sampler/image types
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.sampled_buffer));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.image_buffer));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.image_ms_array));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.storage_image_multisample));
+            // Image1D = 44, not in spirv.zig as a named value
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.image_1d));
+        }
+        if (has_subgroup_vote) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.subgroup_vote_khr));
         }
         if (has_float_atomic) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
@@ -168,8 +202,19 @@ const Codegen = struct {
     }
 
     fn emitExtensions(self: *Codegen) !void {
-        // SPV_KHR_subgroup_vote
-        {
+        // Check if subgroup vote ops are used
+        var has_subgroup_vote = false;
+        for (self.module.functions) |func| {
+            for (func.body) |inst| {
+                switch (inst.tag) {
+                    .group_all, .group_any => has_subgroup_vote = true,
+                    else => {},
+                }
+                if (has_subgroup_vote) break;
+            }
+            if (has_subgroup_vote) break;
+        }
+        if (has_subgroup_vote) {
             const ext_name = "SPV_KHR_subgroup_vote";
             const ext_word_count: u16 = 1 + @as(u16, @intCast(std.math.divCeil(usize, ext_name.len + 1, 4) catch unreachable));
             try self.emitWord(spirv.encodeInstructionHeader(ext_word_count, @intFromEnum(spirv.Op.Extension)));
@@ -1115,6 +1160,25 @@ const Codegen = struct {
         _ = try self.emitIntConstant(1); // Device scope
         _ = try self.emitIntConstant(64); // Uniform semantics
         _ = try self.emitIntConstant(0);
+        // Pre-emit all base types so they appear before functions
+        // (some instructions like VectorShuffle may create types lazily)
+        _ = try self.ensureType(.float);
+        _ = try self.ensureType(.int);
+        _ = try self.ensureType(.uint);
+        _ = try self.ensureType(.bool);
+        _ = try self.ensureType(.void);
+        _ = try self.ensureType(.vec2);
+        _ = try self.ensureType(.vec3);
+        _ = try self.ensureType(.vec4);
+        _ = try self.ensureType(.ivec2);
+        _ = try self.ensureType(.ivec3);
+        _ = try self.ensureType(.ivec4);
+        _ = try self.ensureType(.uvec2);
+        _ = try self.ensureType(.uvec3);
+        _ = try self.ensureType(.uvec4);
+        _ = try self.ensureType(.mat2);
+        _ = try self.ensureType(.mat3);
+        _ = try self.ensureType(.mat4);
         // First, emit all named struct types from the module
         var type_iter = self.module.types.iterator();
         while (type_iter.next()) |entry| {

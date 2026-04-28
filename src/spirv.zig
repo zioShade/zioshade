@@ -166,8 +166,8 @@ pub const Capability = enum(u32) {
     image_buffer = 47,
     image_ms_array = 48,
     storage_image_multisample = 27,
-    group_vote = 44,
     subgroup_vote_khr = 4431,
+    image_1d = 44,
     atomic_float32_add_ext = 6033,
     _,
 };
