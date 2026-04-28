@@ -20,6 +20,7 @@ pub fn generate(
         .module = module,
         .stage = stage,
         .words = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
+        .type_section = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .next_id = module.next_id_start,
         .emitted_types = .{},
         .emitted_array_types = .{},
@@ -71,6 +72,8 @@ const Codegen = struct {
     module: *const ir.Module,
     stage: Stage,
     words: std.ArrayList(u32),
+    type_section: std.ArrayList(u32), // Types/constants emitted during function codegen
+    in_functions: bool = false,
     next_id: u32,
     emitted_types: std.AutoHashMapUnmanaged(u32, u32), // @intFromEnum(ty) -> type_id
     emitted_array_types: std.AutoHashMapUnmanaged(u64, u32), // hash -> type_id
@@ -106,6 +109,7 @@ const Codegen = struct {
         self.emitted_func_types.deinit(self.alloc);
         self.ptr_storage_class.deinit(self.alloc);
         self.words.deinit(self.alloc);
+        self.type_section.deinit(self.alloc);
     }
 
     fn allocId(self: *Codegen) u32 {
@@ -116,6 +120,15 @@ const Codegen = struct {
 
     fn emitWord(self: *Codegen, word: u32) !void {
         try self.words.append(self.alloc, word);
+    }
+
+    // Emit a word to the type section when in function codegen, main stream otherwise
+    fn emitTypeWord(self: *Codegen, word: u32) !void {
+        if (self.in_functions) {
+            try self.type_section.append(self.alloc, word);
+        } else {
+            try self.words.append(self.alloc, word);
+        }
     }
 
     fn emitHeader(self: *Codegen, version: SPIRVVersion) !void {
@@ -387,34 +400,34 @@ const Codegen = struct {
         const id = self.allocId();
         switch (ty) {
             .void => {
-                try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.TypeVoid)));
-                try self.emitWord(id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.TypeVoid)));
+                try self.emitTypeWord(id);
             },
             .bool => {
-                try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.TypeBool)));
-                try self.emitWord(id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.TypeBool)));
+                try self.emitTypeWord(id);
             },
             .int => {
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeInt)));
-                try self.emitWord(id);
-                try self.emitWord(32); // bit width
-                try self.emitWord(1); // signed
+                try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeInt)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(32); // bit width
+                try self.emitTypeWord(1); // signed
             },
             .uint => {
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeInt)));
-                try self.emitWord(id);
-                try self.emitWord(32);
-                try self.emitWord(0); // unsigned
+                try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeInt)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(32);
+                try self.emitTypeWord(0); // unsigned
             },
             .float => {
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeFloat)));
-                try self.emitWord(id);
-                try self.emitWord(32);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeFloat)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(32);
             },
             .double => {
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeFloat)));
-                try self.emitWord(id);
-                try self.emitWord(64);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeFloat)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(64);
             },
             .vec2, .vec3, .vec4,
             .ivec2, .ivec3, .ivec4,
@@ -422,733 +435,733 @@ const Codegen = struct {
             .uvec2, .uvec3, .uvec4 => {
                 const elem_type = try self.ensureType(ty.elementType());
                 const count = ty.numComponents();
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeVector)));
-                try self.emitWord(id);
-                try self.emitWord(elem_type);
-                try self.emitWord(count);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeVector)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(elem_type);
+                try self.emitTypeWord(count);
             },
             .mat2, .mat2x2, .mat2x3, .mat2x4,
             .mat3x2, .mat3, .mat3x3, .mat3x4,
             .mat4x2, .mat4x3, .mat4, .mat4x4 => {
                 const col_type = try self.ensureType(ty.columnType());
                 const num_cols = ty.numColumns();
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeMatrix)));
-                try self.emitWord(id);
-                try self.emitWord(col_type);
-                try self.emitWord(num_cols);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeMatrix)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(col_type);
+                try self.emitTypeWord(num_cols);
             },
             .sampler2d => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(1); // Sampled = 1 (yes)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(1); // Sampled = 1 (yes)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
                 self.sampled_image_inner_id = image_id; // Save for OpImage extraction
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .sampler2d_array => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(1); // Arrayed = 1
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(1); // Sampled = 1 (yes)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(1); // Sampled = 1 (yes)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
                 self.sampled_image_2d_array_inner_id = image_id;
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .sampler3d => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(2); // Dim = 3D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(1); // Sampled = 1 (yes)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(2); // Dim = 3D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(1); // Sampled = 1 (yes)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
                 self.sampled_image_3d_inner_id = image_id;
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .sampler1d => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(0); // Dim = 1D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(1); // Sampled = 1 (yes)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(0); // Dim = 1D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(1); // Sampled = 1 (yes)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
                 self.sampled_image_1d_inner_id = image_id;
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .sampler1d_shadow => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(0); // Dim = 1D
-                try self.emitWord(1); // Depth = 1
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(1); // Sampled = 1 (yes)
-                try self.emitWord(0); // ImageFormat = Unknown
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(0); // Dim = 1D
+                try self.emitTypeWord(1); // Depth = 1
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(1); // Sampled = 1 (yes)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .sampler_buffer => {
                 // samplerBuffer → TypeImage with Dim=Buffer, then TypeSampledImage
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(5); // Dim = Buffer
-                try self.emitWord(0); // Not depth
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(1); // Sampled = 1 (with sampler)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(5); // Dim = Buffer
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(1); // Sampled = 1 (with sampler)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
                 self.sampler_buffer_inner_id = image_id;
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .image2d => {
                 const float_id = try self.ensureType(.float);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(float_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(2); // Sampled = 2 (no sampler needed)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
             },
             .iimage2d => {
                 const int_id = try self.ensureType(.int);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(int_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(2); // Sampled = 2 (no sampler needed)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(int_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
             },
             .uimage2d => {
                 const uint_id = try self.ensureType(.uint);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(uint_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(2); // Sampled = 2 (no sampler needed)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(uint_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
             },
             .image_buffer => {
                 const float_id = try self.ensureType(.float);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(float_id);
-                try self.emitWord(5); // Dim = Buffer
-                try self.emitWord(0); // Not depth
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(2); // Sampled = 2 (no sampler needed)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(5); // Dim = Buffer
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
             },
             .image2d_ms => {
                 const float_id = try self.ensureType(.float);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(float_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(1); // Multisampled = 1
-                try self.emitWord(2); // Sampled = 2 (no sampler needed)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(1); // Multisampled = 1
+                try self.emitTypeWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
             },
             .image2d_ms_array => {
                 const float_id = try self.ensureType(.float);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(float_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(1); // Arrayed = 1
-                try self.emitWord(1); // Multisampled = 1
-                try self.emitWord(2); // Sampled = 2 (no sampler needed)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(1); // Multisampled = 1
+                try self.emitTypeWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
             },
             .image1d => {
                 const float_id = try self.ensureType(.float);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(float_id);
-                try self.emitWord(0); // Dim = 1D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(2); // Sampled = 2
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(0); // Dim = 1D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(2); // Sampled = 2
+                try self.emitTypeWord(0);
             },
             .iimage1d => {
                 const int_id = try self.ensureType(.int);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(int_id);
-                try self.emitWord(0); // Dim = 1D
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(int_id);
+                try self.emitTypeWord(0); // Dim = 1D
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .uimage1d => {
                 const uint_id = try self.ensureType(.uint);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(uint_id);
-                try self.emitWord(0); // Dim = 1D
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(uint_id);
+                try self.emitTypeWord(0); // Dim = 1D
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .image3d => {
                 const float_id = try self.ensureType(.float);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(float_id);
-                try self.emitWord(2); // Dim = 3D
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(2); // Dim = 3D
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .iimage3d => {
                 const int_id = try self.ensureType(.int);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(int_id);
-                try self.emitWord(2); // Dim = 3D
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(int_id);
+                try self.emitTypeWord(2); // Dim = 3D
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .uimage3d => {
                 const uint_id = try self.ensureType(.uint);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(uint_id);
-                try self.emitWord(2); // Dim = 3D
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(uint_id);
+                try self.emitTypeWord(2); // Dim = 3D
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .image_cube => {
                 const float_id = try self.ensureType(.float);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(float_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .iimage_cube => {
                 const int_id = try self.ensureType(.int);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(int_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(int_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .uimage_cube => {
                 const uint_id = try self.ensureType(.uint);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(uint_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(uint_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .image2d_array => {
                 const float_id = try self.ensureType(.float);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(float_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0);
-                try self.emitWord(1); // Arrayed = 1
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .iimage2d_array => {
                 const int_id = try self.ensureType(.int);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(int_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0);
-                try self.emitWord(1); // Arrayed = 1
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(int_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .uimage2d_array => {
                 const uint_id = try self.ensureType(.uint);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(uint_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0);
-                try self.emitWord(1); // Arrayed = 1
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(uint_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .image_cube_array => {
                 const float_id = try self.ensureType(.float);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(float_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(0);
-                try self.emitWord(1); // Arrayed = 1
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .iimage_cube_array => {
                 const int_id = try self.ensureType(.int);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(int_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(0);
-                try self.emitWord(1); // Arrayed = 1
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(int_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .uimage_cube_array => {
                 const uint_id = try self.ensureType(.uint);
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(id);
-                try self.emitWord(uint_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(0);
-                try self.emitWord(1); // Arrayed = 1
-                try self.emitWord(0);
-                try self.emitWord(2);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(uint_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(2);
+                try self.emitTypeWord(0);
             },
             .sampler_cube => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(0);
-                try self.emitWord(1);
-                try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 self.sampled_image_cube_inner_id = image_id;
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .sampler2d_shadow => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(1); // Depth = 1
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(1); // Sampled = 1
-                try self.emitWord(0); // ImageFormat = Unknown
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(1); // Depth = 1
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(1); // Sampled = 1
+                try self.emitTypeWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .sampler_cube_shadow => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(1); // Depth = 1
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(1); // Sampled = 1
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(1); // Depth = 1
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(1); // Sampled = 1
+                try self.emitTypeWord(0); // ImageFormat = Unknown
                 self.sampled_image_cube_inner_id = image_id;
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .sampler_cube_array_shadow => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(1); // Depth = 1
-                try self.emitWord(1); // Arrayed = 1
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(1); // Sampled = 1
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(1); // Depth = 1
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(1); // Sampled = 1
+                try self.emitTypeWord(0); // ImageFormat = Unknown
                 self.sampled_image_cube_inner_id = image_id; // Cube array uses same inner
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .sampler2d_array_shadow => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(1); // Depth = 1
-                try self.emitWord(1); // Arrayed = 1
-                try self.emitWord(0); // Not multisampled
-                try self.emitWord(1); // Sampled = 1
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(1); // Depth = 1
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(1); // Sampled = 1
+                try self.emitTypeWord(0); // ImageFormat = Unknown
                 self.sampled_image_1d_inner_id = image_id;
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .sampler2d_ms => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(0); // Not arrayed
-                try self.emitWord(1); // Multisampled = 1
-                try self.emitWord(1); // Sampled = 1 (with sampler)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(1); // Multisampled = 1
+                try self.emitTypeWord(1); // Sampled = 1 (with sampler)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
                 self.sampled_image_ms_inner_id = image_id;
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .sampler2d_ms_array => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(float_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(1); // Arrayed = 1
-                try self.emitWord(1); // Multisampled = 1
-                try self.emitWord(1); // Sampled = 1 (with sampler)
-                try self.emitWord(0); // ImageFormat = Unknown
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(1); // Multisampled = 1
+                try self.emitTypeWord(1); // Sampled = 1 (with sampler)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
                 self.sampled_image_ms_array_inner_id = image_id;
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             // Integer sampler types — same as float counterparts but with int as sampled type
             .isampler2d => {
                 const base_id = try self.ensureType(.int);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); try self.emitWord(0); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
                 self.sampled_image_int_inner_id = image_id;
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .usampler2d => {
                 const base_id = try self.ensureType(.uint);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); try self.emitWord(0); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
                 self.sampled_image_uint_inner_id = image_id;
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .isampler3d => {
                 const base_id = try self.ensureType(.int);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(2); // Dim = 3D
-                try self.emitWord(0); try self.emitWord(0); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(2); // Dim = 3D
+                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .usampler3d => {
                 const base_id = try self.ensureType(.uint);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(2); // Dim = 3D
-                try self.emitWord(0); try self.emitWord(0); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(2); // Dim = 3D
+                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .isampler_cube => {
                 const base_id = try self.ensureType(.int);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(0); try self.emitWord(0); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .usampler_cube => {
                 const base_id = try self.ensureType(.uint);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(0); try self.emitWord(0); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .isampler2d_array => {
                 const base_id = try self.ensureType(.int);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); // Not depth
-                try self.emitWord(1); // Arrayed = 1
-                try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .usampler2d_array => {
                 const base_id = try self.ensureType(.uint);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(1); // Dim = 2D
-                try self.emitWord(0); try self.emitWord(1); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(1); // Dim = 2D
+                try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .isampler2d_ms => {
                 const base_id = try self.ensureType(.int);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(1); try self.emitWord(0); try self.emitWord(0); try self.emitWord(1); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .usampler2d_ms => {
                 const base_id = try self.ensureType(.uint);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(1); try self.emitWord(0); try self.emitWord(0); try self.emitWord(1); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .isampler2d_ms_array => {
                 const base_id = try self.ensureType(.int);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(1); try self.emitWord(0); try self.emitWord(1); try self.emitWord(1); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(1); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .usampler2d_ms_array => {
                 const base_id = try self.ensureType(.uint);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(1); try self.emitWord(0); try self.emitWord(1); try self.emitWord(1); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(1); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .isampler_cube_array => {
                 const base_id = try self.ensureType(.int);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(0); try self.emitWord(1); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .usampler_cube_array => {
                 const base_id = try self.ensureType(.uint);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(3); // Dim = Cube
-                try self.emitWord(0); try self.emitWord(1); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .isampler1d => {
                 const base_id = try self.ensureType(.int);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(0); // Dim = 1D
-                try self.emitWord(0); try self.emitWord(0); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(0); // Dim = 1D
+                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .usampler1d => {
                 const base_id = try self.ensureType(.uint);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(0); // Dim = 1D
-                try self.emitWord(0); try self.emitWord(0); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(0); // Dim = 1D
+                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .isampler1d_array => {
                 const base_id = try self.ensureType(.int);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(0); // Dim = 1D
-                try self.emitWord(0); try self.emitWord(1); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(0); // Dim = 1D
+                try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .usampler1d_array => {
                 const base_id = try self.ensureType(.uint);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(0); // Dim = 1D
-                try self.emitWord(0); try self.emitWord(1); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(0); // Dim = 1D
+                try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .isampler_buffer => {
                 const base_id = try self.ensureType(.int);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(5); // Dim = Buffer
-                try self.emitWord(0); try self.emitWord(0); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(5); // Dim = Buffer
+                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .usampler_buffer => {
                 const base_id = try self.ensureType(.uint);
                 const image_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
-                try self.emitWord(image_id);
-                try self.emitWord(base_id);
-                try self.emitWord(5); // Dim = Buffer
-                try self.emitWord(0); try self.emitWord(0); try self.emitWord(0); try self.emitWord(1); try self.emitWord(0);
-                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
-                try self.emitWord(id);
-                try self.emitWord(image_id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(base_id);
+                try self.emitTypeWord(5); // Dim = Buffer
+                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
             },
             .named => |name| {
                 // Check if this named type was already emitted
@@ -1158,8 +1171,8 @@ const Codegen = struct {
                 const td = self.module.types.get(name) orelse {
                     // Named type not found — emit empty struct as placeholder
                     const word_count: u16 = 2;
-                    try self.emitWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.TypeStruct)));
-                    try self.emitWord(id);
+                    try self.emitTypeWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.TypeStruct)));
+                    try self.emitTypeWord(id);
                     try self.emitted_named_types.put(self.alloc, name, id);
                     return id;
                 };
@@ -1172,10 +1185,10 @@ const Codegen = struct {
                     try member_ids.append(self.alloc, try self.ensureType(member.ty));
                 }
                 const word_count: u16 = 2 + @as(u16, @intCast(member_ids.items.len));
-                try self.emitWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.TypeStruct)));
-                try self.emitWord(id);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.TypeStruct)));
+                try self.emitTypeWord(id);
                 for (member_ids.items) |mid| {
-                    try self.emitWord(mid);
+                    try self.emitTypeWord(mid);
                 }
             },
             .array => |arr| {
@@ -1188,15 +1201,15 @@ const Codegen = struct {
                 const base_id = base_id_for_key;
                 if (arr.size == 0) {
                     // Runtime array: OpTypeRuntimeArray
-                    try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeRuntimeArray)));
-                    try self.emitWord(id);
-                    try self.emitWord(base_id);
+                    try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeRuntimeArray)));
+                    try self.emitTypeWord(id);
+                    try self.emitTypeWord(base_id);
                 } else {
                     const const_id = try self.emitIntConstant(arr.size);
-                    try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeArray)));
-                    try self.emitWord(id);
-                    try self.emitWord(base_id);
-                    try self.emitWord(const_id);
+                    try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeArray)));
+                    try self.emitTypeWord(id);
+                    try self.emitTypeWord(base_id);
+                    try self.emitTypeWord(const_id);
                 }
                 try self.emitted_array_types.put(self.alloc, cache_key, id);
             },
@@ -1215,10 +1228,10 @@ const Codegen = struct {
         const key: u64 = (@as(u64, base_id) << 32) | @as(u64, @intFromEnum(storage_class));
         if (self.emitted_ptr_types.get(key)) |cached| return cached;
         const ptr_id = self.allocId();
-        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
-        try self.emitWord(ptr_id);
-        try self.emitWord(@intFromEnum(storage_class));
-        try self.emitWord(base_id);
+        try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
+        try self.emitTypeWord(ptr_id);
+        try self.emitTypeWord(@intFromEnum(storage_class));
+        try self.emitTypeWord(base_id);
         try self.emitted_ptr_types.put(self.alloc, key, ptr_id);
         return ptr_id;
     }
@@ -1228,10 +1241,10 @@ const Codegen = struct {
         const key = (@as(u64, int_type_id) << 32) | @as(u64, val);
         if (self.emitted_constants.get(key)) |cached| return cached;
         const const_id = self.allocId();
-        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
-        try self.emitWord(int_type_id);
-        try self.emitWord(const_id);
-        try self.emitWord(val);
+        try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+        try self.emitTypeWord(int_type_id);
+        try self.emitTypeWord(const_id);
+        try self.emitTypeWord(val);
         try self.emitted_constants.put(self.alloc, key, const_id);
         return const_id;
     }
@@ -1258,10 +1271,10 @@ const Codegen = struct {
         const key = (@as(u64, float_type_id) << 32) | @as(u64, val_bits);
         if (self.emitted_constants.get(key)) |cached| return cached;
         const const_id = self.allocId();
-        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
-        try self.emitWord(float_type_id);
-        try self.emitWord(const_id);
-        try self.emitWord(val_bits);
+        try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+        try self.emitTypeWord(float_type_id);
+        try self.emitTypeWord(const_id);
+        try self.emitTypeWord(val_bits);
         try self.emitted_constants.put(self.alloc, key, const_id);
         return const_id;
     }
@@ -1471,14 +1484,6 @@ const Codegen = struct {
                 }
             }
         }
-        // Collect unique non-function global storage classes for access_chain pre-scan
-        var global_storage_classes = std.AutoHashMapUnmanaged(ir.SPIRVStorageClass, void).empty;
-        defer global_storage_classes.deinit(self.alloc);
-        for (self.module.globals) |global| {
-            if (global.storage_class != .function) {
-                try global_storage_classes.put(self.alloc, global.storage_class, {});
-            }
-        }
         for (self.module.functions) |func| {
             _ = try self.ensureType(func.return_type);
             for (func.params) |param| {
@@ -1491,13 +1496,9 @@ const Codegen = struct {
                         _ = try self.ensurePointerType(inst.ty, .function);
                     },
                     .access_chain => {
-                        _ = try self.ensurePointerType(inst.ty, .function);
-                        // Pre-emit pointer types only for storage classes present in globals
-                        var sc_iter = global_storage_classes.iterator();
-                        while (sc_iter.next()) |entry| {
-                            _ = try self.ensurePointerType(inst.ty, entry.key_ptr.*);
-                        }
-                        // Pre-emit the index constant so it's available during codegen
+                        // Pointer types are now emitted on-demand during function codegen
+                        // via emitTypeWord → type_section buffer
+                        // Only pre-emit the index constant
                         if (inst.operands.len > 1) {
                             const idx = switch (inst.operands[1]) {
                                 .literal_int => |v| v,
@@ -1633,6 +1634,8 @@ const Codegen = struct {
         }
 
         // Second pass: emit function definitions
+        self.in_functions = true;
+        const functions_start_pos = self.words.items.len;
         for (self.module.functions, 0..) |func, func_idx| {
             const return_type_id = try self.ensureType(func.return_type);
             const info = func_infos.items[func_idx];
@@ -1670,6 +1673,24 @@ const Codegen = struct {
 
             try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.FunctionEnd)));
         }
+
+        // Splice type_section words before the function code
+        if (self.type_section.items.len > 0) {
+            // Save function words (from functions_start_pos to end)
+            const func_words = try self.allocator().dupe(u32, self.words.items[functions_start_pos..]);
+            // Truncate to where functions start
+            self.words.shrinkRetainingCapacity(functions_start_pos);
+            // Append type section words
+            try self.words.appendSlice(self.allocator(), self.type_section.items);
+            // Append function words back
+            try self.words.appendSlice(self.allocator(), func_words);
+            self.allocator().free(func_words);
+        }
+        self.in_functions = false;
+    }
+
+    fn allocator(self: *Codegen) std.mem.Allocator {
+        return self.alloc;
     }
 
     fn emitInstruction(self: *Codegen, inst: ir.Instruction) !void {
