@@ -1993,18 +1993,32 @@ const Analyzer = struct {
                     if (std.mem.eql(u8, node.data.name, "textureSize")) {
                         // Determine result type based on sampler type
                         const size_ty: ast.Type = if (arg_tids.items.len > 0) switch (arg_tids.items[0].ty) {
-                            .sampler1d, .sampler1d_shadow, .isampler1d, .usampler1d => .int,
-                            .sampler2d, .sampler2d_shadow, .sampler2d_ms, .sampler_cube, .sampler_cube_shadow, .sampler2d_ms_array,
-                            .isampler2d, .usampler2d, .isampler3d, .usampler3d, .isampler_cube, .usampler_cube,
-                            .isampler2d_ms, .usampler2d_ms, .isampler2d_ms_array, .usampler2d_ms_array => .ivec2,
-                            .sampler2d_array_shadow, .isampler2d_array, .usampler2d_array,
-                            .isampler_cube_array, .usampler_cube_array => .ivec3,
-                            .sampler_buffer, .isampler_buffer, .usampler_buffer => .int,
+                            .sampler1d, .sampler1d_shadow, .isampler1d, .usampler1d,
+                            .sampler_buffer, .isampler_buffer, .usampler_buffer,
+                            .image_buffer => .int,
+                            .sampler2d, .sampler2d_shadow, .sampler2d_ms,
+                            .sampler_cube, .sampler_cube_shadow,
+                            .isampler2d, .usampler2d, .isampler3d, .usampler3d,
+                            .isampler_cube, .usampler_cube,
+                            .isampler2d_ms, .usampler2d_ms,
+                            .isampler2d_ms_array, .usampler2d_ms_array,
+                            .image2d, .iimage2d, .uimage2d, .image2d_ms => .ivec2,
+                            .sampler2d_array, .sampler2d_array_shadow, .sampler3d,
+                            .sampler_cube_array_shadow,
+                            .isampler2d_array, .usampler2d_array,
+                            .isampler_cube_array, .usampler_cube_array,
+                            .isampler1d_array, .usampler1d_array,
+                            .image2d_ms_array => .ivec3,
                             else => .ivec2,
                         } else .ivec2;
-                        // Extract image from sampler, then query size with lod
+                        // Extract image from sampler (all sampler types need extraction)
                         var img_id = arg_tids.items[0].id;
-                        if (arg_tids.items[0].ty == .sampler2d or arg_tids.items[0].ty == .sampler3d or arg_tids.items[0].ty == .sampler2d_array or arg_tids.items[0].ty == .sampler2d_ms or arg_tids.items[0].ty == .sampler2d_ms_array or arg_tids.items[0].ty == .sampler1d or arg_tids.items[0].ty == .isampler2d or arg_tids.items[0].ty == .usampler2d or arg_tids.items[0].ty == .isampler3d or arg_tids.items[0].ty == .usampler3d or arg_tids.items[0].ty == .isampler_cube or arg_tids.items[0].ty == .usampler_cube or arg_tids.items[0].ty == .isampler2d_ms or arg_tids.items[0].ty == .usampler2d_ms or arg_tids.items[0].ty == .isampler2d_ms_array or arg_tids.items[0].ty == .usampler2d_ms_array or arg_tids.items[0].ty == .isampler1d or arg_tids.items[0].ty == .usampler1d) {
+                        if (arg_tids.items[0].ty.isCombinedSampler() or
+                            arg_tids.items[0].ty == .sampler1d_shadow or arg_tids.items[0].ty == .sampler2d_shadow or
+                            arg_tids.items[0].ty == .sampler_cube_shadow or arg_tids.items[0].ty == .sampler2d_array_shadow or
+                            arg_tids.items[0].ty == .sampler_cube_array_shadow or
+                            arg_tids.items[0].ty == .isampler1d_array or arg_tids.items[0].ty == .usampler1d_array)
+                        {
                             const extracted = self.allocId();
                             const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ext_ops[0] = .{ .id = arg_tids.items[0].id };
@@ -2041,13 +2055,18 @@ const Analyzer = struct {
                                 .ty = size_ty,
                             });
                         }
-                        return .{ .ty = .ivec2, .id = result_id };
+                        return .{ .ty = size_ty, .id = result_id };
                     }
                     // textureQueryLevels(sampler) → int, uses OpImageQueryLevels
                     if (std.mem.eql(u8, node.data.name, "textureQueryLevels")) {
                         // Need to extract image from sampler first
                         var img_id = arg_tids.items[0].id;
-                        if (arg_tids.items[0].ty == .sampler2d) {
+                        if (arg_tids.items[0].ty.isCombinedSampler() or
+                            arg_tids.items[0].ty == .sampler1d_shadow or arg_tids.items[0].ty == .sampler2d_shadow or
+                            arg_tids.items[0].ty == .sampler_cube_shadow or arg_tids.items[0].ty == .sampler2d_array_shadow or
+                            arg_tids.items[0].ty == .sampler_cube_array_shadow
+                        )
+                        {
                             const extracted = self.allocId();
                             const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ext_ops[0] = .{ .id = arg_tids.items[0].id };
@@ -2074,7 +2093,8 @@ const Analyzer = struct {
                     // textureSamples(image) / imageSamples(image) → OpImageQuerySamples
                     if (std.mem.eql(u8, node.data.name, "textureSamples") or std.mem.eql(u8, node.data.name, "imageSamples")) {
                         var img_id = arg_tids.items[0].id;
-                        if (arg_tids.items[0].ty == .sampler2d or arg_tids.items[0].ty == .sampler2d_ms or arg_tids.items[0].ty == .sampler2d_ms_array) {
+                        if (arg_tids.items[0].ty.isCombinedSampler() or
+                            arg_tids.items[0].ty == .sampler2d_ms or arg_tids.items[0].ty == .sampler2d_ms_array) {
                             const extracted = self.allocId();
                             const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ext_ops[0] = .{ .id = arg_tids.items[0].id };
