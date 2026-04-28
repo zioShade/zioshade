@@ -1705,45 +1705,10 @@ const Codegen = struct {
         // Note: atomic constant pre-emission removed — two-buffer handles it.
         // emitAtomicOp uses emitIntConstant during function codegen, which emits
         // to type_section and is spliced before functions.
-        // Pre-emit base types that might be needed by shuffle/extract ops
-        // during function emission. Only emit if the module uses them.
-        // We must emit them before functions to satisfy SPIR-V layout rules.
-        _ = try self.ensureType(.float);
-        _ = try self.ensureType(.void);
-        // Pre-emit vector types when shadow sampler ops are present.
-        // Codegen emits VectorShuffle for coordinate shrinking during function
-        // emission, which creates types after OpFunction — violating SPIR-V layout.
-        var needs_vec3 = false;
-        var needs_vec2 = false;
-        for (self.module.functions) |func| {
-            for (func.body) |inst| {
-                if (inst.tag == .vector_shuffle) {
-                    // IR shuffle — result type tells us what vectors are needed
-                    switch (inst.ty) {
-                        .vec2 => needs_vec2 = true,
-                        .vec3 => needs_vec3 = true,
-                        else => {},
-                    }
-                }
-                // dref samples generate VectorShuffle during codegen
-                if (inst.tag == .image_sample_dref or inst.tag == .image_sample_dref_explicit_lod or inst.tag == .image_sample_dref_proj or inst.tag == .image_dref_gather) {
-                    switch (inst.ty) {
-                        .sampler2d_shadow, .sampler1d_shadow => needs_vec2 = true,
-                        .sampler2d_array_shadow, .sampler_cube_shadow, .sampler_cube_array_shadow => needs_vec3 = true,
-                        else => {},
-                    }
-                }
-                if (inst.tag == .image_sample_explicit_lod) {
-                    // explicit_lod can shrink coords for array samplers
-                    switch (inst.ty) {
-                        .sampler2d_array, .sampler2d_array_shadow => needs_vec3 = true,
-                        else => {},
-                    }
-                }
-            }
-        }
-        if (needs_vec2) _ = try self.ensureType(.vec2);
-        if (needs_vec3) _ = try self.ensureType(.vec3);
+        // Note: float/void types are emitted on-demand by ensureType during
+        // type emission and function codegen. No need to pre-emit them.
+        // Note: vec2/vec3 pre-emission for shadow samplers removed — two-buffer handles it.
+        // ensureType during function codegen writes to type_section which is spliced before functions.
         // First, emit all named struct types from the module
         // Only emit named types that are actually referenced by globals or instructions
         // Collect referenced type names first
