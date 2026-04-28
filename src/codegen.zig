@@ -1702,15 +1702,8 @@ const Codegen = struct {
 
     // Stub methods — implemented in subsequent tasks
     fn emitTypesAndConstants(self: *Codegen) !void {
-        // Note: atomic constant pre-emission removed — two-buffer handles it.
-        // emitAtomicOp uses emitIntConstant during function codegen, which emits
-        // to type_section and is spliced before functions.
-        // Note: float/void types are emitted on-demand by ensureType during
-        // type emission and function codegen. No need to pre-emit them.
-        // Note: vec2/vec3 pre-emission for shadow samplers removed — two-buffer handles it.
-        // ensureType during function codegen writes to type_section which is spliced before functions.
-        // First, emit all named struct types from the module
-        // Only emit named types that are actually referenced by globals or instructions
+        // Emit named struct types and global types/pointer types.
+        // All other types and constants are emitted on-demand via the two-buffer system.
         // Collect referenced type names first
         var referenced_names = std.StringHashMapUnmanaged(void).empty;
         defer referenced_names.deinit(self.alloc);
@@ -1753,34 +1746,8 @@ const Codegen = struct {
         }
         for (self.module.functions) |func| {
             // Types emitted on-demand via two-buffer during emitFunctions
-            for (func.body) |inst| {
-                // Types now emitted on-demand via two-buffer
-                switch (inst.tag) {
-                    .local_variable => {
-                        // Pointer type emitted on-demand during function codegen
-                    },
-                    .access_chain => {
-                        // Pointer types and index constants emitted on-demand via two-buffer
-                    },
-                    .constant_int => {},
-                    .constant_float => {},
-                    .constant_bool => {},
-                    .image_texel_pointer => {
-                        // Pre-emit pointer type for the texel pointer result
-                        _ = try self.ensurePointerType(inst.ty, .image);
-                    },
-                    else => {},
-                }
-            }
+            _ = func;
         }
-
-        // Note: constant pre-emission for access_chain/composite_extract/vector_shuffle
-        // indices is no longer needed — the two-buffer system (type_section) handles
-        // on-demand constant emission during function codegen, splicing before functions.
-        // Previously this caused spurious uint constants (e.g., uint_0 for literal 0
-        // that was actually emitted as signed int_0 by AccessChain codegen).
-        // Note: float_0 pre-emission for image_sample removed — the two-buffer
-        // system handles on-demand emission via type_section.
     }
     fn emitGlobals(self: *Codegen) !void {
         for (self.module.globals) |global| {
