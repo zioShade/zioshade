@@ -305,15 +305,79 @@ pub const Preprocessor = struct {
 
     fn substituteAndExpand(self: *Preprocessor, func_macro: Macro, args: [][]lexer.Token) !void {
         const f = func_macro.function;
-        for (f.body) |tok| {
+        var i: usize = 0;
+        while (i < f.body.len) {
+            const tok = f.body[i];
+
+            // Handle ## (token paste) — look ahead
+            if (i + 2 < f.body.len and f.body[i + 1].tag == .hash_hash) {
+                // Left side: resolve param or use token text
+                var left_buf: [256]u8 = undefined;
+                const left_text = self.resolveParamText(f.params, args, tok, &left_buf);
+                const right_tok = f.body[i + 2];
+                var right_buf: [256]u8 = undefined;
+                const right_text = self.resolveParamText(f.params, args, right_tok, &right_buf);
+                // Concatenate and emit as identifier
+                const pasted = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ left_text, right_text });
+                defer self.alloc.free(pasted);
+                try self.output.append(self.alloc, .{
+                    .tag = .identifier,
+                    .loc = tok.loc,
+                    .start = 0,
+                    .len = @intCast(pasted.len),
+                });
+                i += 3;
+                continue;
+            }
+
+            // Handle # (stringify) — next token should be a param
+            if (tok.tag == .hash and i + 1 < f.body.len) {
+                const next_tok = f.body[i + 1];
+                if (next_tok.tag == .identifier) {
+                    const param_name = self.getTokenText(next_tok);
+                    for (f.params, 0..) |param, idx| {
+                        if (std.mem.eql(u8, param_name, param)) {
+                            if (idx < args.len) {
+                                // Stringify: convert arg tokens to a string literal
+                                var buf: [1024]u8 = undefined;
+                                var len: usize = 0;
+                                buf[len] = '"'; len += 1;
+                                for (args[idx], 0..) |arg_tok, ai| {
+                                    if (ai > 0) {
+                                        buf[len] = ' '; len += 1;
+                                    }
+                                    const arg_text = self.getTokenText(arg_tok);
+                                    @memcpy(buf[len..][0..arg_text.len], arg_text);
+                                    len += arg_text.len;
+                                }
+                                buf[len] = '"'; len += 1;
+                                try self.output.append(self.alloc, .{
+                                    .tag = .string_literal,
+                                    .loc = tok.loc,
+                                    .start = 0,
+                                    .len = @intCast(len),
+                                });
+                            }
+                            i += 2;
+                            break;
+                        }
+                    } else {
+                        try self.output.append(self.alloc, tok);
+                        i += 1;
+                        continue;
+                    }
+                    continue;
+                }
+            }
+
             if (tok.tag == .identifier) {
                 const param_name = self.getTokenText(tok);
                 var found = false;
-                for (f.params, 0..) |param, i| {
+                for (f.params, 0..) |param, idx| {
                     if (std.mem.eql(u8, param_name, param)) {
                         // Emit argument tokens
-                        if (i < args.len) {
-                            for (args[i]) |arg_tok| {
+                        if (idx < args.len) {
+                            for (args[idx]) |arg_tok| {
                                 try self.output.append(self.alloc, arg_tok);
                             }
                         }
@@ -324,12 +388,11 @@ pub const Preprocessor = struct {
                 if (!found) {
                     // Check for __VA_ARGS__ in variadic macro
                     if (f.is_variadic and std.mem.eql(u8, param_name, "__VA_ARGS__")) {
-                        // Emit extra arguments
-                        for (f.params.len..args.len) |i| {
-                            for (args[i]) |arg_tok| {
+                        for (f.params.len..args.len) |idx| {
+                            for (args[idx]) |arg_tok| {
                                 try self.output.append(self.alloc, arg_tok);
                             }
-                            if (i < args.len - 1) {
+                            if (idx < args.len - 1) {
                                 try self.output.append(self.alloc, .{
                                     .tag = .comma,
                                     .loc = tok.loc,
@@ -339,14 +402,40 @@ pub const Preprocessor = struct {
                             }
                         }
                     } else {
-                        // Not a parameter, emit as-is
                         try self.output.append(self.alloc, tok);
                     }
                 }
             } else {
                 try self.output.append(self.alloc, tok);
             }
+            i += 1;
         }
+    }
+
+    fn resolveParamText(self: *Preprocessor, params: []const []const u8, args: [][]lexer.Token, tok: lexer.Token, buf: []u8) []const u8 {
+        if (tok.tag == .identifier) {
+            const name = self.getTokenText(tok);
+            for (params, 0..) |param, i| {
+                if (std.mem.eql(u8, name, param)) {
+                    if (i < args.len and args[i].len > 0) {
+                        // Concatenate all arg tokens into text
+                        var len: usize = 0;
+                        for (args[i], 0..) |arg_tok, ai| {
+                            if (ai > 0) {
+                                buf[len] = ' ';
+                                len += 1;
+                            }
+                            const t = self.getTokenText(arg_tok);
+                            @memcpy(buf[len..][0..t.len], t);
+                            len += t.len;
+                        }
+                        return buf[0..len];
+                    }
+                    return "";
+                }
+            }
+        }
+        return self.getTokenText(tok);
     }
 
     fn evaluateExpression(self: *Preprocessor, tokens: []const lexer.Token, start: usize, end: usize) !i64 {
