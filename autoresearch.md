@@ -15,7 +15,9 @@ Maintaining 197/197 spirv-val conformance is a hard requirement.
 - Compute shader LocalSize execution mode
 - OpSource GLSL 450 directive
 - OpName/OpMemberName for struct types
-- Bound optimization: ~0.73x glslang (27% smaller)
+- Bound optimization: ~0.72x glslang (28% smaller)
+- OpSource version detection from #version directive
+- ESSL detection: emit OpSource ESSL for #version N es, GLSL for #version N
 
 ## Metrics
 - **Primary**: total_pass (unitless, higher is better) — total shaders passing spirv-val

@@ -20,8 +20,10 @@
 - **Dead instruction elimination**: Instructions whose results are never used (e.g. dead loads, dead composites). Would reduce binary size and potentially bound.
 - **Dead global elimination**: Globals declared but never referenced in function bodies. Would reduce entry point interface.
 - **Simple function inlining**: For functions called exactly once — expand body at call site. ground.vert: 8 funcs vs glslang's 3.
+- **Entry point interface by SPIR-V version**: For 1.0-1.3 only Input/Output vars, for 1.4+ all vars. Risky — must test with both versions. Deferred.
 - **Centroid/NoPerspective/Sample decorations** on IO variables (low priority)
-- **OpSource version detection** from #version directive (emit 1.0 for ESSL, 1.3+ for Vulkan)
+- **OpSource version detection** from #version directive ✅ DONE
+- **ESSL detection** for OpSource ✅ DONE
 
 ### TIER 1 (deferred - high risk):
 - gl_PerVertex Block wrapping: cosmetic only, standalone gl_Position with BuiltIn works
