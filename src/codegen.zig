@@ -1156,10 +1156,22 @@ const Codegen = struct {
 
     // Stub methods — implemented in subsequent tasks
     fn emitTypesAndConstants(self: *Codegen) !void {
-        // Pre-emit common constants needed by atomic operations
-        _ = try self.emitIntConstant(1); // Device scope
-        _ = try self.emitIntConstant(64); // Uniform semantics
-        _ = try self.emitIntConstant(0);
+        // Pre-emit constants needed by atomic operations (only if atomics are used)
+        var has_atomics = false;
+        for (self.module.functions) |func| {
+            for (func.body) |inst| {
+                if (inst.tag == .atomic_fadd or inst.tag == .atomic_add or inst.tag == .atomic_load or inst.tag == .atomic_store) {
+                    has_atomics = true;
+                    break;
+                }
+            }
+            if (has_atomics) break;
+        }
+        if (has_atomics) {
+            _ = try self.emitIntConstant(1); // Device scope
+            _ = try self.emitIntConstant(64); // Uniform semantics
+            _ = try self.emitIntConstant(0);
+        }
         // Pre-emit base types that might be needed by shuffle/extract ops
         // during function emission. Only emit if the module uses them.
         // We must emit them before functions to satisfy SPIR-V layout rules.
@@ -1288,12 +1300,16 @@ const Codegen = struct {
                 }
             }
         }
-        // Also pre-emit common constants
-        _ = try self.emitFloatConstant(0.0);
-        _ = try self.emitFloatConstant(1.0);
-        _ = try self.emitIntConstant(0);
-        _ = try self.emitIntConstant(1);
-        _ = try self.emitIntConstant(3); // Workgroup scope for group operations
+        // Pre-emit float constants only if float type is used
+        if (self.emitted_types.get(@intFromEnum(ast.Type.float)) != null) {
+            _ = try self.emitFloatConstant(0.0);
+            _ = try self.emitFloatConstant(1.0);
+        }
+        if (self.emitted_types.get(@intFromEnum(ast.Type.uint)) != null) {
+            _ = try self.emitIntConstant(0);
+            _ = try self.emitIntConstant(1);
+            _ = try self.emitIntConstant(3); // Workgroup scope for group operations
+        }
     }
     fn emitGlobals(self: *Codegen) !void {
         for (self.module.globals) |global| {
