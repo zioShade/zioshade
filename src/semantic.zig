@@ -301,7 +301,7 @@ const Analyzer = struct {
             try self.declare(name, .{
                 .kind = .func,
                 .ty = .float,
-                .ir_id = self.allocId(),
+                .ir_id = 0, // Function builtins don't need SPIR-V IDs
             });
         }
 
@@ -313,31 +313,23 @@ const Analyzer = struct {
             try self.declare(name, .{
                 .kind = .func,
                 .ty = .vec3,
-                .ir_id = self.allocId(),
+                .ir_id = 0, // Function builtins don't need SPIR-V IDs
             });
         }
 
         // Matrix functions
-        try self.declare("determinant", .{
-            .kind = .func,
-            .ty = .float,
-            .ir_id = self.allocId(),
-        });
-        try self.declare("transpose", .{
-            .kind = .func,
-            .ty = .mat4,
-            .ir_id = self.allocId(),
-        });
+        try self.declare("determinant", .{ .kind = .func, .ty = .float, .ir_id = 0 });
+        try self.declare("transpose", .{ .kind = .func, .ty = .mat4, .ir_id = 0 });
 
-        try self.declare("texture", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
-        try self.declare("texture2D", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
-        try self.declare("textureLod", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
-        try self.declare("textureProj", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
-        try self.declare("textureQueryLevels", .{ .kind = .func, .ty = .int, .ir_id = self.allocId() });
-        try self.declare("texelFetch", .{ .kind = .func, .ty = .vec4, .ir_id = self.allocId() });
-        try self.declare("dFdx", .{ .kind = .func, .ty = .float, .ir_id = self.allocId() });
-        try self.declare("dFdy", .{ .kind = .func, .ty = .float, .ir_id = self.allocId() });
-        try self.declare("fwidth", .{ .kind = .func, .ty = .float, .ir_id = self.allocId() });
+        try self.declare("texture", .{ .kind = .func, .ty = .vec4, .ir_id = 0 });
+        try self.declare("texture2D", .{ .kind = .func, .ty = .vec4, .ir_id = 0 });
+        try self.declare("textureLod", .{ .kind = .func, .ty = .vec4, .ir_id = 0 });
+        try self.declare("textureProj", .{ .kind = .func, .ty = .vec4, .ir_id = 0 });
+        try self.declare("textureQueryLevels", .{ .kind = .func, .ty = .int, .ir_id = 0 });
+        try self.declare("texelFetch", .{ .kind = .func, .ty = .vec4, .ir_id = 0 });
+        try self.declare("dFdx", .{ .kind = .func, .ty = .float, .ir_id = 0 });
+        try self.declare("dFdy", .{ .kind = .func, .ty = .float, .ir_id = 0 });
+        try self.declare("fwidth", .{ .kind = .func, .ty = .float, .ir_id = 0 });
     }
 
 
