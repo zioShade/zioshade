@@ -22,6 +22,7 @@ pub fn generate(
         .words = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .type_section = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .decoration_section = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
+        .name_section = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .next_id = module.next_id_start,
         .emitted_types = .{},
         .emitted_array_types = .{},
@@ -59,16 +60,27 @@ pub fn generate(
     try cg.emitMemoryModel();
     try cg.emitEntryPoint(stage);
     try cg.emitSource();
+    const names_end_pos = cg.words.items.len;
     try cg.emitNames();
     try cg.emitDecorations();
     const decorations_end_pos = cg.words.items.len;
     try cg.emitTypesAndConstants();
+    // Splice struct type names (OpName/OpMemberName from ensureType)
+    // These must go in the debug section (after emitNames, before emitDecorations)
+    if (cg.name_section.items.len > 0) {
+        const after_names_words = try cg.allocator().dupe(u32, cg.words.items[names_end_pos..]);
+        cg.words.shrinkRetainingCapacity(names_end_pos);
+        try cg.words.appendSlice(cg.allocator(), cg.name_section.items);
+        try cg.words.appendSlice(cg.allocator(), after_names_words);
+        cg.allocator().free(after_names_words);
+    }
     // Splice struct layout decorations (Block, Offset, ArrayStride)
     // These are accumulated in decoration_section during emitTypesAndConstants.
     // They must go in the annotation section (between emitDecorations and types).
     if (cg.decoration_section.items.len > 0) {
-        const type_words = try cg.allocator().dupe(u32, cg.words.items[decorations_end_pos..]);
-        cg.words.shrinkRetainingCapacity(decorations_end_pos);
+        const dec_end_adjusted = if (cg.name_section.items.len > 0) decorations_end_pos + cg.name_section.items.len else decorations_end_pos;
+        const type_words = try cg.allocator().dupe(u32, cg.words.items[dec_end_adjusted..]);
+        cg.words.shrinkRetainingCapacity(dec_end_adjusted);
         try cg.words.appendSlice(cg.allocator(), cg.decoration_section.items);
         try cg.words.appendSlice(cg.allocator(), type_words);
         cg.allocator().free(type_words);
@@ -89,6 +101,7 @@ const Codegen = struct {
     words: std.ArrayList(u32),
     type_section: std.ArrayList(u32), // Types/constants emitted during function codegen
     decoration_section: std.ArrayList(u32), // Struct layout decorations (Block, Offset, ArrayStride)
+    name_section: std.ArrayList(u32), // OpName/OpMemberName for struct types
     in_functions: bool = false,
     next_id: u32,
     emitted_types: std.AutoHashMapUnmanaged(u32, u32), // @intFromEnum(ty) -> type_id
@@ -131,6 +144,7 @@ const Codegen = struct {
         self.words.deinit(self.alloc);
         self.type_section.deinit(self.alloc);
         self.decoration_section.deinit(self.alloc);
+        self.name_section.deinit(self.alloc);
     }
 
     fn allocId(self: *Codegen) u32 {
@@ -1218,6 +1232,14 @@ const Codegen = struct {
                 for (member_ids.items) |mid| {
                     try self.emitTypeWord(mid);
                 }
+                // Emit OpName for this struct type
+                try self.emitNameSectionName(id, name);
+                // Emit OpMemberName for each struct member
+                for (td.members, 0..) |member, i| {
+                    if (member.name.len > 0) {
+                        try self.emitNameSectionMemberName(id, @as(u32, @intCast(i)), member.name);
+                    }
+                }
                 // Emit UBO/SSBO decorations: Block + Offset/MatrixStride/ArrayStride
                 // Check if this named type is used as a uniform/storage buffer global
                 for (self.module.globals) |global| {
@@ -1331,6 +1353,49 @@ const Codegen = struct {
         try self.emitWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.Name)));
         try self.emitWord(id);
         try self.emitStringLiteral(name);
+    }
+
+    fn emitMemberName(self: *Codegen, type_id: u32, member_index: u32, name: []const u8) !void {
+        const word_count: u16 = 3 + @as(u16, @intCast(std.math.divCeil(usize, name.len + 1, 4) catch unreachable));
+        try self.emitWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.MemberName)));
+        try self.emitWord(type_id);
+        try self.emitWord(member_index);
+        try self.emitStringLiteral(name);
+    }
+
+    // Name section variants (for struct types emitted during ensureType)
+    fn emitNameSectionName(self: *Codegen, id: u32, name: []const u8) !void {
+        const word_count: u16 = 2 + @as(u16, @intCast(std.math.divCeil(usize, name.len + 1, 4) catch unreachable));
+        try self.name_section.append(self.alloc, spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.Name)));
+        try self.name_section.append(self.alloc, id);
+        // String literal to name_section
+        var buf: [256]u8 = undefined;
+        const encoded = self.encodeStringLiteral(name, &buf);
+        try self.name_section.appendSlice(self.alloc, encoded);
+    }
+
+    fn emitNameSectionMemberName(self: *Codegen, type_id: u32, member_index: u32, name: []const u8) !void {
+        const word_count: u16 = 3 + @as(u16, @intCast(std.math.divCeil(usize, name.len + 1, 4) catch unreachable));
+        try self.name_section.append(self.alloc, spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.MemberName)));
+        try self.name_section.append(self.alloc, type_id);
+        try self.name_section.append(self.alloc, member_index);
+        var buf: [256]u8 = undefined;
+        const encoded = self.encodeStringLiteral(name, &buf);
+        try self.name_section.appendSlice(self.alloc, encoded);
+    }
+
+    fn encodeStringLiteral(self: *Codegen, str: []const u8, buf: []u8) []u32 {
+        _ = self;
+        const total_bytes = str.len + 1; // include null terminator
+        const word_count = std.math.divCeil(usize, total_bytes, 4) catch unreachable;
+        @memcpy(buf[0..str.len], str);
+        buf[str.len] = 0; // null terminator
+        // Pad remaining bytes to 0
+        const padded_len = word_count * 4;
+        for (str.len + 1..padded_len) |i| buf[i] = 0;
+        // Convert to u32 words
+        const words = @as([*]u32, @ptrCast(@alignCast(buf.ptr)))[0..word_count];
+        return words;
     }
 
     fn emitDecorations(self: *Codegen) !void {
