@@ -238,6 +238,21 @@ const Parser = struct {
                     return self.parseUniformBlock(block_name_tok, qualifier, layout);
                 }
             }
+            // Standalone layout qualifier: layout(local_size_x = 1) in;
+            if (self.current().tag == .semicolon) {
+                _ = self.advance(); // consume ;
+                return ast.Node{
+                    .tag = if (qualifier.?.is_in) .in_decl else .out_decl,
+                    .loc = .{ .line = 0, .column = 0 },
+                    .data = .{
+                        .name = "",
+                        .ty = .void,
+                        .qualifier = qualifier,
+                        .layout = layout,
+                        .members = &.{},
+                    },
+                };
+            }
         }
 
         const ty = self.tryType() orelse return error.UnexpectedToken;
