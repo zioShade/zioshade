@@ -2386,41 +2386,15 @@ const Codegen = struct {
             },
             .outer_product => {
                 // outerProduct(a, b) where a=vecN, b=vecM → matNxM
-                // For each column j: extract b[j], then OpVectorTimesScalar(a, b[j])
-                // Then OpCompositeConstruct(col_0, col_1, ..., col_M-1)
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const a_id = self.operandId(resolved, 0);
                 const b_id = self.operandId(resolved, 1);
-                const num_cols = resolved.ty.numColumns();
-                const col_type_id = try self.ensureType(resolved.ty.columnType());
-                // Build each column: a * b[j]
-                const col_ids = try self.alloc.alloc(u32, num_cols);
-                for (0..num_cols) |j| {
-                    const b_comp_id = self.allocId();
-                    const float_id = try self.ensureType(.float);
-                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
-                    try self.emitWord(float_id);
-                    try self.emitWord(b_comp_id);
-                    try self.emitWord(b_id);
-                    try self.emitWord(@intCast(j));
-                    // VectorTimesScalar(a, b[j])
-                    const col_id = self.allocId();
-                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.VectorTimesScalar)));
-                    try self.emitWord(col_type_id);
-                    try self.emitWord(col_id);
-                    try self.emitWord(a_id);
-                    try self.emitWord(b_comp_id);
-                    col_ids[j] = col_id;
-                }
-                // OpCompositeConstruct
-                const wc: u16 = 3 + @as(u16, @intCast(num_cols));
-                try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.CompositeConstruct)));
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.OuterProduct)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
-                for (col_ids) |cid| {
-                    try self.emitWord(cid);
-                }
+                try self.emitWord(a_id);
+                try self.emitWord(b_id);
             },
             .dot => {
                 const result_type_id = resolved.result_type orelse return;
