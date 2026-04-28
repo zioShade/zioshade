@@ -1471,6 +1471,14 @@ const Codegen = struct {
                 }
             }
         }
+        // Collect unique non-function global storage classes for access_chain pre-scan
+        var global_storage_classes = std.AutoHashMapUnmanaged(ir.SPIRVStorageClass, void).empty;
+        defer global_storage_classes.deinit(self.alloc);
+        for (self.module.globals) |global| {
+            if (global.storage_class != .function) {
+                try global_storage_classes.put(self.alloc, global.storage_class, {});
+            }
+        }
         for (self.module.functions) |func| {
             _ = try self.ensureType(func.return_type);
             for (func.params) |param| {
@@ -1484,11 +1492,10 @@ const Codegen = struct {
                     },
                     .access_chain => {
                         _ = try self.ensurePointerType(inst.ty, .function);
-                        // Pre-emit pointer types only for storage classes that have globals
-                        for (self.module.globals) |global| {
-                            if (global.storage_class != .function) {
-                                _ = try self.ensurePointerType(inst.ty, global.storage_class);
-                            }
+                        // Pre-emit pointer types only for storage classes present in globals
+                        var sc_iter = global_storage_classes.iterator();
+                        while (sc_iter.next()) |entry| {
+                            _ = try self.ensurePointerType(inst.ty, entry.key_ptr.*);
                         }
                         // Pre-emit the index constant so it's available during codegen
                         if (inst.operands.len > 1) {
