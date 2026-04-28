@@ -1,7 +1,7 @@
 #!/bin/bash
 # Differential testing: compare our SPIR-V output against glslangValidator reference
 # Compiles each valid test shader with both compilers, disassembles both,
-# and compares the Op instruction sequences (stripping IDs).
+# normalizes, and compares the Op instruction sequences.
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -9,15 +9,16 @@ GLSLANG="C:/VulkanSDK/1.4.341.1/Bin/glslangValidator.exe"
 SPV_DIS="C:/VulkanSDK/1.4.341.1/Bin/spirv-dis.exe"
 SPV_VAL="C:/VulkanSDK/1.4.341.1/Bin/spirv-val.exe"
 CACHE=".zig-cache/ref_classification.txt"
+RUNNER=".zig-cache/bin/conformance-runner.exe"
 
 # Build runner if needed
-if [ ! -f .zig-cache/bin/conformance-runner.exe ]; then
+if [ ! -f "$RUNNER" ]; then
     echo "Building..." >&2
     mkdir -p .zig-cache/bin
     timeout 120 zig build-exe -ODebug --dep glslpp -Mroot=tests/runner.zig -Mglslpp=src/root.zig --cache-dir .zig-cache -femit-bin=.zig-cache/bin/conformance-runner.exe 2>/dev/null
 fi
 
-# Normalize SPIR-V disassembly: strip IDs, labels, debug info
+# Normalize SPIR-V disassembly: strip IDs, debug info, comments, blank lines
 normalize_dis() {
     local dis="$1"
     echo "$dis" | \
@@ -26,17 +27,31 @@ normalize_dis() {
         grep -v 'OpName' | \
         grep -v 'OpMemberName' | \
         grep -v 'OpSource' | \
-        grep -v 'OpDecorate.*Name' | \
-        sed 's/%[0-9]*/%_/g' | \
-        sed 's/ [0-9]\+ / ID /g' | \
+        grep -v 'OpSourceExtension' | \
+        grep -v 'OpString' | \
+        grep -v 'OpModuleProcessed' | \
+        grep -v 'OpLine' | \
+        grep -v 'OpNoLine' | \
+        sed 's/%[a-zA-Z_][a-zA-Z0-9_]*/%_/g' | \
+        sed 's/%[0-9]*/%id/g' | \
+        sed 's/  */ /g' | \
+        sed 's/^ //' | \
         sort
 }
 
-our_pass=0
+# Extract just the Op types (for quick structural comparison)
+op_types() {
+    local dis="$1"
+    echo "$dis" | grep -oE 'Op[A-Za-z]+' | sort | uniq -c | sort -rn
+}
+
 ref_fail=0
+our_fail=0
 match=0
-differ=0
+structural_diff=0
 total=0
+
+mkdir -p .zig-cache/diff
 
 while IFS=' ' read -r status file; do
     [ "$status" != "VALID" ] && continue
@@ -44,6 +59,7 @@ while IFS=' ' read -r status file; do
     total=$((total + 1))
 
     bn=$(basename "$file")
+    name="${bn%.*}"
 
     # Get stage flag for glslang
     glslang_args=("-V")
@@ -59,33 +75,51 @@ while IFS=' ' read -r status file; do
         continue
     fi
 
-    ref_dis=$("$SPV_DIS" /tmp/ref.spv 2>/dev/null)
-    ref_norm=$(normalize_dis "$ref_dis")
-
-    # Count reference Op types
-    ref_op_types=$(echo "$ref_dis" | grep -oE 'Op[A-Za-z]+' | sort -u | wc -l)
-    ref_op_count=$(echo "$ref_dis" | grep -cE 'Op[A-Z]')
-
-    our_pass=0  # Will be set below
-    # Our compiler uses autoresearch.sh approach: run runner on single file
-    # For now, just report if both produce valid SPIR-V
-    our_output=$(timeout 2 .zig-cache/bin/conformance-runner.exe "$file" 2>&1) || true
-    if echo "$our_output" | grep -qE "^  PASS "; then
-        our_pass=1
-        match=$((match + 1))
+    # Compile with our compiler
+    output=$(timeout 2 "$RUNNER" --save-spv /tmp/our.spv "$file" 2>&1)
+    if ! echo "$output" | grep -q "PASS"; then
+        our_fail=$((our_fail + 1))
+        continue
     fi
 
-    # Show progress for first 20 and every 50th
-    if [ $total -le 20 ] || [ $((total % 50)) -eq 0 ]; then
-        echo "[$total] $bn: ref_ops=$ref_op_count, ref_types=$ref_op_types" >&2
+    # Both produced valid SPIR-V — disassemble and compare
+    ref_dis=$("$SPV_DIS" /tmp/ref.spv 2>/dev/null)
+    our_dis=$("$SPV_DIS" /tmp/our.spv 2>/dev/null)
+
+    ref_norm=$(normalize_dis "$ref_dis")
+    our_norm=$(normalize_dis "$our_dis")
+
+    if [ "$ref_norm" = "$our_norm" ]; then
+        match=$((match + 1))
+    else
+        structural_diff=$((structural_diff + 1))
+        # Save diff for analysis
+        diff <(echo "$ref_norm") <(echo "$our_norm") > ".zig-cache/diff/${name}.diff" 2>/dev/null
+
+        # Count Op differences
+        ref_ops=$(op_types "$ref_dis")
+        our_ops=$(op_types "$our_dis")
+        diff <(echo "$ref_ops") <(echo "$our_ops") > ".zig-cache/diff/${name}.ops.diff" 2>/dev/null
+    fi
+
+    # Show progress
+    if [ $total -le 10 ] || [ $((total % 50)) -eq 0 ]; then
+        echo "[$total] $bn: match=$match diff=$structural_diff" >&2
     fi
 done < "$CACHE"
 
 echo ""
 echo "=== DIFFERENTIAL TEST SUMMARY ==="
-echo "Total valid:         $total"
-echo "Reference fails:     $ref_fail (glslangValidator couldn't compile)"
-echo "Both valid:          $match"
+echo "Total valid:            $total"
+echo "Reference fails:        $ref_fail"
+echo "Our compile fails:      $our_fail"
+echo "Both valid:             $((match + structural_diff))"
+echo "Normalized MATCH:       $match"
+echo "STRUCTURAL_DIFF:        $structural_diff"
 echo ""
-echo "Next step: For the $match shaders where both produce valid SPIR-V,"
-echo "compare normalized Op sequences to detect semantic differences."
+echo "Diffs saved to: .zig-cache/diff/*.diff"
+echo "  Op-type diffs: .zig-cache/diff/*.ops.diff"
+echo ""
+echo "To investigate differences:"
+echo "  cat .zig-cache/diff/<name>.diff"
+echo "  cat .zig-cache/diff/<name>.ops.diff"
