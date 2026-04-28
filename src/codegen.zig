@@ -1474,10 +1474,7 @@ const Codegen = struct {
             // (no pre-scan needed)
         }
         for (self.module.functions) |func| {
-            _ = try self.ensureType(func.return_type);
-            for (func.params) |param| {
-                _ = try self.ensureType(param.ty);
-            }
+            // Types emitted on-demand via two-buffer during emitFunctions
             for (func.body) |inst| {
                 // Types now emitted on-demand via two-buffer
                 switch (inst.tag) {
