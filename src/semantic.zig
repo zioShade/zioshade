@@ -438,7 +438,8 @@ const Analyzer = struct {
                     .result_id = id,
                 }) catch return null;
                 const sym = Symbol{ .kind = .var_sym, .ty = b.ty, .ir_id = id };
-                self.declare(b.name, sym) catch return null;
+                // Declare in global scope (index 0) so all functions share it
+                self.scopes.items[0].put(self.alloc, b.name, sym) catch return null;
                 return sym;
             }
         }
@@ -452,7 +453,7 @@ const Analyzer = struct {
             const ty: ast.Type = .{ .array = .{ .base = arr_base, .size = 1 } };
             self.globals.append(self.alloc, .{ .name = "gl_SampleMaskIn", .ty = ty, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id }) catch return null;
             const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
-            self.declare("gl_SampleMaskIn", sym) catch return null;
+            self.scopes.items[0].put(self.alloc, "gl_SampleMaskIn", sym) catch return null;
             return sym;
         }
         if (std.mem.eql(u8, name, "gl_SampleMask")) {
@@ -463,7 +464,7 @@ const Analyzer = struct {
             const ty: ast.Type = .{ .array = .{ .base = arr_base, .size = 1 } };
             self.globals.append(self.alloc, .{ .name = "gl_SampleMask", .ty = ty, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id }) catch return null;
             const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
-            self.declare("gl_SampleMask", sym) catch return null;
+            self.scopes.items[0].put(self.alloc, "gl_SampleMask", sym) catch return null;
             return sym;
         }
 
