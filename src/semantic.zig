@@ -134,6 +134,8 @@ const Analyzer = struct {
     overloads: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(OverloadEntry)),
     tolerate_errors: bool = false,
     next_id: u32 = 1,
+    // Constant dedup: (type_tag << 32 | value_bits) -> ir_id
+    const_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     local_size: ?ir.LocalSize = null,
     // Heap-allocated AST types that transfer to Module for cleanup
     heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
@@ -160,6 +162,7 @@ const Analyzer = struct {
         for (self.errors.items) |msg| self.alloc.free(msg);
         self.errors.deinit(self.alloc);
         self.loop_stack.deinit(self.alloc);
+        self.const_cache.deinit(self.alloc);
         {
             var it = self.overloads.iterator();
             while (it.next()) |entry| {
@@ -188,6 +191,43 @@ const Analyzer = struct {
     fn allocId(self: *Analyzer) u32 {
         const id = self.next_id;
         self.next_id += 1;
+        return id;
+    }
+
+    /// Get or create a constant int IR node with dedup
+    fn getConstInt(self: *Analyzer, val: u32, ty: ast.Type) !u32 {
+        const key = (@as(u64, @intFromEnum(ty)) << 32) | @as(u64, val);
+        if (self.const_cache.get(key)) |cached| return cached;
+        const id = self.allocId();
+        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+        operands[0] = .{ .literal_int = val };
+        try self.instructions.append(self.alloc, .{
+            .tag = .constant_int,
+            .result_type = null,
+            .result_id = id,
+            .operands = operands,
+            .ty = ty,
+        });
+        try self.const_cache.put(self.alloc, key, id);
+        return id;
+    }
+
+    /// Get or create a constant float IR node with dedup
+    fn getConstFloat(self: *Analyzer, val: f32) !u32 {
+        const val_bits: u32 = @bitCast(val);
+        const key = (@as(u64, @intFromEnum(ast.Type.float)) << 32) | @as(u64, val_bits);
+        if (self.const_cache.get(key)) |cached| return cached;
+        const id = self.allocId();
+        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+        operands[0] = .{ .literal_float = val };
+        try self.instructions.append(self.alloc, .{
+            .tag = .constant_float,
+            .result_type = null,
+            .result_id = id,
+            .operands = operands,
+            .ty = .float,
+        });
+        try self.const_cache.put(self.alloc, key, id);
         return id;
     }
 
@@ -1188,9 +1228,12 @@ const Analyzer = struct {
         }
         switch (node.tag) {
             .int_literal => {
+                const val: u32 = @intCast(node.data.int_val);
+                const key = (@as(u64, @intFromEnum(ast.Type.int)) << 32) | @as(u64, val);
+                if (self.const_cache.get(key)) |cached| return .{ .ty = .int, .id = cached };
                 const id = self.allocId();
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                operands[0] = .{ .literal_int = @as(u32, @intCast(node.data.int_val)) };
+                operands[0] = .{ .literal_int = val };
                 try self.instructions.append(self.alloc, .{
                     .tag = .constant_int,
                     .result_type = null,
@@ -1198,12 +1241,16 @@ const Analyzer = struct {
                     .operands = operands,
                     .ty = .int,
                 });
+                try self.const_cache.put(self.alloc, key, id);
                 return .{ .ty = .int, .id = id };
             },
             .uint_literal => {
+                const val: u32 = @intCast(node.data.int_val);
+                const key = (@as(u64, @intFromEnum(ast.Type.uint)) << 32) | @as(u64, val);
+                if (self.const_cache.get(key)) |cached| return .{ .ty = .uint, .id = cached };
                 const id = self.allocId();
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                operands[0] = .{ .literal_int = @as(u32, @intCast(node.data.int_val)) };
+                operands[0] = .{ .literal_int = val };
                 try self.instructions.append(self.alloc, .{
                     .tag = .constant_int,
                     .result_type = null,
@@ -1211,12 +1258,17 @@ const Analyzer = struct {
                     .operands = operands,
                     .ty = .uint,
                 });
+                try self.const_cache.put(self.alloc, key, id);
                 return .{ .ty = .uint, .id = id };
             },
             .float_literal => {
+                const val: f32 = @floatCast(node.data.float_val);
+                const val_bits: u32 = @bitCast(val);
+                const key = (@as(u64, @intFromEnum(ast.Type.float)) << 32) | @as(u64, val_bits);
+                if (self.const_cache.get(key)) |cached| return .{ .ty = .float, .id = cached };
                 const id = self.allocId();
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                operands[0] = .{ .literal_float = @as(f32, @floatCast(node.data.float_val)) };
+                operands[0] = .{ .literal_float = val };
                 try self.instructions.append(self.alloc, .{
                     .tag = .constant_float,
                     .result_type = null,
@@ -1224,12 +1276,16 @@ const Analyzer = struct {
                     .operands = operands,
                     .ty = .float,
                 });
+                try self.const_cache.put(self.alloc, key, id);
                 return .{ .ty = .float, .id = id };
             },
             .bool_literal => {
+                const val: u32 = if (node.data.int_val != 0) 1 else 0;
+                const key = (@as(u64, @intFromEnum(ast.Type.bool)) << 32) | @as(u64, val);
+                if (self.const_cache.get(key)) |cached| return .{ .ty = .bool, .id = cached };
                 const id = self.allocId();
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                operands[0] = .{ .literal_int = if (node.data.int_val != 0) @as(u32, 1) else @as(u32, 0) };
+                operands[0] = .{ .literal_int = val };
                 try self.instructions.append(self.alloc, .{
                     .tag = .constant_bool,
                     .result_type = null,
@@ -1237,6 +1293,7 @@ const Analyzer = struct {
                     .operands = operands,
                     .ty = .bool,
                 });
+                try self.const_cache.put(self.alloc, key, id);
                 return .{ .ty = .bool, .id = id };
             },
             .identifier => {
