@@ -1,29 +1,24 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 197/197 passes — 100% CONFORMANCE 🎉
+## CURRENT STATUS: 197/197 conformance, optimizing SPIR-V output size
 
-All 197 valid test files pass lexer → preprocessor → parser → semantic → codegen → spirv-val.
+### Completed this session:
+- ✅ Lazy builtin injection: only declare gl_* variables when referenced (semantic.zig)
+- ✅ Minimal capability emission: conditional ImageQuery, SubgroupVoteKHR, etc. (codegen.zig)
+- ✅ Conditional extension emission: SPV_KHR_subgroup_vote only when needed
+- ✅ Conditional constant pre-emit: only emit atomic/float/uint constants when used
+- ✅ Pre-emit only vec2/vec3/vec4 (not ivec/uvec/mat) — avoids section ordering violations
 
-### Quality improvements completed:
-- ✅ Error recovery: tolerate_errors flag for production vs test paths
-- ✅ Preprocessor hang: __LINE__/__FILE__/__VERSION__ index fix
-- ✅ Memory leaks: all leaks fixed across parser/semantic/codegen
-- ✅ sampler3D/sampler2DArray: distinct AST types with correct SPIR-V Dim/Arrayed
-- ✅ Stack overflow guard: forward-declare named types in ensureType
-- ✅ Token paste (##) operator in preprocessor
-- ✅ Stringify (#) operator in preprocessor
-- ✅ Error diagnostics: line/column tracking + compileToSPIRVWithDiagnostics
-- ✅ Differential testing: full Op comparison against glslangValidator
-- ✅ Reference failure analysis: 31 shaders categorized (none are glslpp bugs)
+### Metrics progress:
+| Iteration | our_bound | ref_bound | overhead | our_vars | ref_vars |
+|-----------|-----------|-----------|----------|----------|----------|
+| Baseline  | 29142     | 10159     | 2.87x    | 6782     | 1010     |
+| After #1  | 21979     | 10159     | 2.16x    | 879      | 1010     |
+| After #2  | 20563     | 10159     | 2.02x    | 879      | 1010     |
 
-### Test results:
-- **180/180 unit tests pass** (including stringify + token paste)
-- **197/197 conformance** (spirv-val)
-- **0 memory leaks**
-- **166/197 differential**: both compilers produce valid SPIR-V, 0 normalized matches (expected — different codegen strategies)
-- **31/197 reference failures**: all due to glslang strictness or SPIR-V version requirements
-
-### Known areas for future improvement:
-- **OpVariable bloat**: We create ~37x more OpVariables than glslang due to eager param-write local var creation. Only create vars for params that are actually written to.
-- **Normalized Op matching**: 0/166 matches in differential testing — investigate structural differences (Op ordering, type dedup, etc.)
-- **Performance**: Preprocessor processing adds overhead; could be skipped for files without PP directives.
+### Next opportunities (by impact):
+1. **Entry point variable list**: We may list unused variables in OpEntryPoint. glslang only lists vars actually used in the function.
+2. **Constant deduplication**: Multiple constants with the same value may be emitted. `emitIntConstant` should check if constant already exists.
+3. **Function parameter passing**: We pass by value, glslang passes by pointer for out/inout params. Semantic difference for write-back.
+4. **OpVariable for params**: We create local vars for ALL params, glslang only for those written to.
+5. **Dead code elimination**: Unused local variables still get OpVariable declarations.
