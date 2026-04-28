@@ -1336,6 +1336,9 @@ const Codegen = struct {
                 }
                 if (layout.set) |set| {
                     try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.descriptor_set), set);
+                } else if (layout.binding != null and (global.storage_class == .uniform or global.storage_class == .storage_buffer)) {
+                    // Default descriptor set is 0 for UBO/SSBO
+                    try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.descriptor_set), 0);
                 }
             }
             if (std.mem.eql(u8, global.name, "gl_FragCoord")) {
