@@ -58,6 +58,7 @@ pub fn generate(
     try cg.emitExtInstImport();
     try cg.emitMemoryModel();
     try cg.emitEntryPoint(stage);
+    try cg.emitSource();
     try cg.emitNames();
     try cg.emitDecorations();
     const decorations_end_pos = cg.words.items.len;
@@ -328,6 +329,13 @@ const Codegen = struct {
         try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.MemoryModel)));
         try self.emitWord(0); // Logical
         try self.emitWord(1); // GLSL450
+    }
+
+    fn emitSource(self: *Codegen) !void {
+        // OpSource SourceLanguage(3=GLSL) version(450)
+        try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.Source)));
+        try self.emitWord(2); // GLSL
+        try self.emitWord(450); // version
     }
 
     fn emitEntryPoint(self: *Codegen, stage: Stage) !void {
