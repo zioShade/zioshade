@@ -392,7 +392,7 @@ const Tokenizer = struct {
             const start_loc = self.loc;
 
             // Check for preprocessor directive at start of line
-            if (self.source[self.offset] == '#') {
+            if (self.source[self.offset] == '#' and self.loc.column == 1) {
                 const tag = try self.parsePPDirective();
                 const len = self.offset - start;
                 try self.tokens.append(alloc, .{
