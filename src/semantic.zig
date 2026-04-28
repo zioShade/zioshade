@@ -269,257 +269,19 @@ const Analyzer = struct {
             i -= 1;
             if (self.scopes.items[i].get(name)) |sym| return sym;
         }
+        // Lazy builtin variable injection for gl_* names
+        if (name.len > 3 and name[0] == 'g' and name[1] == 'l' and name[2] == '_') {
+            return self.ensureBuiltinVar(name);
+        }
         return null;
     }
 
     fn injectBuiltins(self: *Analyzer) !void {
         try self.pushScope();
 
-        // GLSL builtins that need SPIR-V global variables
-        // gl_FragCoord: Input, BuiltIn FragCoord
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_FragCoord", .ty = .vec4, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_FragCoord", .{ .kind = .var_sym, .ty = .vec4, .ir_id = id });
-        }
-        // gl_FragColor: Output, BuiltIn FragColor
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_FragColor", .ty = .vec4, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
-            try self.declare("gl_FragColor", .{ .kind = .var_sym, .ty = .vec4, .ir_id = id });
-        }
-
-        // gl_FragStencilRefARB: Output int (stencil export)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_FragStencilRefARB", .ty = .int, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
-            try self.declare("gl_FragStencilRefARB", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_FrontFacing: Input, BuiltIn FrontFacing (bool)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_FrontFacing", .ty = .bool, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_FrontFacing", .{ .kind = .var_sym, .ty = .bool, .ir_id = id });
-        }
-        // gl_HelperInvocation: Input, BuiltIn HelperInvocation (bool)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_HelperInvocation", .ty = .bool, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_HelperInvocation", .{ .kind = .var_sym, .ty = .bool, .ir_id = id });
-        }
-        // gl_BaryCoordEXT/gl_BaryCoordNoPerspEXT: Input, BuiltIn BaryCoord (vec3)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_BaryCoordEXT", .ty = .vec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_BaryCoordEXT", .{ .kind = .var_sym, .ty = .vec3, .ir_id = id });
-        }
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_BaryCoordNoPerspEXT", .ty = .vec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_BaryCoordNoPerspEXT", .{ .kind = .var_sym, .ty = .vec3, .ir_id = id });
-        }
-        // NV variants
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_BaryCoordNV", .ty = .vec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_BaryCoordNV", .{ .kind = .var_sym, .ty = .vec3, .ir_id = id });
-        }
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_BaryCoordNoPerspNV", .ty = .vec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_BaryCoordNoPerspNV", .{ .kind = .var_sym, .ty = .vec3, .ir_id = id });
-        }
-        // gl_Position: Output, BuiltIn Position
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_Position", .ty = .vec4, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
-            try self.declare("gl_Position", .{ .kind = .var_sym, .ty = .vec4, .ir_id = id });
-        }
-        // gl_Layer: Output, BuiltIn Layer
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_Layer", .ty = .int, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
-            try self.declare("gl_Layer", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-        // gl_ViewportIndex: Output, BuiltIn ViewportIndex
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_ViewportIndex", .ty = .int, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
-            try self.declare("gl_ViewportIndex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-        // gl_VertexID: Input, BuiltIn VertexIndex
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_VertexID", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_VertexID", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-        // gl_InstanceID: Input, BuiltIn InstanceIndex
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_InstanceID", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_InstanceID", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-        // gl_GlobalInvocationID: Input, BuiltIn GlobalInvocationId (vec3)
-        // Uses uvec3 which doesn't need BuiltIn decoration
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_GlobalInvocationID", .ty = .uvec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_GlobalInvocationID", .{ .kind = .var_sym, .ty = .uvec3, .ir_id = id });
-        }
-        // gl_LocalInvocationID: Input, BuiltIn LocalInvocationId (vec3)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_LocalInvocationID", .ty = .uvec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_LocalInvocationID", .{ .kind = .var_sym, .ty = .uvec3, .ir_id = id });
-        }
-        // gl_WorkGroupID: Input, BuiltIn WorkgroupId (vec3)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_WorkGroupID", .ty = .uvec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_WorkGroupID", .{ .kind = .var_sym, .ty = .uvec3, .ir_id = id });
-        }
-        // gl_NumWorkGroups: Input, BuiltIn NumWorkgroups (vec3)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_NumWorkGroups", .ty = .uvec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_NumWorkGroups", .{ .kind = .var_sym, .ty = .uvec3, .ir_id = id });
-        }
-
-        // gl_WorkGroupSize: constant (from layout local_size_x/y/z)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_WorkGroupSize", .ty = .uvec3, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_WorkGroupSize", .{ .kind = .var_sym, .ty = .uvec3, .ir_id = id });
-        }
-
-        // gl_LocalInvocationIndex: Input, BuiltIn LocalInvocationIndex (uint)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_LocalInvocationIndex", .ty = .uint, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_LocalInvocationIndex", .{ .kind = .var_sym, .ty = .uint, .ir_id = id });
-        }
-
-        // gl_SampleMaskIn: Input, BuiltIn SampleMask (array of int)
-        {
-            const id = self.allocId();
-            const arr_base = try self.alloc.create(ast.Type);
-            arr_base.* = .int;
-            try self.heap_types.append(self.alloc, arr_base);
-            const sample_mask_ty: ast.Type = .{ .array = .{ .base = arr_base, .size = 1 } };
-            try self.globals.append(self.alloc, .{ .name = "gl_SampleMaskIn", .ty = sample_mask_ty, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_SampleMaskIn", .{ .kind = .var_sym, .ty = sample_mask_ty, .ir_id = id });
-        }
-
-        // gl_SampleMask: Output, BuiltIn SampleMask (array of int)
-        {
-            const id = self.allocId();
-            const sm_base = try self.alloc.create(ast.Type);
-            sm_base.* = .int;
-            try self.heap_types.append(self.alloc, sm_base);
-            const smask_ty: ast.Type = .{ .array = .{ .base = sm_base, .size = 1 } };
-            try self.globals.append(self.alloc, .{ .name = "gl_SampleMask", .ty = smask_ty, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id });
-            try self.declare("gl_SampleMask", .{ .kind = .var_sym, .ty = smask_ty, .ir_id = id });
-        }
-
-        // gl_SamplePosition: Input, BuiltIn SamplePosition (vec2)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_SamplePosition", .ty = .vec2, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_SamplePosition", .{ .kind = .var_sym, .ty = .vec2, .ir_id = id });
-        }
-
-        // gl_SampleID: Input, BuiltIn SampleId (int)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_SampleID", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_SampleID", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_SubgroupInvocationID: Input, BuiltIn SubgroupLocalInvocationId (int)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_SubgroupInvocationID", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_SubgroupInvocationID", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_SubgroupSize: Input, BuiltIn SubgroupSize (int)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_SubgroupSize", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_SubgroupSize", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_ViewIndex: Input, BuiltIn ViewIndex (int)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_ViewIndex", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_ViewIndex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_DeviceIndex: Input, BuiltIn DeviceIndex (int)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_DeviceIndex", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_DeviceIndex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_BaseVertex: Input, BuiltIn BaseVertex (int)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_BaseVertex", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_BaseVertex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_BaseVertexARB: alias for gl_BaseVertex
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_BaseVertexARB", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_BaseVertexARB", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_VertexIndex: Input, BuiltIn VertexIndex (int)
-        // Note: glslang maps gl_VertexIndex to BuiltIn VertexIndex, separate from gl_VertexID
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_VertexIndex", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_VertexIndex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_BaseInstance: Input int
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_BaseInstance", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_BaseInstance", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_BaseInstanceARB: alias for gl_BaseInstance
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_BaseInstanceARB", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_BaseInstanceARB", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_InstanceIndex: Input int (same as gl_InstanceID but different BuiltIn)
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_InstanceIndex", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_InstanceIndex", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_DrawID: Input int
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_DrawID", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_DrawID", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
-
-        // gl_DrawIDARB: alias for gl_DrawID
-        {
-            const id = self.allocId();
-            try self.globals.append(self.alloc, .{ .name = "gl_DrawIDARB", .ty = .int, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id });
-            try self.declare("gl_DrawIDARB", .{ .kind = .var_sym, .ty = .int, .ir_id = id });
-        }
+        // NOTE: Variable builtins (gl_FragCoord, gl_Position, etc.) are now
+        // injected lazily via ensureBuiltinVar() when first referenced.
+        // Only function builtins are declared eagerly (they don't emit SPIR-V).
 
         // Math functions that return float (or same type as primary argument)
         const float_return_funcs = .{
@@ -576,6 +338,92 @@ const Analyzer = struct {
         try self.declare("dFdx", .{ .kind = .func, .ty = .float, .ir_id = self.allocId() });
         try self.declare("dFdy", .{ .kind = .func, .ty = .float, .ir_id = self.allocId() });
         try self.declare("fwidth", .{ .kind = .func, .ty = .float, .ir_id = self.allocId() });
+    }
+
+
+    fn ensureBuiltinVar(self: *Analyzer, name: []const u8) ?Symbol {
+        // Lazy builtin variable injection — only create when referenced
+        // Build builtin table
+        const builtins = [_]struct { name: []const u8, ty: ast.Type, is_in: bool, is_out: bool, sc: ir.SPIRVStorageClass }{
+            .{ .name = "gl_FragCoord", .ty = .vec4, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_FragColor", .ty = .vec4, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_FrontFacing", .ty = .bool, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_Position", .ty = .vec4, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_PointSize", .ty = .float, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_VertexID", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_InstanceID", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_GlobalInvocationID", .ty = .uvec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_LocalInvocationID", .ty = .uvec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_WorkGroupID", .ty = .uvec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_NumWorkGroups", .ty = .uvec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_WorkGroupSize", .ty = .uvec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_LocalInvocationIndex", .ty = .uint, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_Layer", .ty = .int, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_ViewportIndex", .ty = .int, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_HelperInvocation", .ty = .bool, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_SampleID", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_SamplePosition", .ty = .vec2, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_SubgroupInvocationID", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_SubgroupSize", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_ViewIndex", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_DeviceIndex", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_BaseVertex", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_BaseVertexARB", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_VertexIndex", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_BaseInstance", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_BaseInstanceARB", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_InstanceIndex", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_DrawID", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_DrawIDARB", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_FragStencilRefARB", .ty = .int, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_BaryCoordEXT", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_BaryCoordNoPerspEXT", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_BaryCoordNV", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_BaryCoordNoPerspNV", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
+        };
+
+        for (&builtins) |b| {
+            if (std.mem.eql(u8, name, b.name)) {
+                const id = self.allocId();
+                self.globals.append(self.alloc, .{
+                    .name = b.name,
+                    .ty = b.ty,
+                    .qualifier = .{ .is_in = b.is_in, .is_out = b.is_out },
+                    .layout = null,
+                    .storage_class = b.sc,
+                    .result_id = id,
+                }) catch return null;
+                const sym = Symbol{ .kind = .var_sym, .ty = b.ty, .ir_id = id };
+                self.declare(b.name, sym) catch return null;
+                return sym;
+            }
+        }
+
+        // Special cases: array-typed builtins
+        if (std.mem.eql(u8, name, "gl_SampleMaskIn")) {
+            const id = self.allocId();
+            const arr_base = self.alloc.create(ast.Type) catch return null;
+            arr_base.* = .int;
+            self.heap_types.append(self.alloc, arr_base) catch {};
+            const ty: ast.Type = .{ .array = .{ .base = arr_base, .size = 1 } };
+            self.globals.append(self.alloc, .{ .name = "gl_SampleMaskIn", .ty = ty, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id }) catch return null;
+            const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
+            self.declare("gl_SampleMaskIn", sym) catch return null;
+            return sym;
+        }
+        if (std.mem.eql(u8, name, "gl_SampleMask")) {
+            const id = self.allocId();
+            const arr_base = self.alloc.create(ast.Type) catch return null;
+            arr_base.* = .int;
+            self.heap_types.append(self.alloc, arr_base) catch {};
+            const ty: ast.Type = .{ .array = .{ .base = arr_base, .size = 1 } };
+            self.globals.append(self.alloc, .{ .name = "gl_SampleMask", .ty = ty, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id }) catch return null;
+            const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
+            self.declare("gl_SampleMask", sym) catch return null;
+            return sym;
+        }
+
+        return null;
     }
 
     fn collectTopLevel(self: *Analyzer, node: ast.Node) !void {
