@@ -222,10 +222,12 @@ pub const StorageClass = enum(u32) {
 
 pub const Decoration = enum(u32) {
     block = 2,
-    row_major = 3,
-    built_in = 11,
+    buffer_block = 3,
+    row_major = 4,
+    col_major = 5,
     array_stride = 6,
     matrix_stride = 7,
+    built_in = 11,
     location = 30,
     binding = 33,
     descriptor_set = 34,
