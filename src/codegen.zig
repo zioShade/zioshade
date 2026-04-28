@@ -15,12 +15,14 @@ pub fn generate(
     stage: Stage,
     spirv_version: SPIRVVersion,
     glsl_version: u32,
+    is_essl: bool,
 ) error{OutOfMemory, CodegenFailed}![]const u32 {
     var cg = Codegen{
         .alloc = alloc,
         .module = module,
         .stage = stage,
         .glsl_version = glsl_version,
+        .is_essl = is_essl,
         .words = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .type_section = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .decoration_section = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
@@ -102,6 +104,7 @@ const Codegen = struct {
     module: *const ir.Module,
     stage: Stage,
     glsl_version: u32,
+    is_essl: bool,
     words: std.ArrayList(u32),
     type_section: std.ArrayList(u32), // Types/constants emitted during function codegen
     decoration_section: std.ArrayList(u32), // Struct layout decorations (Block, Offset, ArrayStride)
@@ -352,10 +355,12 @@ const Codegen = struct {
     }
 
     fn emitSource(self: *Codegen) !void {
-        // OpSource SourceLanguage(2=GLSL) version(N)
+        // OpSource SourceLanguage version
+        // ESSL=1 (OpenGL ES Shading Language), GLSL=2 (OpenGL Shading Language)
+        const source_lang: u32 = if (self.is_essl) 1 else 2;
         try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.Source)));
-        try self.emitWord(2); // GLSL
-        try self.emitWord(self.glsl_version); // version from #version directive
+        try self.emitWord(source_lang);
+        try self.emitWord(self.glsl_version);
     }
 
     fn emitEntryPoint(self: *Codegen, stage: Stage) !void {
@@ -2843,7 +2848,7 @@ test "codegen: header encoding" {
     var module = try semantic.analyze(alloc, &root);
     defer module.deinit();
 
-    const result = try generate(alloc, &module, .fragment, .@"1.5", 450);
+    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false);
     defer alloc.free(result);
 
     try std.testing.expectEqual(@as(u32, spirv.MAGIC), result[0]);
@@ -2863,7 +2868,7 @@ test "codegen: capabilities emitted" {
     var module = try semantic.analyze(alloc, &root);
     defer module.deinit();
 
-    const result = try generate(alloc, &module, .fragment, .@"1.5", 450);
+    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false);
     defer alloc.free(result);
 
     // Word 5 should be OpCapability header (word_count=2, opcode=17)
@@ -2886,7 +2891,7 @@ test "codegen: shader with arithmetic produces instructions" {
     try std.testing.expect(module.functions[0].body.len > 0);
 
     // Generate SPIR-V binary
-    const result = try generate(alloc, &module, .fragment, .@"1.5", 450);
+    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false);
     defer alloc.free(result);
 
     // Verify header
@@ -2903,7 +2908,7 @@ test "codegen: if/else produces OpSelectionMerge and OpBranchConditional" {
     defer parser.freeTree(alloc, &root);
     var module = try semantic.analyze(alloc, &root);
     defer module.deinit();
-    const result = try generate(alloc, &module, .fragment, .@"1.5", 450);
+    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false);
     defer alloc.free(result);
     var has_sel_merge = false;
     var has_br_cond = false;
@@ -2935,7 +2940,7 @@ test "codegen: for loop produces OpLoopMerge" {
         return err;
     };
     defer module.deinit();
-    const result = try generate(alloc, &module, .fragment, .@"1.5", 450);
+    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false);
     defer alloc.free(result);
     var has_loop_merge = false;
     var i: usize = 5;

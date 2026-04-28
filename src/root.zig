@@ -94,7 +94,7 @@ pub fn compileToSPIRV(
         .@"1.5" => .@"1.5",
         .@"1.6" => .@"1.6",
     };
-    return codegen.generate(alloc, &module, stage, spirv_ver, pp.version) catch {
+    return codegen.generate(alloc, &module, stage, spirv_ver, pp.version, pp.is_essl) catch {
         last_compile_detail = .codegen_failed;
         return error.CodegenFailed;
     };
