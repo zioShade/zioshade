@@ -911,6 +911,9 @@ const Codegen = struct {
                     try self.emitted_named_types.put(self.alloc, name, id);
                     return id;
                 };
+                // Forward-declare: cache the ID before processing members
+                // to break recursive type cycles (e.g., Node containing Node)
+                try self.emitted_named_types.put(self.alloc, name, id);
                 var member_ids = try std.ArrayList(u32).initCapacity(self.alloc, td.members.len);
                 defer member_ids.deinit(self.alloc);
                 for (td.members) |member| {
@@ -922,8 +925,6 @@ const Codegen = struct {
                 for (member_ids.items) |mid| {
                     try self.emitWord(mid);
                 }
-                // Cache the named type
-                try self.emitted_named_types.put(self.alloc, name, id);
             },
             .array => |arr| {
                 // Check cache for duplicate array types
