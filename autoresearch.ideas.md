@@ -65,3 +65,18 @@
 - **Constant remap (first attempt)**: Broke 6 shaders. Fixed in second attempt with constant_alias.
 - **Swizzle fix via lexer change**: Multiple attempts all regress. The bare '.' lexer change creates too many member_access nodes that semantic can't handle.
 - **cell_text name collision**: FIXED — in/out block members no longer directly accessible as symbols.
+
+### DONE (Session 2026-04-29):
+- ✅ Array constructor syntax: float[](1.0, 2.0, 3.0) → OpCompositeConstruct for arrays
+- ✅ Multi-dimensional array constructors: vec4[][](vec4[](1,2), vec4[](3,4))
+- ✅ Struct array constructors: Foobar[](Foobar(10,40), Foobar(90,70))
+- ✅ const + identifier type parsing: const StructName var = ...
+- ✅ Identifier-based types in parseLocalVarDecl for struct names
+- ✅ typesCompatible recursive comparison for array types (fixes pointer inequality)
+- ✅ Lexer '.f' bug: tryParseNumber() now requires has_digit for number/float suffix acceptance
+- ✅ Store mismatch count: 14 → 10 (fixed constant-array, constant-composites, ubo_layout, in-block-qualifiers)
+
+### KEY FINDINGS:
+- **Lexer .f bug was a major hidden issue**: Any struct member named 'f', 'flags', 'foo', etc. was broken because `.f` was tokenized as a float literal instead of dot + identifier
+- **Zig caching**: Must `rm -rf .zig-cache/z` to force rebuild after code changes; incremental builds may use stale cache
+- **tolerate_errors mode**: Silently catches semantic errors in function bodies, producing empty functions. Makes debugging hard.
