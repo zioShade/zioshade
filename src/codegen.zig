@@ -231,6 +231,7 @@ const Codegen = struct {
                 switch (inst.tag) {
                     .image_query_size, .image_query_size_lod,
                     .image_query_levels, .image_query_samples,
+                    .image_query_lod,
                     => has_image_query = true,
                     .derivative => has_derivative_control = true,
                     .fwidth => {
@@ -3033,6 +3034,17 @@ const Codegen = struct {
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(image_id);
+            },
+            .image_query_lod => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageQueryLod)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(image_id);
+                try self.emitWord(coord_id);
             },
             .image_read => {
                 const result_type_id = resolved.result_type orelse return;
