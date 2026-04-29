@@ -629,6 +629,12 @@ const Parser = struct {
             });
         }
         _ = try self.expect(.r_brace);
+        // Consume optional instance name: } instance_name;
+        var instance_name: []const u8 = "";
+        if (self.current().tag == .identifier) {
+            instance_name = self.text(self.current());
+            _ = self.advance(); // consume instance name
+        }
         _ = try self.expect(.semicolon);
 
         return .{
@@ -639,6 +645,7 @@ const Parser = struct {
                 .members = try members.toOwnedSlice(self.alloc),
                 .qualifier = qualifier,
                 .layout = layout,
+                .instance_name = instance_name,
             },
         };
     }
