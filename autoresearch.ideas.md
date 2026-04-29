@@ -33,10 +33,21 @@
 - ✅ UniformConstant storage class for sampler/image variables (was Uniform)
 - ✅ For-loop empty init/condition/update fix: parser always emits 4 children
 - ✅ Comma-separated variable declarations via multi_decl AST tag (no scope push/pop)
+- ✅ Comma operator in for-loop condition/update expressions (comma_op AST tag)
+- ✅ uint post-increment: uses getConstInt instead of getConstFloat
+- ✅ OpSwitch implementation with case labels, SelectionMerge, break, fall-through
+- ✅ if_stmt fix: handles break/continue/kill inside if-then/else (avoids double branch)
+- ✅ OpKill for GLSL discard statements (was silently ignored)
+- ✅ Uint literal parsing: strip 'u' suffix before parseInt (was always 0)
+- ✅ texelFetch Lod image operand mask fix (bit 1 = value 2, was bit 0 = value 1 = Bias)
 
 ### TIER 1 - Correctness improvements (beyond spirv-val):
+- **ConstOffset for textureLodOffset/texelFetchOffset**: Requires emitting offsets as OpConstantComposite (compile-time constants) instead of OpCompositeConstruct (runtime). Currently offsets are dropped.
 - **Type aliasing for std140/std430**: When the same struct is used in both std140 and std430 blocks, glslang creates separate type aliases (Content vs Content_0) with different offset decorations. We use a single type, so offsets can only be correct for one layout. Requires significant change to emitType system.
+- **SSA variable unssa": Variables declared with initializer (SSA'd) but later modified in loop update don't get un-SSA'd. Loop conditions use the original SSA constant value instead of the variable's current value. Affects for-loop-init.frag and others.
 - **Fix GPA memory leaks**: ~90 files leak parser/semantic allocations (dupeNodes is #1 source). Would make Debug builds reliable.
+- **RelaxedPrecision decorations**: 52 shaders use mediump precision. glslang emits RelaxedPrecision on mediump variables and expressions.
+- **NoContraction decorations**: precise qualifier should prevent operation reordering. Affects no-contraction.vert.
 
 ### TIER 2 - Feature completeness:
 - **OpLine debug information**: Add source line mapping to SPIR-V output for better debugging.
