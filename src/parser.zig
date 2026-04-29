@@ -280,12 +280,14 @@ const Parser = struct {
                 .kw_uniform => { q.is_uniform = true; _ = self.advance(); found = true; },
                 .kw_buffer => { q.is_buffer = true; _ = self.advance(); found = true; },
                 .kw_readonly, .kw_writeonly, .kw_coherent, .kw_restrict, .kw_invariant,
-                .kw_flat, .kw_smooth, .kw_noperspective,
+                .kw_flat, .kw_smooth, .kw_noperspective, .kw_centroid,
                 .kw_mediump, .kw_highp, .kw_lowp => {
                     switch (self.current().tag) {
                         .kw_readonly => q.is_readonly = true,
                         .kw_writeonly => q.is_writeonly = true,
                         .kw_flat => q.is_flat = true,
+                        .kw_noperspective => q.is_noperspective = true,
+                        .kw_centroid => q.is_centroid = true,
                         else => {},
                     }
                     _ = self.advance(); found = true;
