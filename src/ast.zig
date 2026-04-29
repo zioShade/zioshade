@@ -372,6 +372,7 @@ pub const Layout = struct {
     std140: bool = false,
     std430: bool = false,
     push_constant: bool = false,
+    buffer_reference: bool = false,
     local_size_x: ?u32 = null,
     local_size_y: ?u32 = null,
     local_size_z: ?u32 = null,
