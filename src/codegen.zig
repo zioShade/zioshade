@@ -3181,6 +3181,9 @@ const Codegen = struct {
             .return_void => {
                 try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.Return)));
             },
+            .kill => {
+                try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.Kill)));
+            },
             .return_val => {
                 const val_id = self.operandId(resolved, 0);
                 try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.ReturnValue)));
