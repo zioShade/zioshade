@@ -433,6 +433,7 @@ const Analyzer = struct {
         try self.declare("textureLod", .{ .kind = .func, .ty = .vec4, .ir_id = 0 });
         try self.declare("textureProj", .{ .kind = .func, .ty = .vec4, .ir_id = 0 });
         try self.declare("textureQueryLevels", .{ .kind = .func, .ty = .int, .ir_id = 0 });
+        try self.declare("textureQueryLod", .{ .kind = .func, .ty = .float, .ir_id = 0 });
         try self.declare("texelFetch", .{ .kind = .func, .ty = .vec4, .ir_id = 0 });
         try self.declare("dFdx", .{ .kind = .func, .ty = .float, .ir_id = 0 });
         try self.declare("dFdy", .{ .kind = .func, .ty = .float, .ir_id = 0 });
@@ -2538,7 +2539,23 @@ const Analyzer = struct {
                         });
                         return .{ .ty = .int, .id = result_id };
                     }
-                    // textureSamples(image) / imageSamples(image) → OpImageQuerySamples
+                    // textureQueryLod(sampler, coord) → vec2, uses OpImageQueryLod
+                    // NOTE: OpImageQueryLod takes a SampledImage, NOT a bare image
+                    if (std.mem.eql(u8, node.data.name, "textureQueryLod")) {
+                        const sampled_image_id = arg_tids.items[0].id;
+                        const coord_id = arg_tids.items[1].id;
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        operands[0] = .{ .id = sampled_image_id };
+                        operands[1] = .{ .id = coord_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_query_lod,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .vec2,
+                        });
+                        return .{ .ty = .vec2, .id = result_id };
+                    }
                     if (std.mem.eql(u8, node.data.name, "textureSamples") or std.mem.eql(u8, node.data.name, "imageSamples")) {
                         var img_id = arg_tids.items[0].id;
                         if (arg_tids.items[0].ty.isCombinedSampler() or
@@ -4018,6 +4035,7 @@ const Analyzer = struct {
             "tan", "tanh", "transpose", "trunc",
             "texture", "texture2D", "textureLod", "textureProj", "texelFetch",
             "textureQueryLevels",
+            "textureQueryLod",
             "dFdx", "dFdy", "fwidth", "dFdxFine", "dFdyFine", "fwidthFine", "dFdxCoarse", "dFdyCoarse", "fwidthCoarse",
             "isnan", "isinf",
             // Additional GLSL builtins
