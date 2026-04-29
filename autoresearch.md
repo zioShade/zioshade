@@ -4,23 +4,21 @@
 Achieve functional equivalency with glslangValidator for the glslpp GLSL-to-SPIR-V compiler,
 targeting replacement of the C++ glslang pipeline in the deblasis/wintty (windows branch) project.
 The compiler must produce valid SPIR-V that matches glslang's output while potentially being faster/more compact.
-Maintaining 197/197 spirv-val conformance is a hard requirement.
 
-## Current State (197/199 conformance)
-- 197/199 spirv-val conformance ✅
-- 8/9 Ghostty shaders pass (cell_text.v.glsl fails spirv-val; common.glsl is include-only, excluded)
+## Current State (199/199 conformance)
+- **199/199 spirv-val conformance** ✅
+- **10/10 Ghostty shaders pass** ✅ (common.glsl is include-only, excluded)
+- SPIR-V output ~0.73x glslang size (27% smaller)
 - GL_EXT_buffer_reference support: PhysicalStorageBuffer pointers, OpTypeForwardPointer, access chain pointer loads, Aligned memory operands
 - Proper std140/std430 layout: Block, Offset, ColMajor, MatrixStride, ArrayStride decorations
 - StorageBuffer storage class for SSBOs (modern SPIR-V 1.1+ approach)
 - Default DescriptorSet=0 for UBO/SSBO variables
 - Compute shader LocalSize execution mode
-- OpSource version detection from #version directive
-- ESSL detection: emit OpSource ESSL for #version N es
-- Bound optimization: ~0.72x glslang (28% smaller)
-
-## Remaining 2 failures
-- buffer-reference-bitcast-uvec2-2: PhysicalStorageBuffer pointer → uvec2 conversion (needs OpConvertPtrToU)
-- small-storage.vk.vert: 8/16-bit types (needs Int8, Int16, Float16 SPIR-V types)
+- OpSource version detection from #version directive (GLSL/ESSL)
+- 8/16-bit type support: Int8, Int16, Float16 capabilities
+- Centroid/NoPerspective/Flat decorations for IO variables
+- In/out block member scoping: only uniform/buffer/push_constant members are directly accessible
+- SSA variable optimization, constant dedup, two-buffer on-demand codegen
 
 ## Metrics
 - **Primary**: total_pass (unitless, higher is better) — total shaders passing spirv-val
@@ -49,6 +47,7 @@ Maintaining 197/197 spirv-val conformance is a hard requirement.
 - Must not introduce regressions on already-passing shaders
 
 ## Remaining for full glslang equivalency
-- gl_PerVertex Block wrapping (structurally different, functionally equivalent)
-- SPIR-V version detection from #version directive
-- Centroid/NoPerspective decorations for IO variables
+- gl_PerVertex Block wrapping (structurally different, functionally equivalent — passes spirv-val without it)
+- OpLine debug information
+- Spec constant support
+- Dead instruction/global elimination (size optimization)
