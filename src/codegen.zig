@@ -1743,6 +1743,14 @@ const Codegen = struct {
             if (global.qualifier.is_flat and (global.storage_class == .input or global.storage_class == .output)) {
                 try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.flat));
             }
+            // Emit Centroid decoration for centroid-qualified IO variables
+            if (global.qualifier.is_centroid and (global.storage_class == .input or global.storage_class == .output)) {
+                try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.centroid));
+            }
+            // Emit NoPerspective decoration for noperspective-qualified IO variables
+            if (global.qualifier.is_noperspective and (global.storage_class == .input or global.storage_class == .output)) {
+                try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.no_perspective));
+            }
             // Emit NonWritable/NonReadable for readonly/writeonly buffer variables
             if (global.storage_class == .storage_buffer) {
                 if (global.qualifier.is_readonly) {
