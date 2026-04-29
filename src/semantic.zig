@@ -256,13 +256,13 @@ const Analyzer = struct {
     fn lastInstructionIsReturn(self: *Analyzer) bool {
         if (self.instructions.items.len == 0) return false;
         const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
-        return last_tag == .return_void or last_tag == .return_val or last_tag == .unreachable_inst;
+        return last_tag == .return_void or last_tag == .return_val or last_tag == .unreachable_inst or last_tag == .kill;
     }
 
     fn lastInstructionIsBranch(self: *Analyzer) bool {
         if (self.instructions.items.len == 0) return false;
         const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
-        return last_tag == .branch or last_tag == .branch_conditional or last_tag == .return_void or last_tag == .return_val or last_tag == .unreachable_inst;
+        return last_tag == .branch or last_tag == .branch_conditional or last_tag == .return_void or last_tag == .return_val or last_tag == .unreachable_inst or last_tag == .kill;
     }
 
     fn emitBranch(self: *Analyzer, target_id: u32) !void {
@@ -767,7 +767,7 @@ const Analyzer = struct {
             // Stop processing after a return statement (dead code elimination)
             if (self.instructions.items.len > 0) {
                 const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
-                if (last_tag == .return_void or last_tag == .return_val or last_tag == .unreachable_inst) break;
+                if (last_tag == .return_void or last_tag == .return_val or last_tag == .unreachable_inst or last_tag == .kill) break;
             }
         }
 
@@ -1262,7 +1262,15 @@ const Analyzer = struct {
                     self.has_returned = true;
                 }
             },
-            .discard_stmt => {},
+            .discard_stmt => {
+                try self.instructions.append(self.alloc, .{
+                    .tag = .kill,
+                    .result_type = null,
+                    .result_id = null,
+                    .operands = &.{},
+                    .ty = .void,
+                });
+            },
             .break_stmt => {
                 if (self.loop_stack.items.len == 0) return error.SemanticFailed;
                 try self.emitBranch(self.loop_stack.items[self.loop_stack.items.len - 1].merge_label);
