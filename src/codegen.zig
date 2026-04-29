@@ -1759,7 +1759,7 @@ const Codegen = struct {
             if (global.qualifier.is_noperspective and (global.storage_class == .input or global.storage_class == .output)) {
                 try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.no_perspective));
             }
-            // Emit NonWritable/NonReadable for readonly/writeonly buffer variables
+            // Emit NonWritable/NonReadable/Coherent/Restrict for buffer and image variables
             if (global.storage_class == .storage_buffer) {
                 if (global.qualifier.is_readonly) {
                     try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.non_writable));
@@ -1767,6 +1767,9 @@ const Codegen = struct {
                 if (global.qualifier.is_writeonly) {
                     try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.non_readable));
                 }
+            }
+            // Coherent and Restrict apply to storage buffers and uniform (image/sampler) variables
+            if (global.storage_class == .storage_buffer or global.storage_class == .uniform) {
                 if (global.qualifier.is_coherent) {
                     try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.coherent));
                 }
