@@ -317,6 +317,10 @@ const Parser = struct {
                     layout.push_constant = true;
                 } else if (std.mem.eql(u8, ident_text, "buffer_reference")) {
                     layout.buffer_reference = true;
+                } else if (std.mem.eql(u8, ident_text, "row_major")) {
+                    layout.row_major = true;
+                } else if (std.mem.eql(u8, ident_text, "column_major")) {
+                    layout.col_major = true;
                 } else if (self.current().tag == .eq) {
                     _ = self.advance();
                     const val_text = self.text(self.current());
@@ -578,7 +582,8 @@ const Parser = struct {
         var members = std.ArrayListUnmanaged(ast.StructMember){};
         defer members.deinit(self.alloc);
         while (self.current().tag != .r_brace and self.current().tag != .eof) {
-            if (self.current().tag == .kw_layout) _ = try self.tryLayout();
+            var member_layout: ?ast.Layout = null;
+            if (self.current().tag == .kw_layout) member_layout = try self.tryLayout();
             const member_qual = self.tryQualifier();
             const member_ty = self.tryType() orelse return error.UnexpectedToken;
             const member_name = self.current();
@@ -603,6 +608,7 @@ const Parser = struct {
             try members.append(self.alloc, .{
                 .name = self.text(member_name),
                 .ty = member_ty_final,
+                .layout = member_layout,
                 .qualifier = member_qual,
             });
         }
@@ -624,7 +630,8 @@ const Parser = struct {
         var members = std.ArrayListUnmanaged(ast.StructMember){};
         defer members.deinit(self.alloc);
         while (self.current().tag != .r_brace and self.current().tag != .eof) {
-            if (self.current().tag == .kw_layout) _ = try self.tryLayout();
+            var member_layout: ?ast.Layout = null;
+            if (self.current().tag == .kw_layout) member_layout = try self.tryLayout();
             const member_qual = self.tryQualifier();
             const member_ty = self.tryType() orelse return error.UnexpectedToken;
             const member_name = self.current();
@@ -649,6 +656,7 @@ const Parser = struct {
             try members.append(self.alloc, .{
                 .name = self.text(member_name),
                 .ty = member_ty_final,
+                .layout = member_layout,
                 .qualifier = member_qual,
             });
         }

@@ -1928,11 +1928,16 @@ const Codegen = struct {
             try self.emitDecorationSectionMemberDecorate(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.offset), offset);
             const size = self.layoutSize(member.ty, is_std430);
             offset += size;
-            // ColMajor + MatrixStride for matrix members (direct or element of array)
+            // RowMajor/ColMajor + MatrixStride for matrix members (direct or element of array)
             var effective_ty = member.ty;
             while (effective_ty == .array) effective_ty = effective_ty.array.base.*;
             if (self.isMatrixType(effective_ty)) {
-                try self.emitDecorationSectionMemberDecorateNoExtra(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.col_major));
+                const is_row_major = if (member.layout) |l| l.row_major else false;
+                if (is_row_major) {
+                    try self.emitDecorationSectionMemberDecorateNoExtra(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.row_major));
+                } else {
+                    try self.emitDecorationSectionMemberDecorateNoExtra(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.col_major));
+                }
                 try self.emitDecorationSectionMemberDecorate(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.matrix_stride), 16);
             }
             // ArrayStride for array members (all nesting levels)
