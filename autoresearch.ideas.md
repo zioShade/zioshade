@@ -37,7 +37,6 @@
 ### TIER 1 - Correctness improvements (beyond spirv-val):
 - **Type aliasing for std140/std430**: When the same struct is used in both std140 and std430 blocks, glslang creates separate type aliases (Content vs Content_0) with different offset decorations. We use a single type, so offsets can only be correct for one layout. Requires significant change to emitType system.
 - **Fix GPA memory leaks**: ~90 files leak parser/semantic allocations (dupeNodes is #1 source). Would make Debug builds reliable.
-- **UniformConstant for images/samplers**: We emit images with Uniform storage class; should be UniformConstant. This works but differs from glslang.
 
 ### TIER 2 - Feature completeness:
 - **OpLine debug information**: Add source line mapping to SPIR-V output for better debugging.

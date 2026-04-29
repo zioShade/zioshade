@@ -1039,7 +1039,14 @@ const Analyzer = struct {
 
                 // Continue + update
                 try self.emitLabel(continue_label);
-                if (has_update) try self.analyzeStatement(children[2]);
+                if (has_update) {
+                    if (children[2].tag == .expr_stmt) {
+                        self.analyzeStatement(children[2]) catch {};
+                    } else {
+                        // Bare expression node (e.g., comma_op from for-loop update)
+                        _ = self.analyzeExpression(children[2]) catch {};
+                    }
+                }
                 try self.emitBranch(header_label);
 
                 _ = self.loop_stack.pop();
@@ -3400,6 +3407,14 @@ const Analyzer = struct {
                 });
                 return .{ .ty = result_ty, .id = result_id };
             },
+            .comma_op => {
+                // Comma operator: evaluate all children left-to-right, return last value
+                var last = try self.analyzeExpression(node.data.children[0]);
+                for (node.data.children[1..]) |child| {
+                    last = try self.analyzeExpression(child);
+                }
+                return last;
+            },
             .ternary_op => {
                 if (node.data.children.len < 3) return error.SemanticFailed;
                 const cond_tid = try self.analyzeExpression(node.data.children[0]);
@@ -3687,7 +3702,7 @@ const Analyzer = struct {
                     .ty = lval.ty,
                 });
                 // Create constant 1
-                const one_id: u32 = if (lval.ty == .int or lval.ty.isVector()) try self.getConstInt(1, .int) else try self.getConstFloat(1.0);
+                const one_id: u32 = if (lval.ty == .int or lval.ty == .uint or lval.ty.isVector()) try self.getConstInt(1, if (lval.ty == .uint) .uint else .int) else try self.getConstFloat(1.0);
                 // Compute new value
                 const new_val_id = self.allocId();
                 const is_add = node.tag == .post_increment or node.tag == .pre_increment;

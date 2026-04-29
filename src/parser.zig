@@ -941,7 +941,7 @@ const Parser = struct {
 
         // Condition (always append — empty if just ';')
         if (self.current().tag != .semicolon) {
-            try children.append(self.alloc, try self.parseExpression());
+            try children.append(self.alloc, try self.parseCommaExpression());
         } else {
             try children.append(self.alloc, empty_node);
         }
@@ -949,7 +949,7 @@ const Parser = struct {
 
         // Update (always append — empty if just ')')
         if (self.current().tag != .r_paren) {
-            try children.append(self.alloc, try self.parseExpression());
+            try children.append(self.alloc, try self.parseCommaExpression());
         } else {
             try children.append(self.alloc, empty_node);
         }
@@ -1081,6 +1081,24 @@ const Parser = struct {
 
     fn parseExpression(self: *Parser) Error!ast.Node {
         return self.parseAssignment();
+    }
+
+    /// Parse comma expression (for for-loop update/condition)
+    fn parseCommaExpression(self: *Parser) Error!ast.Node {
+        const expr = try self.parseAssignment();
+        if (self.current().tag != .comma) return expr;
+        var children = std.ArrayListUnmanaged(ast.Node){};
+        defer children.deinit(self.alloc);
+        try children.append(self.alloc, expr);
+        while (self.current().tag == .comma) {
+            _ = self.advance();
+            try children.append(self.alloc, try self.parseAssignment());
+        }
+        return .{
+            .tag = .comma_op,
+            .loc = expr.loc,
+            .data = .{ .children = try children.toOwnedSlice(self.alloc) },
+        };
     }
 
     fn parseAssignment(self: *Parser) Error!ast.Node {
