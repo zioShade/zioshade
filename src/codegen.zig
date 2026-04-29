@@ -1918,6 +1918,10 @@ const Codegen = struct {
 
     /// Emit Offset/ColMajor/MatrixStride/ArrayStride for struct members, recursing into nested structs
     fn emitNestedStructLayout(self: *Codegen, struct_type_id: u32, members: []const ast.StructMember, is_std430: bool) !void {
+        try self.emitNestedStructLayoutInner(struct_type_id, members, is_std430, false);
+    }
+
+    fn emitNestedStructLayoutInner(self: *Codegen, struct_type_id: u32, members: []const ast.StructMember, is_std430: bool, parent_row_major: bool) !void {
         // Prevent decorating the same struct twice
         if (self.emitted_struct_layout.contains(struct_type_id)) return;
         try self.emitted_struct_layout.put(self.alloc, struct_type_id, {});
@@ -1931,9 +1935,9 @@ const Codegen = struct {
             // RowMajor/ColMajor + MatrixStride for matrix members (direct or element of array)
             var effective_ty = member.ty;
             while (effective_ty == .array) effective_ty = effective_ty.array.base.*;
+            const member_is_row_major = if (member.layout) |l| l.row_major else parent_row_major;
             if (self.isMatrixType(effective_ty)) {
-                const is_row_major = if (member.layout) |l| l.row_major else false;
-                if (is_row_major) {
+                if (member_is_row_major) {
                     try self.emitDecorationSectionMemberDecorateNoExtra(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.row_major));
                 } else {
                     try self.emitDecorationSectionMemberDecorateNoExtra(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.col_major));
@@ -1947,14 +1951,14 @@ const Codegen = struct {
                 if (effective_ty == .named) {
                     const elem_td = self.module.types.get(effective_ty.named) orelse continue;
                     const elem_type_id = self.emitted_named_types.get(effective_ty.named) orelse continue;
-                    try self.emitNestedStructLayout(elem_type_id, elem_td.members, is_std430);
+                    try self.emitNestedStructLayoutInner(elem_type_id, elem_td.members, is_std430, member_is_row_major);
                 }
             }
             // Recurse into direct nested struct members
             if (member.ty == .named) {
                 const nested_td = self.module.types.get(member.ty.named) orelse continue;
                 const nested_type_id = self.emitted_named_types.get(member.ty.named) orelse continue;
-                try self.emitNestedStructLayout(nested_type_id, nested_td.members, is_std430);
+                try self.emitNestedStructLayoutInner(nested_type_id, nested_td.members, is_std430, member_is_row_major);
             }
         }
     }
