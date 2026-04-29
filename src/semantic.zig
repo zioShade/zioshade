@@ -637,9 +637,11 @@ const Analyzer = struct {
                     });
                 }
 
-                // Declare block members as directly accessible only for uniform/buffer blocks.
-                // In/out block members must be accessed via the instance name (e.g., out_data.color).
-                if (storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant) {
+                // Declare block members as directly accessible for uniform/buffer blocks
+                // and for anonymous in/out blocks (no instance name).
+                if (storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant or
+                    ((storage_class == .input or storage_class == .output) and node.data.instance_name.len == 0))
+                {
                     for (node.data.members, 0..) |member, idx| {
                         try self.declare(member.name, .{
                             .kind = .block_member,
