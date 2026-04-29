@@ -310,3 +310,4 @@
 {"type":"config","name":"Continue correctness improvements for glslpp compiler","metricName":"total_pass","metricUnit":"","bestDirection":"higher"}
 {"run":272,"commit":"31112a9","metric":199,"metrics":{},"status":"keep","description":"Baseline: 199/199 spirv-val conformance confirmed stable","timestamp":1777474444949,"segment":39,"confidence":null,"iterationTokens":9237,"asi":{"hypothesis":"Baseline verification"}}
 {"type":"config","name":"Array constructor + typesCompatible fix","metricName":"pass_count","metricUnit":"/199","bestDirection":"higher"}
+{"run":273,"commit":"a034b7b","metric":199,"metrics":{},"status":"keep","description":"Baseline: array constructor + typesCompatible fixes — 199/199 still passes","timestamp":1777476156447,"segment":40,"confidence":null,"iterationTokens":223,"asi":{"hypothesis":"Array constructor (float[](...)) support and typesCompatible fix for array types"}}
