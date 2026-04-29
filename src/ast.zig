@@ -57,6 +57,7 @@ pub const Node = struct {
         unary_op,
         binary_op,
         ternary_op,
+        comma_op,
         assign_op,
         compound_assign,
         post_increment,
