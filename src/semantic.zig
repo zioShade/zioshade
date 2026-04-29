@@ -490,16 +490,17 @@ const Analyzer = struct {
                 // Skip creating a global for standalone layout qualifiers (e.g. layout(local_size_x=1) in;)
                 if (node.data.name.len > 0) {
                 const ir_id = self.allocId();
+                const ty = node.data.ty orelse .void;
                 const storage_class: ir.SPIRVStorageClass = switch (node.tag) {
                     .in_decl => .input,
                     .out_decl => .output,
-                    .uniform_decl => .uniform,
+                    .uniform_decl => if (ty.isSampler()) .uniform_constant else .uniform,
                     .var_decl => if (node.data.qualifier != null and node.data.qualifier.?.is_shared) .workgroup else .private,
                     else => .private,
                 };
                 try self.globals.append(self.alloc, .{
                     .name = node.data.name,
-                    .ty = node.data.ty orelse .void,
+                    .ty = ty,
                     .qualifier = node.data.qualifier orelse .{},
                     .layout = node.data.layout,
                     .storage_class = storage_class,
