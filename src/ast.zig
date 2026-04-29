@@ -33,6 +33,7 @@ pub const Node = struct {
         function_decl,
         function_prototype,
         block,
+        multi_decl,
         if_stmt,
         for_stmt,
         while_stmt,
