@@ -1829,7 +1829,21 @@ const Codegen = struct {
                 .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
                 .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 16,
                 .array => |arr| self.layoutAlignment(arr.base.*, is_std430), // std430: array alignment = element alignment
-                .named => 16, // struct alignment is largest member
+                .named => |name| blk: {
+                    // Struct alignment = max alignment of its members
+                    const td = self.module.types.get(name) orelse break :blk 16;
+                    if (td.is_buffer_reference) break :blk 8; // pointer alignment
+                    const type_id = self.emitted_named_types.get(name) orelse break :blk 16;
+                    if (self.layout_visited.contains(type_id)) break :blk 8; // self-ref cycle: pointer
+                    self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 16;
+                    defer _ = self.layout_visited.remove(type_id);
+                    var max_align: u32 = 4;
+                    for (td.members) |member| {
+                        const ma = self.layoutAlignment(member.ty, is_std430);
+                        if (ma > max_align) max_align = ma;
+                    }
+                    break :blk max_align;
+                },
                 else => 4,
             };
         }
@@ -1840,7 +1854,21 @@ const Codegen = struct {
             .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
             .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 16,
             .array => 16, // std140: array alignment is vec4 (16)
-            .named => 16,
+            .named => |name| blk: {
+                // Struct alignment = max alignment of its members
+                const td = self.module.types.get(name) orelse break :blk 16;
+                if (td.is_buffer_reference) break :blk 8; // pointer alignment
+                const type_id = self.emitted_named_types.get(name) orelse break :blk 16;
+                if (self.layout_visited.contains(type_id)) break :blk 8; // self-ref cycle
+                self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 16;
+                defer _ = self.layout_visited.remove(type_id);
+                var max_align: u32 = 4;
+                for (td.members) |member| {
+                    const ma = self.layoutAlignment(member.ty, is_std430);
+                    if (ma > max_align) max_align = ma;
+                }
+                break :blk max_align;
+            },
             else => 4,
         };
     }
