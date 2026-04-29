@@ -540,19 +540,29 @@ const Analyzer = struct {
 
                 // Create a global variable for the block
                 const ir_id = self.allocId();
+                // Use instance name for the global variable if present
+                const global_name = if (node.data.instance_name.len > 0) node.data.instance_name else name;
                 try self.globals.append(self.alloc, .{
-                    .name = name,
+                    .name = global_name,
                     .ty = .{ .named = name },
                     .qualifier = qual,
                     .layout = node.data.layout,
                     .storage_class = storage_class,
                     .result_id = ir_id,
                 });
+                // Declare the block variable under both names (type name and instance name)
                 try self.declare(name, .{
                     .kind = .var_sym,
                     .ty = .{ .named = name },
                     .ir_id = ir_id,
                 });
+                if (node.data.instance_name.len > 0 and !std.mem.eql(u8, name, node.data.instance_name)) {
+                    try self.declare(node.data.instance_name, .{
+                        .kind = .var_sym,
+                        .ty = .{ .named = name },
+                        .ir_id = ir_id,
+                    });
+                }
 
                 // Also declare each member as directly accessible (GLSL allows this)
                 for (node.data.members, 0..) |member, idx| {

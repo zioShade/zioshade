@@ -32,11 +32,11 @@ if [ ! -f "$CACHE" ]; then
             [ "$bn" = "common.glsl" ] && { echo "SKIP $file" >> "$CACHE"; continue; }
             
             # glslangValidator: for .glsl files, infer stage from name
-            glslang_args=()
+            glslang_args=(-V)
             case "$bn" in
-                *.f.glsl) glslang_args=(-S frag) ;;
-                *.v.glsl) glslang_args=(-S vert) ;;
-                *.c.glsl) glslang_args=(-S comp) ;;
+                *.f.glsl) glslang_args+=(-S frag) ;;
+                *.v.glsl) glslang_args+=(-S vert) ;;
+                *.c.glsl) glslang_args+=(-S comp) ;;
             esac
 
             if "$GLSLANG" "${glslang_args[@]}" "$file" >/dev/null 2>&1; then
