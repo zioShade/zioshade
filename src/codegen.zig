@@ -1692,7 +1692,7 @@ const Codegen = struct {
                 }
                 if (layout.set) |set| {
                     try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.descriptor_set), set);
-                } else if (layout.binding != null and (global.storage_class == .uniform or global.storage_class == .storage_buffer)) {
+                } else if (layout.binding != null and (global.storage_class == .uniform or global.storage_class == .storage_buffer or global.storage_class == .uniform_constant)) {
                     // Default descriptor set is 0 for UBO/SSBO
                     try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.descriptor_set), 0);
                 }
@@ -1773,7 +1773,7 @@ const Codegen = struct {
                 }
             }
             // Coherent and Restrict apply to storage buffers and uniform (image/sampler) variables
-            if (global.storage_class == .storage_buffer or global.storage_class == .uniform) {
+            if (global.storage_class == .storage_buffer or global.storage_class == .uniform_constant) {
                 if (global.qualifier.is_coherent) {
                     try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.coherent));
                 }
