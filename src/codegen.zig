@@ -1344,13 +1344,32 @@ const Codegen = struct {
                 }
             },
             .array => |arr| {
-                // Check cache for duplicate array types
-                const base_id_for_key = try self.ensureType(arr.base.*);
-                const cache_key = (@as(u64, base_id_for_key) << 32) | @as(u64, arr.size);
+                // Check if element type is a buffer_reference named type — use PhysicalStorageBuffer pointer
+                var resolved_base = arr.base.*;
+                while (resolved_base == .array) resolved_base = resolved_base.array.base.*;
+                const is_buf_ref_elem = if (resolved_base == .named) blk: {
+                    const td = self.module.types.get(resolved_base.named);
+                    break :blk td != null and td.?.is_buffer_reference;
+                } else false;
+
+                const base_id: u32 = if (is_buf_ref_elem and arr.base.* == .named) blk: {
+                    // Element is a buffer_reference type — emit PhysicalStorageBuffer pointer
+                    const struct_id = try self.ensureType(arr.base.*);
+                    const ptr_key = (@as(u64, struct_id) << 32) | @as(u64, 5349);
+                    if (self.emitted_ptr_types.get(ptr_key)) |cached| break :blk cached;
+                    const ptr_id = self.allocId();
+                    try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
+                    try self.emitTypeWord(ptr_id);
+                    try self.emitTypeWord(5349); // PhysicalStorageBuffer
+                    try self.emitTypeWord(struct_id);
+                    try self.emitted_ptr_types.put(self.alloc, ptr_key, ptr_id);
+                    break :blk ptr_id;
+                } else try self.ensureType(arr.base.*);
+
+                const cache_key = (@as(u64, base_id) << 32) | @as(u64, arr.size);
                 if (self.emitted_array_types.get(cache_key)) |cached_id| {
                     return cached_id;
                 }
-                const base_id = base_id_for_key;
                 if (arr.size == 0) {
                     // Runtime array: OpTypeRuntimeArray
                     try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeRuntimeArray)));
@@ -1679,12 +1698,14 @@ const Codegen = struct {
                 break :blk stride * arr.size;
             },
             .named => |name| blk: {
+                // Buffer_reference types used as members are pointers (8 bytes)
+                const td = self.module.types.get(name) orelse break :blk 0;
+                if (td.is_buffer_reference) break :blk 8;
                 // Get the type_id for cycle detection
                 const type_id = self.emitted_named_types.get(name) orelse break :blk 0;
                 if (self.layout_visited.contains(type_id)) break :blk 8; // Self-referential: treat as pointer (8 bytes)
                 self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 0;
                 defer _ = self.layout_visited.remove(type_id);
-                const td = self.module.types.get(name) orelse break :blk 0;
                 var sz: u32 = 0;
                 for (td.members) |member| {
                     const alignment = self.layoutAlignment(member.ty, is_std430);
@@ -1701,6 +1722,18 @@ const Codegen = struct {
     /// Compute array stride (std140 or std430)
     fn layoutArrayStride(self: *Codegen, ty: ast.Type, is_std430: bool) u32 {
         const arr = ty.array;
+        // For buffer_reference element types, use pointer size (8 bytes)
+        var resolved_base = arr.base.*;
+        while (resolved_base == .array) resolved_base = resolved_base.array.base.*;
+        if (resolved_base == .named) {
+            const td = self.module.types.get(resolved_base.named);
+            if (td != null and td.?.is_buffer_reference) {
+                // PhysicalStorageBuffer pointer is 8 bytes, 8-byte aligned
+                const stride = std.mem.alignForward(u32, 8, 8);
+                if (is_std430) return stride;
+                return std.mem.alignForward(u32, stride, 16); // std140
+            }
+        }
         const elem_size = self.layoutSize(arr.base.*, is_std430);
         const elem_align = self.layoutAlignment(arr.base.*, is_std430);
         const rounded_elem = std.mem.alignForward(u32, elem_size, elem_align);
@@ -1762,7 +1795,19 @@ const Codegen = struct {
     fn emitArrayStrideRecursive(self: *Codegen, ty: ast.Type, is_std430: bool) !void {
         if (ty != .array) return;
         const arr = ty.array;
-        const base_type_id = try self.ensureType(arr.base.*);
+        // Must use same base_id logic as ensureType for arrays (buffer_reference → pointer)
+        var resolved_base = arr.base.*;
+        while (resolved_base == .array) resolved_base = resolved_base.array.base.*;
+        const is_buf_ref_elem = if (resolved_base == .named) blk: {
+            const td = self.module.types.get(resolved_base.named);
+            break :blk td != null and td.?.is_buffer_reference;
+        } else false;
+        const base_type_id: u32 = if (is_buf_ref_elem and arr.base.* == .named) blk: {
+            const struct_id = try self.ensureType(arr.base.*);
+            const ptr_key = (@as(u64, struct_id) << 32) | @as(u64, 5349);
+            break :blk self.emitted_ptr_types.get(ptr_key) orelse struct_id;
+        } else try self.ensureType(arr.base.*);
+
         const cache_key = (@as(u64, base_type_id) << 32) | @as(u64, arr.size);
         if (self.emitted_array_types.get(cache_key)) |array_type_id| {
             if (!self.emitted_array_stride.contains(array_type_id)) {
