@@ -930,6 +930,11 @@ const Analyzer = struct {
                     });
                 }
             },
+            .multi_decl => {
+                for (node.data.children) |child| {
+                    try self.analyzeStatement(child);
+                }
+            },
             .block => {
                 try self.pushScope();
                 for (node.data.children) |child| {
