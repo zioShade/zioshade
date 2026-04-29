@@ -2678,6 +2678,8 @@ const Codegen = struct {
                 const coord_id = self.operandId(resolved, 1);
                 const lod_id = if (resolved.operands.len > 2) self.operandId(resolved, 2) else self.operandId(resolved, 1);
                 // OpImageSampleExplicitLod: result_type, result, sampled_image, coordinate, ImageOperands(Lod=2), lod_value
+                // TODO: For textureLodOffset, emit ConstOffset (bit 3) with constant composite
+                // This requires emitting offsets as OpConstantComposite instead of OpCompositeConstruct
                 try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageSampleExplicitLod)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
@@ -2919,6 +2921,16 @@ const Codegen = struct {
                     try self.emitWord(coord_id);
                     try self.emitWord(64); // Image Operand Sample mask (bit 6)
                     try self.emitWord(sample_id);
+                } else if (resolved.tag == .image_fetch and resolved.operands.len > 2) {
+                    // texelFetch with lod operand
+                    const lod_id = self.operandId(resolved, 2);
+                    try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageFetch)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(2); // Image Operand mask: Lod (bit 1)
+                    try self.emitWord(lod_id);
                 } else {
                     try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageFetch)));
                     try self.emitWord(result_type_id);
