@@ -1767,6 +1767,12 @@ const Codegen = struct {
                 if (global.qualifier.is_writeonly) {
                     try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.non_readable));
                 }
+                if (global.qualifier.is_coherent) {
+                    try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.coherent));
+                }
+                if (global.qualifier.is_restrict) {
+                    try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.restrict));
+                }
             }
         }
     }
