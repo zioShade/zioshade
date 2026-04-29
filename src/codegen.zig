@@ -292,6 +292,86 @@ const Codegen = struct {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.int64));
         }
+        // Emit 8/16-bit type capabilities if needed
+        var has_int8 = false;
+        var has_int16 = false;
+        var has_float16 = false;
+        for (self.module.globals) |global| {
+            has_int8 = has_int8 or self.typeUsesInt8(global.ty);
+            has_int16 = has_int16 or self.typeUsesInt16(global.ty);
+            has_float16 = has_float16 or self.typeUsesFloat16(global.ty);
+        }
+        // Also check struct members for 8/16-bit types
+        var type_iter = self.module.types.iterator();
+        while (type_iter.next()) |entry| {
+            for (entry.value_ptr.members) |member| {
+                has_int8 = has_int8 or self.typeUsesInt8(member.ty);
+                has_int16 = has_int16 or self.typeUsesInt16(member.ty);
+                has_float16 = has_float16 or self.typeUsesFloat16(member.ty);
+            }
+        }
+        // Also check function IR instructions for 8/16-bit types
+        for (self.module.functions) |func| {
+            for (func.body) |inst| {
+                has_int8 = has_int8 or self.typeUsesInt8(inst.ty);
+                has_int16 = has_int16 or self.typeUsesInt16(inst.ty);
+                has_float16 = has_float16 or self.typeUsesFloat16(inst.ty);
+            }
+        }
+        if (has_int8) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.int8));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.storage_uniform_buffer_block8));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.storage_push_constant8));
+        }
+        if (has_int16) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.int16));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.storage_uniform16));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.storage_push_constant16));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.storage_buffer16_bit));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.storage_input_output16));
+        }
+        if (has_float16) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.float16));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.storage_uniform16));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.storage_push_constant16));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.storage_buffer16_bit));
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.storage_input_output16));
+        }
+    }
+
+    fn typeUsesFloat16(self: *Codegen, ty: ast.Type) bool {
+        return switch (ty) {
+            .float16, .f16vec2, .f16vec3, .f16vec4 => true,
+            .array => |arr| self.typeUsesFloat16(arr.base.*),
+            else => false,
+        };
+    }
+    fn typeUsesInt8(self: *Codegen, ty: ast.Type) bool {
+        return switch (ty) {
+            .int8, .i8vec2, .i8vec3, .i8vec4, .uint8, .u8vec2, .u8vec3, .u8vec4 => true,
+            .array => |arr| self.typeUsesInt8(arr.base.*),
+            else => false,
+        };
+    }
+    fn typeUsesInt16(self: *Codegen, ty: ast.Type) bool {
+        return switch (ty) {
+            .int16, .i16vec2, .i16vec3, .i16vec4, .uint16, .u16vec2, .u16vec3, .u16vec4 => true,
+            .array => |arr| self.typeUsesInt16(arr.base.*),
+            else => false,
+        };
     }
 
     fn emitExtensions(self: *Codegen) !void {
@@ -516,6 +596,35 @@ const Codegen = struct {
                 try self.emitTypeWord(32);
                 try self.emitTypeWord(0); // unsigned
             },
+            .int8 => {
+                try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeInt)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(8);
+                try self.emitTypeWord(1); // signed
+            },
+            .uint8 => {
+                try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeInt)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(8);
+                try self.emitTypeWord(0); // unsigned
+            },
+            .int16 => {
+                try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeInt)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(16);
+                try self.emitTypeWord(1); // signed
+            },
+            .uint16 => {
+                try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeInt)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(16);
+                try self.emitTypeWord(0); // unsigned
+            },
+            .float16 => {
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeFloat)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(16);
+            },
             .float => {
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeFloat)));
                 try self.emitTypeWord(id);
@@ -529,7 +638,12 @@ const Codegen = struct {
             .vec2, .vec3, .vec4,
             .ivec2, .ivec3, .ivec4,
             .bvec2, .bvec3, .bvec4,
-            .uvec2, .uvec3, .uvec4 => {
+            .uvec2, .uvec3, .uvec4,
+            .i8vec2, .i8vec3, .i8vec4,
+            .u8vec2, .u8vec3, .u8vec4,
+            .i16vec2, .i16vec3, .i16vec4,
+            .u16vec2, .u16vec3, .u16vec4,
+            .f16vec2, .f16vec3, .f16vec4 => {
                 const elem_type = try self.ensureType(ty.elementType());
                 const count = ty.numComponents();
                 try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeVector)));
@@ -1695,6 +1809,12 @@ const Codegen = struct {
     fn layoutAlignment(self: *Codegen, ty: ast.Type, is_std430: bool) u32 {
         if (is_std430) {
             return switch (ty) {
+                .int8, .uint8 => 1,
+                .int16, .uint16, .float16 => 2,
+                .i8vec2, .u8vec2 => 2,
+                .i16vec2, .u16vec2, .f16vec2 => 4,
+                .i8vec3, .u8vec3, .i8vec4, .u8vec4 => 4,
+                .i16vec3, .u16vec3, .f16vec3, .i16vec4, .u16vec4, .f16vec4 => 8,
                 .float, .int, .uint, .bool => 4,
                 .vec2, .ivec2, .uvec2 => 8,
                 .vec3, .vec4, .ivec3, .ivec4, .uvec3, .uvec4 => 16,
@@ -1720,6 +1840,14 @@ const Codegen = struct {
     /// Compute size for a type (std140 or std430)
     fn layoutSize(self: *Codegen, ty: ast.Type, is_std430: bool) u32 {
         return switch (ty) {
+            .int8, .uint8 => 1,
+            .int16, .uint16, .float16 => 2,
+            .i8vec2, .u8vec2 => 2,
+            .i16vec2, .u16vec2, .f16vec2 => 4,
+            .i8vec3, .u8vec3 => 3,
+            .i16vec3, .u16vec3, .f16vec3 => 6,
+            .i8vec4, .u8vec4 => 4,
+            .i16vec4, .u16vec4, .f16vec4 => 8,
             .float, .int, .uint, .bool => 4,
             .vec2, .ivec2, .uvec2 => 8,
             .vec3, .ivec3, .uvec3 => 12,

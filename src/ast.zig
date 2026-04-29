@@ -162,6 +162,17 @@ pub const Type = union(enum) {
     usampler1d,
     usampler1d_array,
     usampler_buffer,
+    // 8-bit and 16-bit types
+    int8,
+    uint8,
+    int16,
+    uint16,
+    float16,
+    i8vec2, i8vec3, i8vec4,
+    u8vec2, u8vec3, u8vec4,
+    i16vec2, i16vec3, i16vec4,
+    u16vec2, u16vec3, u16vec4,
+    f16vec2, f16vec3, f16vec4,
     named: []const u8,
     array: struct { base: *const Type, size: u32 },
 
@@ -169,6 +180,9 @@ pub const Type = union(enum) {
         return switch (self) {
             .bool => 1,
             .int, .uint => 4,
+            .int8, .uint8 => 1,
+            .int16, .uint16 => 2,
+            .float16 => 2,
             .float => 4,
             .double => 8,
             .void, .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .image2d_ms, .image2d_ms_array, .image1d, .iimage1d, .uimage1d, .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube, .image2d_array, .iimage2d_array, .uimage2d_array, .image_cube_array, .iimage_cube_array, .uimage_cube_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer, .named, .array => 0,
@@ -179,10 +193,10 @@ pub const Type = union(enum) {
     pub fn numComponents(self: Type) u32 {
         return switch (self) {
             .void => 0,
-            .bool, .int, .uint, .float, .double => 1,
-            .vec2, .ivec2, .bvec2, .uvec2 => 2,
-            .vec3, .ivec3, .bvec3, .uvec3 => 3,
-            .vec4, .ivec4, .bvec4, .uvec4 => 4,
+            .bool, .int, .uint, .float, .double, .int8, .uint8, .int16, .uint16, .float16 => 1,
+            .vec2, .ivec2, .bvec2, .uvec2, .i8vec2, .u8vec2, .i16vec2, .u16vec2, .f16vec2 => 2,
+            .vec3, .ivec3, .bvec3, .uvec3, .i8vec3, .u8vec3, .i16vec3, .u16vec3, .f16vec3 => 3,
+            .vec4, .ivec4, .bvec4, .uvec4, .i8vec4, .u8vec4, .i16vec4, .u16vec4, .f16vec4 => 4,
             .mat2, .mat2x2 => 4,
             .mat3, .mat3x3 => 9,
             .mat4, .mat4x4 => 16,
@@ -195,7 +209,7 @@ pub const Type = union(enum) {
 
     pub fn isScalar(self: Type) bool {
         return switch (self) {
-            .bool, .int, .uint, .float, .double => true,
+            .bool, .int, .uint, .float, .double, .int8, .uint8, .int16, .uint16, .float16 => true,
             else => false,
         };
     }
@@ -212,7 +226,12 @@ pub const Type = union(enum) {
             .vec2, .vec3, .vec4,
             .ivec2, .ivec3, .ivec4,
             .bvec2, .bvec3, .bvec4,
-            .uvec2, .uvec3, .uvec4 => true,
+            .uvec2, .uvec3, .uvec4,
+            .i8vec2, .i8vec3, .i8vec4,
+            .u8vec2, .u8vec3, .u8vec4,
+            .i16vec2, .i16vec3, .i16vec4,
+            .u16vec2, .u16vec3, .u16vec4,
+            .f16vec2, .f16vec3, .f16vec4 => true,
             else => false,
         };
     }
@@ -290,6 +309,11 @@ pub const Type = union(enum) {
             .ivec2, .ivec3, .ivec4 => .int,
             .bvec2, .bvec3, .bvec4 => .bool,
             .uvec2, .uvec3, .uvec4 => .uint,
+            .i8vec2, .i8vec3, .i8vec4 => .int8,
+            .u8vec2, .u8vec3, .u8vec4 => .uint8,
+            .i16vec2, .i16vec3, .i16vec4 => .int16,
+            .u16vec2, .u16vec3, .u16vec4 => .uint16,
+            .f16vec2, .f16vec3, .f16vec4 => .float16,
             .mat2, .mat3, .mat4,
             .mat2x2, .mat2x3, .mat2x4,
             .mat3x2, .mat3x3, .mat3x4,
