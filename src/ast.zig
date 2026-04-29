@@ -389,6 +389,9 @@ pub const Qualifier = packed struct {
     is_flat: bool = false,
     is_centroid: bool = false,
     is_noperspective: bool = false,
+    is_coherent: bool = false,
+    is_restrict: bool = false,
+    is_volatile: bool = false,
 };
 
 pub const Layout = struct {
