@@ -996,8 +996,13 @@ const Analyzer = struct {
                 const continue_label = self.allocId();
                 const merge_label = self.allocId();
 
+                const children = node.data.children;
+                const has_init = children.len > 0 and !(children[0].tag == .expr_stmt and children[0].data.children.len == 0);
+                const has_cond = children.len > 1 and !(children[1].tag == .expr_stmt and children[1].data.children.len == 0);
+                const has_update = children.len > 2 and !(children[2].tag == .expr_stmt and children[2].data.children.len == 0);
+
                 // Init
-                if (node.data.children.len > 0) try self.analyzeStatement(node.data.children[0]);
+                if (has_init) try self.analyzeStatement(children[0]);
 
                 try self.emitBranch(header_label);
 
@@ -1008,21 +1013,19 @@ const Analyzer = struct {
 
                 // Header: condition check, then merge + branch
                 try self.emitLabel(header_label);
-                var cond_id: u32 = undefined;
-                if (node.data.children.len > 1) {
-                    const cond = try self.analyzeExpression(node.data.children[1]);
-                    cond_id = cond.id;
-                }
-                try self.emitLoopMerge(merge_label, continue_label);
-                if (node.data.children.len > 1) {
+                if (has_cond) {
+                    const cond = try self.analyzeExpression(children[1]);
+                    const cond_id = cond.id;
+                    try self.emitLoopMerge(merge_label, continue_label);
                     try self.emitBranchConditional(cond_id, body_label, merge_label);
                 } else {
+                    try self.emitLoopMerge(merge_label, continue_label);
                     try self.emitBranch(body_label);
                 }
 
                 // Body
                 try self.emitLabel(body_label);
-                if (node.data.children.len > 3) self.analyzeStatement(node.data.children[3]) catch {
+                if (children.len > 3) self.analyzeStatement(children[3]) catch {
                     // Body failed, continue to emit branch to continue label
                 };
                 if (!self.lastInstructionIsReturn()) {
@@ -1031,7 +1034,7 @@ const Analyzer = struct {
 
                 // Continue + update
                 try self.emitLabel(continue_label);
-                if (node.data.children.len > 2) try self.analyzeStatement(node.data.children[2]);
+                if (has_update) try self.analyzeStatement(children[2]);
                 try self.emitBranch(header_label);
 
                 _ = self.loop_stack.pop();
