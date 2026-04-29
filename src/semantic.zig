@@ -4057,6 +4057,7 @@ const Analyzer = struct {
             "mod", "normalize", "pow", "radians", "reflect", "refract",
             "round", "roundEven", "sign", "sin", "sinh", "smoothstep", "sqrt", "step",
             "tan", "tanh", "transpose", "trunc",
+            "asinh", "acosh", "atanh",
             "texture", "texture2D", "textureLod", "textureProj", "texelFetch",
             "textureQueryLevels",
             "textureQueryLod",
@@ -4210,6 +4211,9 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "sinh")) return 19;
         if (std.mem.eql(u8, name, "cosh")) return 20;
         if (std.mem.eql(u8, name, "tanh")) return 21;
+        if (std.mem.eql(u8, name, "asinh")) return 22;
+        if (std.mem.eql(u8, name, "acosh")) return 23;
+        if (std.mem.eql(u8, name, "atanh")) return 24;
         if (std.mem.eql(u8, name, "atan2")) return 25;
         if (std.mem.eql(u8, name, "pow")) return 26;
         if (std.mem.eql(u8, name, "exp")) return 27;
