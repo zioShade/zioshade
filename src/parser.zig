@@ -1406,7 +1406,11 @@ const Parser = struct {
         switch (tok.tag) {
             .int_literal, .uint_literal => {
                 _ = self.advance();
-                const num_text = self.text(tok);
+                var num_text = self.text(tok);
+                // Strip 'u'/'U' suffix for uint literals
+                if (num_text.len > 0 and (num_text[num_text.len - 1] == 'u' or num_text[num_text.len - 1] == 'U')) {
+                    num_text = num_text[0 .. num_text.len - 1];
+                }
                 const val = std.fmt.parseInt(i64, num_text, 0) catch 0;
                 return .{
                     .tag = if (tok.tag == .uint_literal) .uint_literal else .int_literal,
