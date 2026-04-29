@@ -3222,6 +3222,22 @@ const Codegen = struct {
                 try self.emitWord(merge_id);
                 try self.emitWord(0); // SelectionControl = None
             },
+            .switch_inst => {
+                // OpSwitch: Selector <Default> [<Case> <Target>]...
+                // result_id holds the selector value
+                const selector_id = resolved.result_id orelse return;
+                const default_id = self.operandId(resolved, 0);
+                const wc: u16 = 2 + 1 + @as(u16, @intCast(resolved.operands.len - 1));
+                try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.Switch)));
+                try self.emitWord(selector_id);
+                try self.emitWord(default_id);
+                // Case [literal, target] pairs
+                var i: usize = 1;
+                while (i < resolved.operands.len) : (i += 2) {
+                    try self.emitWord(self.operandValue(resolved.operands[i])); // literal
+                    try self.emitWord(self.operandValue(resolved.operands[i + 1])); // target label
+                }
+            },
             .ext_inst => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;

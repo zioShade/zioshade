@@ -259,6 +259,12 @@ const Analyzer = struct {
         return last_tag == .return_void or last_tag == .return_val or last_tag == .unreachable_inst;
     }
 
+    fn lastInstructionIsBranch(self: *Analyzer) bool {
+        if (self.instructions.items.len == 0) return false;
+        const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
+        return last_tag == .branch or last_tag == .branch_conditional or last_tag == .return_void or last_tag == .return_val or last_tag == .unreachable_inst;
+    }
+
     fn emitBranch(self: *Analyzer, target_id: u32) !void {
         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
         operands[0] = .{ .id = target_id };
@@ -954,44 +960,147 @@ const Analyzer = struct {
                 try self.emitBranchConditional(cond.id, then_label, if (has_else) else_label.? else merge_label);
 
                 try self.emitLabel(then_label);
-                const then_returned = if (node.data.children.len > 1) blk: {
+                const then_has_terminator = if (node.data.children.len > 1) blk: {
                     try self.analyzeStatement(node.data.children[1]);
-                    break :blk self.lastInstructionIsReturn();
+                    break :blk self.lastInstructionIsBranch();
                 } else false;
-                if (!then_returned) try self.emitBranch(merge_label);
+                const then_is_return = if (node.data.children.len > 1) self.lastInstructionIsReturn() else false;
+                if (!then_has_terminator) try self.emitBranch(merge_label);
 
                 if (has_else) {
                     try self.emitLabel(else_label.?);
-                    const else_returned = blk: {
+                    const else_has_terminator = blk: {
                         try self.analyzeStatement(node.data.children[2]);
-                        break :blk self.lastInstructionIsReturn();
+                        break :blk self.lastInstructionIsBranch();
                     };
-                    if (!else_returned) try self.emitBranch(merge_label);
-                }
+                    const else_is_return = self.lastInstructionIsReturn();
+                    if (!else_has_terminator) try self.emitBranch(merge_label);
 
-                const else_did_return = if (has_else) blk: {
-                    break :blk self.lastInstructionIsReturn();
-                } else false;
-                const all_branches_returned = then_returned and (!has_else or else_did_return);
-                if (all_branches_returned) {
-                    try self.emitLabel(merge_label);
-                    try self.instructions.append(self.alloc, .{
-                        .tag = .unreachable_inst,
-                        .result_type = null,
-                        .result_id = null,
-                        .operands = &.{},
-                        .ty = .void,
-                    });
-                } else {
-                    try self.emitLabel(merge_label);
+                    // Mark merge as unreachable only if BOTH branches returned
+                    if (then_is_return and else_is_return) {
+                        try self.emitLabel(merge_label);
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .unreachable_inst,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = &.{},
+                            .ty = .void,
+                        });
+                        return;
+                    }
                 }
+                try self.emitLabel(merge_label);
             },
             .switch_stmt => {
-                // Switch: parse and evaluate selector, but skip case bodies for now
-                // TODO: proper OpSwitch emission with case labels
-                if (node.data.children.len >= 1) {
-                    _ = try self.analyzeExpression(node.data.children[0]);
+                if (node.data.children.len < 2) return;
+
+                const merge_label = self.allocId();
+
+                // Evaluate selector
+                const selector = try self.analyzeExpression(node.data.children[0]);
+                var selector_id = selector.id;
+                if (selector.is_ptr) {
+                    const ld = self.allocId();
+                    const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    ops[0] = .{ .id = selector.id };
+                    try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = selector.ty });
+                    selector_id = ld;
                 }
+
+                const cases = node.data.children[1..];
+
+                // Build OpSwitch: allocate a label per case + default
+                // First, collect case values by evaluating case expressions
+                const CaseInfo = struct { value: ?i64, label: u32, body_idx: usize };
+                var case_infos = std.ArrayListUnmanaged(CaseInfo){};
+                defer case_infos.deinit(self.alloc);
+
+                for (cases, 0..) |case_node, ci| {
+                    const is_default = case_node.data.name.len > 0 and std.mem.eql(u8, case_node.data.name, "default");
+                    const label = self.allocId();
+                    var value: ?i64 = null;
+                    if (!is_default) {
+                        // Case value is stored as first child of the case block
+                        if (case_node.data.children.len > 0) {
+                            value = self.evalConstInt(case_node.data.children[0]) catch null;
+                        }
+                    }
+                    try case_infos.append(self.alloc, .{ .value = value, .label = label, .body_idx = ci });
+                }
+
+                const default_label = self.allocId();
+
+                // Push merge label for break statements
+                try self.loop_stack.append(self.alloc, .{
+                    .merge_label = merge_label,
+                    .continue_label = 0, // unused for switch
+                });
+
+                // Emit SelectionMerge + OpSwitch
+                try self.emitSelectionMerge(merge_label);
+
+                // Build OpSwitch operands
+                var switch_ops = std.ArrayListUnmanaged(ir.Instruction.Operand){};
+                defer switch_ops.deinit(self.alloc);
+
+                // Default target
+                const default_target = blk: {
+                    for (case_infos.items) |ci| {
+                        if (ci.value == null) break :blk ci.label;
+                    }
+                    break :blk default_label;
+                };
+                try switch_ops.append(self.alloc, .{ .id = default_target });
+
+                // Case targets: [literal, target] pairs
+                for (case_infos.items) |ci| {
+                    if (ci.value) |v| {
+                        try switch_ops.append(self.alloc, .{ .literal_int = @intCast(v) });
+                        try switch_ops.append(self.alloc, .{ .id = ci.label });
+                    }
+                }
+
+                try self.instructions.append(self.alloc, .{
+                    .tag = .switch_inst,
+                    .result_type = null,
+                    .result_id = selector_id,
+                    .operands = try switch_ops.toOwnedSlice(self.alloc),
+                    .ty = selector.ty,
+                });
+
+                // Emit case bodies with proper labels
+                for (case_infos.items, 0..) |ci, idx| {
+                    try self.emitLabel(ci.label);
+                    const case_node = cases[ci.body_idx];
+                    // Skip first child (case value expression), emit body statements
+                    const body_stmts = if (case_node.data.children.len > 0) case_node.data.children[1..] else case_node.data.children[0..0];
+                    for (body_stmts) |stmt| {
+                        self.analyzeStatement(stmt) catch {};
+                    }
+                    // Fall through to next case (or merge if last)
+                    // (break statements already branch to merge_label)
+                    if (!self.lastInstructionIsReturn() and !self.lastInstructionIsBranch()) {
+                        if (idx + 1 < case_infos.items.len) {
+                            // Fall through: branch to next case's label
+                            try self.emitBranch(case_infos.items[idx + 1].label);
+                        } else {
+                            try self.emitBranch(merge_label);
+                        }
+                    }
+                }
+
+                // Default label if no default case was found
+                var has_default = false;
+                for (case_infos.items) |ci| {
+                    if (ci.value == null) { has_default = true; break; }
+                }
+                if (!has_default) {
+                    try self.emitLabel(default_label);
+                    try self.emitBranch(merge_label);
+                }
+
+                try self.emitLabel(merge_label);
+                _ = self.loop_stack.pop();
             },
             .for_stmt => {
                 try self.pushScope();
@@ -1338,6 +1447,22 @@ const Analyzer = struct {
                 last_error_ctx = "invalid-assign";
                 return error.InvalidAssignment;
             },
+        }
+    }
+
+    fn evalConstInt(self: *Analyzer, node: ast.Node) Error!i64 {
+        switch (node.tag) {
+            .int_literal => {
+                return @intCast(node.data.int_val);
+            },
+            .uint_literal => {
+                return @intCast(node.data.int_val);
+            },
+            .group => {
+                if (node.data.children.len == 1) return self.evalConstInt(node.data.children[0]);
+                return error.SemanticFailed;
+            },
+            else => return error.SemanticFailed,
         }
     }
 
