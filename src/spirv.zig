@@ -26,6 +26,7 @@ pub const Op = enum(u16) {
     TypeRuntimeArray = 29,
     TypeStruct = 30,
     TypePointer = 32,
+    TypeForwardPointer = 39,
     TypeFunction = 33,
     ConstantTrue = 41,
     ConstantFalse = 42,
