@@ -39,6 +39,7 @@ pub fn generate(
         .constant_alias = .{},
         .emitted_func_types = .{},
         .layout_visited = .{},
+        .default_row_major = false,
         .ptr_storage_class = .{},
         .sampled_image_inner_id = 0,
         .sampled_image_3d_inner_id = 0,
@@ -124,6 +125,7 @@ const Codegen = struct {
     constant_alias: std.AutoHashMapUnmanaged(u32, u32), // IR result_id -> actual constant_id (dedup)
     emitted_func_types: std.AutoHashMapUnmanaged(u64, u32), // hash(ret+params) -> func_type_id
     layout_visited: std.AutoHashMapUnmanaged(u32, void), // struct type_ids currently being laid out (cycle detection)
+    default_row_major: bool, // current block-level matrix layout
     ptr_storage_class: std.AutoHashMapUnmanaged(u32, ir.SPIRVStorageClass), // result_id -> storage class for pointers
     sampled_image_inner_id: u32, // TypeImage (Sampled=1) for use with OpImage extraction
     sampled_image_3d_inner_id: u32,
@@ -1472,19 +1474,25 @@ const Codegen = struct {
                 // Check if this named type is used as a uniform/storage buffer global
                 var needs_block = false;
                 var block_is_std430 = false;
+                var block_row_major = false;
                 for (self.module.globals) |global| {
                     if (global.storage_class != .uniform and global.storage_class != .storage_buffer) continue;
                     if (global.ty != .named) continue;
                     if (!std.mem.eql(u8, global.ty.named, name)) continue;
                     needs_block = true;
-                    block_is_std430 = if (global.layout) |l| l.std430 else false;
+                    if (global.layout) |l| {
+                        block_is_std430 = l.std430;
+                        block_row_major = l.row_major;
+                    }
                     break;
                 }
                 // Buffer_reference types also need Block decoration
                 if (td.is_buffer_reference) needs_block = true;
                 if (needs_block) {
                     try self.emitDecorationSectionDecorateNoExtra(id, @intFromEnum(spirv.Decoration.block));
+                    self.default_row_major = block_row_major;
                     try self.emitNestedStructLayout(id, td.members, block_is_std430);
+                    self.default_row_major = false;
                 }
                 // If we emitted a forward pointer, now emit the actual pointer definition
                 if (self_ptr_id != 0) {
@@ -1891,9 +1899,9 @@ const Codegen = struct {
             .mat2, .mat2x2 => 2 * 16,
             .mat3, .mat3x3 => 3 * 16,
             .mat4, .mat4x4 => 4 * 16,
-            .mat2x3, .mat2x4 => 2 * 16,
-            .mat3x2, .mat3x4 => 3 * 16,
-            .mat4x2, .mat4x3 => 4 * 16,
+            .mat2x3, .mat2x4 => if (self.default_row_major) self.matrixRowCount(ty) * 16 else 2 * 16,
+            .mat3x2, .mat3x4 => if (self.default_row_major) self.matrixRowCount(ty) * 16 else 3 * 16,
+            .mat4x2, .mat4x3 => if (self.default_row_major) self.matrixRowCount(ty) * 16 else 4 * 16,
             .array => |arr| blk: {
                 const stride = self.layoutArrayStride(ty, is_std430);
                 break :blk stride * arr.size;
@@ -1946,7 +1954,7 @@ const Codegen = struct {
 
     /// Emit Offset/ColMajor/MatrixStride/ArrayStride for struct members, recursing into nested structs
     fn emitNestedStructLayout(self: *Codegen, struct_type_id: u32, members: []const ast.StructMember, is_std430: bool) !void {
-        try self.emitNestedStructLayoutInner(struct_type_id, members, is_std430, false);
+        try self.emitNestedStructLayoutInner(struct_type_id, members, is_std430, self.default_row_major);
     }
 
     fn emitNestedStructLayoutInner(self: *Codegen, struct_type_id: u32, members: []const ast.StructMember, is_std430: bool, parent_row_major: bool) !void {
@@ -1955,6 +1963,11 @@ const Codegen = struct {
         try self.emitted_struct_layout.put(self.alloc, struct_type_id, {});
         var offset: u32 = 0;
         for (members, 0..) |member, i| {
+            const member_is_row_major = if (member.layout) |l| l.row_major else parent_row_major;
+            // Temporarily set default_row_major for layoutSize/layoutArrayStride
+            const saved_row_major = self.default_row_major;
+            self.default_row_major = member_is_row_major;
+            defer self.default_row_major = saved_row_major;
             const alignment = self.layoutAlignment(member.ty, is_std430);
             offset = std.mem.alignForward(u32, offset, alignment);
             try self.emitDecorationSectionMemberDecorate(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.offset), offset);
@@ -1963,14 +1976,33 @@ const Codegen = struct {
             // RowMajor/ColMajor + MatrixStride for matrix members (direct or element of array)
             var effective_ty = member.ty;
             while (effective_ty == .array) effective_ty = effective_ty.array.base.*;
-            const member_is_row_major = if (member.layout) |l| l.row_major else parent_row_major;
             if (self.isMatrixType(effective_ty)) {
                 if (member_is_row_major) {
                     try self.emitDecorationSectionMemberDecorateNoExtra(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.row_major));
                 } else {
                     try self.emitDecorationSectionMemberDecorateNoExtra(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.col_major));
                 }
-                try self.emitDecorationSectionMemberDecorate(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.matrix_stride), 16);
+                // MatrixStride: the stride between columns (col_major) or rows (row_major)
+                const mat_stride: u32 = if (member_is_row_major) blk: {
+                    // RowMajor: stride = alignment of vec<column_count>
+                    const cols = self.matrixColumnCount(effective_ty);
+                    break :blk if (is_std430) switch (cols) {
+                        2 => 8,
+                        3 => 16,
+                        4 => 16,
+                        else => 16,
+                    } else 16; // std140 always vec4-aligned
+                } else blk: {
+                    // ColMajor: stride = alignment of vec<row_count>
+                    const rows = self.matrixRowCount(effective_ty);
+                    break :blk if (is_std430) switch (rows) {
+                        2 => 8,
+                        3 => 16,
+                        4 => 16,
+                        else => 16,
+                    } else 16; // std140 always vec4-aligned
+                };
+                try self.emitDecorationSectionMemberDecorate(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.matrix_stride), mat_stride);
             }
             // ArrayStride for array members (all nesting levels)
             if (member.ty == .array) {
@@ -2030,6 +2062,22 @@ const Codegen = struct {
         if (arr.base.* == .array) {
             try self.emitArrayStrideRecursive(arr.base.*, is_std430);
         }
+    }
+
+    fn matrixRowCount(self: *Codegen, ty: ast.Type) u32 {
+        _ = self;
+        return switch (ty) {
+            .mat2, .mat2x2 => 2,
+            .mat2x3 => 3,
+            .mat2x4 => 4,
+            .mat3, .mat3x2 => 2,
+            .mat3x3 => 3,
+            .mat3x4 => 4,
+            .mat4, .mat4x2 => 2,
+            .mat4x3 => 3,
+            .mat4x4 => 4,
+            else => 0,
+        };
     }
 
     fn matrixColumnCount(self: *Codegen, ty: ast.Type) u32 {
