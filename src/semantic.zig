@@ -2904,6 +2904,43 @@ const Analyzer = struct {
                 const result_ty = node.data.ty orelse .void;
                 const result_id = self.allocId();
 
+                // Handle buffer_reference pointer → uvec2 bitcast
+                // The argument should be the PhysicalStorageBuffer pointer, not the loaded struct
+                if (arg_tids.items.len == 1 and result_ty == .uvec2) {
+                    const arg_ty = arg_tids.items[0].ty;
+                    if (arg_ty == .named) {
+                        const td = self.types.get(arg_ty.named);
+                        if (td != null and td.?.is_buffer_reference) {
+                            // Find the original pointer (before the load)
+                            // We need to walk back to find the access chain result
+                            // For now, emit bitcast from the loaded pointer
+                            // The arg was loaded from a PhysicalStorageBuffer pointer,
+                            // so we need to use the pointer ID, not the loaded value
+                            // Hack: look for the last load instruction and use its operand
+                            var ptr_id: u32 = arg_tids.items[0].id;
+                            if (self.instructions.items.len > 0) {
+                                const last = &self.instructions.items[self.instructions.items.len - 1];
+                                if (last.tag == .load and last.result_id == arg_tids.items[0].id and last.operands.len > 0) {
+                                    switch (last.operands[0]) {
+                                        .id => |v| ptr_id = v,
+                                        else => {},
+                                    }
+                                    _ = self.instructions.pop();
+                                }
+                            }
+                            const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            ops[0] = .{ .id = ptr_id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .bitcast,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = ops,
+                                .ty = result_ty,
+                            });
+                            return .{ .ty = result_ty, .id = result_id };
+                        }
+                    }
+                }
                 // Handle scalar-from-vector: float(vec4) → extract first component
                 // This handles the case where .x swizzle was silently dropped
                 if (arg_tids.items.len == 1 and !result_ty.isVector() and !result_ty.isMatrix()) {
