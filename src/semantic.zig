@@ -437,6 +437,12 @@ const Analyzer = struct {
         try self.declare("dFdx", .{ .kind = .func, .ty = .float, .ir_id = 0 });
         try self.declare("dFdy", .{ .kind = .func, .ty = .float, .ir_id = 0 });
         try self.declare("fwidth", .{ .kind = .func, .ty = .float, .ir_id = 0 });
+        try self.declare("dFdxFine", .{ .kind = .func, .ty = .float, .ir_id = 0 });
+        try self.declare("dFdyFine", .{ .kind = .func, .ty = .float, .ir_id = 0 });
+        try self.declare("fwidthFine", .{ .kind = .func, .ty = .float, .ir_id = 0 });
+        try self.declare("dFdxCoarse", .{ .kind = .func, .ty = .float, .ir_id = 0 });
+        try self.declare("dFdyCoarse", .{ .kind = .func, .ty = .float, .ir_id = 0 });
+        try self.declare("fwidthCoarse", .{ .kind = .func, .ty = .float, .ir_id = 0 });
     }
 
 
@@ -2723,11 +2729,18 @@ const Analyzer = struct {
                             .operands = operands,
                             .ty = result_ty,
                         });
-                    } else if (std.mem.eql(u8, node.data.name, "dFdx") or std.mem.eql(u8, node.data.name, "dFdy")) {
-                        // Derivatives: OpDPdx/OpDPdy (core SPIR-V)
-                        const is_dx = std.mem.eql(u8, node.data.name, "dFdx");
+                    } else if (std.mem.eql(u8, node.data.name, "dFdx") or std.mem.eql(u8, node.data.name, "dFdy") or
+                              std.mem.eql(u8, node.data.name, "dFdxFine") or std.mem.eql(u8, node.data.name, "dFdyFine") or
+                              std.mem.eql(u8, node.data.name, "dFdxCoarse") or std.mem.eql(u8, node.data.name, "dFdyCoarse")) {
+                        // Derivatives: OpDPdx/OpDPdy and Fine/Coarse variants (core SPIR-V)
+                        const which: u32 = if (std.mem.eql(u8, node.data.name, "dFdx")) 0
+                            else if (std.mem.eql(u8, node.data.name, "dFdy")) 1
+                            else if (std.mem.eql(u8, node.data.name, "dFdxFine")) 2
+                            else if (std.mem.eql(u8, node.data.name, "dFdyFine")) 3
+                            else if (std.mem.eql(u8, node.data.name, "dFdxCoarse")) 4
+                            else 5; // dFdyCoarse
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
-                        operands[0] = .{ .literal_int = if (is_dx) 0 else 1 }; // 0=DPdx, 1=DPdy
+                        operands[0] = .{ .literal_int = which };
                         for (arg_tids.items, 1..) |tid, i| {
                             operands[i] = .{ .id = tid.id };
                         }
@@ -2738,11 +2751,15 @@ const Analyzer = struct {
                             .operands = operands,
                             .ty = result_ty,
                         });
-                    } else if (std.mem.eql(u8, node.data.name, "fwidth")) {
-                        // fwidth(p) = abs(dFdx(p)) + abs(dFdy(p)) → OpFwidth (opcode 209)
-                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                    } else if (std.mem.eql(u8, node.data.name, "fwidth") or std.mem.eql(u8, node.data.name, "fwidthFine") or std.mem.eql(u8, node.data.name, "fwidthCoarse")) {
+                        // fwidth(p) = abs(dFdx(p)) + abs(dFdy(p)) → OpFwidth / OpFwidthFine / OpFwidthCoarse
+                        const which: u32 = if (std.mem.eql(u8, node.data.name, "fwidth")) 0
+                            else if (std.mem.eql(u8, node.data.name, "fwidthFine")) 1
+                            else 2;
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
+                        operands[0] = .{ .literal_int = which };
                         for (arg_tids.items, 0..) |tid, i| {
-                            operands[i] = .{ .id = tid.id };
+                            operands[i + 1] = .{ .id = tid.id };
                         }
                         try self.instructions.append(self.alloc, .{
                             .tag = .fwidth,
@@ -4001,7 +4018,7 @@ const Analyzer = struct {
             "tan", "tanh", "transpose", "trunc",
             "texture", "texture2D", "textureLod", "textureProj", "texelFetch",
             "textureQueryLevels",
-            "dFdx", "dFdy", "fwidth",
+            "dFdx", "dFdy", "fwidth", "dFdxFine", "dFdyFine", "fwidthFine", "dFdxCoarse", "dFdyCoarse", "fwidthCoarse",
             "isnan", "isinf",
             // Additional GLSL builtins
             "inverse", "outerProduct",
@@ -4200,7 +4217,9 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "dot"))
             return null;
         // dFdx/dFdy are core SPIR-V ops (DPdx/DPdy), not GLSL.std.450
-        if (std.mem.eql(u8, name, "dFdx") or std.mem.eql(u8, name, "dFdy") or std.mem.eql(u8, name, "fwidth"))
+        if (std.mem.eql(u8, name, "dFdx") or std.mem.eql(u8, name, "dFdy") or std.mem.eql(u8, name, "fwidth") or
+            std.mem.eql(u8, name, "dFdxFine") or std.mem.eql(u8, name, "dFdyFine") or std.mem.eql(u8, name, "fwidthFine") or
+            std.mem.eql(u8, name, "dFdxCoarse") or std.mem.eql(u8, name, "dFdyCoarse") or std.mem.eql(u8, name, "fwidthCoarse"))
             return null;
         // isnan/isinf are core SPIR-V ops (OpIsNan/OpIsInf), not GLSL.std.450
         if (std.mem.eql(u8, name, "isnan") or std.mem.eql(u8, name, "isinf"))

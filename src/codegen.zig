@@ -222,6 +222,7 @@ const Codegen = struct {
         var has_image_query = false;
         var has_sampler1d = false;
         var has_sampler_buffer = false;
+        var has_derivative_control = false;
         var has_cube_array = false;
         var has_sampler2d_ms_array = false;
 
@@ -231,6 +232,14 @@ const Codegen = struct {
                     .image_query_size, .image_query_size_lod,
                     .image_query_levels, .image_query_samples,
                     => has_image_query = true,
+                    .derivative => has_derivative_control = true,
+                    .fwidth => {
+                        if (inst.operands.len > 1) {
+                            if (inst.operands[0] == .literal_int and inst.operands[0].literal_int >= 1) {
+                                has_derivative_control = true;
+                            }
+                        }
+                    },
                     else => {},
                 }
             }
@@ -266,6 +275,10 @@ const Codegen = struct {
             try self.emitWord(@intFromEnum(spirv.Capability.sampled_buffer));
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.image_buffer));
+        }
+        if (has_derivative_control) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.derivative_control));
         }
         if (has_sampler2d_ms_array) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
@@ -3175,7 +3188,15 @@ const Codegen = struct {
                 const result_id = resolved.result_id orelse return;
                 const val_id = self.operandId(resolved, 1);
                 const which = self.operandInt(resolved, 0);
-                const opcode: u16 = if (which == 0) @intFromEnum(spirv.Op.DPdx) else @intFromEnum(spirv.Op.DPdy);
+                const opcode: u16 = switch (which) {
+                    0 => @intFromEnum(spirv.Op.DPdx),
+                    1 => @intFromEnum(spirv.Op.DPdy),
+                    2 => @intFromEnum(spirv.Op.DPdxFine),
+                    3 => @intFromEnum(spirv.Op.DPdyFine),
+                    4 => @intFromEnum(spirv.Op.DPdxCoarse),
+                    5 => @intFromEnum(spirv.Op.DPdyCoarse),
+                    else => @intFromEnum(spirv.Op.DPdx),
+                };
                 try self.emitWord(spirv.encodeInstructionHeader(4, opcode));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
@@ -3184,8 +3205,16 @@ const Codegen = struct {
             .fwidth => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
-                const val_id = self.operandId(resolved, 0);
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Fwidth)));
+                // Check if first operand is literal_int (new format) or id (old format)
+                const has_which = resolved.operands.len > 1 and resolved.operands[0] == .literal_int;
+                const which: u32 = if (has_which) self.operandInt(resolved, 0) else 0;
+                const val_id = if (has_which) self.operandId(resolved, 1) else self.operandId(resolved, 0);
+                const opcode: u16 = switch (which) {
+                    1 => @intFromEnum(spirv.Op.FwidthFine),
+                    2 => @intFromEnum(spirv.Op.FwidthCoarse),
+                    else => @intFromEnum(spirv.Op.Fwidth),
+                };
+                try self.emitWord(spirv.encodeInstructionHeader(4, opcode));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(val_id);
