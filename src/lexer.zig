@@ -692,7 +692,7 @@ const Tokenizer = struct {
         }
 
         // Check for float suffix
-        if (self.offset < self.source.len and (self.source[self.offset] == 'f' or self.source[self.offset] == 'F')) {
+        if (has_digit and self.offset < self.source.len and (self.source[self.offset] == 'f' or self.source[self.offset] == 'F')) {
             self.offset += 1;
         }
 
@@ -701,10 +701,11 @@ const Tokenizer = struct {
             self.offset += 1;
         }
 
-        if (has_digit or has_dot) {
+        if (has_digit) {
             return self.offset - start;
         }
 
+        // Not a valid number (e.g., lone '.' without digits)
         self.offset = start;
         return null;
     }
