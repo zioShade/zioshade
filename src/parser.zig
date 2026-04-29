@@ -1484,7 +1484,27 @@ const Parser = struct {
             .kw_mat4x2, .kw_mat4x3, .kw_mat4x4,
             .kw_float, .kw_int, .kw_uint, .kw_bool,
             => {
-                const ty = self.tryType().?;
+                var ty = self.tryType().?;
+                // Handle array constructors: float[](1.0, 2.0, ...), vec4[](...)
+                if (self.current().tag == .l_bracket) {
+                    _ = self.advance(); // [
+                    if (self.current().tag == .r_bracket) {
+                        _ = self.advance(); // ]
+                        // Unsized array constructor: base_type[](...)
+                        const arr_base = try self.alloc.create(ast.Type);
+                        arr_base.* = ty;
+                        ty = .{ .array = .{ .base = arr_base, .size = 0 } };
+                    } else {
+                        // Sized array type: base_type[N]
+                        const size_tok = self.current();
+                        _ = self.advance(); // size
+                        _ = self.expect(.r_bracket) catch {};
+                        const size_val = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                        const arr_base = try self.alloc.create(ast.Type);
+                        arr_base.* = ty;
+                        ty = .{ .array = .{ .base = arr_base, .size = size_val } };
+                    }
+                }
                 _ = self.expect(.l_paren) catch return .{
                     .tag = .type_constructor,
                     .loc = self.nodeLoc(tok),

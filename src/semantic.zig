@@ -3168,7 +3168,13 @@ const Analyzer = struct {
                     }
                     try arg_tids.append(self.alloc, tid);
                 }
-                const result_ty = node.data.ty orelse .void;
+                const result_ty_raw = node.data.ty orelse .void;
+                // For array constructors with unsized type, compute actual size from arguments
+                const result_ty: ast.Type = if (result_ty_raw == .array and result_ty_raw.array.size == 0 and arg_tids.items.len > 0) blk: {
+                    const arr_base = try self.alloc.create(ast.Type);
+                    arr_base.* = result_ty_raw.array.base.*;
+                    break :blk .{ .array = .{ .base = arr_base, .size = @intCast(arg_tids.items.len) } };
+                } else result_ty_raw;
                 const result_id = self.allocId();
 
                 // Handle buffer_reference pointer → uvec2 bitcast
@@ -4011,10 +4017,14 @@ const Analyzer = struct {
     }
 
     fn typesCompatible(self: *Analyzer, target: ast.Type, source: ast.Type) bool {
-        _ = self;
         // For named types, compare by content
         if (target == .named and source == .named) {
             return std.mem.eql(u8, target.named, source.named);
+        }
+        // For array types, compare size and base element type recursively
+        if (target == .array and source == .array) {
+            if (target.array.size != source.array.size) return false;
+            return self.typesCompatible(target.array.base.*, source.array.base.*);
         }
         if (std.meta.eql(target, source)) return true;
         if (target == .float and source.isScalar()) return true;
