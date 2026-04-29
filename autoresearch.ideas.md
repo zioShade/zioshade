@@ -43,6 +43,10 @@
 - ✅ SSA variable un-SSA for for-loops: force materialize all SSA vars before loop header
 - ✅ if-else dead code: save/restore has_returned to prevent if-body return from suppressing else-body
 - ✅ for-loop-init.frag: 10/10 stores matching glslang (was 6/10)
+- ✅ Coarse/fine derivative functions: dFdxCoarse/dFdyCoarse/fwidthCoarse/dFdxFine/dFdyFine/fwidthFine
+- ✅ DerivativeControl capability: value=51 (was incorrectly 28)
+- ✅ SPIR-V capability enum fixes: sampled_image_array_dynamic_indexing=29, image_cube_array=34, sample_rate_shading=35, int64=11
+- ✅ textureQueryLod support (OpImageQueryLod opcode 105)
 
 ### TIER 1 - Correctness improvements (beyond spirv-val):
 - **ConstOffset for textureLodOffset/texelFetchOffset**: Requires emitting offsets as OpConstantComposite (compile-time constants) instead of OpCompositeConstruct (runtime). Currently offsets are dropped.
