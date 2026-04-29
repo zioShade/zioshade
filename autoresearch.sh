@@ -8,7 +8,7 @@ GLSLANG="C:/VulkanSDK/1.4.341.1/Bin/glslangValidator.exe"
 # Build runner
 echo "Building..." >&2
 mkdir -p .zig-cache/bin
-timeout 120 zig build-exe -ODebug --dep glslpp -Mroot=tests/runner.zig -Mglslpp=src/root.zig --cache-dir .zig-cache -femit-bin=.zig-cache/bin/conformance-runner.exe 2>/dev/null || true
+timeout 120 zig build-exe -OReleaseSafe --dep glslpp -Mroot=tests/runner.zig -Mglslpp=src/root.zig --cache-dir .zig-cache -femit-bin=.zig-cache/bin/conformance-runner.exe 2>/dev/null || true
 RUNNER=.zig-cache/bin/conformance-runner.exe
 if [ ! -f "$RUNNER" ]; then echo "ERROR: no runner"; echo "METRIC total_pass=0"; exit 0; fi
 echo "Runner: $RUNNER" >&2
