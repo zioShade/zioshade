@@ -244,6 +244,54 @@ const Analyzer = struct {
         scope.deinit(self.alloc);
     }
 
+    /// Force un-SSA all SSA variables in the current (innermost) scope.
+    fn unssaCurrentScope(self: *Analyzer) !void {
+        if (self.scopes.items.len == 0) return;
+        const scope = &self.scopes.items[self.scopes.items.len - 1];
+        try self.unssaScope(scope);
+    }
+
+    /// Force un-SSA all SSA variables in ALL scopes.
+    fn unssaAllScopes(self: *Analyzer) !void {
+        for (self.scopes.items) |*scope| {
+            try self.unssaScope(scope);
+        }
+    }
+
+    fn unssaScope(self: *Analyzer, scope: *Scope) !void {
+        var it = scope.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.*.kind == .var_sym and entry.value_ptr.*.is_ssa) {
+                const sym = entry.value_ptr.*;
+                const var_id = self.allocId();
+                const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                sc_operands[0] = .{ .literal_int = 7 }; // Function storage class
+                try self.instructions.append(self.alloc, .{
+                    .tag = .local_variable,
+                    .result_type = null,
+                    .result_id = var_id,
+                    .operands = sc_operands,
+                    .ty = sym.ty,
+                });
+                if (sym.init_value) |init_val| {
+                    const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                    store_ops[0] = .{ .id = var_id };
+                    store_ops[1] = .{ .id = init_val };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .store,
+                        .result_type = null,
+                        .result_id = null,
+                        .operands = store_ops,
+                        .ty = .void,
+                    });
+                }
+                entry.value_ptr.*.ir_id = var_id;
+                entry.value_ptr.*.is_ssa = false;
+                entry.value_ptr.*.init_value = null;
+            }
+        }
+    }
+
     fn emitLabel(self: *Analyzer, label_id: u32) !void {
         try self.instructions.append(self.alloc, .{
             .tag = .label,
@@ -959,21 +1007,26 @@ const Analyzer = struct {
                 try self.emitSelectionMerge(merge_label);
                 try self.emitBranchConditional(cond.id, then_label, if (has_else) else_label.? else merge_label);
 
+                // Save has_returned — it might be set by then/else branches
+                const saved_has_returned = self.has_returned;
+                self.has_returned = false;
+
                 try self.emitLabel(then_label);
                 const then_has_terminator = if (node.data.children.len > 1) blk: {
                     try self.analyzeStatement(node.data.children[1]);
                     break :blk self.lastInstructionIsBranch();
                 } else false;
-                const then_is_return = if (node.data.children.len > 1) self.lastInstructionIsReturn() else false;
+                const then_is_return = self.has_returned;
                 if (!then_has_terminator) try self.emitBranch(merge_label);
 
                 if (has_else) {
+                    self.has_returned = false;
                     try self.emitLabel(else_label.?);
                     const else_has_terminator = blk: {
                         try self.analyzeStatement(node.data.children[2]);
                         break :blk self.lastInstructionIsBranch();
                     };
-                    const else_is_return = self.lastInstructionIsReturn();
+                    const else_is_return = self.has_returned;
                     if (!else_has_terminator) try self.emitBranch(merge_label);
 
                     // Mark merge as unreachable only if BOTH branches returned
@@ -986,7 +1039,23 @@ const Analyzer = struct {
                             .operands = &.{},
                             .ty = .void,
                         });
+                        self.has_returned = true;
                         return;
+                    }
+                    // Restore: only set has_returned if both branches returned
+                    if (then_is_return and else_is_return) {
+                        self.has_returned = true;
+                    } else {
+                        self.has_returned = saved_has_returned;
+                    }
+                } else {
+                    // No else: if then returned, code after if might still execute (it shouldn't, but
+                    // we don't know statically). Restore has_returned only if then returned AND
+                    // there's no fallthrough path.
+                    if (then_is_return) {
+                        self.has_returned = saved_has_returned;
+                    } else {
+                        self.has_returned = saved_has_returned;
                     }
                 }
                 try self.emitLabel(merge_label);
@@ -1117,6 +1186,11 @@ const Analyzer = struct {
 
                 // Init
                 if (has_init) try self.analyzeStatement(children[0]);
+
+                // Force un-SSA any variables in ALL scopes.
+                // This ensures loop conditions/updates see variable loads, not init constants.
+                // We need to un-SSA parent scope vars too (e.g., int k = 0; for (; k < 20; k++))
+                try self.unssaAllScopes();
 
                 try self.emitBranch(header_label);
 
