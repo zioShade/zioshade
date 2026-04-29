@@ -147,6 +147,7 @@ pub const Op = enum(u16) {
     SubgroupAllEqualKHR = 4430,
     LoopMerge = 246,
     SelectionMerge = 247,
+    Switch = 251,
     Label = 248,
     Branch = 249,
     BranchConditional = 250,

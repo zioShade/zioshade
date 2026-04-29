@@ -171,6 +171,7 @@ pub const Instruction = struct {
         label,
         loop_merge,
         selection_merge,
+        switch_inst,
         compare_eq,
         compare_neq,
         compare_lt,
