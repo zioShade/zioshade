@@ -30,9 +30,11 @@
 - ✅ OpMemberDecorate NonWritable/NonReadable on block struct member 0 for readonly/writeonly SSBOs
 - ✅ Coherent/Restrict/Volatile decorations for SSBO and image variables
 - ✅ Invariant (18) decoration for invariant-qualified output variables
+- ✅ UniformConstant storage class for sampler/image variables (was Uniform)
+- ✅ For-loop empty init/condition/update fix: parser always emits 4 children
+- ✅ Comma-separated variable declarations via multi_decl AST tag (no scope push/pop)
 
 ### TIER 1 - Correctness improvements (beyond spirv-val):
-- **Comma-separated declarations**: `int i = 1, j = 4;` fails silently. Parser now handles it (multi_decl tag) but exposes a for-loop condition bug: when a for-loop has empty init (`for (; k < 20; k++)`) preceded by a variable decl statement, the init/condition/update children get shifted. Root cause: `parseBlock` sees `int k = 0;` as a statement before the `for`, but the for's `parseStatement()` for init sees `;` and skips it. The actual bug is that the second for-loop in for-loop-init.frag has a non-boolean condition — the loop condition `k < 20` is not being emitted, and instead the variable value is used as the branch condition. Need to investigate the for-loop init/condition/update child indexing.
 - **Type aliasing for std140/std430**: When the same struct is used in both std140 and std430 blocks, glslang creates separate type aliases (Content vs Content_0) with different offset decorations. We use a single type, so offsets can only be correct for one layout. Requires significant change to emitType system.
 - **Fix GPA memory leaks**: ~90 files leak parser/semantic allocations (dupeNodes is #1 source). Would make Debug builds reliable.
 - **UniformConstant for images/samplers**: We emit images with Uniform storage class; should be UniformConstant. This works but differs from glslang.
