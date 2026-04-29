@@ -771,7 +771,7 @@ const Parser = struct {
             }
         }
         // const type identifier ...
-        if (cur == .kw_const and isTypeKeyword(nxt)) {
+        if (cur == .kw_const and (isTypeKeyword(nxt) or nxt == .identifier)) {
             return self.parseLocalVarDecl();
         }
 
@@ -812,7 +812,15 @@ const Parser = struct {
 
     fn parseLocalVarDecl(self: *Parser) Error!ast.Node {
         const qualifier = self.tryQualifier();
-        var ty = self.tryType() orelse return error.UnexpectedToken;
+        var ty = self.tryType() orelse blk: {
+            // Try identifier-based type (struct name)
+            if (self.current().tag == .identifier) {
+                const name = self.text(self.current());
+                _ = self.advance();
+                break :blk ast.Type{ .named = name };
+            }
+            return error.UnexpectedToken;
+        };
         const name_tok = self.current();
         if (name_tok.tag != .identifier) return error.UnexpectedToken;
         _ = self.advance();
@@ -1442,6 +1450,41 @@ const Parser = struct {
             },
             .identifier => {
                 _ = self.advance();
+                // Handle struct array constructors: StructName[](args...)
+                // Check if pattern is Identifier[]...( where [] repeats
+                if (self.current().tag == .l_bracket and self.peek().tag == .r_bracket) {
+                    // Looks like StructName[] pattern — consume all [] pairs
+                    const base_name = self.text(tok);
+                    var ty: ast.Type = .{ .named = base_name };
+                    var dim_count: usize = 0;
+                    while (self.current().tag == .l_bracket and self.peek().tag == .r_bracket) {
+                        _ = self.advance(); // [
+                        _ = self.advance(); // ]
+                        const arr_base = try self.alloc.create(ast.Type);
+                        arr_base.* = ty;
+                        ty = .{ .array = .{ .base = arr_base, .size = 0 } };
+                        dim_count += 1;
+                    }
+                    if (self.current().tag == .l_paren and dim_count > 0) {
+                        // StructName[]...(args...) — struct array constructor
+                        _ = self.advance(); // (
+                        var args = std.ArrayListUnmanaged(ast.Node){};
+                        defer args.deinit(self.alloc);
+                        while (self.current().tag != .r_paren and self.current().tag != .eof) {
+                            try args.append(self.alloc, try self.parseExpression());
+                            if (self.current().tag == .comma) _ = self.advance();
+                        }
+                        _ = self.expect(.r_paren) catch {};
+                        return .{
+                            .tag = .type_constructor,
+                            .loc = self.nodeLoc(tok),
+                            .data = .{ .ty = ty, .children = try args.toOwnedSlice(self.alloc) },
+                        };
+                    }
+                    // Not followed by (, backtrack not easy — but this shouldn't happen for valid GLSL
+                    // Return identifier anyway, the [] was probably array indexing but we already consumed them
+                    // This is a known limitation: arr[] is not valid GLSL anyway
+                }
                 if (self.current().tag == .l_paren) {
                     _ = self.advance();
                     var args = std.ArrayListUnmanaged(ast.Node){};
@@ -1485,8 +1528,8 @@ const Parser = struct {
             .kw_float, .kw_int, .kw_uint, .kw_bool,
             => {
                 var ty = self.tryType().?;
-                // Handle array constructors: float[](1.0, 2.0, ...), vec4[](...)
-                if (self.current().tag == .l_bracket) {
+                // Handle array constructors: float[](1.0, 2.0, ...), vec4[](...), vec4[][](...)
+                while (self.current().tag == .l_bracket) {
                     _ = self.advance(); // [
                     if (self.current().tag == .r_bracket) {
                         _ = self.advance(); // ]
