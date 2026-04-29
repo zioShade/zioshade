@@ -846,9 +846,11 @@ const Parser = struct {
             _ = self.advance();
             try init_nodes.append(self.alloc, try self.parseExpression());
         }
-        _ = try self.expect(.semicolon);
 
-        return .{
+        // Handle comma-separated declarations: int i = 1, j = 4;
+        var decl_children = std.ArrayListUnmanaged(ast.Node){};
+        defer decl_children.deinit(self.alloc);
+        try decl_children.append(self.alloc, .{
             .tag = .var_decl,
             .loc = self.nodeLoc(name_tok),
             .data = .{
@@ -857,6 +859,39 @@ const Parser = struct {
                 .children = try init_nodes.toOwnedSlice(self.alloc),
                 .qualifier = qualifier,
             },
+        });
+        while (self.current().tag == .comma) {
+            _ = self.advance(); // consume ','
+            const next_name = self.current();
+            if (next_name.tag != .identifier) break;
+            _ = self.advance();
+            var next_init = std.ArrayListUnmanaged(ast.Node){};
+            defer next_init.deinit(self.alloc);
+            if (self.current().tag == .eq) {
+                _ = self.advance();
+                try next_init.append(self.alloc, try self.parseExpression());
+            }
+            try decl_children.append(self.alloc, .{
+                .tag = .var_decl,
+                .loc = self.nodeLoc(next_name),
+                .data = .{
+                    .name = self.text(next_name),
+                    .ty = ty,
+                    .children = try next_init.toOwnedSlice(self.alloc),
+                    .qualifier = qualifier,
+                },
+            });
+        }
+
+        _ = try self.expect(.semicolon);
+
+        if (decl_children.items.len == 1) {
+            return decl_children.items[0];
+        }
+        return .{
+            .tag = .multi_decl,
+            .loc = self.nodeLoc(name_tok),
+            .data = .{ .children = try decl_children.toOwnedSlice(self.alloc) },
         };
     }
 
