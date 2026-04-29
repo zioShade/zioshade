@@ -313,6 +313,8 @@ const Parser = struct {
                     layout.std430 = true;
                 } else if (std.mem.eql(u8, ident_text, "push_constant")) {
                     layout.push_constant = true;
+                } else if (std.mem.eql(u8, ident_text, "buffer_reference")) {
+                    layout.buffer_reference = true;
                 } else if (self.current().tag == .eq) {
                     _ = self.advance();
                     const val_text = self.text(self.current());

@@ -70,6 +70,7 @@ pub const TypeDef = struct {
     name: []const u8,
     members: []const ast.StructMember,
     size_bytes: u32,
+    is_buffer_reference: bool = false,
 };
 
 pub const Instruction = struct {
@@ -215,6 +216,7 @@ pub const SPIRVStorageClass = enum(u32) {
     function = 7,
     push_constant = 9,
     workgroup = 4,
+    physical_storage_buffer = 5349,
     storage_buffer = 12,
     image = 11,
 };

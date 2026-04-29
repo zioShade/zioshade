@@ -530,14 +530,25 @@ const Analyzer = struct {
 
                 // Register the block as a struct type
                 const members = try self.alloc.dupe(ast.StructMember, node.data.members);
+                const has_buffer_ref = if (node.data.layout) |l| l.buffer_reference else false;
                 const td = ir.TypeDef{
                     .name = name,
                     .members = members,
                     .size_bytes = 0,
+                    .is_buffer_reference = has_buffer_ref,
                 };
                 const owned_name = try self.alloc.dupe(u8, name);
                 try self.types.put(self.alloc, owned_name, td);
 
+                // For buffer_reference blocks, just register the type — no global variable
+                if (has_buffer_ref) {
+                    // Declare the type name so it can be used as a member type
+                    try self.declare(name, .{
+                        .kind = .type_sym,
+                        .ty = .{ .named = name },
+                        .ir_id = 0, // No global variable for buffer_reference types
+                    });
+                } else {
                 // Create a global variable for the block
                 const ir_id = self.allocId();
                 // Use instance name for the global variable if present
@@ -573,6 +584,7 @@ const Analyzer = struct {
                         .member_index = @intCast(idx),
                     });
                 }
+                } // end if !buffer_reference
             },
             .struct_decl => {
                 const name = node.data.name;

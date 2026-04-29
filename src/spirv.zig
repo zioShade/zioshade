@@ -166,6 +166,8 @@ pub const Capability = enum(u32) {
     image_buffer = 47,
     image_ms_array = 48,
     storage_image_multisample = 27,
+    physical_storage_buffer_addresses = 5347,
+    int64 = 34,
     subgroup_vote_khr = 4431,
     image_1d = 44,
     atomic_float32_add_ext = 6033,
@@ -216,7 +218,14 @@ pub const StorageClass = enum(u32) {
     Function = 7,
     Generic = 8,
     PushConstant = 9,
+    PhysicalStorageBuffer = 5349,
     StorageBuffer = 12,
+    _,
+};
+
+pub const AddressingModel = enum(u32) {
+    Logical = 0,
+    PhysicalStorageBuffer64 = 5348,
     _,
 };
 

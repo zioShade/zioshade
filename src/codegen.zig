@@ -285,6 +285,13 @@ const Codegen = struct {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.atomic_float32_add_ext));
         }
+        if (self.hasBufferReference()) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.physical_storage_buffer_addresses));
+            // Int64 capability is required for 64-bit buffer pointers
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.int64));
+        }
     }
 
     fn emitExtensions(self: *Codegen) !void {
@@ -341,6 +348,22 @@ const Codegen = struct {
             for (ext_words) |w| try self.emitWord(w);
             self.alloc.free(ext_words);
         }
+        // Emit SPV_KHR_physical_storage_buffer extension for buffer_reference
+        if (self.hasBufferReference()) {
+            const ext_name2 = "SPV_KHR_physical_storage_buffer";
+            const ext_word_count2: u16 = 1 + @as(u16, @intCast(std.math.divCeil(usize, ext_name2.len + 1, 4) catch unreachable));
+            try self.emitWord(spirv.encodeInstructionHeader(ext_word_count2, @intFromEnum(spirv.Op.Extension)));
+            const num_words2 = std.math.divCeil(usize, ext_name2.len + 1, 4) catch unreachable;
+            const ext_words2 = try self.alloc.alloc(u32, num_words2);
+            @memset(ext_words2, 0);
+            for (ext_name2, 0..) |byte, idx| {
+                const word_idx = idx / 4;
+                const byte_idx = idx % 4;
+                ext_words2[word_idx] |= @as(u32, byte) << @intCast(byte_idx * 8);
+            }
+            for (ext_words2) |w| try self.emitWord(w);
+            self.alloc.free(ext_words2);
+        }
     }
 
     fn emitExtInstImport(self: *Codegen) !void {
@@ -353,9 +376,21 @@ const Codegen = struct {
         try self.emitStringLiteral(name);
     }
 
+    fn hasBufferReference(self: *Codegen) bool {
+        var it = self.module.types.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.is_buffer_reference) return true;
+        }
+        return false;
+    }
+
     fn emitMemoryModel(self: *Codegen) !void {
         try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.MemoryModel)));
-        try self.emitWord(0); // Logical
+        if (self.hasBufferReference()) {
+            try self.emitWord(@intFromEnum(spirv.AddressingModel.PhysicalStorageBuffer64));
+        } else {
+            try self.emitWord(0); // Logical
+        }
         try self.emitWord(1); // GLSL450
     }
 
@@ -1244,6 +1279,35 @@ const Codegen = struct {
                 var member_ids = try std.ArrayList(u32).initCapacity(self.alloc, td.members.len);
                 defer member_ids.deinit(self.alloc);
                 for (td.members) |member| {
+                    // If member is a buffer_reference named type, emit PhysicalStorageBuffer pointer
+                    var resolved_ty = member.ty;
+                    while (resolved_ty == .array) resolved_ty = resolved_ty.array.base.*;
+                    if (resolved_ty == .named) {
+                        const member_td = self.module.types.get(resolved_ty.named);
+                        if (member_td != null and member_td.?.is_buffer_reference) {
+                            // Emit the struct type first (if not already emitted)
+                            const struct_id = try self.ensureType(member.ty);
+                            // For arrays of buffer_reference, we need the pointer to the struct
+                            // not the struct itself as the member type
+                            if (member.ty == .named) {
+                                // Emit OpTypePointer PhysicalStorageBuffer <struct>
+                                const ptr_key = (@as(u64, struct_id) << 32) | @as(u64, 5349); // PhysicalStorageBuffer = 5349
+                                if (self.emitted_ptr_types.get(ptr_key)) |ptr_id| {
+                                    try member_ids.append(self.alloc, ptr_id);
+                                } else {
+                                    const ptr_id = self.allocId();
+                                    try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
+                                    try self.emitTypeWord(ptr_id);
+                                    try self.emitTypeWord(5349); // PhysicalStorageBuffer
+                                    try self.emitTypeWord(struct_id);
+                                    try self.emitted_ptr_types.put(self.alloc, ptr_key, ptr_id);
+                                    try member_ids.append(self.alloc, ptr_id);
+                                }
+                                continue;
+                            }
+                            // For arrays of buffer_reference types, fall through
+                        }
+                    }
                     try member_ids.append(self.alloc, try self.ensureType(member.ty));
                 }
                 const word_count: u16 = 2 + @as(u16, @intCast(member_ids.items.len));
@@ -1262,14 +1326,21 @@ const Codegen = struct {
                 }
                 // Emit UBO/SSBO decorations: Block + Offset/MatrixStride/ArrayStride
                 // Check if this named type is used as a uniform/storage buffer global
+                var needs_block = false;
+                var block_is_std430 = false;
                 for (self.module.globals) |global| {
                     if (global.storage_class != .uniform and global.storage_class != .storage_buffer) continue;
                     if (global.ty != .named) continue;
                     if (!std.mem.eql(u8, global.ty.named, name)) continue;
-                    try self.emitDecorationSectionDecorateNoExtra(id, @intFromEnum(spirv.Decoration.block));
-                    const is_std430 = if (global.layout) |l| l.std430 else false;
-                    try self.emitNestedStructLayout(id, td.members, is_std430);
+                    needs_block = true;
+                    block_is_std430 = if (global.layout) |l| l.std430 else false;
                     break;
+                }
+                // Buffer_reference types also need Block decoration
+                if (td.is_buffer_reference) needs_block = true;
+                if (needs_block) {
+                    try self.emitDecorationSectionDecorateNoExtra(id, @intFromEnum(spirv.Decoration.block));
+                    try self.emitNestedStructLayout(id, td.members, block_is_std430);
                 }
             },
             .array => |arr| {
@@ -1968,6 +2039,18 @@ const Codegen = struct {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const ptr_id = self.operandId(resolved, 0);
+                // PhysicalStorageBuffer loads require Aligned memory operand
+                if (self.ptr_storage_class.get(ptr_id)) |sc| {
+                    if (sc == .physical_storage_buffer) {
+                        try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.Load)));
+                        try self.emitWord(result_type_id);
+                        try self.emitWord(result_id);
+                        try self.emitWord(ptr_id);
+                        try self.emitWord(2); // Aligned memory operand bit
+                        try self.emitWord(16); // alignment
+                        return;
+                    }
+                }
                 try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Load)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
@@ -1976,6 +2059,17 @@ const Codegen = struct {
             .store => {
                 const ptr_id = self.operandId(resolved, 0);
                 const val_id = self.operandId(resolved, 1);
+                // PhysicalStorageBuffer stores require Aligned memory operand
+                if (self.ptr_storage_class.get(ptr_id)) |sc| {
+                    if (sc == .physical_storage_buffer) {
+                        try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.Store)));
+                        try self.emitWord(ptr_id);
+                        try self.emitWord(val_id);
+                        try self.emitWord(2); // Aligned memory operand bit
+                        try self.emitWord(16); // alignment
+                        return;
+                    }
+                }
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.Store)));
                 try self.emitWord(ptr_id);
                 try self.emitWord(val_id);
@@ -2124,7 +2218,6 @@ const Codegen = struct {
                     }
                     break :sc .function;
                 };
-                const ptr_type_id = try self.ensurePointerType(inst.ty, sc);
                 const result_id = resolved.result_id orelse return;
                 // Track the result pointer's storage class for chained access chains
                 try self.ptr_storage_class.put(self.alloc, result_id, sc);
@@ -2134,11 +2227,57 @@ const Codegen = struct {
                     .literal_int => |v| try self.emitSignedIntConstant(v), // Literal — emit signed constant (matches glslang)
                     else => try self.emitSignedIntConstant(0),
                 };
-                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
-                try self.emitWord(ptr_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(base_id_val);
-                try self.emitWord(index_id);
+
+                // Check if the result type is a buffer_reference named type
+                // If so, the member IS a PhysicalStorageBuffer pointer, so the access chain
+                // should produce a StorageBuffer pointer to that pointer, then load it.
+                var is_buf_ref_member = false;
+                if (inst.ty == .named) {
+                    const td = self.module.types.get(inst.ty.named);
+                    if (td != null and td.?.is_buffer_reference) {
+                        is_buf_ref_member = true;
+                    }
+                }
+
+                if (is_buf_ref_member) {
+                    // Access chain: get a pointer to the PhysicalStorageBuffer pointer member
+                    const struct_id = try self.ensureType(inst.ty);
+                    const phys_ptr_key = (@as(u64, struct_id) << 32) | @as(u64, 5349);
+                    const phys_ptr_id = self.emitted_ptr_types.get(phys_ptr_key) orelse struct_id;
+                    // Create pointer-to-pointer type: StorageBuffer -> PhysicalStorageBuffer pointer
+                    const ptr_to_ptr_key = (@as(u64, phys_ptr_id) << 32) | @as(u64, @intFromEnum(sc));
+                    const ptr_type_id = if (self.emitted_ptr_types.get(ptr_to_ptr_key)) |cached| cached else blk: {
+                        const pid = self.allocId();
+                        try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
+                        try self.emitTypeWord(pid);
+                        try self.emitTypeWord(@intFromEnum(sc));
+                        try self.emitTypeWord(phys_ptr_id);
+                        try self.emitted_ptr_types.put(self.alloc, ptr_to_ptr_key, pid);
+                        break :blk pid;
+                    };
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
+                    try self.emitWord(ptr_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(base_id_val);
+                    try self.emitWord(index_id);
+                    // Now load the PhysicalStorageBuffer pointer
+                    const loaded_id = self.allocId();
+                    try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Load)));
+                    try self.emitWord(phys_ptr_id);
+                    try self.emitWord(loaded_id);
+                    try self.emitWord(result_id);
+                    // Alias the result_id to the loaded pointer for subsequent access chains
+                    try self.constant_alias.put(self.alloc, result_id, loaded_id);
+                    // Track the loaded pointer as PhysicalStorageBuffer
+                    try self.ptr_storage_class.put(self.alloc, loaded_id, .physical_storage_buffer);
+                } else {
+                    const ptr_type_id = try self.ensurePointerType(inst.ty, sc);
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
+                    try self.emitWord(ptr_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(base_id_val);
+                    try self.emitWord(index_id);
+                }
             },
             .vector_extract_dynamic => {
                 const result_type_id = resolved.result_type orelse return;
