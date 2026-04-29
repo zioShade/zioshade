@@ -2,7 +2,7 @@
 
 ## CURRENT STATUS: 199/199 spirv-val conformance, 10/10 Ghostty shaders
 
-## GOAL: Replace glslang C++ pipeline in deblisis/wintty with pure Zig implementation
+## GOAL: Replace glslang C++ pipeline in deblasis/wintty with pure Zig implementation
 
 ### DONE (all sessions):
 - ✅ 199/199 spirv-val conformance
@@ -20,8 +20,16 @@
 - ✅ Centroid (16) and NoPerspective (13) decorations for IO variables
 - ✅ In/out block member scoping fix: only uniform/buffer/push_constant members directly accessible
 - ✅ ReleaseSafe build to avoid GPA leak detection overhead
+- ✅ VertexIndex=42/InstanceIndex=43 (Vulkan BuiltIn values, matching glslang)
+- ✅ RowMajor/ColMajor decorations parsed and emitted correctly
+- ✅ row_major propagation from parent blocks to nested struct matrix members
+- ✅ Struct alignment: max member alignment (not hardcoded 16)
+- ✅ row_major-aware matrix layout size: mat2x3 row_major std140 = 48 bytes (was 32)
+- ✅ MatrixStride varies with row/col major in std430
+- ✅ Array dimension nesting fixed: first dimension is outermost, matching GLSL semantics
 
 ### TIER 1 - Correctness improvements (beyond spirv-val):
+- **Type aliasing for std140/std430**: When the same struct is used in both std140 and std430 blocks, glslang creates separate type aliases (Content vs Content_0) with different offset decorations. We use a single type, so offsets can only be correct for one layout. This causes struct-packing.comp offsets to differ from glslang. Requires significant architectural change to emitType system.
 - **Fix GPA memory leaks**: ~90 files leak parser/semantic allocations (dupeNodes is #1 source). Would make Debug builds reliable. Root cause: GPA allocations in parser/semantic not freed when compileToSPIRV returns.
 - **Dead instruction elimination**: Instructions whose results are never used. Would reduce binary size.
 - **Dead global elimination**: Globals declared but never referenced in function bodies.
