@@ -288,6 +288,8 @@ const Parser = struct {
                         .kw_flat => q.is_flat = true,
                         .kw_noperspective => q.is_noperspective = true,
                         .kw_centroid => q.is_centroid = true,
+                        .kw_coherent => q.is_coherent = true,
+                        .kw_restrict => q.is_restrict = true,
                         else => {},
                     }
                     _ = self.advance(); found = true;

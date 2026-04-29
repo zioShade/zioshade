@@ -241,16 +241,19 @@ pub const AddressingModel = enum(u32) {
 };
 
 pub const Decoration = enum(u32) {
+    coherent = 0,
     block = 2,
     buffer_block = 3,
     row_major = 4,
     col_major = 5,
     array_stride = 6,
     matrix_stride = 7,
-    centroid = 16,
     built_in = 11,
     no_perspective = 13,
     flat = 14,
+    centroid = 16,
+    restrict = 19,
+    @"volatile" = 22,
     non_writable = 24,
     non_readable = 25,
     location = 30,
