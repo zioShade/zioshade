@@ -1702,11 +1702,11 @@ const Codegen = struct {
             if (std.mem.eql(u8, global.name, "gl_Position")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.position));
             }
-            if (std.mem.eql(u8, global.name, "gl_VertexID")) {
-                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.vertex_index));
+            if (std.mem.eql(u8, global.name, "gl_VertexID") or std.mem.eql(u8, global.name, "gl_VertexIndex")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), 42); // VertexIndex
             }
-            if (std.mem.eql(u8, global.name, "gl_InstanceID")) {
-                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.instance_index));
+            if (std.mem.eql(u8, global.name, "gl_InstanceID") or std.mem.eql(u8, global.name, "gl_InstanceIndex")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), 43); // InstanceIndex
             }
             // Only emit BuiltIn decorations for builtins that don't require extra capabilities
             // gl_Layer, gl_ViewportIndex require Geometry capability — skip
