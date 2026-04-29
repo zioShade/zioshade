@@ -6,18 +6,21 @@ targeting replacement of the C++ glslang pipeline in the deblasis/wintty (window
 The compiler must produce valid SPIR-V that matches glslang's output while potentially being faster/more compact.
 Maintaining 197/197 spirv-val conformance is a hard requirement.
 
-## Current State (197/197 conformance, 9/10 Ghostty)
-- 197/197 spirv-val conformance ✅
-- 9/10 Ghostty shaders pass (common.glsl is include-only, excluded)
-- Proper std140 layout: Block, Offset, ColMajor, MatrixStride, ArrayStride decorations
+## Current State (197/199 conformance)
+- 197/199 spirv-val conformance ✅
+- 8/9 Ghostty shaders pass (cell_text.v.glsl fails spirv-val; common.glsl is include-only, excluded)
+- GL_EXT_buffer_reference support: PhysicalStorageBuffer pointers, OpTypeForwardPointer, access chain pointer loads, Aligned memory operands
+- Proper std140/std430 layout: Block, Offset, ColMajor, MatrixStride, ArrayStride decorations
 - StorageBuffer storage class for SSBOs (modern SPIR-V 1.1+ approach)
 - Default DescriptorSet=0 for UBO/SSBO variables
 - Compute shader LocalSize execution mode
-- OpSource GLSL 450 directive
-- OpName/OpMemberName for struct types
-- Bound optimization: ~0.72x glslang (28% smaller)
 - OpSource version detection from #version directive
-- ESSL detection: emit OpSource ESSL for #version N es, GLSL for #version N
+- ESSL detection: emit OpSource ESSL for #version N es
+- Bound optimization: ~0.72x glslang (28% smaller)
+
+## Remaining 2 failures
+- buffer-reference-bitcast-uvec2-2: PhysicalStorageBuffer pointer → uvec2 conversion (needs OpConvertPtrToU)
+- small-storage.vk.vert: 8/16-bit types (needs Int8, Int16, Float16 SPIR-V types)
 
 ## Metrics
 - **Primary**: total_pass (unitless, higher is better) — total shaders passing spirv-val

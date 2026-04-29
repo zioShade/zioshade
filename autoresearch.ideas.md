@@ -1,6 +1,6 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 197/197 spirv-val, 9/9 Ghostty shaders (common.glsl is include-only)
+## CURRENT STATUS: 197/199 spirv-val (2 remaining)
 
 ## GOAL: Replace glslang C++ pipeline in deblisis/wintty with pure Zig implementation
 
@@ -11,20 +11,18 @@
 - ✅ Constant dedup, SSA optimization, type filtering, two-buffer codegen
 - ✅ Pre-emission cleanup (7627→7351 bound), constant_alias dedup
 - ✅ Void input variable elimination for standalone layout(local_size_x)
+- ✅ GL_EXT_buffer_reference support: PhysicalStorageBuffer, OpTypeForwardPointer, access chain pointer loads, Aligned memory operands
 
-### TRIED & ABANDONED:
-- **Composite dedup**: Literal-only composites rare; ID-operand composites unsafe across basic blocks; aliased IDs still allocated. Not worth complexity.
-- **Constant remap (first attempt)**: Broke 6 shaders because operandValue/AccessChain didn't remap. Fixed in second attempt with constant_alias.
+### REMAINING 2 FAILURES:
+1. **buffer-reference-bitcast-uvec2-2.nocompat.invalid.vk.comp**: `uvec2(ptrint)` — converting PhysicalStorageBuffer pointer to uvec2. Needs OpConvertPtrToU or OpBitcast. Very specialized.
+2. **small-storage.vk.vert**: 8/16-bit types (uint16_t, float16_t, i16vec4, etc.). Needs Int8, Int16, Float16 capabilities and many new type keywords.
 
 ### TIER 2 - Worth trying:
-- **Dead instruction elimination**: Instructions whose results are never used (e.g. dead loads, dead composites). Would reduce binary size and potentially bound.
-- **Dead global elimination**: Globals declared but never referenced in function bodies. Would reduce entry point interface.
-- **Simple function inlining**: For functions called exactly once — expand body at call site. ground.vert: 8 funcs vs glslang's 3.
-- **Entry point interface by SPIR-V version**: For 1.0-1.3 only Input/Output vars, for 1.4+ all vars. Risky — must test with both versions. Deferred.
-- **Centroid/NoPerspective/Sample decorations** on IO variables (low priority)
-- **OpSource version detection** from #version directive ✅ DONE
-- **ESSL detection** for OpSource ✅ DONE
+- **8/16-bit type support**: Add uint16_t, int16_t, float16_t, i16vec2-4, u16vec2-4, f16vec2-4, uint8_t, int8_t, i8vec2-4, u8vec2-4 to lexer. Map to SPIR-V 8/16-bit types. Add Int8=39, Int16=6, Float16=22 capabilities. Would fix small-storage.vk.vert.
+- **Dead instruction elimination**: Instructions whose results are never used. Would reduce binary size.
+- **Dead global elimination**: Globals declared but never referenced in function bodies.
+- **Simple function inlining**: For functions called exactly once.
 
-### TIER 1 (deferred - high risk):
-- gl_PerVertex Block wrapping: cosmetic only, standalone gl_Position with BuiltIn works
-- Function inlining for multi-call-site functions: very complex
+### TRIED & ABANDONED:
+- **Composite dedup**: Literal-only composites rare; ID-operand composites unsafe across basic blocks.
+- **Constant remap (first attempt)**: Broke 6 shaders. Fixed in second attempt with constant_alias.
