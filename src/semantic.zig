@@ -3170,11 +3170,23 @@ const Analyzer = struct {
                 }
                 const result_ty_raw = node.data.ty orelse .void;
                 // For array constructors with unsized type, compute actual size from arguments
-                const result_ty: ast.Type = if (result_ty_raw == .array and result_ty_raw.array.size == 0 and arg_tids.items.len > 0) blk: {
-                    const arr_base = try self.alloc.create(ast.Type);
-                    arr_base.* = result_ty_raw.array.base.*;
-                    break :blk .{ .array = .{ .base = arr_base, .size = @intCast(arg_tids.items.len) } };
-                } else result_ty_raw;
+                // Also resolve inner unsized dimensions from arg types
+                const result_ty: ast.Type = blk: {
+                    var ty = result_ty_raw;
+                    if (ty == .array and ty.array.size == 0 and arg_tids.items.len > 0) {
+                        // Resolve outermost unsized dimension from arg count
+                        var inner = ty.array.base.*;
+                        // Resolve inner unsized dimensions from first arg's type
+                        if (inner == .array and inner.array.size == 0 and arg_tids.items.len > 0) {
+                            const arg_base_ty = arg_tids.items[0].ty;
+                            inner = arg_base_ty;
+                        }
+                        const arr_base = try self.alloc.create(ast.Type);
+                        arr_base.* = inner;
+                        ty = .{ .array = .{ .base = arr_base, .size = @intCast(arg_tids.items.len) } };
+                    }
+                    break :blk ty;
+                };
                 const result_id = self.allocId();
 
                 // Handle buffer_reference pointer → uvec2 bitcast
