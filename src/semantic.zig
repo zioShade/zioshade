@@ -1243,6 +1243,10 @@ const Analyzer = struct {
                 const continue_label = self.allocId();
                 const merge_label = self.allocId();
 
+                // Un-SSA variables in all scopes before evaluating loop condition
+                // (e.g., int k = 0; while (k < 5) { k++; })
+                try self.unssaAllScopes();
+
                 try self.emitBranch(header_label);
 
                 try self.loop_stack.append(self.alloc, .{
@@ -1274,6 +1278,9 @@ const Analyzer = struct {
                 const body_label = self.allocId();
                 const cond_label = self.allocId();
                 const merge_label = self.allocId();
+
+                // Un-SSA variables in all scopes before loop body
+                try self.unssaAllScopes();
 
                 try self.emitBranch(body_label);
 
