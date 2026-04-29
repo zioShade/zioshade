@@ -528,6 +528,9 @@ const Parser = struct {
     fn parseVarDecl(self: *Parser, name_tok: lexer.Token, mut_ty: ast.Type, qualifier: ?ast.Qualifier, layout: ?ast.Layout) Error!ast.Node {
         // Handle array size suffix: float a[4]
         var ty = mut_ty;
+        // Collect array dimensions (first dimension is outermost)
+        var arr_dims: std.ArrayListUnmanaged(u32) = .{};
+        defer arr_dims.deinit(self.alloc);
         while (self.current().tag == .l_bracket) {
             _ = self.advance();
             const size_tok = self.current();
@@ -537,9 +540,17 @@ const Parser = struct {
                 _ = self.advance();
             }
             _ = self.expect(.r_bracket) catch break;
-            const arr_base = try self.alloc.create(ast.Type);
-            arr_base.* = ty;
-            ty = .{ .array = .{ .base = arr_base, .size = arr_size } };
+            try arr_dims.append(self.alloc, arr_size);
+        }
+        // Build array type from outermost to innermost (reverse order)
+        if (arr_dims.items.len > 0) {
+            var i: usize = arr_dims.items.len;
+            while (i > 0) {
+                i -= 1;
+                const arr_base = try self.alloc.create(ast.Type);
+                arr_base.* = ty;
+                ty = .{ .array = .{ .base = arr_base, .size = arr_dims.items[i] } };
+            }
         }
         var init_nodes = std.ArrayListUnmanaged(ast.Node){};
         defer init_nodes.deinit(self.alloc);
@@ -591,6 +602,8 @@ const Parser = struct {
             _ = self.advance();
             // Check for array size suffix: vec2 a[1] (supports multi-dim: vec2 a[2][3])
             var member_ty_final = member_ty;
+            var member_arr_dims: std.ArrayListUnmanaged(u32) = .{};
+            defer member_arr_dims.deinit(self.alloc);
             while (self.current().tag == .l_bracket) {
                 _ = self.advance();
                 const size_tok = self.current();
@@ -600,9 +613,16 @@ const Parser = struct {
                     _ = self.advance();
                 }
                 _ = self.expect(.r_bracket) catch break;
-                const arr_base = try self.alloc.create(ast.Type);
-                arr_base.* = member_ty_final;
-                member_ty_final = .{ .array = .{ .base = arr_base, .size = arr_size } };
+                try member_arr_dims.append(self.alloc, arr_size);
+            }
+            if (member_arr_dims.items.len > 0) {
+                var i: usize = member_arr_dims.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const arr_base = try self.alloc.create(ast.Type);
+                    arr_base.* = member_ty_final;
+                    member_ty_final = .{ .array = .{ .base = arr_base, .size = member_arr_dims.items[i] } };
+                }
             }
             _ = try self.expect(.semicolon);
             try members.append(self.alloc, .{
@@ -639,6 +659,8 @@ const Parser = struct {
             _ = self.advance();
             // Check for array size suffix: vec2 a[1] (supports multi-dim: vec2 a[2][3])
             var member_ty_final = member_ty;
+            var member_arr_dims: std.ArrayListUnmanaged(u32) = .{};
+            defer member_arr_dims.deinit(self.alloc);
             while (self.current().tag == .l_bracket) {
                 _ = self.advance();
                 const size_tok = self.current();
@@ -648,9 +670,16 @@ const Parser = struct {
                     _ = self.advance();
                 }
                 _ = self.expect(.r_bracket) catch break;
-                const arr_base = try self.alloc.create(ast.Type);
-                arr_base.* = member_ty_final;
-                member_ty_final = .{ .array = .{ .base = arr_base, .size = arr_size } };
+                try member_arr_dims.append(self.alloc, arr_size);
+            }
+            if (member_arr_dims.items.len > 0) {
+                var i: usize = member_arr_dims.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const arr_base = try self.alloc.create(ast.Type);
+                    arr_base.* = member_ty_final;
+                    member_ty_final = .{ .array = .{ .base = arr_base, .size = member_arr_dims.items[i] } };
+                }
             }
             _ = try self.expect(.semicolon);
             try members.append(self.alloc, .{
@@ -785,6 +814,8 @@ const Parser = struct {
         if (name_tok.tag != .identifier) return error.UnexpectedToken;
         _ = self.advance();
         // Handle array size suffix: float a[4]
+        var local_arr_dims: std.ArrayListUnmanaged(u32) = .{};
+        defer local_arr_dims.deinit(self.alloc);
         while (self.current().tag == .l_bracket) {
             _ = self.advance();
             const size_tok = self.current();
@@ -794,9 +825,16 @@ const Parser = struct {
                 _ = self.advance();
             }
             _ = self.expect(.r_bracket) catch break;
-            const arr_base = try self.alloc.create(ast.Type);
-            arr_base.* = ty;
-            ty = .{ .array = .{ .base = arr_base, .size = arr_size } };
+            try local_arr_dims.append(self.alloc, arr_size);
+        }
+        if (local_arr_dims.items.len > 0) {
+            var i: usize = local_arr_dims.items.len;
+            while (i > 0) {
+                i -= 1;
+                const arr_base = try self.alloc.create(ast.Type);
+                arr_base.* = ty;
+                ty = .{ .array = .{ .base = arr_base, .size = local_arr_dims.items[i] } };
+            }
         }
 
         var init_nodes = std.ArrayListUnmanaged(ast.Node){};
