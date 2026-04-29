@@ -1751,6 +1751,10 @@ const Codegen = struct {
             if (global.qualifier.is_flat and (global.storage_class == .input or global.storage_class == .output)) {
                 try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.flat));
             }
+            // Emit Invariant decoration for invariant-qualified output variables
+            if (global.qualifier.is_invariant and global.storage_class == .output) {
+                try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.invariant));
+            }
             // Emit Centroid decoration for centroid-qualified IO variables
             if (global.qualifier.is_centroid and (global.storage_class == .input or global.storage_class == .output)) {
                 try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.centroid));

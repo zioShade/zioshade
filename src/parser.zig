@@ -290,6 +290,7 @@ const Parser = struct {
                         .kw_centroid => q.is_centroid = true,
                         .kw_coherent => q.is_coherent = true,
                         .kw_restrict => q.is_restrict = true,
+                        .kw_invariant => q.is_invariant = true,
                         else => {},
                     }
                     _ = self.advance(); found = true;

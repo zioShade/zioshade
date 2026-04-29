@@ -242,6 +242,7 @@ pub const AddressingModel = enum(u32) {
 
 pub const Decoration = enum(u32) {
     coherent = 0,
+    invariant = 18,
     block = 2,
     buffer_block = 3,
     row_major = 4,

@@ -392,6 +392,7 @@ pub const Qualifier = packed struct {
     is_coherent: bool = false,
     is_restrict: bool = false,
     is_volatile: bool = false,
+    is_invariant: bool = false,
 };
 
 pub const Layout = struct {
