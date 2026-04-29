@@ -165,6 +165,7 @@ pub const Instruction = struct {
         fwidth,
         return_val,
         return_void,
+        kill,
         unreachable_inst,
         branch,
         branch_conditional,
