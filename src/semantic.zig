@@ -3914,11 +3914,24 @@ const Analyzer = struct {
                 if (!base_tid.is_ptr and (base_tid.ty.isMatrix() or base_tid.ty == .array)) {
                     // Check if index is a compile-time constant
                     var const_idx: ?u32 = null;
+                    // First check instruction list (for current function)
                     for (self.instructions.items, 0..) |inst, i| {
                         if (inst.result_id != null and inst.result_id.? == index_tid.id and inst.tag == .constant_int) {
                             const_idx = switch (inst.operands[0]) { .literal_int => |v| v, else => null };
                             _ = i;
                             break;
+                        }
+                    }
+                    // Also check const_cache for constants from other functions
+                    if (const_idx == null) {
+                        var iter = self.const_cache.iterator();
+                        while (iter.next()) |entry| {
+                            if (entry.value_ptr.* == index_tid.id) {
+                                // Extract value from key: (type_enum << 32) | value
+                                const val = @as(u32, @truncate(entry.key_ptr.*));
+                                const_idx = val;
+                                break;
+                            }
                         }
                     }
                     if (const_idx) |idx| {

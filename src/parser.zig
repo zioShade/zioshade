@@ -256,14 +256,46 @@ const Parser = struct {
         }
 
         const ty = self.tryType() orelse return error.UnexpectedToken;
+        // Handle array dimensions on type (e.g., vec4[2] for function return types)
+        var final_ty = ty;
+        if (self.current().tag == .l_bracket) {
+            // Parse array dimensions
+            var arr_dims: std.ArrayListUnmanaged(u32) = .{};
+            defer arr_dims.deinit(self.alloc);
+            while (self.current().tag == .l_bracket) {
+                _ = self.advance(); // [
+                const size_tok = self.current();
+                if (size_tok.tag == .r_bracket) {
+                    _ = self.advance(); // ]
+                    try arr_dims.append(self.alloc, 0);
+                } else if (size_tok.tag == .int_literal) {
+                    const arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                    _ = self.advance();
+                    _ = self.expect(.r_bracket) catch {};
+                    try arr_dims.append(self.alloc, arr_size);
+                } else {
+                    break;
+                }
+            }
+            // Build array type from outermost to innermost
+            if (arr_dims.items.len > 0) {
+                var i: usize = arr_dims.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const arr_base = try self.alloc.create(ast.Type);
+                    arr_base.* = final_ty;
+                    final_ty = .{ .array = .{ .base = arr_base, .size = arr_dims.items[i] } };
+                }
+            }
+        }
         const name_tok = self.current();
         if (name_tok.tag != .identifier) return error.UnexpectedToken;
         _ = self.advance();
 
         if (self.current().tag == .l_paren) {
-            return self.parseFunctionDecl(name_tok, ty, qualifier, layout);
+            return self.parseFunctionDecl(name_tok, final_ty, qualifier, layout);
         }
-        return self.parseVarDecl(name_tok, ty, qualifier, layout);
+        return self.parseVarDecl(name_tok, final_ty, qualifier, layout);
     }
 
     // ── Qualifiers / Layout / Types ───────────────────────────
