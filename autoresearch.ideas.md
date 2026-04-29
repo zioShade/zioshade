@@ -80,3 +80,28 @@
 - **Lexer .f bug was a major hidden issue**: Any struct member named 'f', 'flags', 'foo', etc. was broken because `.f` was tokenized as a float literal instead of dot + identifier
 - **Zig caching**: Must `rm -rf .zig-cache/z` to force rebuild after code changes; incremental builds may use stale cache
 - **tolerate_errors mode**: Silently catches semantic errors in function bodies, producing empty functions. Makes debugging hard.
+
+### Session 2026-04-29 Summary:
+- Fixed 6 store mismatches (14 → 8)
+- Key fixes: lexer .f bug, typesCompatible for arrays, array constructors, anonymous block members
+- All 199/199 spirv-val conformance maintained
+- Remaining 8 mismatches require significant new features:
+  - Input attachments (subpassInput)
+  - Separate sampler/texture (sampler2D(tex, samp) → OpSampledImage)
+  - nonuniformEXT qualifier
+  - 8-bit arithmetic shader
+  - Spec constants (OpSpecConstant)
+  - Block-scoped struct redeclaration
+
+### PROMISING NEXT STEPS:
+- **OpSampledImage for separate sampler/texture**: sampler2D(tex, samp) creates combined image-sampler. Would fix 3 shaders (separate-sampler-texture x2, nonuniform-qualifier).
+- **textureSize/textureQueryLevels/textureSamples without sampler**: samplerless texture functions.
+- **input_attachment support**: subpassInput type + OpTypeImage with SubpassData dimensionality.
+- **RelaxedPrecision decorations**: Quick win for 52 mediump shaders.
+
+### DEFERRED (complex, significant new code):
+- **Separate sampler/texture + OpSampledImage**: Needs new ast types (sampler, texture2D, etc.), lexer keywords, parser handling, semantic OpSampledImage construction, codegen support. Would fix 3+ shaders.
+- **Input attachments**: Needs subpassInput type, OpTypeImage SubpassData, OpAttachmentImageRead. 2 shaders.
+- **Spec constants**: Needs OpSpecConstant, layout(constant_id=...), SpecConstantOp. 1 shader.
+- **Block-scoped struct redeclaration**: Needs per-scope type table. 1 shader.
+- **8-bit arithmetic**: Needs Int8 capability and 8-bit operations. 1 shader.
