@@ -2144,6 +2144,20 @@ const Codegen = struct {
             // Types emitted on-demand via two-buffer during emitFunctions
             _ = func;
         }
+        // Emit member-level NonWritable/NonReadable for readonly/writeonly buffer blocks
+        for (self.module.globals) |global| {
+            if (global.storage_class != .storage_buffer) continue;
+            if (global.ty != .named) continue;
+            const block_type_id = self.emitted_named_types.get(global.ty.named) orelse continue;
+            const td = self.module.types.get(global.ty.named) orelse continue;
+            if (td.members.len == 0) continue;
+            if (global.qualifier.is_readonly) {
+                try self.emitDecorationSectionMemberDecorateNoExtra(block_type_id, 0, @intFromEnum(spirv.Decoration.non_writable));
+            }
+            if (global.qualifier.is_writeonly) {
+                try self.emitDecorationSectionMemberDecorateNoExtra(block_type_id, 0, @intFromEnum(spirv.Decoration.non_readable));
+            }
+        }
     }
     fn emitGlobals(self: *Codegen) !void {
         for (self.module.globals) |global| {
