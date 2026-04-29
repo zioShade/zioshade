@@ -3712,7 +3712,6 @@ const Analyzer = struct {
                     if (self.lookup(base_child.data.name)) |sym| {
                         if (sym.kind == .var_sym and sym.ty == .named) {
                             // Use the variable pointer directly for member access
-                            // Use the variable pointer directly for member access
                             const struct_name = sym.ty.named;
                             if (self.types.get(struct_name)) |td| {
                                 const member_name = node.data.name;
