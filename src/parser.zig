@@ -890,22 +890,33 @@ const Parser = struct {
         var children = std.ArrayListUnmanaged(ast.Node){};
         defer children.deinit(self.alloc);
 
-        // Init
+        const empty_node = ast.Node{
+            .tag = .expr_stmt,
+            .loc = .{ .line = 0, .column = 0 },
+            .data = .{ .children = &.{} },
+        };
+
+        // Init (always append — empty if just ';')
         if (self.current().tag != .semicolon) {
             try children.append(self.alloc, try self.parseStatement());
         } else {
             _ = self.advance();
+            try children.append(self.alloc, empty_node);
         }
 
-        // Condition
+        // Condition (always append — empty if just ';')
         if (self.current().tag != .semicolon) {
             try children.append(self.alloc, try self.parseExpression());
+        } else {
+            try children.append(self.alloc, empty_node);
         }
         _ = try self.expect(.semicolon);
 
-        // Update
+        // Update (always append — empty if just ')')
         if (self.current().tag != .r_paren) {
             try children.append(self.alloc, try self.parseExpression());
+        } else {
+            try children.append(self.alloc, empty_node);
         }
         _ = try self.expect(.r_paren);
 
