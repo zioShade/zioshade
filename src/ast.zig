@@ -70,6 +70,7 @@ pub const Node = struct {
         int_val: i64 = 0,
         float_val: f64 = 0,
         name: []const u8 = "",
+        instance_name: []const u8 = "", // for uniform_block instance name (e.g. "registers" in "uniform PushMe { ... } registers;")
         ty: ?Type = null,
         children: []const Node = &.{},
         qualifier: ?Qualifier = null,
