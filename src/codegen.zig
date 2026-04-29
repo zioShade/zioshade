@@ -1276,6 +1276,31 @@ const Codegen = struct {
                 // Forward-declare: cache the ID before processing members
                 // to break recursive type cycles (e.g., Node containing Node)
                 try self.emitted_named_types.put(self.alloc, name, id);
+
+                // For buffer_reference types, check for self-referential members
+                // If found, emit OpTypeForwardPointer upfront
+                var self_ptr_id: u32 = 0;
+                if (td.is_buffer_reference) {
+                    var has_self_ref = false;
+                    for (td.members) |member| {
+                        var resolved_ty = member.ty;
+                        while (resolved_ty == .array) resolved_ty = resolved_ty.array.base.*;
+                        if (resolved_ty == .named and std.mem.eql(u8, resolved_ty.named, name)) {
+                            has_self_ref = true;
+                            break;
+                        }
+                    }
+                    if (has_self_ref) {
+                        // Allocate pointer ID and emit forward pointer
+                        self_ptr_id = self.allocId();
+                        try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeForwardPointer)));
+                        try self.emitTypeWord(self_ptr_id);
+                        try self.emitTypeWord(5349); // PhysicalStorageBuffer
+                        const ptr_key = (@as(u64, id) << 32) | @as(u64, 5349);
+                        try self.emitted_ptr_types.put(self.alloc, ptr_key, self_ptr_id);
+                    }
+                }
+
                 var member_ids = try std.ArrayList(u32).initCapacity(self.alloc, td.members.len);
                 defer member_ids.deinit(self.alloc);
                 for (td.members) |member| {
@@ -1285,13 +1310,18 @@ const Codegen = struct {
                     if (resolved_ty == .named) {
                         const member_td = self.module.types.get(resolved_ty.named);
                         if (member_td != null and member_td.?.is_buffer_reference) {
+                            // Self-referential: use the forward-declared pointer
+                            if (self_ptr_id != 0 and std.mem.eql(u8, resolved_ty.named, name) and member.ty == .named) {
+                                try member_ids.append(self.alloc, self_ptr_id);
+                                continue;
+                            }
                             // Emit the struct type first (if not already emitted)
                             const struct_id = try self.ensureType(member.ty);
                             // For arrays of buffer_reference, we need the pointer to the struct
                             // not the struct itself as the member type
                             if (member.ty == .named) {
                                 // Emit OpTypePointer PhysicalStorageBuffer <struct>
-                                const ptr_key = (@as(u64, struct_id) << 32) | @as(u64, 5349); // PhysicalStorageBuffer = 5349
+                                const ptr_key = (@as(u64, struct_id) << 32) | @as(u64, 5349);
                                 if (self.emitted_ptr_types.get(ptr_key)) |ptr_id| {
                                     try member_ids.append(self.alloc, ptr_id);
                                 } else {
@@ -1341,6 +1371,13 @@ const Codegen = struct {
                 if (needs_block) {
                     try self.emitDecorationSectionDecorateNoExtra(id, @intFromEnum(spirv.Decoration.block));
                     try self.emitNestedStructLayout(id, td.members, block_is_std430);
+                }
+                // If we emitted a forward pointer, now emit the actual pointer definition
+                if (self_ptr_id != 0) {
+                    try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
+                    try self.emitTypeWord(self_ptr_id);
+                    try self.emitTypeWord(5349); // PhysicalStorageBuffer
+                    try self.emitTypeWord(id); // The struct type
                 }
             },
             .array => |arr| {
