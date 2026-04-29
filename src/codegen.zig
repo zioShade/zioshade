@@ -38,6 +38,7 @@ pub fn generate(
         .emitted_constants = .{},
         .constant_alias = .{},
         .emitted_func_types = .{},
+        .layout_visited = .{},
         .ptr_storage_class = .{},
         .sampled_image_inner_id = 0,
         .sampled_image_3d_inner_id = 0,
@@ -122,6 +123,7 @@ const Codegen = struct {
     emitted_constants: std.AutoHashMapUnmanaged(u64, u32), // (type_id << 32 | value) -> const_id
     constant_alias: std.AutoHashMapUnmanaged(u32, u32), // IR result_id -> actual constant_id (dedup)
     emitted_func_types: std.AutoHashMapUnmanaged(u64, u32), // hash(ret+params) -> func_type_id
+    layout_visited: std.AutoHashMapUnmanaged(u32, void), // struct type_ids currently being laid out (cycle detection)
     ptr_storage_class: std.AutoHashMapUnmanaged(u32, ir.SPIRVStorageClass), // result_id -> storage class for pointers
     sampled_image_inner_id: u32, // TypeImage (Sampled=1) for use with OpImage extraction
     sampled_image_3d_inner_id: u32,
@@ -151,6 +153,7 @@ const Codegen = struct {
         self.emitted_constants.deinit(self.alloc);
         self.constant_alias.deinit(self.alloc);
         self.emitted_func_types.deinit(self.alloc);
+        self.layout_visited.deinit(self.alloc);
         self.ptr_storage_class.deinit(self.alloc);
         self.words.deinit(self.alloc);
         self.type_section.deinit(self.alloc);
@@ -1605,6 +1608,11 @@ const Codegen = struct {
                 break :blk stride * arr.size;
             },
             .named => |name| blk: {
+                // Get the type_id for cycle detection
+                const type_id = self.emitted_named_types.get(name) orelse break :blk 0;
+                if (self.layout_visited.contains(type_id)) break :blk 8; // Self-referential: treat as pointer (8 bytes)
+                self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 0;
+                defer _ = self.layout_visited.remove(type_id);
                 const td = self.module.types.get(name) orelse break :blk 0;
                 var sz: u32 = 0;
                 for (td.members) |member| {
