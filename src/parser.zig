@@ -1013,6 +1013,8 @@ const Parser = struct {
                 // Parse statements until next case/default/}
                 var case_body = std.ArrayListUnmanaged(ast.Node){};
                 defer case_body.deinit(self.alloc);
+                // Store case value expression as first child
+                try case_body.append(self.alloc, val);
                 while (self.current().tag != .kw_case and self.current().tag != .kw_default and self.current().tag != .r_brace) {
                     try case_body.append(self.alloc, try self.parseStatement());
                 }
