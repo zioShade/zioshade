@@ -2620,6 +2620,7 @@ const Codegen = struct {
             .convert_iti => try self.emitUnaryOp(spirv.Op.Bitcast, resolved),
             .convert_narrow => try self.emitUnaryOp(spirv.Op.SConvert, resolved),
             .convert_widen => try self.emitUnaryOp(spirv.Op.SConvert, resolved),
+            .convert_ftof => try self.emitUnaryOp(spirv.Op.FConvert, resolved),
             .convert_itof => try self.emitUnaryOp(spirv.Op.ConvertSToF, resolved),
             .bitcast => try self.emitUnaryOp(spirv.Op.Bitcast, resolved),
             .convert_utof => try self.emitUnaryOp(spirv.Op.ConvertUToF, resolved),

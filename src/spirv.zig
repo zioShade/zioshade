@@ -87,6 +87,7 @@ pub const Op = enum(u16) {
     ConvertFToU = 109,
     UConvert = 113, // OpUConvert
     SConvert = 114, // OpSConvert
+    FConvert = 115, // OpFConvert
     IsNan = 156,
     IsInf = 157,
     All = 154,
