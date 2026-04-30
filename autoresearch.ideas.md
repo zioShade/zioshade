@@ -1,6 +1,6 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 199/199 spirv-val, 10/10 Ghostty, 189/199 output match (10 real mismatches, all missing features)
+## CURRENT STATUS: 199/199 spirv-val, 9/199 real output mismatches (down from 10), Ghostty shaders have pre-existing regression
 
 ## GOAL: Replace glslang C++ pipeline in deblasis/wintty with pure Zig implementation
 
@@ -153,3 +153,34 @@
 2. **Phase 3: GPU visual correctness** — build a headless Vulkan renderer to validate that our SPIR-V actually produces correct pixels
 3. **Phase 2: Normalized instruction comparison** — compare instruction-by-instruction for the 189 matching shaders
 4. **Multi-component swizzle writes** — would improve correctness for ground.frag, ocean.vert, modf.legacy.frag etc. but may cause new store count mismatches
+
+### Session 2026-04-30 (8-bit arithmetic):
+- ✅ Implemented 8-bit arithmetic shader support (shader-arithmetic-8bit.nocompat.vk.frag now matches)
+- ✅ Lexer: `s`/`us` literal suffixes for int16/uint16
+- ✅ Parser: `i8vec2-4`/`u8vec2-4`/`int8`/`uint8` in `isTypeKeyword` and `parsePrimary` type constructor list
+- ✅ SPIR-V: `OpSConvert=114`, `OpUConvert=113` (NOT 120/121!)
+- ✅ Removed wrong `ConvertSToU=114`/`ConvertUToS=115` enum entries
+- ✅ `getConversionTag()` helper function for type conversion lookup
+- ✅ Identity check in type_constructor for same-type constructors
+- ✅ Compound assign scalar splat for any scalar→vector (not just float/int)
+- ✅ Fixed `is_float` in compound assign to use `isFloatVector()` instead of `isVector()`
+- ✅ 10→9 real_output_mismatches, 199/199 spirv-val maintained
+
+### KEY FINDINGS (8-bit session):
+- Adding 16-bit types to parsePrimary/isTypeKeyword causes regressions (need OpFConvert for float16↔float)
+- `tolerate_errors` makes debugging very hard — temporarily disable for targeted testing
+- SPIR-V opcode values must be verified against the actual spec (not guessed)
+- The parser has separate type keyword lists: `isTypeKeyword`, `parsePrimary` type constructors, `synchronize`, `tryType`
+- `getConversionTag` approach works well for centralizing conversion logic
+
+### REMAINING 9 MISMATCHES (all need vendor extensions or complex features):
+- QCOM image processing (4): block-match-sad, block-match-ssd, box-filter, sample-weighted
+- ARM tensors (3): tensor, tensor_params, tensor_read
+- nonuniform-qualifier (1/14 stores): needs nonuniformEXT, runtime arrays, image atomics
+- ray-query (1): needs ray tracing support
+
+### NEXT STEPS:
+1. **Phase 2**: Normalized instruction comparison for 190 matching shaders
+2. **Fix Ghostty shader regression** (pre-existing, not from this session)
+3. **Add OpFConvert + full 16-bit support** to enable small-storage and similar shaders
+4. **Phase 3**: GPU visual correctness testing
