@@ -531,9 +531,24 @@ const Parser = struct {
             const p_name = self.current();
             if (p_name.tag != .identifier) return error.UnexpectedToken;
             _ = self.advance();
+            // Handle array dimensions after param name: e.g. texture2D tex[4]
+            var final_type = p_type;
+            if (self.current().tag == .l_bracket) {
+                _ = self.advance(); // consume [
+                const size_tok = self.current();
+                _ = self.advance(); // consume size
+                if (self.current().tag == .r_bracket) _ = self.advance(); // consume ]
+                const size_str = self.text(size_tok);
+                const size = std.fmt.parseInt(u32, size_str, 10) catch 0;
+                if (size > 0) {
+                    const base_ptr = try self.alloc.create(ast.Type);
+                    base_ptr.* = p_type;
+                    final_type = .{ .array = .{ .base = base_ptr, .size = size } };
+                }
+            }
             try params.append(self.alloc, .{
                 .name = self.text(p_name),
-                .ty = p_type,
+                .ty = final_type,
                 .qualifier = p_qual,
             });
             if (self.current().tag == .comma) _ = self.advance();
