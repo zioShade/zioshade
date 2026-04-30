@@ -489,7 +489,12 @@ const Parser = struct {
             .kw_image3d => { _ = self.advance(); return .image3d; },
             .kw_imagecube => { _ = self.advance(); return .image_cube; },
             .kw_image2d_array => { _ = self.advance(); return .image2d_array; },
-            .kw_texture2d, .kw_sampler_shadow, .kw_sampler_plain => { _ = self.advance(); return .sampler2d; },
+            .kw_texture2d => { _ = self.advance(); return .texture2d_plain; },
+            .kw_texture3d => { _ = self.advance(); return .texture3d_plain; },
+            .kw_texture_cube => { _ = self.advance(); return .texture_cube_plain; },
+            .kw_texture2d_array => { _ = self.advance(); return .texture2d_array_plain; },
+            .kw_texture2d_ms => { _ = self.advance(); return .texture2d_ms_plain; },
+            .kw_sampler_shadow, .kw_sampler_plain => { _ = self.advance(); return .sampler_plain; },
             .kw_sampler_cube => { _ = self.advance(); return .sampler_cube; },
             .identifier => {
                 const tok = self.advance();
@@ -1558,6 +1563,7 @@ const Parser = struct {
             .kw_mat3x2, .kw_mat3x3, .kw_mat3x4,
             .kw_mat4x2, .kw_mat4x3, .kw_mat4x4,
             .kw_float, .kw_int, .kw_uint, .kw_bool,
+            .kw_sampler2d, .kw_sampler3d, .kw_sampler_cube, .kw_sampler2d_array, .kw_sampler2d_ms,
             => {
                 var ty = self.tryType().?;
                 // Handle array constructors: float[](1.0, 2.0, ...), vec4[](...), vec4[][](...)
