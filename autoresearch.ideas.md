@@ -1,6 +1,6 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 199/199 spirv-val, 9/199 real output mismatches, 9/10 Ghostty shaders
+## CURRENT STATUS: 199/199 spirv-val, 9/199 real output mismatches, 9/10 Ghostty shaders, proper barrier support
 
 ## Session 2026-04-30 (Part 3):
 ### Infrastructure added:
@@ -25,9 +25,26 @@
 - nonuniform-qualifier (1) — needs runtime arrays + nonuniformEXT
 - ray-query (1) — needs ray tracing
 
+## Session 2026-04-30 (Part 4):
+### Fixed:
+- ✅ OpControlBarrier opcode was WRONG (227 instead of 224). 227 = OpAtomicLoad! Fixed to 224.
+- ✅ OpMemoryBarrier opcode 225 is correct
+- ✅ Barrier constants now created via semantic analyzer's `getConstInt()` instead of codegen's `emitIntConstant()` — avoids type_section splice issues
+- ✅ barrier() → OpControlBarrier Workgroup Workgroup AcquireRelease|WorkgroupMemory
+- ✅ memoryBarrier() → OpMemoryBarrier Device AcquireRelease|Uniform
+- ✅ memoryBarrierShared() → OpMemoryBarrier Workgroup AcquireRelease|WorkgroupMemory
+- ✅ memoryBarrierImage/Buffer → OpMemoryBarrier Device AcquireRelease|Uniform
+- ✅ groupMemoryBarrier → OpMemoryBarrier Workgroup AcquireRelease|Uniform
+
 ## FUTURE WORK:
 - Enable 16-bit type constructors when NV atomic fp16 is properly supported
 - textureOffset (non-shadow) — ConstOffset for image_sample
+- Runtime arrays (OpTypeRuntimeArray) — would help nonuniform-qualifier shader
+- Normalized instruction comparison for 190 matching shaders — verify semantic correctness beyond store counts
+- GPU visual correctness via headless Vulkan renderer
+- textureGather — common pattern for shadow maps
+- OpControlBarrier scope values could match glslang's exactly (glslang uses 3400 for memoryBarrier semantics vs our 72)
+- Consider using VulkanMemoryModel capability for more accurate memory model
 - barrier() → proper OpControlBarrier
 - Phase 2: Normalized instruction comparison
 - Phase 3: GPU visual correctness
