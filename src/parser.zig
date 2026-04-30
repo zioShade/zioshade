@@ -164,6 +164,9 @@ const Parser = struct {
                 .kw_ivec2, .kw_ivec3, .kw_ivec4,
                 .kw_bvec2, .kw_bvec3, .kw_bvec4,
                 .kw_uvec2, .kw_uvec3, .kw_uvec4,
+                .kw_i8vec2, .kw_i8vec3, .kw_i8vec4,
+                .kw_u8vec2, .kw_u8vec3, .kw_u8vec4,
+                .kw_int8, .kw_uint8,
                 .kw_mat2, .kw_mat3, .kw_mat4,
                 .kw_struct, .kw_uniform, .kw_in, .kw_out, .kw_buffer,
                 => return,
@@ -200,10 +203,13 @@ const Parser = struct {
     fn isTypeKeyword(tag: lexer.Token.Tag) bool {
         return switch (tag) {
             .kw_void, .kw_float, .kw_int, .kw_uint, .kw_bool,
+            .kw_int8, .kw_uint8,
             .kw_vec2, .kw_vec3, .kw_vec4,
             .kw_ivec2, .kw_ivec3, .kw_ivec4,
             .kw_bvec2, .kw_bvec3, .kw_bvec4,
             .kw_uvec2, .kw_uvec3, .kw_uvec4,
+            .kw_i8vec2, .kw_i8vec3, .kw_i8vec4,
+            .kw_u8vec2, .kw_u8vec3, .kw_u8vec4,
             .kw_mat2, .kw_mat3, .kw_mat4,
             .kw_mat2x2, .kw_mat2x3, .kw_mat2x4,
             .kw_mat3x2, .kw_mat3x3, .kw_mat3x4,
@@ -1584,11 +1590,14 @@ const Parser = struct {
             .kw_ivec2, .kw_ivec3, .kw_ivec4,
             .kw_bvec2, .kw_bvec3, .kw_bvec4,
             .kw_uvec2, .kw_uvec3, .kw_uvec4,
+            .kw_i8vec2, .kw_i8vec3, .kw_i8vec4,
+            .kw_u8vec2, .kw_u8vec3, .kw_u8vec4,
             .kw_mat2, .kw_mat3, .kw_mat4,
             .kw_mat2x2, .kw_mat2x3, .kw_mat2x4,
             .kw_mat3x2, .kw_mat3x3, .kw_mat3x4,
             .kw_mat4x2, .kw_mat4x3, .kw_mat4x4,
             .kw_float, .kw_int, .kw_uint, .kw_bool,
+            .kw_int8, .kw_uint8,
             .kw_sampler2d, .kw_sampler3d, .kw_sampler_cube, .kw_sampler2d_array, .kw_sampler2d_ms,
             => {
                 var ty = self.tryType().?;

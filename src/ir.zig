@@ -119,6 +119,8 @@ pub const Instruction = struct {
         convert_itof,
         bitcast,
         convert_utof,
+        convert_narrow, // OpSConvert: int/int16 → int8, or ivec4 → i8vec4
+        convert_widen, // OpSConvert: int8/int16 → int, or i8vec4 → ivec4
         bool_to_float,
         bool_to_int,
         bool_to_uint,

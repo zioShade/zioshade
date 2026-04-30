@@ -708,9 +708,19 @@ const Tokenizer = struct {
             self.offset += 1;
         }
 
-        // Check for uint suffix
-        if (!has_dot and !has_exponent and self.offset < self.source.len and (self.source[self.offset] == 'u' or self.source[self.offset] == 'U')) {
-            self.offset += 1;
+        // Check for uint suffix (also handles 'us' for uint16)
+        if (!has_dot and !has_exponent and self.offset < self.source.len) {
+            const c = self.source[self.offset];
+            if (c == 'u' or c == 'U') {
+                self.offset += 1;
+                // 'us' suffix for uint16
+                if (self.offset < self.source.len and (self.source[self.offset] == 's' or self.source[self.offset] == 'S')) {
+                    self.offset += 1;
+                }
+            } else if (c == 's' or c == 'S') {
+                // 's' suffix for int16
+                self.offset += 1;
+            }
         }
 
         if (has_digit) {
