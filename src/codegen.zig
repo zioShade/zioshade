@@ -1570,6 +1570,48 @@ const Codegen = struct {
                 }
                 try self.emitted_array_types.put(self.alloc, cache_key, id);
             },
+            // Separate sampler/texture types
+            .sampler_plain => {
+                try self.emitTypeWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.TypeSampler)));
+                try self.emitTypeWord(id);
+            },
+            .texture2d_plain => {
+                // Reuse the image type from sampler2d (same TypeImage params)
+                // Ensure sampler2d is emitted first to set sampled_image_inner_id
+                _ = try self.ensureType(.sampler2d);
+                // The image type was already emitted as part of sampler2d
+                // We need to get the same type ID that sampler2d used
+                if (self.emitted_types.get(@intFromEnum(ast.Type.texture2d_plain))) |cached| {
+                    return cached;
+                }
+                // Store the same image ID as what sampler2d used
+                try self.emitted_types.put(self.alloc, @intFromEnum(ast.Type.texture2d_plain), self.sampled_image_inner_id);
+                return self.sampled_image_inner_id;
+            },
+            .texture3d_plain => {
+                _ = try self.ensureType(.sampler3d);
+                if (self.emitted_types.get(@intFromEnum(ast.Type.texture3d_plain))) |cached| return cached;
+                try self.emitted_types.put(self.alloc, @intFromEnum(ast.Type.texture3d_plain), self.sampled_image_3d_inner_id);
+                return self.sampled_image_3d_inner_id;
+            },
+            .texture_cube_plain => {
+                _ = try self.ensureType(.sampler_cube);
+                if (self.emitted_types.get(@intFromEnum(ast.Type.texture_cube_plain))) |cached| return cached;
+                try self.emitted_types.put(self.alloc, @intFromEnum(ast.Type.texture_cube_plain), self.sampled_image_cube_inner_id);
+                return self.sampled_image_cube_inner_id;
+            },
+            .texture2d_array_plain => {
+                _ = try self.ensureType(.sampler2d_array);
+                if (self.emitted_types.get(@intFromEnum(ast.Type.texture2d_array_plain))) |cached| return cached;
+                try self.emitted_types.put(self.alloc, @intFromEnum(ast.Type.texture2d_array_plain), self.sampled_image_2d_array_inner_id);
+                return self.sampled_image_2d_array_inner_id;
+            },
+            .texture2d_ms_plain => {
+                _ = try self.ensureType(.sampler2d_ms);
+                if (self.emitted_types.get(@intFromEnum(ast.Type.texture2d_ms_plain))) |cached| return cached;
+                try self.emitted_types.put(self.alloc, @intFromEnum(ast.Type.texture2d_ms_plain), self.sampled_image_ms_inner_id);
+                return self.sampled_image_ms_inner_id;
+            },
         }
         // Cache for simple types
         if (normalized != .named and normalized != .array) {
@@ -3038,6 +3080,19 @@ const Codegen = struct {
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(sampled_image_id);
+            },
+            .sampled_image => {
+                // OpSampledImage: combine texture + sampler into a combined image-sampler
+                const result_id = resolved.result_id orelse return;
+                const texture_id = self.operandId(resolved, 0);
+                const sampler_id = self.operandId(resolved, 1);
+                // Result type is the combined sampled image type
+                const result_type_id = try self.ensureType(inst.ty);
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.SampledImage)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(texture_id);
+                try self.emitWord(sampler_id);
             },
             .image_query_size => {
                 const result_type_id = resolved.result_type orelse return;
