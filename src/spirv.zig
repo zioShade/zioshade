@@ -164,6 +164,8 @@ pub const Op = enum(u16) {
     Return = 253,
     ReturnValue = 254,
     Unreachable = 255,
+    ControlBarrier = 224,
+    MemoryBarrier = 225,
     _,
 };
 

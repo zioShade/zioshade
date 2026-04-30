@@ -2522,6 +2522,24 @@ const Codegen = struct {
                 }
                 return;
             },
+            .control_barrier => {
+                // OpControlBarrier: Execution Scope <id>, Memory Scope <id>, Memory Semantics <id>
+                const scope = self.operandId(resolved, 0);
+                const mem_scope = self.operandId(resolved, 1);
+                const semantics = self.operandId(resolved, 2);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.ControlBarrier)));
+                try self.emitWord(scope);
+                try self.emitWord(mem_scope);
+                try self.emitWord(semantics);
+            },
+            .memory_barrier => {
+                // OpMemoryBarrier: Memory Scope <id>, Memory Semantics <id>
+                const scope = self.operandId(resolved, 0);
+                const semantics = self.operandId(resolved, 1);
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.MemoryBarrier)));
+                try self.emitWord(scope);
+                try self.emitWord(semantics);
+            },
             .local_variable => {
                 const ptr_type_id = try self.ensurePointerType(resolved.ty, .function);
                 const result_id = resolved.result_id orelse return;

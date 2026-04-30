@@ -2638,9 +2638,91 @@ const Analyzer = struct {
                         });
                         return .{ .ty = ret_ty, .id = result_id };
                     }
-                    // Barrier/memory functions — void, no SPIR-V instruction needed for now
+                    // Barrier/memory functions
+                    if (std.mem.eql(u8, node.data.name, "barrier")) {
+                        // OpControlBarrier: Execution=Workgroup(2), Memory=Workgroup(2), Semantics=AcquireRelease+WorkgroupMemory(264)
+                        const scope_id = try self.getConstInt(2, .uint);
+                        const mem_scope_id = scope_id; // same
+                        const semantics_id = try self.getConstInt(264, .uint);
+                        const barrier_ops = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                        barrier_ops[0] = .{ .id = scope_id };
+                        barrier_ops[1] = .{ .id = mem_scope_id };
+                        barrier_ops[2] = .{ .id = semantics_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .control_barrier,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = barrier_ops,
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = result_id };
+                    }
+                    if (std.mem.eql(u8, node.data.name, "memoryBarrier")) {
+                        // OpMemoryBarrier: Device(1), AcquireRelease+Uniform(72)
+                        const scope_id = try self.getConstInt(1, .uint);
+                        const semantics_id = try self.getConstInt(72, .uint);
+                        const mb_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        mb_ops[0] = .{ .id = scope_id };
+                        mb_ops[1] = .{ .id = semantics_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .memory_barrier,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = mb_ops,
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = result_id };
+                    }
+                    if (std.mem.eql(u8, node.data.name, "memoryBarrierShared")) {
+                        // OpMemoryBarrier: Workgroup(2), AcquireRelease+WorkgroupMemory(264)
+                        const scope_id = try self.getConstInt(2, .uint);
+                        const semantics_id = try self.getConstInt(264, .uint);
+                        const mb_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        mb_ops[0] = .{ .id = scope_id };
+                        mb_ops[1] = .{ .id = semantics_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .memory_barrier,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = mb_ops,
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = result_id };
+                    }
+                    if (std.mem.eql(u8, node.data.name, "memoryBarrierImage") or std.mem.eql(u8, node.data.name, "memoryBarrierBuffer")) {
+                        // OpMemoryBarrier: Device(1), AcquireRelease+Uniform(72)
+                        const scope_id = try self.getConstInt(1, .uint);
+                        const semantics_id = try self.getConstInt(72, .uint);
+                        const mb_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        mb_ops[0] = .{ .id = scope_id };
+                        mb_ops[1] = .{ .id = semantics_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .memory_barrier,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = mb_ops,
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = result_id };
+                    }
+                    if (std.mem.eql(u8, node.data.name, "groupMemoryBarrier")) {
+                        // OpMemoryBarrier: Workgroup(2), AcquireRelease+Uniform(72)
+                        const scope_id = try self.getConstInt(2, .uint);
+                        const semantics_id = try self.getConstInt(72, .uint);
+                        const mb_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        mb_ops[0] = .{ .id = scope_id };
+                        mb_ops[1] = .{ .id = semantics_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .memory_barrier,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = mb_ops,
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = result_id };
+                    }
                     if (self.isBarrierBuiltin(node.data.name)) {
-                        // Emit a no-op (void) — TODO: proper OpControlBarrier/OpMemoryBarrier
+                        // Remaining barrier builtins (beginInvocationInterlockARB, endInvocationInterlockARB, demote)
                         return .{ .ty = .void, .id = result_id };
                     }
                     // helperInvocationEXT() returns bool (constant false for now)
