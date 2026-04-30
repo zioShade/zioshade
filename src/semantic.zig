@@ -261,6 +261,7 @@ const Analyzer = struct {
     /// if all operand IDs reference constant instructions.
     /// Returns true if upgraded.
     fn tryUpgradeToConstantComposite(self: *Analyzer) bool {
+        if (self.instructions.items.len == 0) return false;
         const last = &self.instructions.items[self.instructions.items.len - 1];
         if (last.tag != .composite_construct) return false;
         for (last.operands) |op| {
@@ -273,6 +274,18 @@ const Analyzer = struct {
         }
         last.tag = .constant_composite;
         return true;
+    }
+
+    /// Emit a composite_construct instruction and try to upgrade to constant_composite if all operands are constants.
+    fn emitCompositeConstruct(self: *Analyzer, result_id: u32, operands: []ir.Instruction.Operand, ty: ast.Type) !void {
+        try self.instructions.append(self.alloc, .{
+            .tag = .composite_construct,
+            .result_type = null,
+            .result_id = result_id,
+            .operands = operands,
+            .ty = ty,
+        });
+        _ = self.tryUpgradeToConstantComposite();
     }
 
     fn pushScope(self: *Analyzer) !void {
@@ -2350,6 +2363,7 @@ const Analyzer = struct {
                                             .operands = splat_ops,
                                             .ty = swizzled_ty,
                                         });
+                                        _ = self.tryUpgradeToConstantComposite();
                                         value_id = splat_id;
                                     }
 
