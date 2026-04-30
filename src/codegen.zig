@@ -58,6 +58,7 @@ pub fn generate(
         .sampled_image_uint_1d_inner_id = 0,
         .sampled_image_cube_inner_id = 0,
         .glsl_std_450_id = 0,
+        .access_chain_cache = .{},
     };
     defer cg.deinit();
 
@@ -144,6 +145,7 @@ const Codegen = struct {
     sampled_image_uint_1d_inner_id: u32,
     sampled_image_cube_inner_id: u32, // TypeImage (Dim=Cube, Sampled=1)
     glsl_std_450_id: u32,
+    access_chain_cache: std.AutoHashMapUnmanaged(u64, u32), // (base_id << 32 | index_id) -> result_id, cleared per function
 
     fn deinit(self: *Codegen) void {
         self.emitted_types.deinit(self.alloc);
@@ -157,6 +159,7 @@ const Codegen = struct {
         self.emitted_func_types.deinit(self.alloc);
         self.layout_visited.deinit(self.alloc);
         self.ptr_storage_class.deinit(self.alloc);
+        self.access_chain_cache.deinit(self.alloc);
         self.words.deinit(self.alloc);
         self.type_section.deinit(self.alloc);
         self.decoration_section.deinit(self.alloc);
@@ -2254,6 +2257,9 @@ const Codegen = struct {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Label)));
             try self.emitWord(label_id);
 
+            // Clear per-function caches
+            self.access_chain_cache.clearRetainingCapacity();
+
             // SPIR-V requires all OpVariable be first in the first block
             for (func.body) |inst| {
                 if (inst.tag == .local_variable) {
@@ -2584,43 +2590,62 @@ const Codegen = struct {
                 }
 
                 if (is_buf_ref_member) {
-                    // Access chain: get a pointer to the PhysicalStorageBuffer pointer member
-                    const struct_id = try self.ensureType(inst.ty);
-                    const phys_ptr_key = (@as(u64, struct_id) << 32) | @as(u64, 5349);
-                    const phys_ptr_id = self.emitted_ptr_types.get(phys_ptr_key) orelse struct_id;
-                    // Create pointer-to-pointer type: StorageBuffer -> PhysicalStorageBuffer pointer
-                    const ptr_to_ptr_key = (@as(u64, phys_ptr_id) << 32) | @as(u64, @intFromEnum(sc));
-                    const ptr_type_id = if (self.emitted_ptr_types.get(ptr_to_ptr_key)) |cached| cached else blk: {
-                        const pid = self.allocId();
-                        try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
-                        try self.emitTypeWord(pid);
-                        try self.emitTypeWord(@intFromEnum(sc));
-                        try self.emitTypeWord(phys_ptr_id);
-                        try self.emitted_ptr_types.put(self.alloc, ptr_to_ptr_key, pid);
-                        break :blk pid;
-                    };
-                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
-                    try self.emitWord(ptr_type_id);
-                    try self.emitWord(result_id);
-                    try self.emitWord(base_id_val);
-                    try self.emitWord(index_id);
-                    // Now load the PhysicalStorageBuffer pointer
-                    const loaded_id = self.allocId();
-                    try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Load)));
-                    try self.emitWord(phys_ptr_id);
-                    try self.emitWord(loaded_id);
-                    try self.emitWord(result_id);
-                    // Alias the result_id to the loaded pointer for subsequent access chains
-                    try self.constant_alias.put(self.alloc, result_id, loaded_id);
-                    // Track the loaded pointer as PhysicalStorageBuffer
-                    try self.ptr_storage_class.put(self.alloc, loaded_id, .physical_storage_buffer);
+                    // Check cache first
+                    const buf_cache_key = (@as(u64, base_id_val) << 32) | @as(u64, index_id);
+                    if (self.access_chain_cache.get(buf_cache_key)) |cached_loaded| {
+                        // Reuse existing buffer reference load result
+                        try self.constant_alias.put(self.alloc, result_id, cached_loaded);
+                        try self.ptr_storage_class.put(self.alloc, cached_loaded, .physical_storage_buffer);
+                    } else {
+                        // Access chain: get a pointer to the PhysicalStorageBuffer pointer member
+                        const struct_id = try self.ensureType(inst.ty);
+                        const phys_ptr_key = (@as(u64, struct_id) << 32) | @as(u64, 5349);
+                        const phys_ptr_id = self.emitted_ptr_types.get(phys_ptr_key) orelse struct_id;
+                        // Create pointer-to-pointer type: StorageBuffer -> PhysicalStorageBuffer pointer
+                        const ptr_to_ptr_key = (@as(u64, phys_ptr_id) << 32) | @as(u64, @intFromEnum(sc));
+                        const ptr_type_id = if (self.emitted_ptr_types.get(ptr_to_ptr_key)) |ptr_cached| ptr_cached else blk: {
+                            const pid = self.allocId();
+                            try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
+                            try self.emitTypeWord(pid);
+                            try self.emitTypeWord(@intFromEnum(sc));
+                            try self.emitTypeWord(phys_ptr_id);
+                            try self.emitted_ptr_types.put(self.alloc, ptr_to_ptr_key, pid);
+                            break :blk pid;
+                        };
+                        try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
+                        try self.emitWord(ptr_type_id);
+                        try self.emitWord(result_id);
+                        try self.emitWord(base_id_val);
+                        try self.emitWord(index_id);
+                        // Now load the PhysicalStorageBuffer pointer
+                        const loaded_id = self.allocId();
+                        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Load)));
+                        try self.emitWord(phys_ptr_id);
+                        try self.emitWord(loaded_id);
+                        try self.emitWord(result_id);
+                        // Alias the result_id to the loaded pointer for subsequent access chains
+                        try self.constant_alias.put(self.alloc, result_id, loaded_id);
+                        // Track the loaded pointer as PhysicalStorageBuffer
+                        try self.ptr_storage_class.put(self.alloc, loaded_id, .physical_storage_buffer);
+                        // Cache the loaded result
+                        try self.access_chain_cache.put(self.alloc, buf_cache_key, loaded_id);
+                    }
                 } else {
                     const ptr_type_id = try self.ensurePointerType(inst.ty, sc);
-                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
-                    try self.emitWord(ptr_type_id);
-                    try self.emitWord(result_id);
-                    try self.emitWord(base_id_val);
-                    try self.emitWord(index_id);
+                    // Check if we've already computed this AccessChain
+                    const cache_key = (@as(u64, base_id_val) << 32) | @as(u64, index_id);
+                    if (self.access_chain_cache.get(cache_key)) |cached_result| {
+                        // Reuse existing result, alias it
+                        try self.constant_alias.put(self.alloc, result_id, cached_result);
+                        try self.ptr_storage_class.put(self.alloc, cached_result, sc);
+                    } else {
+                        try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
+                        try self.emitWord(ptr_type_id);
+                        try self.emitWord(result_id);
+                        try self.emitWord(base_id_val);
+                        try self.emitWord(index_id);
+                        try self.access_chain_cache.put(self.alloc, cache_key, result_id);
+                    }
                 }
             },
             .vector_extract_dynamic => {
@@ -2640,11 +2665,18 @@ const Codegen = struct {
                 const base_id = self.operandId(resolved, 0);
                 const member_idx = self.operandInt(resolved, 1);
                 const index_const_id = try self.emitSignedIntConstant(member_idx);
-                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
-                try self.emitWord(result_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(base_id);
-                try self.emitWord(index_const_id);
+                // Check cache for duplicate AccessChain
+                const cache_key = (@as(u64, base_id) << 32) | @as(u64, index_const_id);
+                if (self.access_chain_cache.get(cache_key)) |cached_result| {
+                    try self.constant_alias.put(self.alloc, result_id, cached_result);
+                } else {
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(base_id);
+                    try self.emitWord(index_const_id);
+                    try self.access_chain_cache.put(self.alloc, cache_key, result_id);
+                }
             },
             .vector_shuffle => {
                 const result_type_id = resolved.result_type orelse return;
@@ -3246,6 +3278,8 @@ const Codegen = struct {
                 try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.Unreachable)));
             },
             .label => {
+                // New basic block: clear AccessChain cache to maintain dominance
+                self.access_chain_cache.clearRetainingCapacity();
                 const label_id = resolved.result_id orelse return;
                 try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Label)));
                 try self.emitWord(label_id);
@@ -3388,7 +3422,7 @@ const Codegen = struct {
             .id => |v| self.constant_alias.get(v) orelse v,
             .literal_int => |v| v,
             .literal_float => |v| @as(u32, @bitCast(v)),
-            .literal_string => |_| 0,
+            .literal_string => 0,
         };
     }
 };
