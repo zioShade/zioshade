@@ -3035,15 +3035,29 @@ const Codegen = struct {
                     for (0..num_comp) |i| try self.emitWord(@intCast(i));
                 }
                 const lod_id = if (resolved.operands.len >= 3) self.operandId(resolved, 2) else return;
-                // Image Operand Lod mask = bit 1 (0x2)
-                try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleDrefExplicitLod)));
-                try self.emitWord(result_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(sampled_image_id);
-                try self.emitWord(shrunk_coord_id);
-                try self.emitWord(dref_id);
-                try self.emitWord(2); // Image Operand Lod mask (bit 1)
-                try self.emitWord(lod_id);
+                if (resolved.operands.len >= 4) {
+                    // textureLodOffset with shadow sampler: sampler, coord, lod, offset → Lod|ConstOffset
+                    const offset_id = self.operandId(resolved, 3);
+                    try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.ImageSampleDrefExplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(dref_id);
+                    try self.emitWord(10); // Image Operand Lod|ConstOffset mask
+                    try self.emitWord(lod_id);
+                    try self.emitWord(offset_id);
+                } else {
+                    // Image Operand Lod mask = bit 1 (0x2)
+                    try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleDrefExplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(dref_id);
+                    try self.emitWord(2); // Image Operand Lod mask (bit 1)
+                    try self.emitWord(lod_id);
+                }
             },
             .image_sample_dref_proj => {
                 // OpImageSampleProjDrefImplicitLod: result_type(float), result, sampled_image, coordinate_with_proj, Dref
