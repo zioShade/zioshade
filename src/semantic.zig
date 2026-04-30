@@ -1460,6 +1460,42 @@ const Analyzer = struct {
         }
     }
 
+    /// Materialize an SSA variable into a proper OpVariable with pointer.
+    /// Returns the new variable ID (pointer). Safe to call multiple times.
+    fn materializeSSA(self: *Analyzer, name: []const u8) ?u32 {
+        if (self.lookupMut(name)) |sym| {
+            if (sym.kind == .var_sym and sym.is_ssa) {
+                const var_id = self.allocId();
+                const sc_ops = self.alloc.alloc(ir.Instruction.Operand, 1) catch return null;
+                sc_ops[0] = .{ .literal_int = 7 }; // Function
+                self.instructions.append(self.alloc, .{
+                    .tag = .local_variable,
+                    .result_type = null,
+                    .result_id = var_id,
+                    .operands = sc_ops,
+                    .ty = sym.ty,
+                }) catch return null;
+                if (sym.init_value) |init_val| {
+                    const store_ops = self.alloc.alloc(ir.Instruction.Operand, 2) catch return null;
+                    store_ops[0] = .{ .id = var_id };
+                    store_ops[1] = .{ .id = init_val };
+                    self.instructions.append(self.alloc, .{
+                        .tag = .store,
+                        .result_type = null,
+                        .result_id = null,
+                        .operands = store_ops,
+                        .ty = .void,
+                    }) catch return null;
+                }
+                sym.ir_id = var_id;
+                sym.is_ssa = false;
+                sym.init_value = null;
+                return var_id;
+            }
+        }
+        return null;
+    }
+
     fn analyzeLValue(self: *Analyzer, node: ast.Node) Error!TypedId {
         switch (node.tag) {
             .identifier => {
@@ -2057,10 +2093,16 @@ const Analyzer = struct {
                                         value = .{ .ty = value.ty, .id = loaded_id };
                                     }
 
+                                    // Materialize SSA variable if needed for swizzle write
+                                    _ = self.materializeSSA(base_node.data.name);
+                                    // Re-lookup to get updated ir_id after materialization
+                                    const mat_sym = self.lookup(base_node.data.name);
+                                    const var_ptr_id = if (mat_sym) |ms| ms.ir_id else sym.ir_id;
+
                                     // Load current vector value directly from the variable
                                     const load_id = self.allocId();
                                     const ld_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                                    ld_ops[0] = .{ .id = sym.ir_id };
+                                    ld_ops[0] = .{ .id = var_ptr_id };
                                     try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = load_id, .operands = ld_ops, .ty = base_ty });
 
                                     // Build VectorShuffle: combine current vector with new values
@@ -2100,7 +2142,7 @@ const Analyzer = struct {
 
                                     // Store the shuffled vector back
                                     const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                                    store_ops[0] = .{ .id = sym.ir_id };
+                                    store_ops[0] = .{ .id = var_ptr_id };
                                     store_ops[1] = .{ .id = shuffle_id };
                                     try self.instructions.append(self.alloc, .{
                                         .tag = .store,
@@ -2185,10 +2227,15 @@ const Analyzer = struct {
                                 const swizzle_name = lhs.data.name;
                                 if (swizzle_name.len > 1) {
                                     // Multi-component swizzle compound assign
+                                    // Materialize SSA variable if needed
+                                    _ = self.materializeSSA(base_node.data.name);
+                                    const mat_sym2 = self.lookup(base_node.data.name);
+                                    const var_ptr_id2 = if (mat_sym2) |ms| ms.ir_id else sym.ir_id;
+
                                     // 1. Load current vector
                                     const vec_load_id = self.allocId();
                                     const vec_ld_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                                    vec_ld_ops[0] = .{ .id = sym.ir_id };
+                                    vec_ld_ops[0] = .{ .id = var_ptr_id2 };
                                     try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = vec_load_id, .operands = vec_ld_ops, .ty = base_ty });
 
                                     // 2. Extract swizzled components from the loaded vector
@@ -2313,7 +2360,7 @@ const Analyzer = struct {
 
                                     // 6. Store back
                                     const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                                    store_ops[0] = .{ .id = sym.ir_id };
+                                    store_ops[0] = .{ .id = var_ptr_id2 };
                                     store_ops[1] = .{ .id = final_shuffle_id };
                                     try self.instructions.append(self.alloc, .{
                                         .tag = .store,
