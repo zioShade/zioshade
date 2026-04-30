@@ -4538,6 +4538,17 @@ const Analyzer = struct {
                             },
                             else => base_tid.ty,
                         };
+                        // Identity check: if result type == base type and all indices are sequential, return base directly
+                        if (std.meta.eql(result_ty, base_tid.ty)) {
+                            var is_identity = true;
+                            for (member_name, 0..) |c, i| {
+                                if (self.swizzleIndex(c) != i) {
+                                    is_identity = false;
+                                    break;
+                                }
+                            }
+                            if (is_identity) return base_tid;
+                        }
                         const result_id = self.allocId();
                         // vector_shuffle operands: vec1, vec2, literal indices...
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 2 + num_comps);
