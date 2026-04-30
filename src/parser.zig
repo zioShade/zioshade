@@ -497,6 +497,7 @@ const Parser = struct {
             .kw_texture2d_array => { _ = self.advance(); return .texture2d_array_plain; },
             .kw_texture2d_ms => { _ = self.advance(); return .texture2d_ms_plain; },
             .kw_subpass_input => { _ = self.advance(); return .subpass_input; },
+            .kw_subpass_input_ms => { _ = self.advance(); return .subpass_input_ms; },
             .kw_sampler_shadow, .kw_sampler_plain => { _ = self.advance(); return .sampler_plain; },
             .kw_sampler_cube => { _ = self.advance(); return .sampler_cube; },
             .identifier => {

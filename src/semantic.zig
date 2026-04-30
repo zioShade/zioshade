@@ -2810,6 +2810,7 @@ const Analyzer = struct {
                         return .{ .ty = .vec2, .id = result_id };
                     }
                     // subpassLoad(subpassInput) → OpLoad + OpImageRead with ivec2(0,0)
+                    // subpassLoad(subpassInputMS, sampleIndex) → OpLoad + OpImageRead with Sample operand
                     if (std.mem.eql(u8, node.data.name, "subpassLoad")) {
                         if (arg_tids.items.len < 1) return error.SemanticFailed;
                         // The argument is a subpassInput variable — load it to get the image
@@ -2840,17 +2841,32 @@ const Analyzer = struct {
                             .operands = coord_ops,
                             .ty = .ivec2,
                         });
-                        // OpImageRead
-                        const read_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                        read_ops[0] = .{ .id = img_id };
-                        read_ops[1] = .{ .id = coord_id };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .image_read,
-                            .result_type = null,
-                            .result_id = result_id,
-                            .operands = read_ops,
-                            .ty = .vec4,
-                        });
+                        // OpImageRead — with optional Sample operand for MS
+                        if (arg_tids.items.len >= 2) {
+                            // MS subpassLoad: subpassLoad(img, sampleIndex)
+                            const read_ops = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                            read_ops[0] = .{ .id = img_id };
+                            read_ops[1] = .{ .id = coord_id };
+                            read_ops[2] = .{ .id = arg_tids.items[1].id }; // sample index
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .image_read,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = read_ops,
+                                .ty = .vec4,
+                            });
+                        } else {
+                            const read_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            read_ops[0] = .{ .id = img_id };
+                            read_ops[1] = .{ .id = coord_id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .image_read,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = read_ops,
+                                .ty = .vec4,
+                            });
+                        }
                         return .{ .ty = .vec4, .id = result_id };
                     }
                     if (std.mem.eql(u8, node.data.name, "textureSamples") or std.mem.eql(u8, node.data.name, "imageSamples")) {
