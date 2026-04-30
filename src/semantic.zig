@@ -2436,22 +2436,26 @@ const Analyzer = struct {
                     value_id = splat_id;
                     value_ty = target.ty;
                 } else if (target.ty.isVector() and value_ty == .float) {
-                    // float → splat to vector
-                    const splat_id = self.allocId();
-                    const num_comps = target.ty.numComponents();
-                    const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
-                    for (0..num_comps) |i| {
-                        splat_operands[i] = .{ .id = value.id };
+                    // For multiplication, skip splat — we'll use vec_scalar_mul instead
+                    const is_mul = node.data.op == .mul_assign;
+                    if (!is_mul) {
+                        // float → splat to vector (needed for +=, -=, /= etc.)
+                        const splat_id = self.allocId();
+                        const num_comps = target.ty.numComponents();
+                        const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
+                        for (0..num_comps) |i| {
+                            splat_operands[i] = .{ .id = value.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_construct,
+                            .result_type = null,
+                            .result_id = splat_id,
+                            .operands = splat_operands,
+                            .ty = target.ty,
+                        });
+                        value_id = splat_id;
+                        value_ty = target.ty;
                     }
-                    try self.instructions.append(self.alloc, .{
-                        .tag = .composite_construct,
-                        .result_type = null,
-                        .result_id = splat_id,
-                        .operands = splat_operands,
-                        .ty = target.ty,
-                    });
-                    value_id = splat_id;
-                    value_ty = target.ty;
                 } else if (target.ty.isVector() and value_ty.isScalar() and !value_ty.isVector()) {
                     // Any other scalar → splat to vector (handles int8, int16, uint8, uint16, etc.)
                     const splat_id = self.allocId();
