@@ -1,6 +1,6 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 199/199 spirv-val, 10/10 Ghostty, 186/199 output match (13 real mismatches, all missing features)
+## CURRENT STATUS: 199/199 spirv-val, 10/10 Ghostty, 187/199 output match (12 real mismatches, all missing features)
 
 ## GOAL: Replace glslang C++ pipeline in deblasis/wintty with pure Zig implementation
 
@@ -127,7 +127,7 @@
 **Baseline**: 22/199 (88.9% match, 18 false positives excluded)
 **Tool**: autoresearch_bench.py — compares OpStore to Output/StorageBuffer vars, excludes gl_PerVertex wrapping
 
-## REMAINING 13 MISMATCHES (all need significant new features):
+## REMAINING 12 MISMATCHES (all need significant new features):
 
 ### Missing features (out=0/ref=N):
 1. **block-match-sad/ssd.spv14.frag** (2) — GL_QCOM_image_processing extension
@@ -135,20 +135,20 @@
 3. **sample-weighted.spv14.frag** (1) — GL_QCOM_image_processing
 4. **nonuniform-qualifier.vk.nocompat.frag** (14!) — nonuniformEXT, separate sampler arrays, image atomics
 5. **rq-position-fetch.vk.spv14.nocompat.frag** (1) — ray query position fetch
-6. **separate-sampler-texture-array.vk.frag** (1) — function params with array-of-texture2D
-7. **shader-arithmetic-8bit.nocompat.vk.frag** (2) — 8-bit arithmetic types
-8. **spec-constant-block-size.vk.frag** (1) — OpSpecConstant + layout(constant_id=)
-9. **struct-type-unrelated-alias.frag** (1) — block-scoped struct redeclaration (needs per-scope type table)
-10. **tensor.nocompat.noopt.vk.frag** (1) — GL_ARM_tensors extension
-11. **tensor_params.nocompat.invalid.vk.comp** (buf=0/1) — GL_ARM_tensors
-12. **tensor_read.nocompat.noopt.vk.comp** (buf=0/1) — GL_ARM_tensors
+6. **shader-arithmetic-8bit.nocompat.vk.frag** (2) — 8-bit arithmetic types + pack/unpack builtins
+7. **spec-constant-block-size.vk.frag** (1) — OpSpecConstant + layout(constant_id=). PARTIALLY DONE — needs splice fix.
+8. **struct-type-unrelated-alias.frag** (1) — block-scoped struct redeclaration (needs per-scope type table)
+9. **tensor.nocompat.noopt.vk.frag** (1) — GL_ARM_tensors extension
+10. **tensor_params.nocompat.invalid.vk.comp** (buf=0/1) — GL_ARM_tensors
+11. **tensor_read.nocompat.noopt.vk.comp** (buf=0/1) — GL_ARM_tensors
 
 ### Estimation: Each needs 100+ lines of new code. Total: ~1500+ lines.
 
 ## PRUNED / STALE:
 - Store mismatch phases 1-3 metrics are outdated (replaced by real_output_mismatches)
-- "modf/frexp multi-component swizzle writes" — still broken but not in the 13 mismatch set
+- "modf/frexp multi-component swizzle writes" — still broken but not in the 12 mismatch set
 - Function inlining, dead code elimination — good ideas but not the bottleneck
+- **Spec constants**: Attempted but caused SPIR-V section ordering corruption. The issue: appending SpecId decorations and OpSpecConstant to `words` between `emitDecorations` and `emitTypesAndConstants` causes the name_section/decoration_section splices to corrupt the binary. Fix: emit SpecId decorations through the existing `emitDecorations` function (need spec constant info available before decoration emission). Key opcode: OpSpecConstant=50 (NOT 51), Decoration.SpecId=41.
 
 ## BEST PATH FORWARD:
 1. **Phase 3: GPU visual correctness** — build a headless Vulkan renderer to validate that
