@@ -2091,6 +2091,163 @@ const Analyzer = struct {
             },
             .compound_assign => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
+
+                // Handle multi-component swizzle compound assignment: v.xy *= expr, v.xyz += expr, etc.
+                const lhs = node.data.children[0];
+                if (lhs.tag == .member_access and lhs.data.children.len > 0) {
+                    const base_node = lhs.data.children[0];
+                    if (base_node.tag == .identifier) {
+                        if (self.lookup(base_node.data.name)) |sym| {
+                            const base_ty = sym.ty;
+                            if (base_ty.isVector()) {
+                                const swizzle_name = lhs.data.name;
+                                if (swizzle_name.len > 1) {
+                                    // Multi-component swizzle compound assign
+                                    // 1. Load current vector
+                                    const vec_load_id = self.allocId();
+                                    const vec_ld_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                    vec_ld_ops[0] = .{ .id = sym.ir_id };
+                                    try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = vec_load_id, .operands = vec_ld_ops, .ty = base_ty });
+
+                                    // 2. Extract swizzled components from the loaded vector
+                                    const swizzle_len = swizzle_name.len;
+                                    const swizzle_ops = try self.alloc.alloc(ir.Instruction.Operand, 2 + swizzle_len);
+                                    swizzle_ops[0] = .{ .id = vec_load_id };
+                                    swizzle_ops[1] = .{ .id = vec_load_id }; // second vector unused for extract-only
+                                    for (0..swizzle_len) |i| {
+                                        swizzle_ops[2 + i] = .{ .literal_int = self.swizzleIndex(swizzle_name[i]) };
+                                    }
+                                    const swizzled_id = self.allocId();
+                                    const swizzled_ty: ast.Type = switch (base_ty) {
+                                        .vec2, .vec3, .vec4 => switch (swizzle_len) {
+                                            2 => ast.Type.vec2,
+                                            3 => ast.Type.vec3,
+                                            4 => ast.Type.vec4,
+                                            else => base_ty,
+                                        },
+                                        .ivec2, .ivec3, .ivec4 => switch (swizzle_len) {
+                                            2 => ast.Type.ivec2,
+                                            3 => ast.Type.ivec3,
+                                            4 => ast.Type.ivec4,
+                                            else => base_ty,
+                                        },
+                                        .uvec2, .uvec3, .uvec4 => switch (swizzle_len) {
+                                            2 => ast.Type.uvec2,
+                                            3 => ast.Type.uvec3,
+                                            4 => ast.Type.uvec4,
+                                            else => base_ty,
+                                        },
+                                        .bvec2, .bvec3, .bvec4 => switch (swizzle_len) {
+                                            2 => ast.Type.bvec2,
+                                            3 => ast.Type.bvec3,
+                                            4 => ast.Type.bvec4,
+                                            else => base_ty,
+                                        },
+                                        else => base_ty,
+                                    };
+                                    try self.instructions.append(self.alloc, .{
+                                        .tag = .vector_shuffle,
+                                        .result_type = null,
+                                        .result_id = swizzled_id,
+                                        .operands = swizzle_ops,
+                                        .ty = swizzled_ty,
+                                    });
+
+                                    // 3. Evaluate RHS
+                                    var value = try self.analyzeExpression(node.data.children[1]);
+                                    if (value.is_ptr) {
+                                        const loaded_id = self.allocId();
+                                        const ld_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                        ld_ops[0] = .{ .id = value.id };
+                                        try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = loaded_id, .operands = ld_ops, .ty = value.ty });
+                                        value = .{ .ty = value.ty, .id = loaded_id };
+                                    }
+
+                                    // Splat scalar to swizzle_len if needed
+                                    var value_id = value.id;
+                                    if (!value.ty.isVector() and swizzled_ty.isVector()) {
+                                        const splat_ops = try self.alloc.alloc(ir.Instruction.Operand, swizzle_len);
+                                        for (0..swizzle_len) |i| {
+                                            splat_ops[i] = .{ .id = value.id };
+                                        }
+                                        const splat_id = self.allocId();
+                                        try self.instructions.append(self.alloc, .{
+                                            .tag = .composite_construct,
+                                            .result_type = null,
+                                            .result_id = splat_id,
+                                            .operands = splat_ops,
+                                            .ty = swizzled_ty,
+                                        });
+                                        value_id = splat_id;
+                                    }
+
+                                    // 4. Apply the compound operation
+                                    const assign_op = node.data.op orelse .mul_assign;
+                                    const op_tag: ir.Instruction.Tag = switch (assign_op) {
+                                        .add_assign => .fadd,
+                                        .sub_assign => .fsub,
+                                        .mul_assign => .fmul,
+                                        .div_assign => .fdiv,
+                                        else => .fmul, // fallback
+                                    };
+                                    const result_id = self.allocId();
+                                    const op_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                    op_ops[0] = .{ .id = swizzled_id };
+                                    op_ops[1] = .{ .id = value_id };
+                                    try self.instructions.append(self.alloc, .{
+                                        .tag = op_tag,
+                                        .result_type = null,
+                                        .result_id = result_id,
+                                        .operands = op_ops,
+                                        .ty = swizzled_ty,
+                                    });
+
+                                    // 5. VectorShuffle to combine: keep non-swizzled from original, use result for swizzled
+                                    const n = base_ty.numComponents();
+                                    const final_shuffle_ops = try self.alloc.alloc(ir.Instruction.Operand, 2 + n);
+                                    final_shuffle_ops[0] = .{ .id = vec_load_id }; // original vector
+                                    final_shuffle_ops[1] = .{ .id = result_id }; // computed values
+                                    for (0..n) |i| {
+                                        var found = false;
+                                        for (0..swizzle_len) |j| {
+                                            if (self.swizzleIndex(swizzle_name[j]) == i) {
+                                                final_shuffle_ops[2 + i] = .{ .literal_int = @intCast(swizzle_len + j) };
+                                                found = true;
+                                                break;
+                                            }
+                                        }
+                                        if (!found) {
+                                            final_shuffle_ops[2 + i] = .{ .literal_int = @intCast(i) };
+                                        }
+                                    }
+                                    const final_shuffle_id = self.allocId();
+                                    try self.instructions.append(self.alloc, .{
+                                        .tag = .vector_shuffle,
+                                        .result_type = null,
+                                        .result_id = final_shuffle_id,
+                                        .operands = final_shuffle_ops,
+                                        .ty = base_ty,
+                                    });
+
+                                    // 6. Store back
+                                    const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                    store_ops[0] = .{ .id = sym.ir_id };
+                                    store_ops[1] = .{ .id = final_shuffle_id };
+                                    try self.instructions.append(self.alloc, .{
+                                        .tag = .store,
+                                        .result_type = null,
+                                        .result_id = null,
+                                        .operands = store_ops,
+                                        .ty = .void,
+                                    });
+                                    return .{ .ty = .void, .id = 0 };
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Regular (non-swizzle) compound assignment
                 const target = try self.analyzeLValue(node.data.children[0]);
                 var value = try self.analyzeExpression(node.data.children[1]);
                 // If value is a pointer, load it
