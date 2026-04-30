@@ -7,31 +7,11 @@
 **Baseline**: 40/199 mismatches (159/199 match = 79.9%)
 **Constraint**: 199/199 spirv-val conformance must be maintained.
 
-**Breakdown of 40 mismatches:**
-- 17 shaders: we emit EXTRA output stores (out=N/ref=0) — likely unused output variables we should eliminate
+**Breakdown of 22 real mismatches:**
 - 14 shaders: we emit 0 output stores (out=0/ref=N) — missing features
-- 9 shaders: different counts (logic differences like swizzle writes, struct flattening)
+- 8 shaders: different output store counts (logic differences like swizzle writes, struct flattening)
 
-**Extra output stores (17, easiest to fix):**
-  clip-cull-distance.desktop.sso.vert, clip-cull-distance.desktop.vert,
-  device-group.nocompat.vk.vert, ground.vert, implicit-lod.legacy.vert,
-  int-attribute.legacy.vert, invariant.vert, io-block.legacy.vert,
-  modf.legacy.frag, multiview.nocompat.vk.vert, no-contraction.vert,
-  ocean.vert, push-constant.flatten.vert, read-from-row-major-array.vert,
-  return-array.vert, struct-flatten-inner-array.legacy.vert, swizzle.flatten.vert,
-  texture_buffer.vert, ubo.vert, vulkan-vertex.vk.vert
-
-**Missing features (14):**
-  separate-sampler-texture*.frag, input-attachment*.frag, nonuniform-qualifier,
-  shader-arithmetic-8bit, shader_ballot.comp, spec-constant-block-size,
-  struct-type-unrelated-alias, tensor.nocompat, rq-position-fetch,
-  block-match-sad/ssd, box-filter, sample-weighted
-
-**Logic differences (9):**
-  barycentric-khr-io-block.frag, buffer-reference.nocompat.vk.comp,
-  ground.vert, ocean.vert, read-from-row-major-array.vert,
-  row-major-workaround.vert, small-storage.vk.vert, struct-varying.legacy.*,
-  switch-nested.legacy.vert, type-alias.comp
+**Plus 18 false positives** (gl_PerVertex block wrapping — we use gl_Position directly, glslang wraps in gl_PerVertex. Structurally different but functionally equivalent.)
 
 ### Phase 2: Normalized Instruction Comparison
 **Metric**: `struct_match_rate` — percentage of shaders where normalized SPIR-V instruction sequence matches glslang.

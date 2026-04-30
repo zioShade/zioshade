@@ -1,6 +1,6 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 199/199 spirv-val conformance, 10/10 Ghostty shaders, bound ratio 0.792 (9783/12351)
+## CURRENT STATUS: 199/199 spirv-val, 10/10 Ghostty, 177/199 output match (22 real mismatches)
 
 ## GOAL: Replace glslang C++ pipeline in deblasis/wintty with pure Zig implementation
 
@@ -119,3 +119,46 @@
 ### IDEAS:
 - **Implement multi-component swizzle writes**: For `v.xy = vec2(...)`, load current vector, OpVectorShuffle to combine, store back. Would fix modf/frexp output and many other patterns.
 - **OpSampledImage for separate sampler/texture**: sampler2D(tex, samp) → OpSampledImage. Would fix 3 shaders.
+
+### AUTORESEARCH FRAMEWORK (Session 2026-04-30):
+
+#### PHASE 1: Reduce real_output_mismatches (22 → 0)
+**Metric**: real_output_mismatches (lower is better)
+**Baseline**: 22/199 (88.9% match, 18 false positives excluded)
+**Tool**: autoresearch_bench.py — compares OpStore to Output/StorageBuffer vars, excludes gl_PerVertex wrapping
+
+**Priority order for fixing 22 mismatches:**
+1. **Logic bugs (8 shaders, closest to fixing):**
+   - modf.legacy.frag: multi-component swizzle writes to output (result.xy, result.zw)
+   - barycentric-khr-io-block.frag: out=2/8 — likely struct flattening
+   - ground.vert: out=3/2 — off by 1, minor logic difference
+   - ocean.vert: out=3/2 — off by 1
+   - small-storage.vk.vert: out=1/3 — missing stores
+   - switch-nested.legacy.vert: out=1/0 — extra store?
+   - type-alias.comp: out=3/5 — struct aliasing issue
+   - buffer-reference.nocompat.vk.comp: buf=0/9 — physical storage buffer stores missing
+
+2. **Missing features (14 shaders, need new code):**
+   - separate-sampler-texture*.frag (2 shaders) — OpSampledImage
+   - input-attachment*.frag (2) — subpassInput
+   - block-match-sad/ssd/box-filter/sample-weighted (4) — SPIR-V 1.4 subgroups?
+   - nonuniform-qualifier (1) — nonuniformEXT
+   - shader-arithmetic-8bit (1) — 8-bit ops
+   - shader_ballot.comp (1) — subgroup ops
+   - spec-constant-block-size (1) — spec constants
+   - struct-type-unrelated-alias (1) — type aliasing
+   - rq-position-fetch (1) — ray query position fetch
+
+#### PHASE 2: Structural instruction match
+Compare normalized SPIR-V disassembly instruction-by-instruction.
+
+#### PHASE 3: GPU visual correctness
+Headless Vulkan renderer, screenshot comparison, pixel diff metric.
+
+#### PHASE 4: Performance optimization
+Compile time, SPIR-V size, while maintaining 100% correctness.
+
+#### BENCHMARK COMMAND:
+```bash
+python3 autoresearch_bench.py  # outputs METRIC real_output_mismatches=N
+```
