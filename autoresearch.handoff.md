@@ -1,9 +1,9 @@
-# Autoresearch Handoff Notes — Session 10
+# Autoresearch Handoff Notes — Session 11
 
 ## Current State
 - **199/199 spirv-val pass**, 9/199 real output mismatches, 9/10 Ghostty shaders, 0 total failures
 - Branch: `autoresearch/conformance-20260423`
-- Current HEAD: `f52613b` (barrier support)
+- Current HEAD: `c985506` (swizzle compound mul optimization)
 - 39/199 instruction-level exact matches with glslang
 - ID bound ratio: 0.8355 (we use ~84% of glslang's IDs)
 - ~3ms compile time for complex shaders
@@ -12,6 +12,10 @@
 1. Fixed OpControlBarrier opcode: was 227 (OpAtomicLoad!), now 224 (correct)
 2. Implemented proper barrier()/memoryBarrier*() SPIR-V instruction generation
 3. Barrier constants created via semantic analyzer's `getConstInt()` (avoids codegen type_section splice issues)
+4. Optimized float-to-vector splat: skip for `*=` and use `VectorTimesScalar` directly
+5. Optimized swizzle compound multiply to use `VectorTimesScalar` instead of splat+`FMul`
+6. Instruction-level matches improved: 39 → 42 / 199
+7. ID bound ratio improved: 0.8355 → 0.8352
 
 ## Remaining 9 mismatches (all vendor extensions — not quick wins)
 1. `block-match-sad.spv14.frag` — QCOM image processing (out=0/2)

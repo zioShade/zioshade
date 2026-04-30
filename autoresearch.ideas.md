@@ -2,6 +2,18 @@
 
 ## CURRENT STATUS: 199/199 spirv-val, 9/199 real output mismatches, 9/10 Ghostty shaders, proper barrier support
 
+## Session 2026-04-30 (Part 4):
+### Fixed:
+- ✅ OpControlBarrier opcode was WRONG (227 instead of 224). 227 = OpAtomicLoad! Fixed to 224.
+- ✅ Barrier constants via semantic analyzer `getConstInt()` instead of codegen `emitIntConstant()`
+- ✅ barrier()/memoryBarrier*() → proper OpControlBarrier/OpMemoryBarrier
+
+### Optimized:
+- ✅ Skip float-to-vector splat for `*=` — use VectorTimesScalar directly
+- ✅ Skip splat for swizzle compound multiply — use VectorTimesScalar
+- ✅ Instruction-level matches: 39 → 42 / 199
+- ✅ ID bound ratio: 0.8355 → 0.8352
+
 ## Session 2026-04-30 (Part 3):
 ### Infrastructure added:
 - ✅ OpFConvert (opcode 115) + `convert_ftof` IR tag
