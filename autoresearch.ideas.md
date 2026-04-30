@@ -1,6 +1,6 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 199/199 spirv-val conformance, 10/10 Ghostty shaders
+## CURRENT STATUS: 199/199 spirv-val conformance, 10/10 Ghostty shaders, bound ratio 0.792 (9783/12351)
 
 ## GOAL: Replace glslang C++ pipeline in deblasis/wintty with pure Zig implementation
 

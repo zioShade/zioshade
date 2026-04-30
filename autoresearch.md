@@ -1,31 +1,56 @@
-# Autoresearch: Maximize GLSL-to-SPIR-V Conformance
+# Autoresearch: Replace glslang C++ with Pure Zig in deblasis/wintty
 
-## Objective
-Achieve functional equivalency with glslangValidator for the glslpp GLSL-to-SPIR-V compiler,
-targeting replacement of the C++ glslang pipeline in the deblasis/wintty (windows branch) project.
-The compiler must produce valid SPIR-V that matches glslang's output while potentially being faster/more compact.
+## Phased Approach
 
-## Current State (199/199 conformance)
-- **199/199 spirv-val conformance** ✅
-- **10/10 Ghostty shaders pass** ✅ (common.glsl is include-only, excluded)
-- SPIR-V output ~0.73x glslang size (27% smaller)
-- GL_EXT_buffer_reference support: PhysicalStorageBuffer pointers, OpTypeForwardPointer, access chain pointer loads, Aligned memory operands
-- Proper std140/std430 layout: Block, Offset, ColMajor, MatrixStride, ArrayStride decorations
-- StorageBuffer storage class for SSBOs (modern SPIR-V 1.1+ approach)
-- Default DescriptorSet=0 for UBO/SSBO variables
-- Compute shader LocalSize execution mode
-- OpSource version detection from #version directive (GLSL/ESSL)
-- 8/16-bit type support: Int8, Int16, Float16 capabilities
-- Centroid/NoPerspective/Flat decorations for IO variables
-- In/out block member scoping: only uniform/buffer/push_constant members are directly accessible
-- SSA variable optimization, constant dedup, two-buffer on-demand codegen
+### Phase 1: Reduce Store Mismatches (CURRENT)
+**Metric**: `store_mismatches` (lower is better) — count of shaders where our OpStore count differs from glslang's.
+**Baseline**: 95/199 mismatches (104/199 match = 52.3%)
+**Constraint**: 199/199 spirv-val conformance must be maintained.
 
-## Metrics
-- **Primary**: total_pass (unitless, higher is better) — total shaders passing spirv-val
-- **Secondary**: total_compile_error, total_fail (spirv-val), total_skip, total_hang
+**Breakdown of 95 mismatches:**
+- 41 "missing feature" (we emit 0 stores — shader features we don't implement)
+- 31 "minor diff" (1-3 stores off — small logic differences)
+- 23 "major diff" (>3 stores off — significant logic differences)
+
+**Categories of missing features (41 shaders):**
+- fp64/double support: fp64.desktop.comp (42 stores)
+- int64 support: int64.desktop.comp (12 stores)
+- image query functions: image-query.desktop.frag (28 stores)
+- tensor/cooperative vector: tensor_*.comp, cooperative-vec-nv (27+ stores)
+- spec constants: spec-constant-*.comp/frag (6 stores)
+- input attachments: input-attachment*.frag (2 stores)
+- subgroup operations: shader_ballot, shader_group_vote, shared (18 stores)
+- separate sampler/texture: separate-sampler-texture*.frag (22 stores)
+- nonuniformEXT: nonuniform-qualifier (18 stores)
+- extended arithmetic: extended-arithmetic (32 stores)
+- demote-to-helper, shader-clock, struct-type-alias, etc.
+
+**Categories of minor/major diffs (54 shaders):**
+- modf/frexp output: multi-component swizzle writes needed
+- struct flattening: in/out block member handling
+- row-major array access: read-from-row-major-array.vert
+- composite construction patterns
+- for-loop/switch logic differences
+- function inlining vs separate definitions
+
+### Phase 2: Normalized Instruction Comparison
+**Metric**: `struct_match_rate` — percentage of shaders where normalized SPIR-V instruction sequence matches glslang.
+**Tool**: Normalize disassembly (strip IDs, debug info), compare instruction-by-instruction.
+
+### Phase 3: GPU Visual Correctness (FUTURE)
+**Metric**: `pixel_diff` — percentage of pixels that differ when rendering with our SPIR-V vs glslang's.
+**Setup needed**: Headless Vulkan renderer that:
+1. Renders a fullscreen triangle with known uniforms/textures
+2. Captures framebuffer for both SPIR-V binaries
+3. Computes per-pixel diff
+4. Reports match percentage
+
+### Phase 4: Performance Optimization (AFTER 100% correctness)
+**Metric**: `compile_time_us` or `total_bound` (SPIR-V output size)
+**Constraint**: Zero correctness regression (store_mismatches must not increase).
 
 ## How to Run
-`./autoresearch.sh` — outputs `METRIC name=number` lines.
+`bash autoresearch.sh` — outputs METRIC lines.
 
 ## Files in Scope
 - `src/parser.zig`: Pratt parser
@@ -45,9 +70,10 @@ The compiler must produce valid SPIR-V that matches glslang's output while poten
 ## Constraints
 - All changes must compile with Zig 0.15.2
 - Must not introduce regressions on already-passing shaders
+- Must maintain 199/199 spirv-val conformance
 
-## Remaining for full glslang equivalency
-- gl_PerVertex Block wrapping (structurally different, functionally equivalent — passes spirv-val without it)
-- OpLine debug information
-- Spec constant support
-- Dead instruction/global elimination (size optimization)
+## Build
+```bash
+ZIG=/c/Users/Alessandro/zig-0.15.2-extracted/zig-x86_64-windows-0.15.2/zig.exe
+$ZIG build-exe -OReleaseSafe --dep glslpp -Mroot=tests/runner.zig -Mglslpp=src/root.zig --cache-dir .zig-cache -femit-bin=.zig-cache/bin/conformance-runner.exe
+```
