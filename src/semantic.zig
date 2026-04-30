@@ -435,6 +435,7 @@ const Analyzer = struct {
         try self.declare("textureQueryLevels", .{ .kind = .func, .ty = .int, .ir_id = 0 });
         try self.declare("textureQueryLod", .{ .kind = .func, .ty = .float, .ir_id = 0 });
         try self.declare("texelFetch", .{ .kind = .func, .ty = .vec4, .ir_id = 0 });
+        try self.declare("subpassLoad", .{ .kind = .func, .ty = .vec4, .ir_id = 0 });
         try self.declare("dFdx", .{ .kind = .func, .ty = .float, .ir_id = 0 });
         try self.declare("dFdy", .{ .kind = .func, .ty = .float, .ir_id = 0 });
         try self.declare("fwidth", .{ .kind = .func, .ty = .float, .ir_id = 0 });
@@ -2808,6 +2809,50 @@ const Analyzer = struct {
                         });
                         return .{ .ty = .vec2, .id = result_id };
                     }
+                    // subpassLoad(subpassInput) → OpLoad + OpImageRead with ivec2(0,0)
+                    if (std.mem.eql(u8, node.data.name, "subpassLoad")) {
+                        if (arg_tids.items.len < 1) return error.SemanticFailed;
+                        // The argument is a subpassInput variable — load it to get the image
+                        var img_id = arg_tids.items[0].id;
+                        if (arg_tids.items[0].is_ptr) {
+                            const loaded = self.allocId();
+                            const ld_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            ld_ops[0] = .{ .id = arg_tids.items[0].id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .load,
+                                .result_type = null,
+                                .result_id = loaded,
+                                .operands = ld_ops,
+                                .ty = arg_tids.items[0].ty,
+                            });
+                            img_id = loaded;
+                        }
+                        // Create ivec2(0, 0) coordinate
+                        const coord_id = self.allocId();
+                        const zero_id = try self.getConstInt(0, .int);
+                        const coord_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        coord_ops[0] = .{ .id = zero_id };
+                        coord_ops[1] = .{ .id = zero_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_construct,
+                            .result_type = null,
+                            .result_id = coord_id,
+                            .operands = coord_ops,
+                            .ty = .ivec2,
+                        });
+                        // OpImageRead
+                        const read_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        read_ops[0] = .{ .id = img_id };
+                        read_ops[1] = .{ .id = coord_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_read,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = read_ops,
+                            .ty = .vec4,
+                        });
+                        return .{ .ty = .vec4, .id = result_id };
+                    }
                     if (std.mem.eql(u8, node.data.name, "textureSamples") or std.mem.eql(u8, node.data.name, "imageSamples")) {
                         var img_id = arg_tids.items[0].id;
                         if (arg_tids.items[0].ty.isCombinedSampler() or
@@ -4342,6 +4387,7 @@ const Analyzer = struct {
             "texture", "texture2D", "textureLod", "textureProj", "texelFetch",
             "textureQueryLevels",
             "textureQueryLod",
+            "subpassLoad",
             "dFdx", "dFdy", "fwidth", "dFdxFine", "dFdyFine", "fwidthFine", "dFdxCoarse", "dFdyCoarse", "fwidthCoarse",
             "isnan", "isinf",
             // Additional GLSL builtins
