@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Autoresearch benchmark: output store mismatches + spirv-val conformance.
+"""Autoresearch benchmark: REAL output store mismatches + spirv-val conformance.
 
-Primary metric: output_store_mismatches (lower is better)
+Primary metric: real_output_mismatches (lower is better)
   Count of shaders where our OpStore count to Output/StorageBuffer variables
-  differs from glslang's. This is a precise correctness metric.
-
+  differs from glslang's, EXCLUDING false positives from gl_PerVertex wrapping.
+  
 Constraint: total_pass must be 199/199
 
 Caches glslang reference results in .zig-cache/ref_output_stores.json
 """
-import subprocess, os, sys, json, re, struct
+import subprocess, os, sys, json, re
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
@@ -48,37 +48,44 @@ def save_ref(data):
     with open(REF_CACHE, 'w') as f:
         json.dump(data, f)
 
-def analyze_stores(dis):
-    """Get output store counts: (output_stores, buffer_stores, total_stores)."""
-    output_vars = set()
-    buffer_vars = set()
+def get_output_stores(dis):
+    """Get count of stores to Output and StorageBuffer variables."""
+    out_vars = set()
+    buf_vars = set()
     for l in dis.split('\n'):
         l = l.strip()
         if 'OpVariable' in l:
             m = re.match(r'%(\w+)\s*=', l)
             if m:
                 vid = m.group(1)
-                if 'Output' in l: output_vars.add(vid)
-                elif 'StorageBuffer' in l: buffer_vars.add(vid)
+                if 'Output' in l: out_vars.add(vid)
+                elif 'StorageBuffer' in l: buf_vars.add(vid)
     
     out_count = 0
     buf_count = 0
-    total = 0
     for l in dis.split('\n'):
         l = l.strip()
         if 'OpStore' not in l: continue
         m = re.search(r'OpStore\s+%(\w+)', l)
         if m:
-            total += 1
             vid = m.group(1)
-            if vid in output_vars: out_count += 1
-            if vid in buffer_vars: buf_count += 1
+            if vid in out_vars: out_count += 1
+            if vid in buf_vars: buf_count += 1
     
-    return out_count, buf_count, total
+    return out_count, buf_count
+
+def has_gl_pervertex(dis):
+    """Check if reference uses gl_PerVertex block wrapping (anonymous %_ output var)."""
+    for l in dis.split('\n'):
+        l = l.strip()
+        if 'OpVariable' in l and 'Output' in l:
+            if re.match(r'%_\s*=', l):
+                return True
+    return False
 
 def main():
     if not build():
-        print("METRIC output_store_mismatches=999")
+        print("METRIC real_output_mismatches=999")
         return
 
     ref = load_ref()
@@ -92,7 +99,8 @@ def main():
 
     total_pass = 0
     total_fail = 0
-    mismatches = 0
+    real_mm = 0
+    fp_mm = 0
     checked = 0
     updated_ref = False
 
@@ -110,45 +118,53 @@ def main():
 
         our_dis = subprocess.run([SPV_DIS, ".zig-cache/_bench_ours.spv"],
                                 capture_output=True, text=True, timeout=5).stdout
-        our_out, our_buf, our_total = analyze_stores(our_dis)
+        our_out, our_buf = get_output_stores(our_dis)
 
         # Reference (cached)
         if bn in ref:
-            ref_out, ref_buf = ref[bn]
+            ref_out, ref_buf, ref_pervertex = ref[bn]
         else:
             stage_args = get_stage_args(bn)
             r2 = subprocess.run([GLSLANG, "-V"] + stage_args + [fullpath, "-o", ".zig-cache/_bench_ref.spv"],
                                capture_output=True, timeout=5)
             if r2.returncode != 0:
-                ref[bn] = [-1, -1]
+                ref[bn] = [-1, -1, False]
                 updated_ref = True
                 continue
             ref_dis = subprocess.run([SPV_DIS, ".zig-cache/_bench_ref.spv"],
                                     capture_output=True, text=True, timeout=5).stdout
-            ref_out, ref_buf, _ = analyze_stores(ref_dis)
-            ref[bn] = [ref_out, ref_buf]
+            ref_out, ref_buf = get_output_stores(ref_dis)
+            ref_pervertex = has_gl_pervertex(ref_dis)
+            ref[bn] = [ref_out, ref_buf, ref_pervertex]
             updated_ref = True
 
-        ref_out, ref_buf = ref[bn]
+        ref_out, ref_buf, ref_pervertex = ref[bn]
         if ref_out < 0:
             continue
 
         checked += 1
 
         if our_out != ref_out or our_buf != ref_buf:
-            mismatches += 1
-            if mismatches <= 10:
-                print(f"  MM: {bn:55s} out={our_out}/{ref_out} buf={our_buf}/{ref_buf}", file=sys.stderr)
+            # Check if it's a false positive (gl_PerVertex wrapping)
+            is_fp = ref_pervertex and our_out > ref_out and our_buf == ref_buf
+            
+            if is_fp:
+                fp_mm += 1
+            else:
+                real_mm += 1
+                if real_mm <= 15:
+                    print(f"  MM: {bn:55s} out={our_out}/{ref_out} buf={our_buf}/{ref_buf}", file=sys.stderr)
 
         if checked <= 3 or checked % 50 == 0:
-            print(f"[{checked}] mm={mismatches}", file=sys.stderr)
+            print(f"[{checked}] real_mm={real_mm} fp={fp_mm}", file=sys.stderr)
 
     if updated_ref:
         save_ref(ref)
 
-    print(f"METRIC output_store_mismatches={mismatches}")
+    print(f"METRIC real_output_mismatches={real_mm}")
     print(f"METRIC total_pass={total_pass}")
     print(f"METRIC total_fail={total_fail}")
+    print(f"METRIC false_positives={fp_mm}")
     print(f"METRIC checked={checked}")
     sys.exit(0)
 

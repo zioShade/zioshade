@@ -2,36 +2,36 @@
 
 ## Phased Approach
 
-### Phase 1: Reduce Store Mismatches (CURRENT)
-**Metric**: `store_mismatches` (lower is better) — count of shaders where our OpStore count differs from glslang's.
-**Baseline**: 95/199 mismatches (104/199 match = 52.3%)
+### Phase 1: Reduce Output Store Mismatches (CURRENT)
+**Metric**: `output_store_mismatches` (lower is better) — count of shaders where our OpStore count to Output/StorageBuffer variables differs from glslang's.
+**Baseline**: 40/199 mismatches (159/199 match = 79.9%)
 **Constraint**: 199/199 spirv-val conformance must be maintained.
 
-**Breakdown of 95 mismatches:**
-- 41 "missing feature" (we emit 0 stores — shader features we don't implement)
-- 31 "minor diff" (1-3 stores off — small logic differences)
-- 23 "major diff" (>3 stores off — significant logic differences)
+**Breakdown of 40 mismatches:**
+- 17 shaders: we emit EXTRA output stores (out=N/ref=0) — likely unused output variables we should eliminate
+- 14 shaders: we emit 0 output stores (out=0/ref=N) — missing features
+- 9 shaders: different counts (logic differences like swizzle writes, struct flattening)
 
-**Categories of missing features (41 shaders):**
-- fp64/double support: fp64.desktop.comp (42 stores)
-- int64 support: int64.desktop.comp (12 stores)
-- image query functions: image-query.desktop.frag (28 stores)
-- tensor/cooperative vector: tensor_*.comp, cooperative-vec-nv (27+ stores)
-- spec constants: spec-constant-*.comp/frag (6 stores)
-- input attachments: input-attachment*.frag (2 stores)
-- subgroup operations: shader_ballot, shader_group_vote, shared (18 stores)
-- separate sampler/texture: separate-sampler-texture*.frag (22 stores)
-- nonuniformEXT: nonuniform-qualifier (18 stores)
-- extended arithmetic: extended-arithmetic (32 stores)
-- demote-to-helper, shader-clock, struct-type-alias, etc.
+**Extra output stores (17, easiest to fix):**
+  clip-cull-distance.desktop.sso.vert, clip-cull-distance.desktop.vert,
+  device-group.nocompat.vk.vert, ground.vert, implicit-lod.legacy.vert,
+  int-attribute.legacy.vert, invariant.vert, io-block.legacy.vert,
+  modf.legacy.frag, multiview.nocompat.vk.vert, no-contraction.vert,
+  ocean.vert, push-constant.flatten.vert, read-from-row-major-array.vert,
+  return-array.vert, struct-flatten-inner-array.legacy.vert, swizzle.flatten.vert,
+  texture_buffer.vert, ubo.vert, vulkan-vertex.vk.vert
 
-**Categories of minor/major diffs (54 shaders):**
-- modf/frexp output: multi-component swizzle writes needed
-- struct flattening: in/out block member handling
-- row-major array access: read-from-row-major-array.vert
-- composite construction patterns
-- for-loop/switch logic differences
-- function inlining vs separate definitions
+**Missing features (14):**
+  separate-sampler-texture*.frag, input-attachment*.frag, nonuniform-qualifier,
+  shader-arithmetic-8bit, shader_ballot.comp, spec-constant-block-size,
+  struct-type-unrelated-alias, tensor.nocompat, rq-position-fetch,
+  block-match-sad/ssd, box-filter, sample-weighted
+
+**Logic differences (9):**
+  barycentric-khr-io-block.frag, buffer-reference.nocompat.vk.comp,
+  ground.vert, ocean.vert, read-from-row-major-array.vert,
+  row-major-workaround.vert, small-storage.vk.vert, struct-varying.legacy.*,
+  switch-nested.legacy.vert, type-alias.comp
 
 ### Phase 2: Normalized Instruction Comparison
 **Metric**: `struct_match_rate` — percentage of shaders where normalized SPIR-V instruction sequence matches glslang.
