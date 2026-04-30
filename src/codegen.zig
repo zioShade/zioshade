@@ -307,9 +307,6 @@ const Codegen = struct {
         if (self.hasBufferReference()) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.physical_storage_buffer_addresses));
-            // Int64 capability is required for 64-bit buffer pointers
-            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
-            try self.emitWord(@intFromEnum(spirv.Capability.int64));
         }
         // Emit 8/16-bit type capabilities if needed
         var has_int8 = false;
