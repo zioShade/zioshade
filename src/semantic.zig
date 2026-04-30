@@ -1941,6 +1941,87 @@ const Analyzer = struct {
             },
             .assign_op => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
+
+                // Check for swizzle write: v.xy = vec2(...), v.xyz = vec3(...)
+                const lhs = node.data.children[0];
+                if (lhs.tag == .member_access and lhs.data.children.len > 0) {
+                    const base_node = lhs.data.children[0];
+                    if (base_node.tag == .identifier) {
+                        if (self.lookup(base_node.data.name)) |sym| {
+                            const base_ty = sym.ty;
+                            if (base_ty.isVector()) {
+                                const swizzle_name = lhs.data.name;
+                                if (swizzle_name.len > 1) {
+                                    // Multi-component swizzle write
+                                    // Evaluate the RHS value
+                                    var value = try self.analyzeExpression(node.data.children[1]);
+                                    if (value.is_ptr) {
+                                        const loaded_id = self.allocId();
+                                        const load_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                        load_ops[0] = .{ .id = value.id };
+                                        try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = loaded_id, .operands = load_ops, .ty = value.ty });
+                                        value = .{ .ty = value.ty, .id = loaded_id };
+                                    }
+
+                                    // Load current vector value directly from the variable
+                                    const load_id = self.allocId();
+                                    const ld_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                    ld_ops[0] = .{ .id = sym.ir_id };
+                                    try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = load_id, .operands = ld_ops, .ty = base_ty });
+
+                                    // Build VectorShuffle: combine current vector with new values
+                                    const n = base_ty.numComponents();
+                                    const swizzle_len = swizzle_name.len;
+                                    const shuffle_ops = try self.alloc.alloc(ir.Instruction.Operand, 2 + n);
+                                    shuffle_ops[0] = .{ .id = load_id }; // current vector (vec1)
+                                    shuffle_ops[1] = .{ .id = value.id }; // new values (vec2)
+
+                                    // Build shuffle select: for each component of the output
+                                    for (0..n) |i| {
+                                        // Check if this component is in the swizzle
+                                        var found = false;
+                                        for (0..swizzle_len) |j| {
+                                            const swizzle_idx = self.swizzleIndex(swizzle_name[j]);
+                                            if (swizzle_idx == i) {
+                                                // Use from new values (vec2): select from n + j
+                                                shuffle_ops[2 + i] = .{ .literal_int = @intCast(n + j) };
+                                                found = true;
+                                                break;
+                                            }
+                                        }
+                                        if (!found) {
+                                            // Keep from current vector (vec1): select index i
+                                            shuffle_ops[2 + i] = .{ .literal_int = @intCast(i) };
+                                        }
+                                    }
+
+                                    const shuffle_id = self.allocId();
+                                    try self.instructions.append(self.alloc, .{
+                                        .tag = .vector_shuffle,
+                                        .result_type = null,
+                                        .result_id = shuffle_id,
+                                        .operands = shuffle_ops,
+                                        .ty = base_ty,
+                                    });
+
+                                    // Store the shuffled vector back
+                                    const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                    store_ops[0] = .{ .id = sym.ir_id };
+                                    store_ops[1] = .{ .id = shuffle_id };
+                                    try self.instructions.append(self.alloc, .{
+                                        .tag = .store,
+                                        .result_type = null,
+                                        .result_id = null,
+                                        .operands = store_ops,
+                                        .ty = .void,
+                                    });
+                                    return .{ .ty = .void, .id = 0 };
+                                }
+                            }
+                        }
+                    }
+                }
+
                 const target = try self.analyzeLValue(node.data.children[0]);
                 var value = try self.analyzeExpression(node.data.children[1]);
                 // If value is a pointer, load it
