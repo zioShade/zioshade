@@ -3882,6 +3882,7 @@ const Analyzer = struct {
                         .u8vec2, .u8vec3, .u8vec4 => .uint8,
                         .i16vec2, .i16vec3, .i16vec4 => .int16,
                         .u16vec2, .u16vec3, .u16vec4 => .uint16,
+                        .f16vec2, .f16vec3, .f16vec4 => .float16,
                         else => .void,
                     };
                     const need_conv = !std.meta.eql(splat_ty, result_scalar) and result_scalar != .void;
@@ -4109,6 +4110,9 @@ const Analyzer = struct {
                     .uvec2, .uvec3, .uvec4 => .uint,
                     .i8vec2, .i8vec3, .i8vec4 => .int8,
                     .u8vec2, .u8vec3, .u8vec4 => .uint8,
+                    .i16vec2, .i16vec3, .i16vec4 => .int16,
+                    .u16vec2, .u16vec3, .u16vec4 => .uint16,
+                    .f16vec2, .f16vec3, .f16vec4 => .float16,
                     else => result_ty, // mat types etc
                 };
                 const converted_ids = try self.alloc.alloc(u32, arg_tids.items.len);
@@ -4122,6 +4126,9 @@ const Analyzer = struct {
                         .uvec2, .uvec3, .uvec4 => .uint,
                         .i8vec2, .i8vec3, .i8vec4 => .int8,
                         .u8vec2, .u8vec3, .u8vec4 => .uint8,
+                        .i16vec2, .i16vec3, .i16vec4 => .int16,
+                        .u16vec2, .u16vec3, .u16vec4 => .uint16,
+                        .f16vec2, .f16vec3, .f16vec4 => .float16,
                         else => .void,
                     } else arg_ty;
                     if (!std.meta.eql(arg_scalar, result_scalar) and result_scalar.isScalar() and arg_scalar.isScalar()) {
@@ -4623,21 +4630,21 @@ const Analyzer = struct {
     fn getConversionTag(self: *Analyzer, to: ast.Type, from: ast.Type) ?ir.Instruction.Tag {
         _ = self;
         if (std.meta.eql(to, from)) return null;
-        // float <-> int/uint
-        if (to == .float) {
+        // float/float16 <-> int/uint
+        if (to == .float or to == .float16) {
             if (from == .int) return .convert_itof;
             if (from == .uint) return .convert_utof;
             if (from == .bool) return .bool_to_float;
         }
         if (to == .int) {
-            if (from == .float) return .convert_ftoi;
+            if (from == .float or from == .float16) return .convert_ftoi;
             if (from == .uint) return .convert_iti; // bitcast for same-width
             if (from == .bool) return .bool_to_int;
             // Narrowing from wider integer types
             if (from == .int8 or from == .uint8 or from == .int16 or from == .uint16) return .convert_widen;
         }
         if (to == .uint) {
-            if (from == .float) return .convert_ftou;
+            if (from == .float or from == .float16) return .convert_ftou;
             if (from == .int) return .convert_iti; // bitcast for same-width
             if (from == .bool) return .bool_to_uint;
             if (from == .int8 or from == .uint8 or from == .int16 or from == .uint16) return .convert_widen;
@@ -4705,6 +4712,18 @@ const Analyzer = struct {
         if (to == .uvec2 or to == .uvec3 or to == .uvec4) {
             if (from == .i16vec2 or from == .i16vec3 or from == .i16vec4) return .convert_widen;
             if (from == .u16vec2 or from == .u16vec3 or from == .u16vec4) return .convert_widen;
+        }
+        // Float16 conversions (float ↔ float16, vec ↔ f16vec)
+        if (to == .float16) {
+            if (from == .float) return .convert_ftof;
+        }
+        if (to == .float and from == .float16) return .convert_ftof;
+        // Float16 vector conversions
+        if (to == .f16vec2 or to == .f16vec3 or to == .f16vec4) {
+            if (from == .vec2 or from == .vec3 or from == .vec4) return .convert_ftof;
+        }
+        if (to == .vec2 or to == .vec3 or to == .vec4) {
+            if (from == .f16vec2 or from == .f16vec3 or from == .f16vec4) return .convert_ftof;
         }
         return null;
     }
