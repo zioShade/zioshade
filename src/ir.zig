@@ -87,6 +87,7 @@ pub const Instruction = struct {
         constant_int,
         constant_float,
         constant_bool,
+        constant_composite,
         spec_constant,
         local_variable,
         load,
