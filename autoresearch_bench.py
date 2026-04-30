@@ -137,7 +137,19 @@ def main():
         # Our compiler
         r1 = subprocess.run([RUNNER, fullpath, "--save-spv", ".zig-cache/_bench_ours.spv"],
                            capture_output=True, timeout=5)
-        if b"PASS" not in r1.stderr:
+        # Check if THIS shader passed (not just the summary line)
+        # Runner format: "  PASS tests/..." for success, "  FAIL tests/..." for failure
+        shader_passed = False
+        for line in r1.stderr.split(b'\n'):
+            stripped = line.strip()
+            if stripped.startswith(b'PASS ') or stripped.startswith(b'PASS\t'):
+                # This is a per-shader PASS line
+                shader_passed = True
+                break
+            if stripped.startswith(b'FAIL '):
+                # This is a per-shader FAIL line — stop looking
+                break
+        if not shader_passed:
             total_fail += 1
             continue
         total_pass += 1

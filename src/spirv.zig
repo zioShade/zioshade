@@ -190,6 +190,7 @@ pub const Capability = enum(u32) {
     subgroup_vote_khr = 4431,
     image_1d = 44,
     derivative_control = 51,
+    input_attachment = 40,
     atomic_float32_add_ext = 6033,
     _,
 };
@@ -270,6 +271,7 @@ pub const Decoration = enum(u32) {
     binding = 33,
     descriptor_set = 34,
     offset = 35,
+    input_attachment_index = 43,
     _,
 };
 
