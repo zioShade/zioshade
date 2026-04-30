@@ -1798,46 +1798,58 @@ const Analyzer = struct {
                         right_id = cvt_id;
                     }
                 }
+                const op = node.data.op orelse .add;
                 if (result_ty.isVector()) {
                     if (left.ty.isScalar() and !right.ty.isScalar()) {
-                        // Splat left scalar to vector
-                        const num_comps = result_ty.numComponents();
-                        const splat_id = self.allocId();
-                        const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
-                        for (0..num_comps) |i| {
-                            splat_operands[i] = .{ .id = left_id };
+                        // Check if we can use vector-scalar op instead of splat
+                        const is_float_vec = right.ty == .vec2 or right.ty == .vec3 or right.ty == .vec4;
+                        if (op == .mul and is_float_vec and left.ty == .float) {
+                            // Skip splat, will use scalar_vec_mul tag
+                        } else {
+                            // Splat left scalar to vector
+                            const num_comps = result_ty.numComponents();
+                            const splat_id = self.allocId();
+                            const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
+                            for (0..num_comps) |i| {
+                                splat_operands[i] = .{ .id = left_id };
+                            }
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .composite_construct,
+                                .result_type = null,
+                                .result_id = splat_id,
+                                .operands = splat_operands,
+                                .ty = result_ty,
+                            });
+                            left_id = splat_id;
+                            did_splat = true;
                         }
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .composite_construct,
-                            .result_type = null,
-                            .result_id = splat_id,
-                            .operands = splat_operands,
-                            .ty = result_ty,
-                        });
-                        left_id = splat_id;
-                        did_splat = true;
                     } else if (!left.ty.isScalar() and right.ty.isScalar()) {
-                        // Splat right scalar to vector
-                        const num_comps = result_ty.numComponents();
-                        const splat_id = self.allocId();
-                        const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
-                        for (0..num_comps) |i| {
-                            splat_operands[i] = .{ .id = right_id };
+                        // Check if we can use vector-scalar op instead of splat
+                        const is_float_vec = left.ty == .vec2 or left.ty == .vec3 or left.ty == .vec4;
+                        if (op == .mul and is_float_vec and right.ty == .float) {
+                            // Skip splat, will use vec_scalar_mul tag
+                        } else {
+                            // Splat right scalar to vector
+                            const num_comps = result_ty.numComponents();
+                            const splat_id = self.allocId();
+                            const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
+                            for (0..num_comps) |i| {
+                                splat_operands[i] = .{ .id = right_id };
+                            }
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .composite_construct,
+                                .result_type = null,
+                                .result_id = splat_id,
+                                .operands = splat_operands,
+                                .ty = result_ty,
+                            });
+                            right_id = splat_id;
+                            did_splat = true;
                         }
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .composite_construct,
-                            .result_type = null,
-                            .result_id = splat_id,
-                            .operands = splat_operands,
-                            .ty = result_ty,
-                        });
-                        right_id = splat_id;
-                        did_splat = true;
                     }
                 }
 
                 const is_float = result_ty == .float or result_ty == .double or result_ty == .vec2 or result_ty == .vec3 or result_ty == .vec4 or result_ty.isMatrix();
-                const op = node.data.op orelse .add;
 
 
                 const tag: ir.Instruction.Tag = switch (op) {
