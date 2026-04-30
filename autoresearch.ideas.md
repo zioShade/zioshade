@@ -57,7 +57,7 @@
 
 ### TIER 2 - Feature completeness:
 - **OpLine debug information**: Add source line mapping to SPIR-V output for better debugging.
-- **Spec constant support**: OpSpecConstant for specialization constants.
+- **Spec constant support**: ✅ DONE — OpSpecConstant(50) + SpecId(1) decoration + identifier array sizes.
 - **gl_PerVertex block wrapping**: Structurally different from glslang but functionally equivalent. Low priority.
 
 ### TRIED & ABANDONED:
@@ -146,10 +146,10 @@
 - Store mismatch phases 1-3 metrics are outdated (replaced by real_output_mismatches)
 - "modf/frexp multi-component swizzle writes" — still broken but not in the 12 mismatch set
 - Function inlining, dead code elimination — good ideas but not the bottleneck
-- **Spec constants**: Attempted but caused SPIR-V section ordering corruption. The issue: appending SpecId decorations and OpSpecConstant to `words` between `emitDecorations` and `emitTypesAndConstants` causes the name_section/decoration_section splices to corrupt the binary. Fix: emit SpecId decorations through the existing `emitDecorations` function (need spec constant info available before decoration emission). Key opcode: OpSpecConstant=50 (NOT 51), Decoration.SpecId=41.
+- **Spec constants**: FIXED in session 2026-04-30. Key: OpSpecConstant=50, Decoration.SpecId=1. Must emit through emitDecorations/emitTypesAndConstants (not direct words.append).
 
 ## BEST PATH FORWARD:
-1. **Phase 3: GPU visual correctness** — build a headless Vulkan renderer to validate that
-   our SPIR-V actually produces correct pixels, not just valid SPIR-V
-2. **Phase 2: Normalized instruction comparison** — more nuanced than store count
-3. Continue implementing missing features one by one (slow but steady)
+1. **More feature work**: The 10 remaining mismatches all need 100+ lines of new code each. The most tractable is `shader-arithmetic-8bit` (needs 8-bit arithmetic + pack/unpack builtins).
+2. **Phase 3: GPU visual correctness** — build a headless Vulkan renderer to validate that our SPIR-V actually produces correct pixels
+3. **Phase 2: Normalized instruction comparison** — compare instruction-by-instruction for the 189 matching shaders
+4. **Multi-component swizzle writes** — would improve correctness for ground.frag, ocean.vert, modf.legacy.frag etc. but may cause new store count mismatches
