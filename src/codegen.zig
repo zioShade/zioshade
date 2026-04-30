@@ -1638,6 +1638,18 @@ const Codegen = struct {
                 try self.emitTypeWord(2); // Sampled = 2 (no sampler needed)
                 try self.emitTypeWord(0); // ImageFormat = Unknown
             },
+            .subpass_input_ms => {
+                const float_id = try self.ensureType(.float);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(6); // Dim = SubpassData
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(1); // Multisampled = 1
+                try self.emitTypeWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
+            },
         }
         // Cache for simple types
         if (normalized != .named and normalized != .array) {
