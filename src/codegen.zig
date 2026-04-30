@@ -2874,16 +2874,27 @@ const Codegen = struct {
                 const sampled_image_id = self.operandId(resolved, 0);
                 const coord_id = self.operandId(resolved, 1);
                 const lod_id = if (resolved.operands.len > 2) self.operandId(resolved, 2) else self.operandId(resolved, 1);
-                // OpImageSampleExplicitLod: result_type, result, sampled_image, coordinate, ImageOperands(Lod=2), lod_value
-                // TODO: For textureLodOffset, emit ConstOffset (bit 3) with constant composite
-                // This requires emitting offsets as OpConstantComposite instead of OpCompositeConstruct
-                try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageSampleExplicitLod)));
-                try self.emitWord(result_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(sampled_image_id);
-                try self.emitWord(coord_id);
-                try self.emitWord(2); // Image Operands Mask: Lod
-                try self.emitWord(lod_id);
+                if (resolved.operands.len >= 4) {
+                    // textureLodOffset: sampler, coord, lod, offset → Lod|ConstOffset
+                    const offset_id = self.operandId(resolved, 3);
+                    try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleExplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(10); // Image Operands Mask: Lod (bit 1) | ConstOffset (bit 3)
+                    try self.emitWord(lod_id);
+                    try self.emitWord(offset_id);
+                } else {
+                    // textureLod: sampler, coord, lod → Lod
+                    try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageSampleExplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(2); // Image Operands Mask: Lod
+                    try self.emitWord(lod_id);
+                }
             },
             .image_sample_proj => {
                 const result_type_id = resolved.result_type orelse return;

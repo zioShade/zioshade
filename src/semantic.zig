@@ -3915,7 +3915,36 @@ const Analyzer = struct {
                         });
                         splat_id = conv_id;
                     }
-                    // Scalar splat
+                    // Scalar splat — check if arg is a literal and result is int/uint vector
+                    if ((arg_tids.items[0].ty == .int or arg_tids.items[0].ty == .uint) and
+                        (result_ty == .ivec2 or result_ty == .ivec3 or result_ty == .ivec4 or result_ty == .uvec2 or result_ty == .uvec3 or result_ty == .uvec4))
+                    {
+                        const arg_node = node.data.children[0];
+                        if (arg_node.tag == .int_literal or arg_node.tag == .uint_literal) {
+                            const val: u32 = if (arg_node.tag == .uint_literal) @intCast(@as(u64, @bitCast(arg_node.data.int_val))) else @bitCast(@as(i32, @intCast(arg_node.data.int_val)));
+                            const comp_ty: ast.Type = switch (result_ty) {
+                                .ivec2, .ivec3, .ivec4 => .int,
+                                .uvec2, .uvec3, .uvec4 => .uint,
+                                else => .int,
+                            };
+                            const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, n);
+                            for (0..n) |i| {
+                                const comp_id = self.allocId();
+                                const ci_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                ci_ops[0] = .{ .literal_int = val };
+                                try self.instructions.append(self.alloc, .{ .tag = .constant_int, .result_type = null, .result_id = comp_id, .operands = ci_ops, .ty = comp_ty });
+                                cc_ops[i] = .{ .id = comp_id };
+                            }
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .constant_composite,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = cc_ops,
+                                .ty = result_ty,
+                            });
+                            return .{ .ty = result_ty, .id = result_id };
+                        }
+                    }
                     const operands = try self.alloc.alloc(ir.Instruction.Operand, n);
                     for (0..n) |i| {
                         operands[i] = .{ .id = splat_id };
