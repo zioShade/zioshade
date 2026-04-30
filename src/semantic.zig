@@ -700,6 +700,19 @@ const Analyzer = struct {
             },
             .struct_decl => {
                 const name = node.data.name;
+                const existing = self.types.getPtr(name);
+                if (existing != null) {
+                    // Inner struct redeclaration — for correctness, we'd need per-scope types.
+                    // As a workaround, merge new members into existing type.
+                    // This allows both foo.a and bar.b to resolve.
+                    const new_members = try self.alloc.dupe(ast.StructMember, node.data.members);
+                    // Append new members to existing type
+                    var merged = try std.ArrayListUnmanaged(ast.StructMember).initCapacity(self.alloc, existing.?.members.len + new_members.len);
+                    try merged.appendSlice(self.alloc, existing.?.members);
+                    try merged.appendSlice(self.alloc, new_members);
+                    existing.?.members = merged.items;
+                    return;
+                }
                 // Duplicate members to avoid double-free with AST
                 const members = try self.alloc.dupe(ast.StructMember, node.data.members);
                 const td = ir.TypeDef{
@@ -712,7 +725,7 @@ const Analyzer = struct {
                 try self.declare(name, .{
                     .kind = .type_sym,
                     .ty = .{ .named = name },
-                    .ir_id = 0, // Type symbols don't need SPIR-V IDs
+                    .ir_id = 0,
                 });
             },
             .function_decl, .function_prototype => {
@@ -1417,6 +1430,33 @@ const Analyzer = struct {
             .expr_stmt => {
                 if (node.data.children.len > 0) {
                     _ = try self.analyzeExpression(node.data.children[0]);
+                }
+            },
+            .struct_decl => {
+                // Inner struct declaration inside function body
+                const name = node.data.name;
+                const existing = self.types.getPtr(name);
+                if (existing != null) {
+                    // Redefinition: merge new members into existing type
+                    const new_members = try self.alloc.dupe(ast.StructMember, node.data.members);
+                    var merged = try std.ArrayListUnmanaged(ast.StructMember).initCapacity(self.alloc, existing.?.members.len + new_members.len);
+                    try merged.appendSlice(self.alloc, existing.?.members);
+                    try merged.appendSlice(self.alloc, new_members);
+                    existing.?.members = merged.items;
+                } else {
+                    const members = try self.alloc.dupe(ast.StructMember, node.data.members);
+                    const td = ir.TypeDef{
+                        .name = name,
+                        .members = members,
+                        .size_bytes = 0,
+                    };
+                    const owned_name = try self.alloc.dupe(u8, name);
+                    try self.types.put(self.alloc, owned_name, td);
+                    try self.declare(name, .{
+                        .kind = .type_sym,
+                        .ty = .{ .named = name },
+                        .ir_id = 0,
+                    });
                 }
             },
             else => {},

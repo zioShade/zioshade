@@ -847,6 +847,7 @@ const Parser = struct {
                     .data = .{ .children = stmts },
                 };
             },
+            .kw_struct => self.parseStructDecl(),
             .kw_if => self.parseIf(),
             .kw_for => self.parseFor(),
             .kw_while => self.parseWhile(),
