@@ -969,11 +969,8 @@ const Analyzer = struct {
                             // int <-> uint same width: use bitcast
                             if (ty == .uint and init.ty == .int) break :blk .bitcast;
                             if (ty == .int and init.ty == .uint) break :blk .bitcast;
-                            if (ty == .float and init.ty == .int) break :blk .convert_itof;
-                            if (ty == .float and init.ty == .uint) break :blk .convert_utof;
-                            if (ty == .int and init.ty == .float) break :blk .convert_ftoi;
-                            if (ty == .uint and init.ty == .float) break :blk .convert_ftou;
-                            break :blk null;
+                            // Use generic conversion helper
+                            break :blk self.getConversionTag(ty, init.ty);
                         };
                         if (conv_tag) |tag| {
                             const conv_id = self.allocId();
@@ -2408,6 +2405,23 @@ const Analyzer = struct {
                     });
                     value_id = splat_id;
                     value_ty = target.ty;
+                } else if (target.ty.isVector() and value_ty.isScalar() and !value_ty.isVector()) {
+                    // Any other scalar → splat to vector (handles int8, int16, uint8, uint16, etc.)
+                    const splat_id = self.allocId();
+                    const num_comps = target.ty.numComponents();
+                    const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
+                    for (0..num_comps) |i| {
+                        splat_operands[i] = .{ .id = value.id };
+                    }
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .composite_construct,
+                        .result_type = null,
+                        .result_id = splat_id,
+                        .operands = splat_operands,
+                        .ty = target.ty,
+                    });
+                    value_id = splat_id;
+                    value_ty = target.ty;
                 } else if (target.ty == .float and value_ty == .int) {
                     // int → float
                     const conv_id = self.allocId();
@@ -2440,7 +2454,7 @@ const Analyzer = struct {
                 }
                 // Compute result
                 const result_ty_2 = target.ty;
-                const is_float = result_ty_2 == .float or result_ty_2 == .double or result_ty_2.isVector() or result_ty_2.isMatrix();
+                const is_float = result_ty_2 == .float or result_ty_2 == .double or result_ty_2.isFloatVector() or result_ty_2.isMatrix();
                 const op_tag: ir.Instruction.Tag = switch (node.data.op orelse .add) {
                     .add_assign => if (is_float) .fadd else .add,
                     .sub_assign => if (is_float) .fsub else .sub,
@@ -3644,6 +3658,10 @@ const Analyzer = struct {
                 // Handle scalar-from-vector: float(vec4) → extract first component
                 // This handles the case where .x swizzle was silently dropped
                 if (arg_tids.items.len == 1 and !result_ty.isVector() and !result_ty.isMatrix()) {
+                    // Identity: same scalar type
+                    if (std.meta.eql(result_ty, arg_tids.items[0].ty)) {
+                        return .{ .ty = result_ty, .id = arg_tids.items[0].id };
+                    }
                     const arg_ty = arg_tids.items[0].ty;
                     if (arg_ty.isVector()) {
                         // Extract first component from vector
@@ -3696,6 +3714,10 @@ const Analyzer = struct {
                 // Handle scalar-to-vector splat: vec4(1.0) → CompositeConstruct with N copies
                 // Handle vector conversion: vec4(ivec4_var) → ConvertUToF / ConvertSToF
                 if (arg_tids.items.len == 1 and result_ty.isVector()) {
+                    // Identity conversion: same-type constructor is a no-op
+                    if (std.meta.eql(result_ty, arg_tids.items[0].ty)) {
+                        return .{ .ty = result_ty, .id = arg_tids.items[0].id };
+                    }
                     const arg_ty = arg_tids.items[0].ty;
                     const n = result_ty.numComponents();
                     const arg_n = if (arg_ty.isVector()) arg_ty.numComponents() else 1;
@@ -3785,6 +3807,8 @@ const Analyzer = struct {
                                 if (arg_ty == .vec2 or arg_ty == .vec3 or arg_ty == .vec4) break :blk .convert_ftou;
                                 if (arg_ty == .ivec2 or arg_ty == .ivec3 or arg_ty == .ivec4) break :blk .convert_iti;
                             }
+                            // Try generic conversion (handles 8-bit/16-bit vector types)
+                            if (self.getConversionTag(result_ty, arg_ty)) |tag| break :blk tag;
                             break :blk .composite_construct;
                         };
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
@@ -3807,6 +3831,10 @@ const Analyzer = struct {
                         .vec2, .vec3, .vec4 => .float,
                         .ivec2, .ivec3, .ivec4 => .int,
                         .uvec2, .uvec3, .uvec4 => .uint,
+                        .i8vec2, .i8vec3, .i8vec4 => .int8,
+                        .u8vec2, .u8vec3, .u8vec4 => .uint8,
+                        .i16vec2, .i16vec3, .i16vec4 => .int16,
+                        .u16vec2, .u16vec3, .u16vec4 => .uint16,
                         else => .void,
                     };
                     const need_conv = !std.meta.eql(splat_ty, result_scalar) and result_scalar != .void;
@@ -3824,6 +3852,8 @@ const Analyzer = struct {
                                 if (splat_ty == .float) break :blk .convert_ftou;
                                 if (splat_ty == .int) break :blk .convert_iti;
                             }
+                            // Try generic conversion for 8/16-bit types
+                            if (self.getConversionTag(result_scalar, splat_ty)) |tag| break :blk tag;
                             break :blk .composite_construct;
                         };
                         const conv_id = self.allocId();
@@ -3878,6 +3908,8 @@ const Analyzer = struct {
                             if (from == .float or from == .double) break :blk .convert_ftou;
                             if (from == .int) break :blk .convert_iti;
                         }
+                        // Try generic conversion (handles 8-bit/16-bit types)
+                        if (self.getConversionTag(to, from)) |tag| break :blk tag;
                         break :blk .composite_construct; // fallback
                     };
                     const result_id2 = self.allocId();
@@ -3999,6 +4031,8 @@ const Analyzer = struct {
                     .vec2, .vec3, .vec4 => .float,
                     .ivec2, .ivec3, .ivec4 => .int,
                     .uvec2, .uvec3, .uvec4 => .uint,
+                    .i8vec2, .i8vec3, .i8vec4 => .int8,
+                    .u8vec2, .u8vec3, .u8vec4 => .uint8,
                     else => result_ty, // mat types etc
                 };
                 const converted_ids = try self.alloc.alloc(u32, arg_tids.items.len);
@@ -4010,6 +4044,8 @@ const Analyzer = struct {
                         .vec2, .vec3, .vec4 => .float,
                         .ivec2, .ivec3, .ivec4 => .int,
                         .uvec2, .uvec3, .uvec4 => .uint,
+                        .i8vec2, .i8vec3, .i8vec4 => .int8,
+                        .u8vec2, .u8vec3, .u8vec4 => .uint8,
                         else => .void,
                     } else arg_ty;
                     if (!std.meta.eql(arg_scalar, result_scalar) and result_scalar.isScalar() and arg_scalar.isScalar()) {
@@ -4030,6 +4066,8 @@ const Analyzer = struct {
                                 if (arg_scalar == .float) break :blk .convert_ftou;
                                 if (arg_scalar == .int) break :blk .convert_iti;
                             }
+                            // Try generic conversion for 8/16-bit types
+                            if (self.getConversionTag(result_scalar, arg_scalar)) |tag| break :blk tag;
                             break :blk .composite_construct;
                         };
                         const conv_id = self.allocId();
@@ -4456,6 +4494,97 @@ const Analyzer = struct {
         return a;
     }
 
+    /// Determine the IR conversion tag needed to convert `from` type to `to` type.
+    /// Returns null if no conversion is needed or the conversion is not supported.
+    fn getConversionTag(self: *Analyzer, to: ast.Type, from: ast.Type) ?ir.Instruction.Tag {
+        _ = self;
+        if (std.meta.eql(to, from)) return null;
+        // float <-> int/uint
+        if (to == .float) {
+            if (from == .int) return .convert_itof;
+            if (from == .uint) return .convert_utof;
+            if (from == .bool) return .bool_to_float;
+        }
+        if (to == .int) {
+            if (from == .float) return .convert_ftoi;
+            if (from == .uint) return .convert_iti; // bitcast for same-width
+            if (from == .bool) return .bool_to_int;
+            // Narrowing from wider integer types
+            if (from == .int8 or from == .uint8 or from == .int16 or from == .uint16) return .convert_widen;
+        }
+        if (to == .uint) {
+            if (from == .float) return .convert_ftou;
+            if (from == .int) return .convert_iti; // bitcast for same-width
+            if (from == .bool) return .bool_to_uint;
+            if (from == .int8 or from == .uint8 or from == .int16 or from == .uint16) return .convert_widen;
+        }
+        // Narrow integer conversions (int/uint → int8/uint8/int16/uint16)
+        if (to == .int8 or to == .uint8 or to == .int16 or to == .uint16) {
+            if (from == .int or from == .uint) return .convert_narrow;
+        }
+        // 8-bit ↔ 16-bit
+        if (to == .int8 or to == .uint8) {
+            if (from == .int16 or from == .uint16) return .convert_narrow;
+        }
+        if (to == .int16 or to == .uint16) {
+            if (from == .int8 or from == .uint8) return .convert_widen;
+        }
+        // Vector conversions (float ↔ int/uint vectors)
+        if (to == .vec2 or to == .vec3 or to == .vec4) {
+            if (from == .ivec2 or from == .ivec3 or from == .ivec4) return .convert_itof;
+            if (from == .uvec2 or from == .uvec3 or from == .uvec4) return .convert_utof;
+        }
+        if (to == .ivec2 or to == .ivec3 or to == .ivec4) {
+            if (from == .vec2 or from == .vec3 or from == .vec4) return .convert_ftoi;
+            if (from == .uvec2 or from == .uvec3 or from == .uvec4) return .convert_iti;
+            // 8-bit/16-bit int vector → 32-bit int vector
+            if (from == .i8vec2 or from == .i8vec3 or from == .i8vec4) return .convert_widen;
+            if (from == .u8vec2 or from == .u8vec3 or from == .u8vec4) return .convert_widen;
+        }
+        if (to == .uvec2 or to == .uvec3 or to == .uvec4) {
+            if (from == .vec2 or from == .vec3 or from == .vec4) return .convert_ftou;
+            if (from == .ivec2 or from == .ivec3 or from == .ivec4) return .convert_iti;
+            if (from == .i8vec2 or from == .i8vec3 or from == .i8vec4) return .convert_widen;
+            if (from == .u8vec2 or from == .u8vec3 or from == .u8vec4) return .convert_widen;
+            if (from == .i16vec2 or from == .i16vec3 or from == .i16vec4) return .convert_widen;
+            if (from == .u16vec2 or from == .u16vec3 or from == .u16vec4) return .convert_widen;
+        }
+        // 8-bit vector conversions
+        if (to == .i8vec2 or to == .i8vec3 or to == .i8vec4) {
+            if (from == .ivec2 or from == .ivec3 or from == .ivec4) return .convert_narrow;
+            if (from == .uvec2 or from == .uvec3 or from == .uvec4) return .convert_narrow;
+            if (from == .i16vec2 or from == .i16vec3 or from == .i16vec4) return .convert_narrow;
+            if (from == .u16vec2 or from == .u16vec3 or from == .u16vec4) return .convert_narrow;
+        }
+        if (to == .u8vec2 or to == .u8vec3 or to == .u8vec4) {
+            if (from == .ivec2 or from == .ivec3 or from == .ivec4) return .convert_narrow;
+            if (from == .uvec2 or from == .uvec3 or from == .uvec4) return .convert_narrow;
+            if (from == .i16vec2 or from == .i16vec3 or from == .i16vec4) return .convert_narrow;
+            if (from == .u16vec2 or from == .u16vec3 or from == .u16vec4) return .convert_narrow;
+        }
+        // 16-bit vector conversions
+        if (to == .i16vec2 or to == .i16vec3 or to == .i16vec4) {
+            if (from == .ivec2 or from == .ivec3 or from == .ivec4) return .convert_narrow;
+            if (from == .uvec2 or from == .uvec3 or from == .uvec4) return .convert_narrow;
+            if (from == .i8vec2 or from == .i8vec3 or from == .i8vec4) return .convert_widen;
+        }
+        if (to == .u16vec2 or to == .u16vec3 or to == .u16vec4) {
+            if (from == .ivec2 or from == .ivec3 or from == .ivec4) return .convert_narrow;
+            if (from == .uvec2 or from == .uvec3 or from == .uvec4) return .convert_narrow;
+            if (from == .u8vec2 or from == .u8vec3 or from == .u8vec4) return .convert_widen;
+        }
+        // 16-bit vector widening (to 32-bit vectors)
+        if (to == .ivec2 or to == .ivec3 or to == .ivec4) {
+            if (from == .i16vec2 or from == .i16vec3 or from == .i16vec4) return .convert_widen;
+            if (from == .u16vec2 or from == .u16vec3 or from == .u16vec4) return .convert_widen;
+        }
+        if (to == .uvec2 or to == .uvec3 or to == .uvec4) {
+            if (from == .i16vec2 or from == .i16vec3 or from == .i16vec4) return .convert_widen;
+            if (from == .u16vec2 or from == .u16vec3 or from == .u16vec4) return .convert_widen;
+        }
+        return null;
+    }
+
     fn typesCompatible(self: *Analyzer, target: ast.Type, source: ast.Type) bool {
         // For named types, compare by content
         if (target == .named and source == .named) {
@@ -4469,6 +4598,9 @@ const Analyzer = struct {
         if (std.meta.eql(target, source)) return true;
         if (target == .float and source.isScalar()) return true;
         if (target == .uint and source == .int) return true;
+        // Accept narrowing/widening integer conversions only (int ↔ int8/int16, ivec4 ↔ i8vec4)
+        const conv = self.getConversionTag(target, source);
+        if (conv != null and (conv.? == .convert_narrow or conv.? == .convert_widen)) return true;
         return false;
     }
 
