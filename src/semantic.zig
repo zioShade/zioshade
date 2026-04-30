@@ -2292,9 +2292,13 @@ const Analyzer = struct {
                                         value = .{ .ty = value.ty, .id = loaded_id };
                                     }
 
+                                    // 3b. Determine operation before splat decision
+                                    const assign_op = node.data.op orelse .mul_assign;
+
                                     // Splat scalar to swizzle_len if needed
                                     var value_id = value.id;
-                                    if (!value.ty.isVector() and swizzled_ty.isVector()) {
+                                    const skip_splat_for_mul = assign_op == .mul_assign and !value.ty.isVector() and swizzled_ty.isVector() and swizzled_ty.isFloatVector();
+                                    if (!skip_splat_for_mul and !value.ty.isVector() and swizzled_ty.isVector()) {
                                         const splat_ops = try self.alloc.alloc(ir.Instruction.Operand, swizzle_len);
                                         for (0..swizzle_len) |i| {
                                             splat_ops[i] = .{ .id = value.id };
@@ -2311,11 +2315,10 @@ const Analyzer = struct {
                                     }
 
                                     // 4. Apply the compound operation
-                                    const assign_op = node.data.op orelse .mul_assign;
                                     const op_tag: ir.Instruction.Tag = switch (assign_op) {
                                         .add_assign => .fadd,
                                         .sub_assign => .fsub,
-                                        .mul_assign => .fmul,
+                                        .mul_assign => if (skip_splat_for_mul) .vec_scalar_mul else .fmul,
                                         .div_assign => .fdiv,
                                         else => .fmul, // fallback
                                     };
