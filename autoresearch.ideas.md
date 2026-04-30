@@ -1,6 +1,6 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 199/199 spirv-val, 10/10 Ghostty, 184/199 output match (15 real mismatches, all missing features)
+## CURRENT STATUS: 199/199 spirv-val, 10/10 Ghostty, 186/199 output match (13 real mismatches, all missing features)
 
 ## GOAL: Replace glslang C++ pipeline in deblasis/wintty with pure Zig implementation
 
