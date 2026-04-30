@@ -2975,12 +2975,38 @@ const Codegen = struct {
                     for (0..num_comp) |i| try self.emitWord(@intCast(i));
                 }
                 // Emit the Dref instruction
-                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageSampleDrefImplicitLod)));
-                try self.emitWord(result_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(sampled_image_id);
-                try self.emitWord(shrunk_coord_id);
-                try self.emitWord(dref_id);
+                if (resolved.operands.len >= 4) {
+                    // textureOffset(shadow, coord, offset, bias) → Bias|ConstOffset
+                    const offset_id = self.operandId(resolved, 2);
+                    const bias_id = self.operandId(resolved, 3);
+                    try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.ImageSampleDrefImplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(dref_id);
+                    try self.emitWord(9); // Image Operand Bias|ConstOffset (bit 0 | bit 3)
+                    try self.emitWord(bias_id);
+                    try self.emitWord(offset_id);
+                } else if (resolved.operands.len >= 3 and inst.ty != .sampler_cube_array_shadow) {
+                    // texture(shadow, coord, bias) → Bias
+                    const bias_id = self.operandId(resolved, 2);
+                    try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleDrefImplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(dref_id);
+                    try self.emitWord(1); // Image Operand Bias (bit 0)
+                    try self.emitWord(bias_id);
+                } else {
+                    try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageSampleDrefImplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(dref_id);
+                }
                 }
             },
             .image_sample_dref_explicit_lod => {
