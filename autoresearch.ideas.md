@@ -1,9 +1,10 @@
 # Autoresearch Ideas — glslpp
 
-## STATUS: 199/199 spirv-val, 9/199 real output mismatches, 9/10 Ghostty shaders, 49/199 instruction-level matches
-## Commit: d7e7fc9 (skip identity VectorShuffle)
+## STATUS: 199/199 spirv-val, 9/199 real output mismatches, 9/10 Ghostty shaders, 50/199 instruction-level matches
+## Commit: 799acc2 (constant_composite upgrades)
+## All 9 mismatches are vendor extensions NOT needed for wintty
 
-## REMAINING 9 MISMATCHES (all vendor extensions — not needed for wintty):
+## REMAINING 9 MISMATCHES (vendor extensions):
 - QCOM image processing (4): block-match-sad/ssd, box-filter, sample-weighted
 - ARM tensor (3): tensor, tensor_params, tensor_read
 - nonuniform-qualifier (1): needs runtime arrays + nonuniformEXT + descriptor indexing
@@ -11,21 +12,22 @@
 
 ## DONE THIS SESSION:
 - ✅ Skip identity VectorShuffle when swizzle selects all components in order
+- ✅ Upgrade composite_construct → constant_composite for array/struct constructors with all-constant operands
+- ✅ Cross-function constant ID lookup (check self.functions for constants from previous functions)
+- ✅ Upgrade binary op scalar splats to constant_composite when operand is constant
+- ✅ emitCompositeConstruct helper with automatic upgrade
 
-## TRIED & REVERTED:
-- Adding i16vec/u16vec/f16vec to isTypeKeyword → spv.nvAtomicFp16Vec.frag regression
-- OpControlBarrier=227 (WRONG — it's OpAtomicLoad!) → Fixed to 224
-
-## CODE QUALITY OBSERVATIONS:
-- 102 shaders have fewer OpAccessChain (349 vs 1012) — our SSA approach uses fewer pointers
-- 27 shaders have more OpCompositeConstruct (102 vs 70) — extra splats
-- 13 shaders have more OpVectorShuffle (95 vs 52) — partial swizzle extracts
-- 6 shaders have more OpFMul (72 vs 27) — not using VectorTimesScalar everywhere
+## READY FOR WINTTY USE:
+- ✅ 199/199 spirv-val conformance
+- ✅ 9/10 Ghostty shaders (common.glsl is header-only)
+- ✅ All standard GLSL shaders produce correct output stores
+- ✅ ~150ms compilation time per shader
+- ✅ 0 total_fail
 
 ## FUTURE OPTIMIZATION IDEAS:
-- Extend VectorTimesScalar: detect more float vec×scalar patterns to reduce OpFMul count
-- Reduce extra OpCompositeConstruct for non-literal args (27 shaders have extras)
+- Reduce extra OpCompositeConstruct for 8-bit type constructors (need constant-folding through conversions)
 - Runtime arrays (OpTypeRuntimeArray) for nonuniform-qualifier shader
 - textureGather support
-- GPU visual correctness verification
-- Memory leak fix for tolerate_errors path
+- GPU visual correctness verification (headless Vulkan renderer)
+- Memory leak fix for tolerate_errors path (8 GPA leaks per complex shader)
+- Performance optimization: avoid linear scan in isConstantId (use a set instead)
