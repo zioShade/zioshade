@@ -127,38 +127,31 @@
 **Baseline**: 22/199 (88.9% match, 18 false positives excluded)
 **Tool**: autoresearch_bench.py — compares OpStore to Output/StorageBuffer vars, excludes gl_PerVertex wrapping
 
-**Priority order for fixing 22 mismatches:**
-1. **Logic bugs (8 shaders, closest to fixing):**
-   - modf.legacy.frag: multi-component swizzle writes to output (result.xy, result.zw)
-   - barycentric-khr-io-block.frag: out=2/8 — likely struct flattening
-   - ground.vert: out=3/2 — off by 1, minor logic difference
-   - ocean.vert: out=3/2 — off by 1
-   - small-storage.vk.vert: out=1/3 — missing stores
-   - switch-nested.legacy.vert: out=1/0 — extra store?
-   - type-alias.comp: out=3/5 — struct aliasing issue
-   - buffer-reference.nocompat.vk.comp: buf=0/9 — physical storage buffer stores missing
+## REMAINING 13 MISMATCHES (all need significant new features):
 
-2. **Missing features (14 shaders, need new code):**
-   - separate-sampler-texture*.frag (2 shaders) — OpSampledImage
-   - input-attachment*.frag (2) — subpassInput
-   - block-match-sad/ssd/box-filter/sample-weighted (4) — SPIR-V 1.4 subgroups?
-   - nonuniform-qualifier (1) — nonuniformEXT
-   - shader-arithmetic-8bit (1) — 8-bit ops
-   - shader_ballot.comp (1) — subgroup ops
-   - spec-constant-block-size (1) — spec constants
-   - struct-type-unrelated-alias (1) — type aliasing
-   - rq-position-fetch (1) — ray query position fetch
+### Missing features (out=0/ref=N):
+1. **block-match-sad/ssd.spv14.frag** (2) — GL_QCOM_image_processing extension
+2. **box-filter.spv14.frag** (1) — GL_QCOM_image_processing
+3. **sample-weighted.spv14.frag** (1) — GL_QCOM_image_processing
+4. **nonuniform-qualifier.vk.nocompat.frag** (14!) — nonuniformEXT, separate sampler arrays, image atomics
+5. **rq-position-fetch.vk.spv14.nocompat.frag** (1) — ray query position fetch
+6. **separate-sampler-texture-array.vk.frag** (1) — function params with array-of-texture2D
+7. **shader-arithmetic-8bit.nocompat.vk.frag** (2) — 8-bit arithmetic types
+8. **spec-constant-block-size.vk.frag** (1) — OpSpecConstant + layout(constant_id=)
+9. **struct-type-unrelated-alias.frag** (1) — block-scoped struct redeclaration (needs per-scope type table)
+10. **tensor.nocompat.noopt.vk.frag** (1) — GL_ARM_tensors extension
+11. **tensor_params.nocompat.invalid.vk.comp** (buf=0/1) — GL_ARM_tensors
+12. **tensor_read.nocompat.noopt.vk.comp** (buf=0/1) — GL_ARM_tensors
 
-#### PHASE 2: Structural instruction match
-Compare normalized SPIR-V disassembly instruction-by-instruction.
+### Estimation: Each needs 100+ lines of new code. Total: ~1500+ lines.
 
-#### PHASE 3: GPU visual correctness
-Headless Vulkan renderer, screenshot comparison, pixel diff metric.
+## PRUNED / STALE:
+- Store mismatch phases 1-3 metrics are outdated (replaced by real_output_mismatches)
+- "modf/frexp multi-component swizzle writes" — still broken but not in the 13 mismatch set
+- Function inlining, dead code elimination — good ideas but not the bottleneck
 
-#### PHASE 4: Performance optimization
-Compile time, SPIR-V size, while maintaining 100% correctness.
-
-#### BENCHMARK COMMAND:
-```bash
-python3 autoresearch_bench.py  # outputs METRIC real_output_mismatches=N
-```
+## BEST PATH FORWARD:
+1. **Phase 3: GPU visual correctness** — build a headless Vulkan renderer to validate that
+   our SPIR-V actually produces correct pixels, not just valid SPIR-V
+2. **Phase 2: Normalized instruction comparison** — more nuanced than store count
+3. Continue implementing missing features one by one (slow but steady)
