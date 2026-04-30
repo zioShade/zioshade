@@ -105,3 +105,17 @@
 - **Spec constants**: Needs OpSpecConstant, layout(constant_id=...), SpecConstantOp. 1 shader.
 - **Block-scoped struct redeclaration**: Needs per-scope type table. 1 shader.
 - **8-bit arithmetic**: Needs Int8 capability and 8-bit operations. 1 shader.
+
+### Session 2026-04-29 (Part 2):
+- ✅ Added asinh(22), acosh(23), atanh(24) hyperbolic inverse GLSL.std.450 functions
+- ✅ Functions returning array types (vec4[2] func()) — parser handles array dims on return types
+- ✅ Fixed const_cache constant index lookup for cross-function constant reuse in index_access
+
+### DISCOVERED ISSUES:
+- **Swizzle writes don't work**: `v.xy = vec2(...)` produces no code. Single-component works (v.x = val), multi-component doesn't. Affects modf/frexp output parameter usage, many struct flattening shaders.
+- **modf/frexp with vector types**: After Modf with scalar type, the next statement fails silently because multi-component swizzle writes aren't supported.
+- The `tolerate_errors` mode hides these failures completely.
+
+### IDEAS:
+- **Implement multi-component swizzle writes**: For `v.xy = vec2(...)`, load current vector, OpVectorShuffle to combine, store back. Would fix modf/frexp output and many other patterns.
+- **OpSampledImage for separate sampler/texture**: sampler2D(tex, samp) → OpSampledImage. Would fix 3 shaders.
