@@ -374,6 +374,8 @@ const Parser = struct {
                         layout.local_size_z = std.fmt.parseInt(u32, val_text, 10) catch null;
                     } else if (std.mem.eql(u8, ident_text, "input_attachment_index")) {
                         layout.input_attachment_index = std.fmt.parseInt(u32, val_text, 10) catch null;
+                    } else if (std.mem.eql(u8, ident_text, "constant_id")) {
+                        layout.constant_id = std.fmt.parseInt(u32, val_text, 10) catch null;
                     }
                 }
             } else {
@@ -720,12 +722,16 @@ const Parser = struct {
             var member_ty_final = member_ty;
             var member_arr_dims: std.ArrayListUnmanaged(u32) = .{};
             defer member_arr_dims.deinit(self.alloc);
+            var member_arr_size_name: ?[]const u8 = null;
             while (self.current().tag == .l_bracket) {
                 _ = self.advance();
                 const size_tok = self.current();
                 var arr_size: u32 = 0;
                 if (size_tok.tag == .int_literal) {
                     arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                    _ = self.advance();
+                } else if (size_tok.tag == .identifier) {
+                    member_arr_size_name = self.text(size_tok);
                     _ = self.advance();
                 }
                 _ = self.expect(.r_bracket) catch break;
@@ -737,7 +743,7 @@ const Parser = struct {
                     i -= 1;
                     const arr_base = try self.alloc.create(ast.Type);
                     arr_base.* = member_ty_final;
-                    member_ty_final = .{ .array = .{ .base = arr_base, .size = member_arr_dims.items[i] } };
+                    member_ty_final = .{ .array = .{ .base = arr_base, .size = member_arr_dims.items[i], .size_name = member_arr_size_name } };
                 }
             }
             _ = try self.expect(.semicolon);
