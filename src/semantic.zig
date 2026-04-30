@@ -3441,6 +3441,24 @@ const Analyzer = struct {
                 };
                 const result_id = self.allocId();
 
+                // Handle sampler2D(tex, samp) → OpSampledImage (separate sampler/texture)
+                if (result_ty.isCombinedSampler() and arg_tids.items.len == 2) {
+                    const tex_ty = arg_tids.items[0].ty;
+                    if (tex_ty == .texture2d_plain or tex_ty == .texture3d_plain or tex_ty == .texture_cube_plain or tex_ty == .texture2d_array_plain or tex_ty == .texture2d_ms_plain) {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        operands[0] = .{ .id = arg_tids.items[0].id }; // texture
+                        operands[1] = .{ .id = arg_tids.items[1].id }; // sampler
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .sampled_image,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = result_ty,
+                        });
+                        return .{ .ty = result_ty, .id = result_id };
+                    }
+                }
+
                 // Handle buffer_reference pointer → uvec2 bitcast
                 // The argument should be the PhysicalStorageBuffer pointer, not the loaded struct
                 if (arg_tids.items.len == 1 and result_ty == .uvec2) {
