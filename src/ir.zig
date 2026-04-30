@@ -88,6 +88,8 @@ pub const Instruction = struct {
         constant_float,
         constant_bool,
         constant_composite,
+        control_barrier,
+        memory_barrier,
         spec_constant,
         local_variable,
         load,
