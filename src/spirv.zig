@@ -31,6 +31,7 @@ pub const Op = enum(u16) {
     ConstantTrue = 41,
     ConstantFalse = 42,
     Constant = 43,
+    SpecConstant = 50,
     ConstantComposite = 44,
     Function = 54,
     FunctionParameter = 55,
@@ -272,6 +273,7 @@ pub const Decoration = enum(u32) {
     descriptor_set = 34,
     offset = 35,
     input_attachment_index = 43,
+    spec_id = 1,
     _,
 };
 

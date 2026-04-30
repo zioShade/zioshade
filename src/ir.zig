@@ -3,6 +3,8 @@ const ast = @import("ast.zig");
 
 pub const LocalSize = struct { x: u32, y: u32, z: u32 };
 
+pub const SpecConstant = struct { result_id: u32, spec_id: u32, default_literal: u32, type_tag: u32 };
+
 pub const Module = struct {
     functions: []const Function,
     globals: []const Global,
@@ -13,6 +15,7 @@ pub const Module = struct {
     local_size: ?LocalSize = null,
     // Heap-allocated AST types that must be freed with the module
     heap_types: []*ast.Type = &.{},
+    spec_constants: std.StringHashMapUnmanaged(SpecConstant) = .{},
 
     pub fn deinit(self: *Module) void {
         for (self.functions) |func| {
@@ -84,6 +87,7 @@ pub const Instruction = struct {
         constant_int,
         constant_float,
         constant_bool,
+        spec_constant,
         local_variable,
         load,
         store,

@@ -184,7 +184,7 @@ pub const Type = union(enum) {
     u16vec2, u16vec3, u16vec4,
     f16vec2, f16vec3, f16vec4,
     named: []const u8,
-    array: struct { base: *const Type, size: u32 },
+    array: struct { base: *const Type, size: u32, size_name: ?[]const u8 = null },
 
     pub fn scalarSize(self: Type) u32 {
         return switch (self) {
@@ -419,6 +419,7 @@ pub const Layout = struct {
     local_size_y: ?u32 = null,
     local_size_z: ?u32 = null,
     input_attachment_index: ?u32 = null,
+    constant_id: ?u32 = null,
 };
 
 pub const StructMember = struct {

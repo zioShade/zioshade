@@ -87,12 +87,14 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .alloc = alloc,
         .local_size = analyzer.local_size,
         .heap_types = try analyzer.heap_types.toOwnedSlice(alloc),
+        .spec_constants = analyzer.spec_constants,
     };
     // Clear transferred fields before defer deinit runs
     analyzer.types = .{};
     analyzer.functions = .{};
     analyzer.globals = .{};
     analyzer.heap_types = .{};
+    analyzer.spec_constants = .{};
     analyzer.instructions.clearRetainingCapacity();
     return mod;
 }
@@ -143,6 +145,7 @@ const Analyzer = struct {
     local_size: ?ir.LocalSize = null,
     // Heap-allocated AST types that transfer to Module for cleanup
     heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
+    spec_constants: std.StringHashMapUnmanaged(ir.SpecConstant) = .{},
 
     fn deinit(self: *Analyzer) void {
         // Free heap-allocated AST types (if not transferred to Module)
@@ -551,6 +554,47 @@ const Analyzer = struct {
                 }
                 // Skip creating a global for standalone layout qualifiers (e.g. layout(local_size_x=1) in;)
                 if (node.data.name.len > 0) {
+                // Check for specialization constant: layout(constant_id = N) const int X = val;
+                if (node.data.qualifier != null and node.data.qualifier.?.is_const) {
+                    if (node.data.layout) |layout| {
+                        if (layout.constant_id) |cid| {
+                            const sc_ir_id = self.allocId();
+                            const sc_ty = node.data.ty orelse .int;
+                            // Get the default literal value
+                            var default_literal: u32 = 0;
+                            if (node.data.children.len > 0) {
+                                const init = try self.analyzeExpression(node.data.children[0]);
+                                // Extract literal from the constant_int instruction
+                                for (self.instructions.items) |inst| {
+                                    if (inst.result_id != null and inst.result_id.? == init.id and inst.tag == .constant_int) {
+                                        default_literal = switch (inst.operands[0]) {
+                                            .literal_int => |v| @intCast(v),
+                                            else => 0,
+                                        };
+                                        break;
+                                    }
+                                }
+                            }
+                            // Declare as SSA symbol
+                            try self.declare(node.data.name, .{
+                                .kind = .var_sym,
+                                .ty = sc_ty,
+                                .ir_id = sc_ir_id,
+                                .init_value = sc_ir_id,
+                                .is_ssa = true,
+                            });
+                            // Store spec constant info for codegen
+                            const owned_name = try self.alloc.dupe(u8, node.data.name);
+                            try self.spec_constants.put(self.alloc, owned_name, .{
+                                .result_id = sc_ir_id,
+                                .spec_id = cid,
+                                .default_literal = default_literal,
+                                .type_tag = @intFromEnum(sc_ty),
+                            });
+                            return; // Don't create a global variable
+                        }
+                    }
+                }
                 const ir_id = self.allocId();
                 const ty = node.data.ty orelse .void;
                 const storage_class: ir.SPIRVStorageClass = switch (node.tag) {
