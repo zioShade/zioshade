@@ -210,7 +210,7 @@ const Codegen = struct {
         // Only emit additional capabilities if the module actually uses them
         var has_subgroup_vote = false;
         var has_float_atomic = false;
-        var has_input_attachment = true; // TODO: detect from globals
+        var has_input_attachment = false;
 
         for (self.module.functions) |func| {
             for (func.body) |inst| {
