@@ -238,6 +238,34 @@ const Analyzer = struct {
         return id;
     }
 
+    /// Check if an ID was produced by a constant instruction (constant_int, constant_float, constant_composite, spec_constant)
+    fn isConstantId(self: *Analyzer, id: u32) bool {
+        for (self.instructions.items) |inst| {
+            if (inst.result_id == id) {
+                return inst.tag == .constant_int or inst.tag == .constant_float or inst.tag == .constant_composite or inst.tag == .spec_constant;
+            }
+        }
+        return false;
+    }
+
+    /// Try to upgrade the last instruction from composite_construct to constant_composite
+    /// if all operand IDs reference constant instructions.
+    /// Returns true if upgraded.
+    fn tryUpgradeToConstantComposite(self: *Analyzer) bool {
+        const last = &self.instructions.items[self.instructions.items.len - 1];
+        if (last.tag != .composite_construct) return false;
+        for (last.operands) |op| {
+            switch (op) {
+                .id => |id| {
+                    if (!self.isConstantId(id)) return false;
+                },
+                else => return false,
+            }
+        }
+        last.tag = .constant_composite;
+        return true;
+    }
+
     fn pushScope(self: *Analyzer) !void {
         try self.scopes.append(self.alloc, .empty);
     }
@@ -3684,6 +3712,8 @@ const Analyzer = struct {
                             .operands = operands,
                             .ty = result_ty,
                         });
+                        // Upgrade to constant_composite if all operands are constants
+                        _ = self.tryUpgradeToConstantComposite();
                         return .{ .ty = result_ty, .id = result_id };
                     }
                     const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
@@ -4411,6 +4441,8 @@ const Analyzer = struct {
                     .operands = operands,
                     .ty = result_ty,
                 });
+                // Upgrade to constant_composite if all operands are constants
+                _ = self.tryUpgradeToConstantComposite();
                 return .{ .ty = result_ty, .id = result_id };
             },
             .comma_op => {
