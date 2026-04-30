@@ -463,6 +463,19 @@ const Codegen = struct {
     }
 
     fn emitExtInstImport(self: *Codegen) !void {
+        // Only emit GLSL.std.450 import if the module actually uses ext_inst instructions
+        var has_ext_inst = false;
+        for (self.module.functions) |func| {
+            for (func.body) |inst| {
+                if (inst.tag == .ext_inst) {
+                    has_ext_inst = true;
+                    break;
+                }
+            }
+            if (has_ext_inst) break;
+        }
+        if (!has_ext_inst) return;
+
         const name = "GLSL.std.450";
         const id = self.allocId();
         self.glsl_std_450_id = id;
