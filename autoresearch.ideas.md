@@ -1,54 +1,35 @@
 # Autoresearch Ideas
 
-## CURRENT STATUS: 199/199 spirv-val, 9/199 real output mismatches, 9/10 Ghostty shaders (common.glsl is header-only)
+## CURRENT STATUS: 199/199 spirv-val, 9/199 real output mismatches, 9/10 Ghostty shaders
 
-## GOAL: Replace glslang C++ pipeline in deblasis/wintty with pure Zig implementation
+## Session 2026-04-30 (Part 2):
+- ✅ Fixed Ghostty cell_text.f.glsl SSA materialization for swizzle writes
+- ✅ Fixed texelFetchOffset: ConstOffset (bit 3=8) + OpConstantComposite for offsets
+- ✅ Fixed textureLodOffset: Lod|ConstOffset in image_sample_explicit_lod
+- ✅ Fixed shadow textureLodOffset: ConstOffset in image_sample_dref_explicit_lod
+- ✅ Added constant_composite IR tag + codegen for OpConstantComposite
+- ✅ Added constant_composite for scalar-to-vector splat of literal ints
+- All fixes are correctness improvements (store counts unchanged)
 
-## REMAINING 9 MISMATCHES (all vendor extensions or complex features):
+## REMAINING 9 MISMATCHES (all vendor extensions):
 - QCOM image processing (4): block-match-sad, block-match-ssd, box-filter, sample-weighted
 - ARM tensors (3): tensor, tensor_params, tensor_read
-- nonuniform-qualifier (1/14 stores): needs nonuniformEXT, runtime arrays, image atomics
-- ray-query (1): needs ray tracing support
+- nonuniform-qualifier (1): needs nonuniformEXT, runtime arrays
+- ray-query (1): needs ray tracing
 
-## DONE (all sessions, key items):
-- ✅ 199/199 spirv-val conformance
-- ✅ 9/10 Ghostty shaders (cell_text.f.glsl fixed via SSA materialization)
-- ✅ SPIR-V output ~0.73x glslang size
-- ✅ Separate sampler/texture, input attachments, spec constants, 8-bit arithmetic
-- ✅ std140/std430 layout, proper decorations
-- ✅ SSA optimization, constant dedup, two-buffer codegen
+## TRIED THIS SESSION:
+- newTexture.frag sampler2DRect texelFetchOffset: needs different arg handling for Rect samplers (no Lod). Skipped — INVALID shader.
+- textureOffset shadow with bias: needs ConstOffset|Bias for image_sample_dref. Skipped — complex.
 
-## TRIED & ABANDONED:
-- Adding 16-bit types to parsePrimary/isTypeKeyword causes regressions (need OpFConvert)
-- Composite dedup, swizzle fix via lexer change
-- Constant remap first attempt
+## STILL TO DO:
+- textureOffset (implicit lod with offset): image_sample with ConstOffset mask=8
+- textureGatherOffsets: needs ConstOffsets (plural, bit 5) with array of offsets
+- OpFConvert + full 16-bit support
+- barrier() → proper OpControlBarrier/OpMemoryBarrier
+- Phase 2: Normalized instruction comparison
+- Phase 3: GPU visual correctness
 
-## KEY FINDINGS:
-- SSA variables must be materialized before swizzle writes (OpLoad/OpStore need pointers)
-- SPIR-V opcode values must be verified against actual spec (OpSConvert=114, OpUConvert=113)
-- `tolerate_errors` hides failures — disable for debugging
-- The parser has 4 separate type keyword lists that must be kept in sync
-
-## NEXT STEPS:
-1. **Phase 2**: Normalized instruction comparison for 190 matching shaders
-2. **Phase 3**: GPU visual correctness via headless Vulkan renderer
-3. **Add OpFConvert + full 16-bit support** (enables small-storage.vk.vert)
-4. **Performance optimization** of compile time
-
-### Session 2026-04-30 (Ghostty SSA fix):
-- ✅ Fixed Ghostty cell_text.f.glsl spirv-val failure (SSA materialization for swizzle writes)
-- ✅ 199/199 spirv-val, 9/199 mismatches, 9/10 Ghostty shaders
-- Added `materializeSSA()` helper that converts SSA var → OpVariable + init store
-- Fix applied to both swizzle write and swizzle compound assign paths
-- `common.glsl` failure is expected — it's a header file, not a standalone shader
-
-### AUTORESEARCH METRICS:
-- real_output_mismatches: 9 (baseline 40, down from 10 last session)
-- spirv-val: 199/199
-- Ghostty shaders: 9/10 (common.glsl is header)
-- Total VALID shaders: 199
-- Total non-asm failures: 3 (newTexture x2, queryL — all INVALID, not in 199)
-Session 2026-04-30 (Ghostty SSA fix):
-- Fixed cell_text.f.glsl spirv-val (SSA materialization)
-- 199/199 spirv-val, 9/199 mismatches, 9/10 Ghostty
-- Only 3 non-asm non-benchmark failures (newTexture x2, queryL)
+## KEY FINDINGS THIS SESSION:
+- SPIR-V Image Operand bits: Bias=0, Lod=1, Grad=2, ConstOffset=3, Offset=4, ConstOffsets=5, Sample=6
+- ConstOffset requires OpConstantComposite (NOT OpCompositeConstruct)
+- ConstOffset word count: OpImageFetch(8), OpImageSampleExplicitLod(8), OpImageSampleDrefExplicitLod(9)
