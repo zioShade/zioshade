@@ -4035,6 +4035,31 @@ const Analyzer = struct {
                             return .{ .ty = result_ty, .id = result_id };
                         }
                     }
+                    // Float literal splat — check if arg is a float literal and result is a float vector
+                    if (arg_tids.items[0].ty == .float and
+                        (result_ty == .vec2 or result_ty == .vec3 or result_ty == .vec4))
+                    {
+                        const arg_node = node.data.children[0];
+                        if (arg_node.tag == .float_literal) {
+                            const val: f32 = @floatCast(arg_node.data.float_val);
+                            const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, n);
+                            const comp_id = self.allocId();
+                            const cf_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            cf_ops[0] = .{ .literal_float = val };
+                            try self.instructions.append(self.alloc, .{ .tag = .constant_float, .result_type = null, .result_id = comp_id, .operands = cf_ops, .ty = .float });
+                            for (0..n) |i| {
+                                cc_ops[i] = .{ .id = comp_id };
+                            }
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .constant_composite,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = cc_ops,
+                                .ty = result_ty,
+                            });
+                            return .{ .ty = result_ty, .id = result_id };
+                        }
+                    }
                     const operands = try self.alloc.alloc(ir.Instruction.Operand, n);
                     for (0..n) |i| {
                         operands[i] = .{ .id = splat_id };
@@ -4319,6 +4344,48 @@ const Analyzer = struct {
                         ci_ops[0] = .{ .literal_int = val };
                         try self.instructions.append(self.alloc, .{ .tag = .constant_int, .result_type = null, .result_id = comp_id, .operands = ci_ops, .ty = comp_ty });
                         cc_ops[i] = .{ .id = comp_id };
+                    }
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .constant_composite,
+                        .result_type = null,
+                        .result_id = result_id,
+                        .operands = cc_ops,
+                        .ty = result_ty,
+                    });
+                    return .{ .ty = result_ty, .id = result_id };
+                }
+
+                // Check if all args are float literals and result is a float vector → constant_composite
+                // This emits OpConstantComposite in the type section instead of OpCompositeConstruct in the function body
+                var all_const_floats = true;
+                for (node.data.children) |arg| {
+                    if (arg.tag != .float_literal) {
+                        all_const_floats = false;
+                        break;
+                    }
+                }
+                if (all_const_floats and (result_ty == .vec2 or result_ty == .vec3 or result_ty == .vec4)) {
+                    const num_comps = result_ty.numComponents();
+                    const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
+                    // Check for scalar-to-vector splat (single float literal arg)
+                    if (node.data.children.len == 1) {
+                        const val: f32 = @floatCast(node.data.children[0].data.float_val);
+                        const comp_id = self.allocId();
+                        const cf_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        cf_ops[0] = .{ .literal_float = val };
+                        try self.instructions.append(self.alloc, .{ .tag = .constant_float, .result_type = null, .result_id = comp_id, .operands = cf_ops, .ty = .float });
+                        for (0..num_comps) |i| {
+                            cc_ops[i] = .{ .id = comp_id };
+                        }
+                    } else {
+                        for (node.data.children, 0..) |arg, i| {
+                            const val: f32 = @floatCast(arg.data.float_val);
+                            const comp_id = self.allocId();
+                            const cf_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            cf_ops[0] = .{ .literal_float = val };
+                            try self.instructions.append(self.alloc, .{ .tag = .constant_float, .result_type = null, .result_id = comp_id, .operands = cf_ops, .ty = .float });
+                            cc_ops[i] = .{ .id = comp_id };
+                        }
                     }
                     try self.instructions.append(self.alloc, .{
                         .tag = .constant_composite,
