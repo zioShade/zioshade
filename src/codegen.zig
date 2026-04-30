@@ -1570,7 +1570,20 @@ const Codegen = struct {
                 if (self.emitted_array_types.get(cache_key)) |cached_id| {
                     return cached_id;
                 }
-                if (arr.size == 0) {
+                if (arr.size_name) |sname| {
+                    // Spec constant array size: use the spec constant result ID
+                    if (self.module.spec_constants.get(sname)) |sc| {
+                        try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeArray)));
+                        try self.emitTypeWord(id);
+                        try self.emitTypeWord(base_id);
+                        try self.emitTypeWord(sc.result_id);
+                    } else {
+                        // Fallback: runtime array
+                        try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeRuntimeArray)));
+                        try self.emitTypeWord(id);
+                        try self.emitTypeWord(base_id);
+                    }
+                } else if (arr.size == 0) {
                     // Runtime array: OpTypeRuntimeArray
                     try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeRuntimeArray)));
                     try self.emitTypeWord(id);
@@ -1891,6 +1904,12 @@ const Codegen = struct {
                     try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.restrict));
                 }
             }
+        }
+        // Emit SpecId decorations for specialization constants
+        var spec_iter = self.module.spec_constants.iterator();
+        while (spec_iter.next()) |entry| {
+            const sc = entry.value_ptr.*;
+            try self.emitDecorate(sc.result_id, @intFromEnum(spirv.Decoration.spec_id), sc.spec_id);
         }
     }
 
@@ -2221,6 +2240,29 @@ const Codegen = struct {
 
     // Stub methods — implemented in subsequent tasks
     fn emitTypesAndConstants(self: *Codegen) !void {
+        // First: emit OpSpecConstant for specialization constants (must come before types that reference them)
+        var spec_iter = self.module.spec_constants.iterator();
+        while (spec_iter.next()) |entry| {
+            const sc = entry.value_ptr.*;
+            // Reconstruct type from tag
+            const TypeTag = @typeInfo(ast.Type).@"union".tag_type.?;
+            const tag: TypeTag = @enumFromInt(sc.type_tag);
+            const ty: ast.Type = switch (tag) {
+                .int => .int,
+                .uint => .uint,
+                .float => .float,
+                .bool => .bool,
+                else => .int,
+            };
+            const result_type_id = try self.ensureType(ty);
+            try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.SpecConstant)));
+            try self.emitTypeWord(result_type_id);
+            try self.emitTypeWord(sc.result_id);
+            try self.emitTypeWord(sc.default_literal);
+            // Track in emitted_constants so array type emission can find the spec constant
+            const cache_key = (@as(u64, result_type_id) << 32) | @as(u64, sc.default_literal);
+            try self.emitted_constants.put(self.alloc, cache_key, sc.result_id);
+        }
         // Emit named struct types and global types/pointer types.
         // All other types and constants are emitted on-demand via the two-buffer system.
         // Collect referenced type names first
@@ -2403,6 +2445,7 @@ const Codegen = struct {
             resolved.result_type = try self.ensureType(.vec4);
         }
         switch (resolved.tag) {
+            .spec_constant => return, // Emitted during emitTypesAndConstants
             .constant_int, .constant_float, .constant_bool => {
                 // Emit constants via type section when in functions
                 switch (resolved.tag) {
