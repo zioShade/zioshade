@@ -4157,6 +4157,54 @@ const Analyzer = struct {
                     converted_ids[i] = arg_id;
                 }
 
+                // Check if all args are integer literals and result is an int/uint vector → constant_composite
+                // This is needed for texelFetchOffset which requires OpConstantComposite for ConstOffset
+                // Handles: int_literal, uint_literal, unary_op(-int_literal)
+                var all_const_ints = true;
+                for (node.data.children) |arg| {
+                    if (arg.tag != .int_literal and arg.tag != .uint_literal) {
+                        // Check for unary minus of int literal
+                        if (arg.tag == .unary_op and arg.data.children.len > 0 and arg.data.children[0].tag == .int_literal) {
+                            // ok, negated literal
+                        } else {
+                            all_const_ints = false;
+                            break;
+                        }
+                    }
+                }
+                if (all_const_ints and (result_ty == .ivec2 or result_ty == .ivec3 or result_ty == .ivec4 or result_ty == .uvec2 or result_ty == .uvec3 or result_ty == .uvec4)) {
+                    const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, node.data.children.len);
+                    for (node.data.children, 0..) |arg, i| {
+                        const val: u32 = blk: {
+                            if (arg.tag == .int_literal) break :blk @bitCast(@as(i32, @intCast(arg.data.int_val)));
+                            if (arg.tag == .uint_literal) break :blk @intCast(@as(u64, @bitCast(arg.data.int_val)));
+                            // unary minus of int literal
+                            if (arg.tag == .unary_op and arg.data.children.len > 0 and arg.data.children[0].tag == .int_literal)
+                                break :blk @bitCast(-@as(i32, @intCast(arg.data.children[0].data.int_val)));
+                            break :blk 0;
+                        };
+                        // Emit a constant for each component with the correct type
+                        const comp_ty: ast.Type = switch (result_ty) {
+                            .ivec2, .ivec3, .ivec4 => .int,
+                            .uvec2, .uvec3, .uvec4 => .uint,
+                            else => .int,
+                        };
+                        const comp_id = self.allocId();
+                        const ci_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        ci_ops[0] = .{ .literal_int = val };
+                        try self.instructions.append(self.alloc, .{ .tag = .constant_int, .result_type = null, .result_id = comp_id, .operands = ci_ops, .ty = comp_ty });
+                        cc_ops[i] = .{ .id = comp_id };
+                    }
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .constant_composite,
+                        .result_type = null,
+                        .result_id = result_id,
+                        .operands = cc_ops,
+                        .ty = result_ty,
+                    });
+                    return .{ .ty = result_ty, .id = result_id };
+                }
+
                 // Allocate operand array
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, converted_ids.len);
                 for (converted_ids, 0..) |cid, i| {

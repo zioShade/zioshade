@@ -2509,6 +2509,19 @@ const Codegen = struct {
                 }
                 return;
             },
+            .constant_composite => {
+                // OpConstantComposite — must be emitted in type section
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const wc: u16 = 3 + @as(u16, @intCast(resolved.operands.len));
+                try self.emitTypeWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.ConstantComposite)));
+                try self.emitTypeWord(result_type_id);
+                try self.emitTypeWord(result_id);
+                for (resolved.operands) |op| {
+                    try self.emitTypeWord(self.operandValue(op));
+                }
+                return;
+            },
             .local_variable => {
                 const ptr_type_id = try self.ensurePointerType(resolved.ty, .function);
                 const result_id = resolved.result_id orelse return;
@@ -3105,6 +3118,18 @@ const Codegen = struct {
                     try self.emitWord(coord_id);
                     try self.emitWord(64); // Image Operand Sample mask (bit 6)
                     try self.emitWord(sample_id);
+                } else if (resolved.tag == .image_fetch and resolved.operands.len >= 4) {
+                    // texelFetchOffset: [image, coord, lod, offset]
+                    const lod_id = self.operandId(resolved, 2);
+                    const offset_id = self.operandId(resolved, 3);
+                    try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageFetch)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(10); // Image Operand mask: Lod (bit 1) | ConstOffset (bit 3)
+                    try self.emitWord(lod_id);
+                    try self.emitWord(offset_id);
                 } else if (resolved.tag == .image_fetch and resolved.operands.len > 2) {
                     // texelFetch with lod operand
                     const lod_id = self.operandId(resolved, 2);
