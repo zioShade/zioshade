@@ -210,6 +210,7 @@ const Codegen = struct {
         // Only emit additional capabilities if the module actually uses them
         var has_subgroup_vote = false;
         var has_float_atomic = false;
+        var has_input_attachment = true; // TODO: detect from globals
 
         for (self.module.functions) |func| {
             for (func.body) |inst| {
@@ -217,6 +218,15 @@ const Codegen = struct {
                     .group_all, .group_any => has_subgroup_vote = true,
                     .atomic_fadd => has_float_atomic = true,
                     else => {},
+                }
+            }
+        }
+
+        // Check globals for input attachment
+        for (self.module.globals) |global| {
+            if (global.layout) |layout| {
+                if (layout.input_attachment_index != null) {
+                    has_input_attachment = true;
                 }
             }
         }
@@ -303,6 +313,10 @@ const Codegen = struct {
         if (has_float_atomic) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.atomic_float32_add_ext));
+        }
+        if (has_input_attachment) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.input_attachment));
         }
         if (self.hasBufferReference()) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
@@ -1612,6 +1626,18 @@ const Codegen = struct {
                 try self.emitted_types.put(self.alloc, @intFromEnum(ast.Type.texture2d_ms_plain), self.sampled_image_ms_inner_id);
                 return self.sampled_image_ms_inner_id;
             },
+            .subpass_input => {
+                const float_id = try self.ensureType(.float);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(6); // Dim = SubpassData
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
+            },
         }
         // Cache for simple types
         if (normalized != .named and normalized != .array) {
@@ -1764,6 +1790,9 @@ const Codegen = struct {
                 } else if (layout.binding != null and (global.storage_class == .uniform or global.storage_class == .storage_buffer or global.storage_class == .uniform_constant)) {
                     // Default descriptor set is 0 for UBO/SSBO
                     try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.descriptor_set), 0);
+                }
+                if (layout.input_attachment_index != null) {
+                    try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.input_attachment_index), layout.input_attachment_index.?);
                 }
             }
             if (std.mem.eql(u8, global.name, "gl_FragCoord")) {

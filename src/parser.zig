@@ -372,6 +372,8 @@ const Parser = struct {
                         layout.local_size_y = std.fmt.parseInt(u32, val_text, 10) catch null;
                     } else if (std.mem.eql(u8, ident_text, "local_size_z")) {
                         layout.local_size_z = std.fmt.parseInt(u32, val_text, 10) catch null;
+                    } else if (std.mem.eql(u8, ident_text, "input_attachment_index")) {
+                        layout.input_attachment_index = std.fmt.parseInt(u32, val_text, 10) catch null;
                     }
                 }
             } else {
@@ -494,6 +496,7 @@ const Parser = struct {
             .kw_texture_cube => { _ = self.advance(); return .texture_cube_plain; },
             .kw_texture2d_array => { _ = self.advance(); return .texture2d_array_plain; },
             .kw_texture2d_ms => { _ = self.advance(); return .texture2d_ms_plain; },
+            .kw_subpass_input => { _ = self.advance(); return .subpass_input; },
             .kw_sampler_shadow, .kw_sampler_plain => { _ = self.advance(); return .sampler_plain; },
             .kw_sampler_cube => { _ = self.advance(); return .sampler_cube; },
             .identifier => {
