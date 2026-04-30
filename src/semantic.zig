@@ -240,9 +240,18 @@ const Analyzer = struct {
 
     /// Check if an ID was produced by a constant instruction (constant_int, constant_float, constant_composite, spec_constant)
     fn isConstantId(self: *Analyzer, id: u32) bool {
+        // Check current function's instructions
         for (self.instructions.items) |inst| {
             if (inst.result_id == id) {
                 return inst.tag == .constant_int or inst.tag == .constant_float or inst.tag == .constant_composite or inst.tag == .spec_constant;
+            }
+        }
+        // Check global constant functions (constants from previous functions are in the module)
+        for (self.functions.items) |func| {
+            for (func.body) |inst| {
+                if (inst.result_id == id) {
+                    return inst.tag == .constant_int or inst.tag == .constant_float or inst.tag == .constant_composite or inst.tag == .spec_constant;
+                }
             }
         }
         return false;
@@ -1966,6 +1975,7 @@ const Analyzer = struct {
                                 .operands = splat_operands,
                                 .ty = result_ty,
                             });
+                            _ = self.tryUpgradeToConstantComposite();
                             left_id = splat_id;
                             did_splat = true;
                         }
@@ -1989,6 +1999,7 @@ const Analyzer = struct {
                                 .operands = splat_operands,
                                 .ty = result_ty,
                             });
+                            _ = self.tryUpgradeToConstantComposite();
                             right_id = splat_id;
                             did_splat = true;
                         }
@@ -4101,6 +4112,8 @@ const Analyzer = struct {
                         .operands = operands,
                         .ty = result_ty,
                     });
+                    // Upgrade to constant_composite if splat value is a constant
+                    _ = self.tryUpgradeToConstantComposite();
                     return .{ .ty = result_ty, .id = result_id };
                 }
 
