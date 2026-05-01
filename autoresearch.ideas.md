@@ -1,39 +1,36 @@
 # Autoresearch Ideas — glslpp
 
-## STATUS: 199/199 spirv-val, 187/199 exact matches (94%), 149/149 gap tests, 8/9 Ghostty spirv-val
-## Commit: b642f86 (DFE constant rescue + codegen pre-scan)
-
-## CRITICAL BUG FIXED:
-- Dead function elimination was silently producing invalid SPIR-V for Ghostty shaders
-- Root cause: const_cache in semantic.zig + DFE removing constant definitions
-- Fix: Rescue constants from eliminated functions + pre-scan in codegen
-- This bug was masked because Ghostty shaders were classified as INVALID in the benchmark
-- After fix: 8/9 Ghostty shaders now pass spirv-val (was silently broken before)
+## STATUS: 199/199 spirv-val, 196/199 exact matches (98.5%), 149/149 gap tests
+## Commit: 7151699 (Ray query + constant_bool dedup)
 
 ## CURRENT METRICS:
 - 199/199 spirv-val ✅
-- 187/199 exact output store matches (94.0%)
-- 7 zero mismatches (ALL vendor extensions)
-- 5 structural mismatches (SSA vs memory, functionally equivalent)
+- 196/199 exact output store matches (98.5%)
+- 3 remaining mismatches (ALL ARM tensor vendor extension)
+- 0 failures (was 6)
 - 149/149 gap tests ✅
-- 8/9 Ghostty shaders pass spirv-val ✅
 
-## REMAINING GAPS:
-- 7 vendor extensions (QCOM, ARM tensor, ray query, nonuniform)
-- 5 structural (SSA differences, not bugs)
-- cell_text.v.glsl: semantic analysis error (tolerate_errors produces truncated output)
+## REMAINING GAPS (3 shaders):
+1. tensor.nocompat.noopt.vk.frag (out=0/1) — tensorARM<uint8_t,3> type + tensorSizeARM/tensorReadARM
+2. tensor_params.nocompat.invalid.vk.comp (buf=0/1) — tensorARM<int32_t,4> + tensorSizeARM with function params
+3. tensor_read.nocompat.noopt.vk.comp (buf=0/1) — tensorReadARM with OutOfBoundsValueARM
 
-## NEXT PRIORITY:
-1. Fix cell_text.v.glsl semantic error (currently silently fails)
-2. GPU visual correctness verification
-3. Memory leak fix for tolerate_errors path
-4. gl_PerVertex block wrapping
+## ARM TENSOR IMPLEMENTATION PLAN:
+- SPIR-V opcodes: TypeTensorARM=4163, TensorReadARM=4164, TensorQuerySizeARM=4166
+- Capability: TensorsARM=4174, Extension: SPV_ARM_tensors
+- Parser: Add tensorARM keyword, parse template-like syntax tensorARM<type, N>
+- Semantic: tensorARM as named type with element_type and rank
+- Codegen: OpTypeTensorARM elem_type rank_constant
+- Builtins: tensorSizeARM(tensor, dim) → OpTensorQuerySizeARM, tensorReadARM(tensor, coords, out) → OpTensorReadARM
+- Complexity: HIGH — template syntax, new type system, multiple SPIR-V ops
 
-## FEATURES COMPLETED THIS AUTORESEARCH SESSION:
-- floatBitsToUint/Int/uintBitsToFloat → OpBitcast
-- Dead function elimination with constant rescue
-- gl_FragDepth + depth execution modes (DepthGreater/Less/Unchanged)
-- EarlyFragmentTests execution mode
-- 54 gap tests (50 original + 4 depth)
-- DFE constant rescue bug fix
-- Codegen constant pre-scan
+## FEATURES COMPLETED THIS SESSION:
+- nonuniformEXT() passthrough (1 shader, 14 stores)
+- GL_QCOM_image_processing (4 shaders, 8 stores): box-filter, block-match-sad/ssd, sample-weighted
+- GL_EXT_ray_query (1 shader, 1 store): accelerationStructureEXT, rayQueryEXT types, 4 builtins
+- constant_bool dedup fix (was emitting OpConstantTrue/False with duplicate IDs)
+- isTypeKeyword expanded for all sampler/image/texture types
+
+## STRUCTURAL MISMATCHES (5, not bugs):
+- Different implementation patterns (SSA vs memory, VectorShuffle vs AccessChain)
+- Functionally equivalent outputs
