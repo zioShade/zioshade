@@ -88,6 +88,11 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .local_size = analyzer.local_size,
         .heap_types = try analyzer.heap_types.toOwnedSlice(alloc),
         .spec_constants = analyzer.spec_constants,
+        .depth_greater = analyzer.has_depth_greater,
+        .depth_less = analyzer.has_depth_less,
+        .depth_unchanged = analyzer.has_depth_unchanged,
+        .early_fragment_tests = analyzer.has_early_fragment_tests,
+        .origin_upper_left = analyzer.has_origin_upper_left,
     };
     // Dead function elimination: only keep functions reachable from main()
     mod = eliminateDeadFunctions(alloc, mod);
@@ -222,6 +227,12 @@ const Analyzer = struct {
     // Heap-allocated AST types that transfer to Module for cleanup
     heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
     spec_constants: std.StringHashMapUnmanaged(ir.SpecConstant) = .{},
+    // Fragment execution mode flags
+    has_early_fragment_tests: bool = false,
+    has_origin_upper_left: bool = false,
+    has_depth_greater: bool = false,
+    has_depth_less: bool = false,
+    has_depth_unchanged: bool = false,
 
     fn deinit(self: *Analyzer) void {
         // Free heap-allocated AST types (if not transferred to Module)
@@ -583,6 +594,7 @@ const Analyzer = struct {
         const builtins = [_]struct { name: []const u8, ty: ast.Type, is_in: bool, is_out: bool, sc: ir.SPIRVStorageClass }{
             .{ .name = "gl_FragCoord", .ty = .vec4, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_FragColor", .ty = .vec4, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_FragDepth", .ty = .float, .is_in = false, .is_out = true, .sc = .output },
             .{ .name = "gl_FrontFacing", .ty = .bool, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_Position", .ty = .vec4, .is_in = false, .is_out = true, .sc = .output },
             .{ .name = "gl_PointSize", .ty = .float, .is_in = false, .is_out = true, .sc = .output },
@@ -676,6 +688,20 @@ const Analyzer = struct {
                                 .z = layout.local_size_z orelse 1,
                             };
                         }
+                        if (layout.early_fragment_tests) {
+                            self.has_early_fragment_tests = true;
+                        }
+                        if (layout.origin_upper_left) {
+                            self.has_origin_upper_left = true;
+                        }
+                    }
+                }
+                // Check for depth layout qualifiers on output declarations
+                if (node.tag == .out_decl) {
+                    if (node.data.layout) |layout| {
+                        if (layout.depth_greater) self.has_depth_greater = true;
+                        if (layout.depth_less) self.has_depth_less = true;
+                        if (layout.depth_unchanged) self.has_depth_unchanged = true;
                     }
                 }
                 // Skip creating a global for standalone layout qualifiers (e.g. layout(local_size_x=1) in;)
