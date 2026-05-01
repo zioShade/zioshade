@@ -265,6 +265,7 @@ const Analyzer = struct {
     // Constant dedup: (type_tag << 32 | value_bits) -> ir_id
     const_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     const_composite_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
+    access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     local_size: ?ir.LocalSize = null,
     // Heap-allocated AST types that transfer to Module for cleanup
     heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
@@ -304,6 +305,7 @@ const Analyzer = struct {
         self.loop_stack.deinit(self.alloc);
         self.const_cache.deinit(self.alloc);
         self.const_composite_cache.deinit(self.alloc);
+        self.access_chain_cache.deinit(self.alloc);
         {
             var it = self.overloads.iterator();
             while (it.next()) |entry| {
@@ -409,6 +411,40 @@ const Analyzer = struct {
         return key;
     }
 
+    /// Emit an access_chain instruction with dedup caching.
+    /// AccessChains are pure (same base + indices = same pointer), so caching is always safe.
+    /// Returns the result_id (either newly allocated or from cache).
+    fn emitAccessChainCached(self: *Analyzer, base_id: u32, operands: []const ir.Instruction.Operand, result_ty: ast.Type) !u32 {
+        // Build cache key from base + operands
+        var key: u64 = base_id;
+        for (operands) |op| {
+            const op_val: u64 = switch (op) {
+                .id => |id| id,
+                .literal_int => |v| v | (@as(u64, 1) << 63),
+                else => 0,
+            };
+            key = key *% 33 +% op_val;
+        }
+        if (self.access_chain_cache.get(key)) |existing_id| {
+            return existing_id;
+        }
+        const ptr_id = self.allocId();
+        const ops = try self.alloc.alloc(ir.Instruction.Operand, operands.len + 1);
+        ops[0] = .{ .id = base_id };
+        for (operands, 1..) |op, i| {
+            ops[i] = op;
+        }
+        try self.instructions.append(self.alloc, .{
+            .tag = .access_chain,
+            .result_type = null,
+            .result_id = ptr_id,
+            .operands = ops,
+            .ty = result_ty,
+        });
+        self.access_chain_cache.put(self.alloc, key, ptr_id) catch {};
+        return ptr_id;
+    }
+
     fn tryUpgradeToConstantComposite(self: *Analyzer) bool {
         if (self.instructions.items.len == 0) return false;
         const last = &self.instructions.items[self.instructions.items.len - 1];
@@ -500,6 +536,7 @@ const Analyzer = struct {
     }
 
     fn emitLabel(self: *Analyzer, label_id: u32) !void {
+        self.access_chain_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
             .tag = .label,
             .result_id = label_id,
@@ -1008,6 +1045,7 @@ const Analyzer = struct {
 
     fn analyzeFunction(self: *Analyzer, node: ast.Node) !void {
         self.has_returned = false;
+        self.access_chain_cache.clearRetainingCapacity();
         try self.pushScope();
 
         // For overloaded functions, resolve the correct ir_id based on param types
@@ -1726,17 +1764,7 @@ const Analyzer = struct {
                 if (self.lookup(node.data.name)) |sym| {
                     if (sym.kind == .block_member) {
                         // Generate access chain for the member pointer
-                        const ptr_id = self.allocId();
-                        const ac_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                        ac_operands[0] = .{ .id = sym.ir_id };
-                        ac_operands[1] = .{ .literal_int = sym.member_index };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .access_chain,
-                            .result_type = null,
-                            .result_id = ptr_id,
-                            .operands = ac_operands,
-                            .ty = sym.ty,
-                        });
+                        const ptr_id = try self.emitAccessChainCached(sym.ir_id, &[1]ir.Instruction.Operand{.{ .literal_int = sym.member_index }}, sym.ty);
                         return .{ .ty = sym.ty, .id = ptr_id };
                     }
                     if (sym.kind == .param) {
@@ -1823,17 +1851,7 @@ const Analyzer = struct {
                         }
                         if (member_index) |idx| {
                             const member_ty = td.members[idx].ty;
-                            const ptr_id = self.allocId();
-                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                            operands[0] = .{ .id = base_lv.id };
-                            operands[1] = .{ .literal_int = idx };
-                            try self.instructions.append(self.alloc, .{
-                                .tag = .access_chain,
-                                .result_type = null,
-                                .result_id = ptr_id,
-                                .operands = operands,
-                                .ty = member_ty,
-                            });
+                            const ptr_id = try self.emitAccessChainCached(base_lv.id, &[1]ir.Instruction.Operand{.{ .literal_int = idx }}, member_ty);
                             return .{ .ty = member_ty, .id = ptr_id, .is_ptr = true };
                         }
                     }
@@ -1842,17 +1860,7 @@ const Analyzer = struct {
                 if (base_lv.ty.isVector() and member_name.len == 1) {
                     const idx = self.swizzleIndex(member_name[0]);
                     const elem_ty = base_lv.ty.elementType();
-                    const ptr_id = self.allocId();
-                    const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                    operands[0] = .{ .id = base_lv.id };
-                    operands[1] = .{ .literal_int = idx };
-                    try self.instructions.append(self.alloc, .{
-                        .tag = .access_chain,
-                        .result_type = null,
-                        .result_id = ptr_id,
-                        .operands = operands,
-                        .ty = elem_ty,
-                    });
+                    const ptr_id = try self.emitAccessChainCached(base_lv.id, &[1]ir.Instruction.Operand{.{ .literal_int = idx }}, elem_ty);
                     return .{ .ty = elem_ty, .id = ptr_id, .is_ptr = true };
                 }
                 last_error_ctx = "invalid-assign";
@@ -1870,17 +1878,7 @@ const Analyzer = struct {
                     base_lv.ty.elementType()
                 else
                     return error.TypeMismatch;
-                const ptr_id = self.allocId();
-                const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                operands[0] = .{ .id = base_lv.id };
-                operands[1] = .{ .id = index_tid.id };
-                try self.instructions.append(self.alloc, .{
-                    .tag = .access_chain,
-                    .result_type = null,
-                    .result_id = ptr_id,
-                    .operands = operands,
-                    .ty = element_ty,
-                });
+                const ptr_id = try self.emitAccessChainCached(base_lv.id, &[1]ir.Instruction.Operand{.{ .id = index_tid.id }}, element_ty);
                 return .{ .ty = element_ty, .id = ptr_id };
             },
             else => {
@@ -1998,17 +1996,7 @@ const Analyzer = struct {
                 if (self.lookup(node.data.name)) |sym| {
                     if (sym.kind == .block_member) {
                         // Generate access chain to get a pointer to the member
-                        const ptr_id = self.allocId();
-                        const ac_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                        ac_operands[0] = .{ .id = sym.ir_id };
-                        ac_operands[1] = .{ .literal_int = sym.member_index };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .access_chain,
-                            .result_type = null,
-                            .result_id = ptr_id,
-                            .operands = ac_operands,
-                            .ty = sym.ty,
-                        });
+                        const ptr_id = try self.emitAccessChainCached(sym.ir_id, &[1]ir.Instruction.Operand{.{ .literal_int = sym.member_index }}, sym.ty);
                         // If the member is an array type, don't load — return the pointer
                         // so that index_access can chain another access chain
                         if (sym.ty == .array) {
@@ -5028,17 +5016,7 @@ const Analyzer = struct {
                                 }
                                 if (member_index) |idx| {
                                     const member_ty = td.members[idx].ty;
-                                    const result_id = self.allocId();
-                                    const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                                    operands[0] = .{ .id = sym.ir_id };
-                                    operands[1] = .{ .literal_int = idx };
-                                    try self.instructions.append(self.alloc, .{
-                                        .tag = .access_chain,
-                                        .result_type = null,
-                                        .result_id = result_id,
-                                        .operands = operands,
-                                        .ty = member_ty,
-                                    });
+                                    const result_id = try self.emitAccessChainCached(sym.ir_id, &[1]ir.Instruction.Operand{.{ .literal_int = idx }}, member_ty);
                                     return .{ .ty = member_ty, .id = result_id, .is_ptr = true };
                                 }
                             }
@@ -5148,23 +5126,14 @@ const Analyzer = struct {
 
                         if (member_index) |idx| {
                             const member_ty = td.members[idx].ty;
-                            const result_id = self.allocId();
 
                             if (base_tid.is_ptr) {
                                 // Pointer base → access_chain (pointer result)
-                                const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                                operands[0] = .{ .id = base_tid.id };
-                                operands[1] = .{ .literal_int = idx };
-                                try self.instructions.append(self.alloc, .{
-                                    .tag = .access_chain,
-                                    .result_type = null,
-                                    .result_id = result_id,
-                                    .operands = operands,
-                                    .ty = member_ty,
-                                });
+                                const result_id = try self.emitAccessChainCached(base_tid.id, &[1]ir.Instruction.Operand{.{ .literal_int = idx }}, member_ty);
                                 return .{ .ty = member_ty, .id = result_id, .is_ptr = true };
                             } else {
                                 // Value base → composite_extract (value result)
+                                const result_id = self.allocId();
                                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                                 operands[0] = .{ .id = base_tid.id };
                                 operands[1] = .{ .literal_int = idx };
