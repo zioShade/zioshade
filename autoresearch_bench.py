@@ -10,7 +10,7 @@ Constraint: total_pass must be 199/199
 
 Caches glslang reference results in .zig-cache/ref_output_stores.json
 """
-import subprocess, os, sys, json, re
+import subprocess, os, sys, json, re, struct
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
@@ -130,6 +130,7 @@ def main():
     total_fail = 0
     real_mm = 0
     checked = 0
+    total_bound = 0
     updated_ref = False
     mm_details = []
 
@@ -156,6 +157,16 @@ def main():
             total_fail += 1
             continue
         total_pass += 1
+
+        # Measure SPIR-V bound
+        try:
+            with open(".zig-cache/_bench_ours.spv", "rb") as sf:
+                header = sf.read(20)
+                if len(header) >= 20:
+                    bound = struct.unpack('<5I', header)[3]
+                    total_bound += bound
+        except:
+            pass
 
         our_dis = subprocess.run([SPV_DIS, ".zig-cache/_bench_ours.spv"],
                                 capture_output=True, text=True, timeout=5).stdout
@@ -210,6 +221,7 @@ def main():
     print(f"METRIC total_pass={total_pass}")
     print(f"METRIC total_fail={total_fail}")
     print(f"METRIC checked={checked}")
+    print(f"METRIC total_bound={total_bound}")
     sys.exit(0)
 
 if __name__ == "__main__":
