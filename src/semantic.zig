@@ -133,9 +133,12 @@ const Scope = std.StringHashMapUnmanaged(Symbol);
 fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) ir.Module {
     if (mod.functions.len <= 1) return mod;
 
+    // Make a mutable copy of the functions slice
+    const functions = mod.functions;
+
     // Find main() function index
     var main_idx: ?usize = null;
-    for (mod.functions, 0..) |func, i| {
+    for (functions, 0..) |func, i| {
         if (std.mem.eql(u8, func.name, "main")) {
             main_idx = i;
             break;
@@ -146,14 +149,14 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) ir.Module {
     // Build map from function result_id → function index
     var id_to_idx = std.AutoHashMapUnmanaged(u32, usize){};
     defer id_to_idx.deinit(alloc);
-    for (mod.functions, 0..) |func, i| {
+    for (functions, 0..) |func, i| {
         if (func.result_id != 0) {
             id_to_idx.put(alloc, func.result_id, i) catch {};
         }
     }
 
     // BFS from main to find all reachable function indices
-    var reachable = std.DynamicBitSet.initEmpty(alloc, mod.functions.len) catch return mod;
+    var reachable = std.DynamicBitSet.initEmpty(alloc, functions.len) catch return mod;
     defer reachable.deinit();
     var queue = std.ArrayListUnmanaged(usize){};
     defer queue.deinit(alloc);
@@ -161,7 +164,7 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) ir.Module {
     reachable.set(mi);
 
     while (queue.pop()) |idx| {
-        const func = mod.functions[idx];
+        const func = functions[idx];
         for (func.body) |inst| {
             if (inst.tag == .function_call and inst.operands.len >= 1) {
                 const callee_id = switch (inst.operands[0]) {
@@ -180,14 +183,44 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) ir.Module {
 
     // If all functions are reachable, return as-is
     const reachable_count = reachable.count();
-    if (reachable_count == mod.functions.len) return mod;
+    if (reachable_count == functions.len) return mod;
+
+    // Collect constant instructions from eliminated functions.
+    // These may be referenced by surviving functions due to const_cache reuse.
+    var rescued_constants = std.ArrayListUnmanaged(ir.Instruction){};
+    defer rescued_constants.deinit(alloc);
+    for (functions, 0..) |func, i| {
+        if (!reachable.isSet(i)) {
+            for (func.body) |inst| {
+                if (inst.tag == .constant_int or inst.tag == .constant_float or inst.tag == .constant_bool or inst.tag == .constant_composite) {
+                    rescued_constants.append(alloc, inst) catch {};
+                }
+            }
+        }
+    }
 
     // Filter to only reachable functions
     var kept = std.ArrayListUnmanaged(ir.Function){};
     kept.ensureTotalCapacity(alloc, reachable_count) catch return mod;
-    for (mod.functions, 0..) |func, i| {
-        if (reachable.isSet(i)) {
-            kept.appendAssumeCapacity(func);
+    var fi: usize = 0;
+    while (fi < functions.len) : (fi += 1) {
+        const func = functions[fi];
+        if (reachable.isSet(fi)) {
+            // If this is main() and we have rescued constants, prepend them
+            var body_to_keep: []const ir.Instruction = func.body;
+            if (std.mem.eql(u8, func.name, "main") and rescued_constants.items.len > 0) {
+                const new_body = alloc.alloc(ir.Instruction, rescued_constants.items.len + func.body.len) catch {
+                    kept.appendAssumeCapacity(func);
+                    continue;
+                };
+                @memcpy(new_body[0..rescued_constants.items.len], rescued_constants.items);
+                @memcpy(new_body[rescued_constants.items.len..], func.body);
+                alloc.free(func.body);
+                body_to_keep = new_body;
+            }
+            var func_copy = func;
+            func_copy.body = body_to_keep;
+            kept.appendAssumeCapacity(func_copy);
         } else {
             // Free unreachable function's body/params
             alloc.free(func.body);
@@ -196,7 +229,7 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) ir.Module {
     }
 
     // Free old functions slice (but not individual items we kept)
-    alloc.free(mod.functions);
+    alloc.free(functions);
     var result = mod;
     result.functions = kept.items;
     return result;
@@ -971,6 +1004,11 @@ const Analyzer = struct {
         }
 
         self.instructions.clearRetainingCapacity();
+        // Note: const_cache is NOT cleared here. Constants from previous functions
+        // are reused by ID, but their definitions live in the previous function's body.
+        // The codegen's emitted_constants cache handles dedup across functions.
+        // If a constant is needed but its definition is in a different function,
+        // the codegen must re-emit it.
 
         var param_ids = std.ArrayListUnmanaged(u32){};
         defer param_ids.deinit(self.alloc);
