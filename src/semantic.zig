@@ -78,7 +78,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
     if (!analyzer.tolerate_errors and analyzer.errors.items.len > 0) return error.SemanticFailed;
 
     // Transfer ownership to module; clear analyzer fields so defer deinit doesn't double-free
-    const mod: ir.Module = .{
+    var mod: ir.Module = .{
         .functions = try analyzer.functions.toOwnedSlice(alloc),
         .globals = try analyzer.globals.toOwnedSlice(alloc),
         .types = analyzer.types,
@@ -89,6 +89,9 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .heap_types = try analyzer.heap_types.toOwnedSlice(alloc),
         .spec_constants = analyzer.spec_constants,
     };
+    // Dead function elimination: only keep functions reachable from main()
+    mod = eliminateDeadFunctions(alloc, mod);
+
     // Clear transferred fields before defer deinit runs
     analyzer.types = .{};
     analyzer.functions = .{};
@@ -120,6 +123,79 @@ const OverloadEntry = struct {
 };
 
 const Scope = std.StringHashMapUnmanaged(Symbol);
+
+/// Eliminate functions not reachable from main() via function_call instructions.
+fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) ir.Module {
+    if (mod.functions.len <= 1) return mod;
+
+    // Find main() function index
+    var main_idx: ?usize = null;
+    for (mod.functions, 0..) |func, i| {
+        if (std.mem.eql(u8, func.name, "main")) {
+            main_idx = i;
+            break;
+        }
+    }
+    const mi = main_idx orelse return mod;
+
+    // Build map from function result_id → function index
+    var id_to_idx = std.AutoHashMapUnmanaged(u32, usize){};
+    defer id_to_idx.deinit(alloc);
+    for (mod.functions, 0..) |func, i| {
+        if (func.result_id != 0) {
+            id_to_idx.put(alloc, func.result_id, i) catch {};
+        }
+    }
+
+    // BFS from main to find all reachable function indices
+    var reachable = std.DynamicBitSet.initEmpty(alloc, mod.functions.len) catch return mod;
+    defer reachable.deinit();
+    var queue = std.ArrayListUnmanaged(usize){};
+    defer queue.deinit(alloc);
+    queue.append(alloc, mi) catch return mod;
+    reachable.set(mi);
+
+    while (queue.pop()) |idx| {
+        const func = mod.functions[idx];
+        for (func.body) |inst| {
+            if (inst.tag == .function_call and inst.operands.len >= 1) {
+                const callee_id = switch (inst.operands[0]) {
+                    .id => |id| id,
+                    else => continue,
+                };
+                if (id_to_idx.get(callee_id)) |callee_idx| {
+                    if (!reachable.isSet(callee_idx)) {
+                        reachable.set(callee_idx);
+                        queue.append(alloc, callee_idx) catch {};
+                    }
+                }
+            }
+        }
+    }
+
+    // If all functions are reachable, return as-is
+    const reachable_count = reachable.count();
+    if (reachable_count == mod.functions.len) return mod;
+
+    // Filter to only reachable functions
+    var kept = std.ArrayListUnmanaged(ir.Function){};
+    kept.ensureTotalCapacity(alloc, reachable_count) catch return mod;
+    for (mod.functions, 0..) |func, i| {
+        if (reachable.isSet(i)) {
+            kept.appendAssumeCapacity(func);
+        } else {
+            // Free unreachable function's body/params
+            alloc.free(func.body);
+            alloc.free(func.param_ids);
+        }
+    }
+
+    // Free old functions slice (but not individual items we kept)
+    alloc.free(mod.functions);
+    var result = mod;
+    result.functions = kept.items;
+    return result;
+}
 
 const Analyzer = struct {
     const TypedId = struct {
