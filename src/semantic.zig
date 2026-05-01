@@ -3669,6 +3669,50 @@ const Analyzer = struct {
                             });
                         }
                         return .{ .ty = arg_tids.items[0].ty, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "floatBitsToUint") or
+                        std.mem.eql(u8, node.data.name, "floatBitsToInt") or
+                        std.mem.eql(u8, node.data.name, "intBitsToFloat") or
+                        std.mem.eql(u8, node.data.name, "uintBitsToFloat"))
+                    {
+                        // Bitcast builtins: reinterpret bits, NOT numeric conversion
+                        const arg_ty = arg_tids.items[0].ty;
+                        const bitcast_ty: ast.Type = blk: {
+                            if (std.mem.eql(u8, node.data.name, "floatBitsToUint")) {
+                                if (arg_ty == .float) break :blk .uint;
+                                if (arg_ty == .vec2) break :blk .uvec2;
+                                if (arg_ty == .vec3) break :blk .uvec3;
+                                if (arg_ty == .vec4) break :blk .uvec4;
+                            }
+                            if (std.mem.eql(u8, node.data.name, "floatBitsToInt")) {
+                                if (arg_ty == .float) break :blk .int;
+                                if (arg_ty == .vec2) break :blk .ivec2;
+                                if (arg_ty == .vec3) break :blk .ivec3;
+                                if (arg_ty == .vec4) break :blk .ivec4;
+                            }
+                            if (std.mem.eql(u8, node.data.name, "intBitsToFloat")) {
+                                if (arg_ty == .int) break :blk .float;
+                                if (arg_ty == .ivec2) break :blk .vec2;
+                                if (arg_ty == .ivec3) break :blk .vec3;
+                                if (arg_ty == .ivec4) break :blk .vec4;
+                            }
+                            if (std.mem.eql(u8, node.data.name, "uintBitsToFloat")) {
+                                if (arg_ty == .uint) break :blk .float;
+                                if (arg_ty == .uvec2) break :blk .vec2;
+                                if (arg_ty == .uvec3) break :blk .vec3;
+                                if (arg_ty == .uvec4) break :blk .vec4;
+                            }
+                            break :blk result_ty;
+                        };
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .bitcast,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = bitcast_ty,
+                        });
+                        return .{ .ty = bitcast_ty, .id = result_id };
                     } else {
                         const glsl_id = self.glslExtInstruction(node.data.name) orelse 1;
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
