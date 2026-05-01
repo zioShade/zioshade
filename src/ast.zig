@@ -420,6 +420,11 @@ pub const Layout = struct {
     local_size_z: ?u32 = null,
     input_attachment_index: ?u32 = null,
     constant_id: ?u32 = null,
+    origin_upper_left: bool = false,
+    early_fragment_tests: bool = false,
+    depth_greater: bool = false,
+    depth_less: bool = false,
+    depth_unchanged: bool = false,
 };
 
 pub const StructMember = struct {

@@ -366,6 +366,16 @@ const Parser = struct {
                     layout.row_major = true;
                 } else if (std.mem.eql(u8, ident_text, "column_major")) {
                     layout.col_major = true;
+                } else if (std.mem.eql(u8, ident_text, "origin_upper_left")) {
+                    layout.origin_upper_left = true;
+                } else if (std.mem.eql(u8, ident_text, "early_fragment_tests")) {
+                    layout.early_fragment_tests = true;
+                } else if (std.mem.eql(u8, ident_text, "depth_greater")) {
+                    layout.depth_greater = true;
+                } else if (std.mem.eql(u8, ident_text, "depth_less")) {
+                    layout.depth_less = true;
+                } else if (std.mem.eql(u8, ident_text, "depth_unchanged")) {
+                    layout.depth_unchanged = true;
                 } else if (self.current().tag == .eq) {
                     _ = self.advance();
                     const val_text = self.text(self.current());
