@@ -22,6 +22,9 @@ pub const Module = struct {
     depth_unchanged: bool = false,
     early_fragment_tests: bool = false,
     origin_upper_left: bool = false,
+    uses_qcom_image_processing: bool = false,
+    qcom_block_match_textures: []const u32 = &.{},
+    qcom_weight_textures: []const u32 = &.{},
 
     pub fn deinit(self: *Module) void {
         for (self.functions) |func| {
@@ -163,6 +166,10 @@ pub const Instruction = struct {
         image_query_lod,
         image_read,
         image_write,
+        image_box_filter_qcom,
+        image_block_match_sad_qcom,
+        image_block_match_ssd_qcom,
+        image_sample_weighted_qcom,
         image_texel_pointer,
         atomic_iadd,
         atomic_isub,
