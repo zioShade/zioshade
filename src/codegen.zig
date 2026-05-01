@@ -328,10 +328,12 @@ const Codegen = struct {
         var has_int8 = false;
         var has_int16 = false;
         var has_float16 = false;
+        var has_float64 = false;
         for (self.module.globals) |global| {
             has_int8 = has_int8 or self.typeUsesInt8(global.ty);
             has_int16 = has_int16 or self.typeUsesInt16(global.ty);
             has_float16 = has_float16 or self.typeUsesFloat16(global.ty);
+            has_float64 = has_float64 or self.typeUsesFloat64(global.ty);
         }
         // Also check struct members for 8/16-bit types
         var type_iter = self.module.types.iterator();
@@ -340,6 +342,7 @@ const Codegen = struct {
                 has_int8 = has_int8 or self.typeUsesInt8(member.ty);
                 has_int16 = has_int16 or self.typeUsesInt16(member.ty);
                 has_float16 = has_float16 or self.typeUsesFloat16(member.ty);
+                has_float64 = has_float64 or self.typeUsesFloat64(member.ty);
             }
         }
         // Also check function IR instructions for 8/16-bit types
@@ -348,6 +351,7 @@ const Codegen = struct {
                 has_int8 = has_int8 or self.typeUsesInt8(inst.ty);
                 has_int16 = has_int16 or self.typeUsesInt16(inst.ty);
                 has_float16 = has_float16 or self.typeUsesFloat16(inst.ty);
+                has_float64 = has_float64 or self.typeUsesFloat64(inst.ty);
             }
         }
         if (has_int8) {
@@ -381,6 +385,10 @@ const Codegen = struct {
             try self.emitWord(@intFromEnum(spirv.Capability.storage_buffer16_bit));
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.storage_input_output16));
+        }
+        if (has_float64) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.float64));
         }
         // QCOM image processing capabilities
         if (self.module.uses_qcom_image_processing) {
@@ -446,6 +454,15 @@ const Codegen = struct {
         return switch (ty) {
             .float16, .f16vec2, .f16vec3, .f16vec4 => true,
             .array => |arr| self.typeUsesFloat16(arr.base.*),
+            .tensor_arm => |ta| self.typeUsesFloat16(ta.element.*),
+            else => false,
+        };
+    }
+    fn typeUsesFloat64(self: *Codegen, ty: ast.Type) bool {
+        return switch (ty) {
+            .double => true,
+            .array => |arr| self.typeUsesFloat64(arr.base.*),
+            .tensor_arm => |ta| self.typeUsesFloat64(ta.element.*),
             else => false,
         };
     }
@@ -472,6 +489,7 @@ const Codegen = struct {
         return switch (ty) {
             .int8, .i8vec2, .i8vec3, .i8vec4, .uint8, .u8vec2, .u8vec3, .u8vec4 => true,
             .array => |arr| self.typeUsesInt8(arr.base.*),
+            .tensor_arm => |ta| self.typeUsesInt8(ta.element.*),
             else => false,
         };
     }
@@ -479,6 +497,7 @@ const Codegen = struct {
         return switch (ty) {
             .int16, .i16vec2, .i16vec3, .i16vec4, .uint16, .u16vec2, .u16vec3, .u16vec4 => true,
             .array => |arr| self.typeUsesInt16(arr.base.*),
+            .tensor_arm => |ta| self.typeUsesInt16(ta.element.*),
             else => false,
         };
     }

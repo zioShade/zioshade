@@ -197,6 +197,7 @@ pub const Capability = enum(u32) {
     int16 = 22,
     int8 = 39,
     float16 = 9,
+    float64 = 10,
     storage_buffer16_bit = 4433,
     storage_uniform16 = 4434,
     storage_push_constant16 = 4435,
