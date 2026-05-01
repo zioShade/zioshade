@@ -3001,8 +3001,8 @@ const Analyzer = struct {
                         self.uses_qcom_image_processing = true;
                         return .{ .ty = .vec4, .id = result_id };
                     }
-                    if (std.mem.eql(u8, node.data.name, "textureWeightedSampleQCOM")) {
-                        // textureWeightedSampleQCOM(sampler, coords, weights) → OpImageSampleWeightedQCOM
+                    if (std.mem.eql(u8, node.data.name, "textureWeightedQCOM")) {
+                        // textureWeightedQCOM(sampler, coords, weights) → OpImageSampleWeightedQCOM
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 3);
                         operands[0] = .{ .id = arg_tids.items[0].id };
                         operands[1] = .{ .id = arg_tids.items[1].id };
@@ -5305,7 +5305,7 @@ const Analyzer = struct {
             "allInvocations", "anyInvocation", "allInvocationsEqual",
             "subgroupBarrier", "subgroupElect", "subgroupAll", "subgroupAny", "subgroupAllEqual",
             // QCOM image processing builtins
-            "textureBoxFilterQCOM", "textureBlockMatchSADQCOM", "textureBlockMatchSSDQCOM", "textureWeightedSampleQCOM",
+            "textureBoxFilterQCOM", "textureBlockMatchSADQCOM", "textureBlockMatchSSDQCOM", "textureWeightedQCOM",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
