@@ -90,6 +90,9 @@ pub const Op = enum(u16) {
     RayQueryGetIntersectionTriangleVertexPositionsKHR = 5340,
     TypeAccelerationStructureKHR = 5341,
     TypeRayQueryKHR = 4472,
+    TypeTensorARM = 4163,
+    TensorReadARM = 4164,
+    TensorQuerySizeARM = 4166,
     Transpose = 84,
     ConvertFToS = 110,
     ConvertSToF = 111,
@@ -211,6 +214,7 @@ pub const Capability = enum(u32) {
     texture_block_match_qcom = 4486,
     ray_query_khr = 4472,
     ray_query_position_fetch_khr = 5391,
+    tensors_arm = 4174,
     _,
 };
 

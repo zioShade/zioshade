@@ -96,6 +96,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .uses_qcom_image_processing = analyzer.uses_qcom_image_processing,
         .uses_ray_query = analyzer.uses_ray_query,
         .uses_ray_query_position_fetch = analyzer.uses_ray_query_position_fetch,
+        .uses_arm_tensors = analyzer.uses_arm_tensors,
     };
     // Dead function elimination: only keep functions reachable from main()
     mod = eliminateDeadFunctions(alloc, mod);
@@ -276,6 +277,7 @@ const Analyzer = struct {
     uses_qcom_image_processing: bool = false,
     uses_ray_query: bool = false,
     uses_ray_query_position_fetch: bool = false,
+    uses_arm_tensors: bool = false,
 
     fn deinit(self: *Analyzer) void {
         // Free heap-allocated AST types (if not transferred to Module)
@@ -3119,7 +3121,58 @@ const Analyzer = struct {
                         self.uses_ray_query_position_fetch = true;
                         return .{ .ty = ret_ty, .id = result_id };
                     }
-                    // === Buffer/SSBO atomics (atomicAdd/Or/Xor/And/Min/Max/Exchange/CompSwap) ===
+                    // === ARM tensor builtins ===
+                    if (std.mem.eql(u8, node.data.name, "tensorSizeARM")) {
+                        const tensor_id = arg_tids.items[0].id;
+                        const dim_id = arg_tids.items[1].id;
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        operands[0] = .{ .id = tensor_id };
+                        operands[1] = .{ .id = dim_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .tensor_query_size_arm,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .uint,
+                        });
+                        self.uses_arm_tensors = true;
+                        return .{ .ty = .uint, .id = result_id };
+                    }
+                    if (std.mem.eql(u8, node.data.name, "tensorReadARM")) {
+                        // tensorReadARM(tensor, coords, out [, operands...])
+                        // This is a void function - writes result to out parameter
+                        const tensor_id = arg_tids.items[0].id;
+                        const coords_id = arg_tids.items[1].id;
+                        // Get pointer to output variable (not loaded value)
+                        const out_ptr = if (node.data.children.len > 2) self.analyzeLValue(node.data.children[2]) catch arg_tids.items[2] else arg_tids.items[2];
+                        const out_id = out_ptr.id;
+                        const out_ty = arg_tids.items[2].ty;
+                        // Emit as a read that returns to out_id via store
+                        const read_result_id = self.allocId();
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        operands[0] = .{ .id = tensor_id };
+                        operands[1] = .{ .id = coords_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .tensor_read_arm,
+                            .result_type = null,
+                            .result_id = read_result_id,
+                            .operands = operands,
+                            .ty = out_ty,
+                        });
+                        self.uses_arm_tensors = true;
+                        // Store result to out parameter
+                        const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        store_ops[0] = .{ .id = out_id };
+                        store_ops[1] = .{ .id = read_result_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .store,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = store_ops,
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = out_id };
+                    }
                     const is_buffer_atomic = std.mem.eql(u8, node.data.name, "atomicAdd") or
                         std.mem.eql(u8, node.data.name, "atomicAnd") or
                         std.mem.eql(u8, node.data.name, "atomicOr") or
@@ -4091,7 +4144,32 @@ const Analyzer = struct {
                             }
                         }
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        // For array constructors, coerce each element to the array base type
+                        const arr_base_ty = if (result_ty == .array) result_ty.array.base.* else result_ty;
                         for (arg_tids.items, 0..) |tid, i| {
+                            if (result_ty == .array and !std.meta.eql(tid.ty, arr_base_ty)) {
+                                const conv_tag: ?ir.Instruction.Tag = blk: {
+                                    if (arr_base_ty == .uint and tid.ty == .int) break :blk .bitcast;
+                                    if (arr_base_ty == .int and tid.ty == .uint) break :blk .bitcast;
+                                    if (arr_base_ty == .float and tid.ty == .int) break :blk .convert_itof;
+                                    if (arr_base_ty == .float and tid.ty == .uint) break :blk .convert_utof;
+                                    break :blk null;
+                                };
+                                if (conv_tag) |tag| {
+                                    const conv_id = self.allocId();
+                                    const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                    conv_ops[0] = .{ .id = tid.id };
+                                    try self.instructions.append(self.alloc, .{
+                                        .tag = tag,
+                                        .result_type = null,
+                                        .result_id = conv_id,
+                                        .operands = conv_ops,
+                                        .ty = arr_base_ty,
+                                    });
+                                    operands[i] = .{ .id = conv_id };
+                                    continue;
+                                }
+                            }
                             operands[i] = .{ .id = tid.id };
                         }
                         try self.instructions.append(self.alloc, .{
@@ -4648,7 +4726,7 @@ const Analyzer = struct {
                     .i16vec2, .i16vec3, .i16vec4 => .int16,
                     .u16vec2, .u16vec3, .u16vec4 => .uint16,
                     .f16vec2, .f16vec3, .f16vec4 => .float16,
-                    else => result_ty, // mat types etc
+                    else => if (result_ty == .array) result_ty.array.base.* else result_ty, // mat types, arrays etc
                 };
                 const converted_ids = try self.alloc.alloc(u32, arg_tids.items.len);
                 for (arg_tids.items, 0..) |tid, i| {
@@ -4774,6 +4852,34 @@ const Analyzer = struct {
                         .ty = result_ty,
                     });
                     return .{ .ty = result_ty, .id = result_id };
+                }
+                // Array constructors with all-constant int args: emit as constant_composite
+                // with proper element type (e.g., uint[](1,2,3) → OpConstantComposite %arr_uint_3)
+                if (all_const_ints and result_ty == .array) {
+                    const base_ty = result_ty.array.base.*;
+                    if (base_ty == .uint or base_ty == .int or base_ty == .float) {
+                        const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, node.data.children.len);
+                        for (node.data.children, 0..) |arg, i| {
+                            const val: u32 = blk: {
+                                if (arg.tag == .int_literal) break :blk @bitCast(@as(i32, @intCast(arg.data.int_val)));
+                                if (arg.tag == .uint_literal) break :blk @intCast(@as(u64, @bitCast(arg.data.int_val)));
+                                break :blk 0;
+                            };
+                            const comp_id = self.allocId();
+                            const ci_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            ci_ops[0] = .{ .literal_int = val };
+                            try self.instructions.append(self.alloc, .{ .tag = .constant_int, .result_type = null, .result_id = comp_id, .operands = ci_ops, .ty = base_ty });
+                            cc_ops[i] = .{ .id = comp_id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .constant_composite,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = cc_ops,
+                            .ty = result_ty,
+                        });
+                        return .{ .ty = result_ty, .id = result_id };
+                    }
                 }
 
                 // Check if all args are float literals and result is a float vector → constant_composite
@@ -5224,6 +5330,8 @@ const Analyzer = struct {
         if (to == .float or to == .float16) {
             if (from == .int) return .convert_itof;
             if (from == .uint) return .convert_utof;
+            if (from == .int8 or from == .int16) return .convert_itof;
+            if (from == .uint8 or from == .uint16) return .convert_utof;
             if (from == .bool) return .bool_to_float;
         }
         if (to == .int) {
@@ -5411,6 +5519,7 @@ const Analyzer = struct {
             // Ray query builtins
             "rayQueryInitializeEXT", "rayQueryProceedEXT", "rayQueryGetIntersectionTypeEXT",
             "rayQueryGetIntersectionTriangleVertexPositionsEXT",
+            "tensorSizeARM", "tensorReadARM",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;

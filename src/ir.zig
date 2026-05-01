@@ -25,6 +25,7 @@ pub const Module = struct {
     uses_qcom_image_processing: bool = false,
     uses_ray_query: bool = false,
     uses_ray_query_position_fetch: bool = false,
+    uses_arm_tensors: bool = false,
     qcom_block_match_textures: []const u32 = &.{},
     qcom_weight_textures: []const u32 = &.{},
 
@@ -176,6 +177,8 @@ pub const Instruction = struct {
         ray_query_proceed,
         ray_query_get_intersection_type,
         ray_query_get_triangle_vertex_positions,
+        tensor_query_size_arm,
+        tensor_read_arm,
         image_texel_pointer,
         atomic_iadd,
         atomic_isub,
