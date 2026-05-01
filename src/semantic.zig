@@ -222,9 +222,13 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) ir.Module {
             func_copy.body = body_to_keep;
             kept.appendAssumeCapacity(func_copy);
         } else {
-            // Free unreachable function's body/params
-            alloc.free(func.body);
-            alloc.free(func.param_ids);
+            // Do NOT free unreachable function's body/params here.
+            // The body may contain constants referenced by surviving functions.
+            // The rescued_constants list copies instruction structs but NOT their
+            // operand slices, which still point into these bodies.
+            // These bodies will be cleaned up when the module is deinitialized.
+            // alloc.free(func.body);
+            // alloc.free(func.param_ids);
         }
     }
 
