@@ -80,6 +80,10 @@ pub const Op = enum(u16) {
     AtomicExchange = 229,
     AtomicCompareExchange = 230,
     AtomicFAddEXT = 6035,
+    ImageSampleWeightedQCOM = 4480,
+    ImageBoxFilterQCOM = 4481,
+    ImageBlockMatchSSDQCOM = 4482,
+    ImageBlockMatchSADQCOM = 4483,
     Transpose = 84,
     ConvertFToS = 110,
     ConvertSToF = 111,
@@ -196,6 +200,9 @@ pub const Capability = enum(u32) {
     derivative_control = 51,
     input_attachment = 40,
     atomic_float32_add_ext = 6033,
+    texture_sample_weighted_qcom = 4484,
+    texture_box_filter_qcom = 4485,
+    texture_block_match_qcom = 4486,
     _,
 };
 

@@ -93,6 +93,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .depth_unchanged = analyzer.has_depth_unchanged,
         .early_fragment_tests = analyzer.has_early_fragment_tests,
         .origin_upper_left = analyzer.has_origin_upper_left,
+        .uses_qcom_image_processing = analyzer.uses_qcom_image_processing,
     };
     // Dead function elimination: only keep functions reachable from main()
     mod = eliminateDeadFunctions(alloc, mod);
@@ -270,6 +271,7 @@ const Analyzer = struct {
     has_depth_greater: bool = false,
     has_depth_less: bool = false,
     has_depth_unchanged: bool = false,
+    uses_qcom_image_processing: bool = false,
 
     fn deinit(self: *Analyzer) void {
         // Free heap-allocated AST types (if not transferred to Module)
@@ -2777,6 +2779,13 @@ const Analyzer = struct {
                     }
                     try arg_tids.append(self.alloc, tid);
                 }
+                // nonuniformEXT(expr) → passthrough (just returns the expression value)
+                // TODO: emit NonUniform decoration on the result for full compliance
+                if (std.mem.eql(u8, node.data.name, "nonuniformEXT")) {
+                    if (arg_tids.items.len == 1) {
+                        return arg_tids.items[0];
+                    }
+                }
                 const sym_raw = self.lookup(node.data.name);
                 // Resolve function overloads
                 var resolved_sym = sym_raw;
@@ -2942,6 +2951,71 @@ const Analyzer = struct {
                             .ty = .bool,
                         });
                         return .{ .ty = .bool, .id = bool_val };
+                    }
+                    // === QCOM image processing builtins ===
+                    if (std.mem.eql(u8, node.data.name, "textureBoxFilterQCOM")) {
+                        // textureBoxFilterQCOM(sampler, coords, boxSize) → OpImageBoxFilterQCOM
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        operands[1] = .{ .id = arg_tids.items[1].id };
+                        operands[2] = .{ .id = arg_tids.items[2].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_box_filter_qcom,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .vec4,
+                        });
+                        self.uses_qcom_image_processing = true;
+                        return .{ .ty = .vec4, .id = result_id };
+                    }
+                    if (std.mem.eql(u8, node.data.name, "textureBlockMatchSADQCOM")) {
+                        // textureBlockMatchSADQCOM(target_samp, target_coords, ref_samp, ref_coords, blockSize) → OpImageBlockMatchSADQCOM
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 5);
+                        for (arg_tids.items, 0..) |tid, idx| {
+                            operands[idx] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_block_match_sad_qcom,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .vec4,
+                        });
+                        self.uses_qcom_image_processing = true;
+                        return .{ .ty = .vec4, .id = result_id };
+                    }
+                    if (std.mem.eql(u8, node.data.name, "textureBlockMatchSSDQCOM")) {
+                        // Same as SAD but uses SSD opcode
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 5);
+                        for (arg_tids.items, 0..) |tid, idx| {
+                            operands[idx] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_block_match_ssd_qcom,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .vec4,
+                        });
+                        self.uses_qcom_image_processing = true;
+                        return .{ .ty = .vec4, .id = result_id };
+                    }
+                    if (std.mem.eql(u8, node.data.name, "textureWeightedSampleQCOM")) {
+                        // textureWeightedSampleQCOM(sampler, coords, weights) → OpImageSampleWeightedQCOM
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        operands[1] = .{ .id = arg_tids.items[1].id };
+                        operands[2] = .{ .id = arg_tids.items[2].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .image_sample_weighted_qcom,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .vec4,
+                        });
+                        self.uses_qcom_image_processing = true;
+                        return .{ .ty = .vec4, .id = result_id };
                     }
                     // === Buffer/SSBO atomics (atomicAdd/Or/Xor/And/Min/Max/Exchange/CompSwap) ===
                     const is_buffer_atomic = std.mem.eql(u8, node.data.name, "atomicAdd") or
@@ -5230,6 +5304,8 @@ const Analyzer = struct {
             "allInvocationsARB", "anyInvocationARB", "allInvocationsEqualARB",
             "allInvocations", "anyInvocation", "allInvocationsEqual",
             "subgroupBarrier", "subgroupElect", "subgroupAll", "subgroupAny", "subgroupAllEqual",
+            // QCOM image processing builtins
+            "textureBoxFilterQCOM", "textureBlockMatchSADQCOM", "textureBlockMatchSSDQCOM", "textureWeightedSampleQCOM",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
