@@ -2046,6 +2046,11 @@ const Analyzer = struct {
                     const cid = try self.getConstInt(1, .uint);
                     return .{ .ty = .uint, .id = cid };
                 }
+                // ARM tensor operand constants
+                if (std.mem.eql(u8, node.data.name, "gl_TensorOperandsOutOfBoundsValueARM")) {
+                    const cid = try self.getConstInt(1, .uint); // OutOfBoundsValueARM flag
+                    return .{ .ty = .uint, .id = cid };
+                }
                 // Handle barrier builtins used as expressions (void)
                 if (self.isBarrierBuiltin(node.data.name)) {
                     return .{ .ty = .void, .id = 0 };
