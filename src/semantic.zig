@@ -266,6 +266,7 @@ const Analyzer = struct {
     const_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     const_composite_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
+    load_cache: std.AutoHashMapUnmanaged(u32, u32) = .{}, // ptr_id -> loaded_value_id
     local_size: ?ir.LocalSize = null,
     // Heap-allocated AST types that transfer to Module for cleanup
     heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
@@ -306,6 +307,7 @@ const Analyzer = struct {
         self.const_cache.deinit(self.alloc);
         self.const_composite_cache.deinit(self.alloc);
         self.access_chain_cache.deinit(self.alloc);
+        self.load_cache.deinit(self.alloc);
         {
             var it = self.overloads.iterator();
             while (it.next()) |entry| {
@@ -445,6 +447,43 @@ const Analyzer = struct {
         return ptr_id;
     }
 
+    /// Emit a load instruction with caching within the current basic block.
+    /// Caches are invalidated on stores and at block boundaries.
+    /// Returns the loaded value's result_id.
+    fn emitLoadCached(self: *Analyzer, ptr_id: u32, ty: ast.Type) !u32 {
+        if (self.load_cache.get(ptr_id)) |existing_id| {
+            return existing_id;
+        }
+        const ld = self.allocId();
+        const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+        ops[0] = .{ .id = ptr_id };
+        try self.instructions.append(self.alloc, .{
+            .tag = .load,
+            .result_type = null,
+            .result_id = ld,
+            .operands = ops,
+            .ty = ty,
+        });
+        self.load_cache.put(self.alloc, ptr_id, ld) catch {};
+        return ld;
+    }
+
+    /// Emit a store instruction, invalidating the load cache.
+    fn emitStore(self: *Analyzer, ptr_id: u32, val_id: u32) !void {
+        self.load_cache.clearRetainingCapacity();
+        const ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+        ops[0] = .{ .id = ptr_id };
+        ops[1] = .{ .id = val_id };
+        self.load_cache.clearRetainingCapacity();
+        try self.instructions.append(self.alloc, .{
+            .tag = .store,
+            .result_type = null,
+            .result_id = null,
+            .operands = ops,
+            .ty = .void,
+        });
+    }
+
     fn tryUpgradeToConstantComposite(self: *Analyzer) bool {
         if (self.instructions.items.len == 0) return false;
         const last = &self.instructions.items[self.instructions.items.len - 1];
@@ -520,7 +559,8 @@ const Analyzer = struct {
                     const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                     store_ops[0] = .{ .id = var_id };
                     store_ops[1] = .{ .id = init_val };
-                    try self.instructions.append(self.alloc, .{
+                    self.load_cache.clearRetainingCapacity();
+        try self.instructions.append(self.alloc, .{
                         .tag = .store,
                         .result_type = null,
                         .result_id = null,
@@ -537,6 +577,7 @@ const Analyzer = struct {
 
     fn emitLabel(self: *Analyzer, label_id: u32) !void {
         self.access_chain_cache.clearRetainingCapacity();
+        self.load_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
             .tag = .label,
             .result_id = label_id,
@@ -1046,6 +1087,7 @@ const Analyzer = struct {
     fn analyzeFunction(self: *Analyzer, node: ast.Node) !void {
         self.has_returned = false;
         self.access_chain_cache.clearRetainingCapacity();
+        self.load_cache.clearRetainingCapacity();
         try self.pushScope();
 
         // For overloaded functions, resolve the correct ir_id based on param types
@@ -1107,7 +1149,8 @@ const Analyzer = struct {
                 const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 store_ops[0] = .{ .id = var_id };
                 store_ops[1] = .{ .id = pid };
-                try self.instructions.append(self.alloc, .{
+                self.load_cache.clearRetainingCapacity();
+        try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
                     .result_id = null,
@@ -1209,16 +1252,7 @@ const Analyzer = struct {
                     var init = try self.analyzeExpression(node.data.children[0]);
                     // If the initializer is a pointer (from access chain), load it first
                     if (init.is_ptr) {
-                        const loaded_id = self.allocId();
-                        const load_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                        load_ops[0] = .{ .id = init.id };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .load,
-                            .result_type = null,
-                            .result_id = loaded_id,
-                            .operands = load_ops,
-                            .ty = init.ty,
-                        });
+                        const loaded_id = try self.emitLoadCached(init.id, init.ty);
                         init = .{ .ty = init.ty, .id = loaded_id };
                     }
                     if (!self.typesCompatible(ty, init.ty)) {
@@ -1274,7 +1308,8 @@ const Analyzer = struct {
                         const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                         store_operands[0] = .{ .id = id };
                         store_operands[1] = .{ .id = init_id };
-                        try self.instructions.append(self.alloc, .{
+                        self.load_cache.clearRetainingCapacity();
+        try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
                             .result_id = null,
@@ -1395,10 +1430,7 @@ const Analyzer = struct {
                 const selector = try self.analyzeExpression(node.data.children[0]);
                 var selector_id = selector.id;
                 if (selector.is_ptr) {
-                    const ld = self.allocId();
-                    const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                    ops[0] = .{ .id = selector.id };
-                    try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = selector.ty });
+                    const ld = try self.emitLoadCached(selector.id, selector.ty);
                     selector_id = ld;
                 }
 
@@ -1642,10 +1674,7 @@ const Analyzer = struct {
                 if (node.data.children.len > 0) {
                     var val = try self.analyzeExpression(node.data.children[0]);
                     if (val.is_ptr) {
-                        const ld = self.allocId();
-                        const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                        ops[0] = .{ .id = val.id };
-                        try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = val.ty });
+                        const ld = try self.emitLoadCached(val.id, val.ty);
                         val = .{ .ty = val.ty, .id = ld };
                     }
                     const ret_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
@@ -1782,7 +1811,8 @@ const Analyzer = struct {
                         const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                         store_ops[0] = .{ .id = var_id };
                         store_ops[1] = .{ .id = sym.ir_id };
-                        try self.instructions.append(self.alloc, .{
+                        self.load_cache.clearRetainingCapacity();
+        try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
                             .result_id = null,
@@ -1813,7 +1843,8 @@ const Analyzer = struct {
                             const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                             store_ops[0] = .{ .id = var_id };
                             store_ops[1] = .{ .id = init_val };
-                            try self.instructions.append(self.alloc, .{
+                            self.load_cache.clearRetainingCapacity();
+        try self.instructions.append(self.alloc, .{
                                 .tag = .store,
                                 .result_type = null,
                                 .result_id = null,
@@ -2003,16 +2034,7 @@ const Analyzer = struct {
                             return .{ .ty = sym.ty, .id = ptr_id, .is_ptr = true };
                         }
                         // Then load from that pointer
-                        const id = self.allocId();
-                        const load_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                        load_operands[0] = .{ .id = ptr_id };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .load,
-                            .result_type = null,
-                            .result_id = id,
-                            .operands = load_operands,
-                            .ty = sym.ty,
-                        });
+                        const id = try self.emitLoadCached(ptr_id, sym.ty);
                         return .{ .ty = sym.ty, .id = id };
                     }
                     if (sym.kind == .var_sym) {
@@ -2025,16 +2047,7 @@ const Analyzer = struct {
                         if (sym.ty == .array) {
                             return .{ .ty = sym.ty, .id = sym.ir_id, .is_ptr = true };
                         }
-                        const id = self.allocId();
-                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                        operands[0] = .{ .id = sym.ir_id };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .load,
-                            .result_type = null,
-                            .result_id = id,
-                            .operands = operands,
-                            .ty = sym.ty,
-                        });
+                        const id = try self.emitLoadCached(sym.ir_id, sym.ty);
                         return .{ .ty = sym.ty, .id = id };
                     }
                     return .{ .ty = sym.ty, .id = sym.ir_id };
@@ -2077,17 +2090,11 @@ const Analyzer = struct {
                 var right = try self.analyzeExpression(node.data.children[1]);
                 // Auto-load pointers
                 if (left.is_ptr) {
-                    const ld = self.allocId();
-                    const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                    ops[0] = .{ .id = left.id };
-                    try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = left.ty });
+                    const ld = try self.emitLoadCached(left.id, left.ty);
                     left = .{ .ty = left.ty, .id = ld };
                 }
                 if (right.is_ptr) {
-                    const ld = self.allocId();
-                    const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                    ops[0] = .{ .id = right.id };
-                    try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = right.ty });
+                    const ld = try self.emitLoadCached(right.id, right.ty);
                     right = .{ .ty = right.ty, .id = ld };
                 }
                 const result_ty = self.promoteTypes(left.ty, right.ty) orelse return error.TypeMismatch;
@@ -2322,10 +2329,7 @@ const Analyzer = struct {
                                     // Evaluate the RHS value
                                     var value = try self.analyzeExpression(node.data.children[1]);
                                     if (value.is_ptr) {
-                                        const loaded_id = self.allocId();
-                                        const load_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                                        load_ops[0] = .{ .id = value.id };
-                                        try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = loaded_id, .operands = load_ops, .ty = value.ty });
+                                        const loaded_id = try self.emitLoadCached(value.id, value.ty);
                                         value = .{ .ty = value.ty, .id = loaded_id };
                                     }
 
@@ -2336,10 +2340,7 @@ const Analyzer = struct {
                                     const var_ptr_id = if (mat_sym) |ms| ms.ir_id else sym.ir_id;
 
                                     // Load current vector value directly from the variable
-                                    const load_id = self.allocId();
-                                    const ld_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                                    ld_ops[0] = .{ .id = var_ptr_id };
-                                    try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = load_id, .operands = ld_ops, .ty = base_ty });
+                                    const load_id = try self.emitLoadCached(var_ptr_id, base_ty);
 
                                     // Build VectorShuffle: combine current vector with new values
                                     const n = base_ty.numComponents();
@@ -2380,7 +2381,8 @@ const Analyzer = struct {
                                     const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                                     store_ops[0] = .{ .id = var_ptr_id };
                                     store_ops[1] = .{ .id = shuffle_id };
-                                    try self.instructions.append(self.alloc, .{
+                                    self.load_cache.clearRetainingCapacity();
+        try self.instructions.append(self.alloc, .{
                                         .tag = .store,
                                         .result_type = null,
                                         .result_id = null,
@@ -2398,16 +2400,7 @@ const Analyzer = struct {
                 var value = try self.analyzeExpression(node.data.children[1]);
                 // If value is a pointer, load it
                 if (value.is_ptr) {
-                    const loaded_id = self.allocId();
-                    const load_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                    load_ops[0] = .{ .id = value.id };
-                    try self.instructions.append(self.alloc, .{
-                        .tag = .load,
-                        .result_type = null,
-                        .result_id = loaded_id,
-                        .operands = load_ops,
-                        .ty = value.ty,
-                    });
+                    const loaded_id = try self.emitLoadCached(value.id, value.ty);
                     value = .{ .ty = value.ty, .id = loaded_id };
                 }
                 // Convert value type to match target type if compatible but different
@@ -2440,7 +2433,8 @@ const Analyzer = struct {
                 const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 store_operands[0] = .{ .id = target.id };
                 store_operands[1] = .{ .id = value_id };
-                try self.instructions.append(self.alloc, .{
+                self.load_cache.clearRetainingCapacity();
+        try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
                     .result_id = null,
@@ -2469,10 +2463,7 @@ const Analyzer = struct {
                                     const var_ptr_id2 = if (mat_sym2) |ms| ms.ir_id else sym.ir_id;
 
                                     // 1. Load current vector
-                                    const vec_load_id = self.allocId();
-                                    const vec_ld_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                                    vec_ld_ops[0] = .{ .id = var_ptr_id2 };
-                                    try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = vec_load_id, .operands = vec_ld_ops, .ty = base_ty });
+                                    const vec_load_id = try self.emitLoadCached(var_ptr_id2, base_ty);
 
                                     // 2. Extract swizzled components from the loaded vector
                                     const swizzle_len = swizzle_name.len;
@@ -2521,10 +2512,7 @@ const Analyzer = struct {
                                     // 3. Evaluate RHS
                                     var value = try self.analyzeExpression(node.data.children[1]);
                                     if (value.is_ptr) {
-                                        const loaded_id = self.allocId();
-                                        const ld_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                                        ld_ops[0] = .{ .id = value.id };
-                                        try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = loaded_id, .operands = ld_ops, .ty = value.ty });
+                                        const loaded_id = try self.emitLoadCached(value.id, value.ty);
                                         value = .{ .ty = value.ty, .id = loaded_id };
                                     }
 
@@ -2602,7 +2590,8 @@ const Analyzer = struct {
                                     const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                                     store_ops[0] = .{ .id = var_ptr_id2 };
                                     store_ops[1] = .{ .id = final_shuffle_id };
-                                    try self.instructions.append(self.alloc, .{
+                                    self.load_cache.clearRetainingCapacity();
+        try self.instructions.append(self.alloc, .{
                                         .tag = .store,
                                         .result_type = null,
                                         .result_id = null,
@@ -2621,29 +2610,11 @@ const Analyzer = struct {
                 var value = try self.analyzeExpression(node.data.children[1]);
                 // If value is a pointer, load it
                 if (value.is_ptr) {
-                    const ld_id = self.allocId();
-                    const ld_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                    ld_ops[0] = .{ .id = value.id };
-                    try self.instructions.append(self.alloc, .{
-                        .tag = .load,
-                        .result_type = null,
-                        .result_id = ld_id,
-                        .operands = ld_ops,
-                        .ty = value.ty,
-                    });
+                    const ld_id = try self.emitLoadCached(value.id, value.ty);
                     value = .{ .ty = value.ty, .id = ld_id };
                 }
                 // Load current value
-                const loaded_id = self.allocId();
-                const load_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                load_operands[0] = .{ .id = target.id };
-                try self.instructions.append(self.alloc, .{
-                    .tag = .load,
-                    .result_type = null,
-                    .result_id = loaded_id,
-                    .operands = load_operands,
-                    .ty = target.ty,
-                });
+                const loaded_id = try self.emitLoadCached(target.id, target.ty);
                 // Convert value type to match target if needed
                 var value_id = value.id;
                 var value_ty = value.ty;
@@ -2775,7 +2746,8 @@ const Analyzer = struct {
                 const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 store_operands[0] = .{ .id = target.id };
                 store_operands[1] = .{ .id = computed_id };
-                try self.instructions.append(self.alloc, .{
+                self.load_cache.clearRetainingCapacity();
+        try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
                     .result_id = null,
@@ -2809,10 +2781,7 @@ const Analyzer = struct {
                     // Image atomics also need the image pointer (not loaded value)
                     const skip_load = (is_atomic_fn and i == 0) or (is_image_atomic_fn and i == 0);
                     if (tid.is_ptr and !skip_load) {
-                        const ld = self.allocId();
-                        const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                        ops[0] = .{ .id = tid.id };
-                        try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = tid.ty });
+                        const ld = try self.emitLoadCached(tid.id, tid.ty);
                         tid = .{ .ty = tid.ty, .id = ld };
                     }
                     try arg_tids.append(self.alloc, tid);
@@ -3179,7 +3148,8 @@ const Analyzer = struct {
                         const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                         store_ops[0] = .{ .id = out_id };
                         store_ops[1] = .{ .id = read_result_id };
-                        try self.instructions.append(self.alloc, .{
+                        self.load_cache.clearRetainingCapacity();
+        try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
                             .result_id = null,
@@ -3491,16 +3461,7 @@ const Analyzer = struct {
                         // The argument is a subpassInput variable — load it to get the image
                         var img_id = arg_tids.items[0].id;
                         if (arg_tids.items[0].is_ptr) {
-                            const loaded = self.allocId();
-                            const ld_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                            ld_ops[0] = .{ .id = arg_tids.items[0].id };
-                            try self.instructions.append(self.alloc, .{
-                                .tag = .load,
-                                .result_type = null,
-                                .result_id = loaded,
-                                .operands = ld_ops,
-                                .ty = arg_tids.items[0].ty,
-                            });
+                            const loaded = try self.emitLoadCached(arg_tids.items[0].id, arg_tids.items[0].ty);
                             img_id = loaded;
                         }
                         // Create ivec2(0, 0) coordinate
@@ -4219,10 +4180,7 @@ const Analyzer = struct {
                 for (node.data.children) |arg| {
                     var tid = try self.analyzeExpression(arg);
                     if (tid.is_ptr) {
-                        const ld = self.allocId();
-                        const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                        ops[0] = .{ .id = tid.id };
-                        try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = tid.ty });
+                        const ld = try self.emitLoadCached(tid.id, tid.ty);
                         tid = .{ .ty = tid.ty, .id = ld };
                     }
                     try arg_tids.append(self.alloc, tid);
@@ -5030,10 +4988,7 @@ const Analyzer = struct {
                 if (base_tid.ty.isVector()) {
                     // If pointer to vector, load first
                     if (base_tid.is_ptr) {
-                        const ld = self.allocId();
-                        const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                        ops[0] = .{ .id = base_tid.id };
-                        try self.instructions.append(self.alloc, .{ .tag = .load, .result_type = null, .result_id = ld, .operands = ops, .ty = base_tid.ty });
+                        const ld = try self.emitLoadCached(base_tid.id, base_tid.ty);
                         base_tid = .{ .ty = base_tid.ty, .id = ld };
                     }
                     const member_name = node.data.name;
@@ -5254,16 +5209,7 @@ const Analyzer = struct {
                 // Get the lvalue (variable pointer)
                 const lval = try self.analyzeLValue(node.data.children[0]);
                 // Load current value
-                const loaded_id = self.allocId();
-                const load_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                load_ops[0] = .{ .id = lval.id };
-                try self.instructions.append(self.alloc, .{
-                    .tag = .load,
-                    .result_type = null,
-                    .result_id = loaded_id,
-                    .operands = load_ops,
-                    .ty = lval.ty,
-                });
+                const loaded_id = try self.emitLoadCached(lval.id, lval.ty);
                 // Create constant 1
                 const one_id: u32 = if (lval.ty == .int or lval.ty == .uint or lval.ty.isVector()) try self.getConstInt(1, if (lval.ty == .uint) .uint else .int) else try self.getConstFloat(1.0);
                 // Compute new value
@@ -5284,7 +5230,8 @@ const Analyzer = struct {
                 const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 store_ops[0] = .{ .id = lval.id };
                 store_ops[1] = .{ .id = new_val_id };
-                try self.instructions.append(self.alloc, .{
+                self.load_cache.clearRetainingCapacity();
+        try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
                     .result_id = null,
