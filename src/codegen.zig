@@ -380,12 +380,60 @@ const Codegen = struct {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.storage_input_output16));
         }
+        // QCOM image processing capabilities
+        if (self.module.uses_qcom_image_processing) {
+            // Check which specific QCOM opcodes are used
+            var has_box_filter = false;
+            var has_block_match = false;
+            var has_sample_weighted = false;
+            for (self.module.functions) |func| {
+                for (func.body) |inst| {
+                    switch (inst.tag) {
+                        .image_box_filter_qcom => has_box_filter = true,
+                        .image_block_match_sad_qcom, .image_block_match_ssd_qcom => has_block_match = true,
+                        .image_sample_weighted_qcom => has_sample_weighted = true,
+                        else => {},
+                    }
+                }
+            }
+            if (has_sample_weighted) {
+                try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+                try self.emitWord(@intFromEnum(spirv.Capability.texture_sample_weighted_qcom));
+            }
+            if (has_box_filter) {
+                try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+                try self.emitWord(@intFromEnum(spirv.Capability.texture_box_filter_qcom));
+            }
+            if (has_block_match) {
+                try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+                try self.emitWord(@intFromEnum(spirv.Capability.texture_block_match_qcom));
+            }
+        }
     }
 
     fn typeUsesFloat16(self: *Codegen, ty: ast.Type) bool {
         return switch (ty) {
             .float16, .f16vec2, .f16vec3, .f16vec4 => true,
             .array => |arr| self.typeUsesFloat16(arr.base.*),
+            else => false,
+        };
+    }
+    fn isTextureType(self: *Codegen, ty: ast.Type) bool {
+        return switch (ty) {
+            .texture2d_plain, .texture3d_plain, .texture_cube_plain,
+            .texture2d_array_plain, .texture2d_ms_plain,
+            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d,
+            .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer,
+            .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow,
+            .sampler2d_array_shadow, .sampler_cube_array_shadow,
+            .sampler_cube, .sampler_plain,
+            .image2d, .iimage2d, .uimage2d, .image1d, .iimage1d, .uimage1d,
+            .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube,
+            .image2d_array, .iimage2d_array, .uimage2d_array,
+            .image_cube_array, .iimage_cube_array, .uimage_cube_array,
+            .image_buffer, .image2d_ms, .image2d_ms_array => true,
+            .named => false, // struct types are not textures
+            .array => |arr| self.isTextureType(arr.base.*),
             else => false,
         };
     }
@@ -473,6 +521,22 @@ const Codegen = struct {
             }
             for (ext_words2) |w| try self.emitWord(w);
             self.alloc.free(ext_words2);
+        }
+        // QCOM image processing extension
+        if (self.module.uses_qcom_image_processing) {
+            const qcom_ext = "SPV_QCOM_image_processing";
+            const qcom_wc: u16 = 1 + @as(u16, @intCast(std.math.divCeil(usize, qcom_ext.len + 1, 4) catch unreachable));
+            try self.emitWord(spirv.encodeInstructionHeader(qcom_wc, @intFromEnum(spirv.Op.Extension)));
+            const qcom_nw = std.math.divCeil(usize, qcom_ext.len + 1, 4) catch unreachable;
+            const qcom_ew = try self.alloc.alloc(u32, qcom_nw);
+            @memset(qcom_ew, 0);
+            for (qcom_ext, 0..) |byte, idx| {
+                const word_idx = idx / 4;
+                const byte_idx = idx % 4;
+                qcom_ew[word_idx] |= @as(u32, byte) << @intCast(byte_idx * 8);
+            }
+            for (qcom_ew) |w| try self.emitWord(w);
+            self.alloc.free(qcom_ew);
         }
     }
 
@@ -1947,6 +2011,34 @@ const Codegen = struct {
         while (spec_iter.next()) |entry| {
             const sc = entry.value_ptr.*;
             try self.emitDecorate(sc.result_id, @intFromEnum(spirv.Decoration.spec_id), sc.spec_id);
+        }
+        // QCOM image processing decorations
+        if (self.module.uses_qcom_image_processing) {
+            // Determine which QCOM decoration to apply based on operations used
+            var has_block_match = false;
+            var has_weighted = false;
+            for (self.module.functions) |func| {
+                for (func.body) |inst| {
+                    switch (inst.tag) {
+                        .image_block_match_sad_qcom, .image_block_match_ssd_qcom => has_block_match = true,
+                        .image_sample_weighted_qcom => has_weighted = true,
+                        else => {},
+                    }
+                }
+            }
+            // Apply QCOM decorations to all texture/sampler globals in UniformConstant
+            for (self.module.globals) |global| {
+                if (global.storage_class != .uniform_constant) continue;
+                const is_texture = self.isTextureType(global.ty);
+                if (!is_texture) continue;
+                if (has_block_match) {
+                    try self.emitDecorateNoExtra(global.result_id, 4488); // BlockMatchTextureQCOM
+                }
+                if (has_weighted) {
+                    // WeightTextureQCOM only for the weight texture (last texture arg)
+                    try self.emitDecorateNoExtra(global.result_id, 4487); // WeightTextureQCOM
+                }
+            }
         }
     }
 
@@ -3494,6 +3586,57 @@ const Codegen = struct {
                 try self.emitWord(sample_id);
                 // Register as pointer in UniformConstant storage class
                 try self.ptr_storage_class.put(self.alloc, result_id, .image);
+            },
+            .image_box_filter_qcom => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const box_size_id = self.operandId(resolved, 2);
+                // OpImageBoxFilterQCOM: result_type result sampled_image coords box_size (wc=6)
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageBoxFilterQCOM)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(box_size_id);
+            },
+            .image_block_match_sad_qcom => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                // 5 operands: target, target_coords, ref, ref_coords, block_size
+                const op_count: u16 = @intCast(3 + resolved.operands.len);
+                try self.emitWord(spirv.encodeInstructionHeader(op_count, @intFromEnum(spirv.Op.ImageBlockMatchSADQCOM)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                for (resolved.operands) |op| {
+                    try self.emitWord(self.operandValue(op));
+                }
+            },
+            .image_block_match_ssd_qcom => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const op_count: u16 = @intCast(3 + resolved.operands.len);
+                try self.emitWord(spirv.encodeInstructionHeader(op_count, @intFromEnum(spirv.Op.ImageBlockMatchSSDQCOM)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                for (resolved.operands) |op| {
+                    try self.emitWord(self.operandValue(op));
+                }
+            },
+            .image_sample_weighted_qcom => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const weights_id = self.operandId(resolved, 2);
+                // OpImageSampleWeightedQCOM: result_type result sampled_image coords weights (wc=6)
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageSampleWeightedQCOM)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(weights_id);
             },
             .atomic_iadd => {
                 try self.emitAtomicOp(resolved, spirv.Op.AtomicIAdd);
