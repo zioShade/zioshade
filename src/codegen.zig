@@ -2300,6 +2300,77 @@ const Codegen = struct {
             const cache_key = (@as(u64, result_type_id) << 32) | @as(u64, sc.default_literal);
             try self.emitted_constants.put(self.alloc, cache_key, sc.result_id);
         }
+        // Pre-scan ALL function bodies for constants and emit them.
+        // This ensures constants defined in one function are available when
+        // referenced by another function (cross-function const_cache reuse).
+        for (self.module.functions) |func| {
+            for (func.body) |inst| {
+                switch (inst.tag) {
+                    .constant_float => {
+                        const val: f32 = switch (inst.operands[0]) {
+                            .literal_float => |v| v,
+                            .literal_int => |v| @floatFromInt(v),
+                            else => continue,
+                        };
+                        const float_type_id = try self.ensureType(.float);
+                        const cache_key = (@as(u64, float_type_id) << 32) | @as(u64, @as(u32, @bitCast(val)));
+                        const ir_id = inst.result_id orelse continue;
+                        if (self.emitted_constants.get(cache_key)) |existing_id| {
+                            if (ir_id != existing_id) {
+                                try self.constant_alias.put(self.alloc, ir_id, existing_id);
+                            }
+                        } else {
+                            try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+                            try self.emitTypeWord(float_type_id);
+                            try self.emitTypeWord(ir_id);
+                            try self.emitTypeWord(@as(u32, @bitCast(val)));
+                            try self.emitted_constants.put(self.alloc, cache_key, ir_id);
+                        }
+                    },
+                    .constant_int => {
+                        const val: u32 = switch (inst.operands[0]) {
+                            .literal_int => |v| v,
+                            else => continue,
+                        };
+                        const int_type_id = try self.ensureType(inst.ty);
+                        const cache_key = (@as(u64, int_type_id) << 32) | @as(u64, val);
+                        const ir_id = inst.result_id orelse continue;
+                        if (self.emitted_constants.get(cache_key)) |existing_id| {
+                            if (ir_id != existing_id) {
+                                try self.constant_alias.put(self.alloc, ir_id, existing_id);
+                            }
+                        } else {
+                            try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+                            try self.emitTypeWord(int_type_id);
+                            try self.emitTypeWord(ir_id);
+                            try self.emitTypeWord(val);
+                            try self.emitted_constants.put(self.alloc, cache_key, ir_id);
+                        }
+                    },
+                    .constant_bool => {
+                        const val: u32 = switch (inst.operands[0]) {
+                            .literal_int => |v| v,
+                            else => continue,
+                        };
+                        const bool_type_id = try self.ensureType(.bool);
+                        const cache_key = (@as(u64, bool_type_id) << 32) | @as(u64, val);
+                        const ir_id = inst.result_id orelse continue;
+                        if (self.emitted_constants.get(cache_key)) |existing_id| {
+                            if (ir_id != existing_id) {
+                                try self.constant_alias.put(self.alloc, ir_id, existing_id);
+                            }
+                        } else {
+                            const opcode: u16 = if (val != 0) @intFromEnum(spirv.Op.ConstantTrue) else @intFromEnum(spirv.Op.ConstantFalse);
+                            try self.emitTypeWord(spirv.encodeInstructionHeader(3, opcode));
+                            try self.emitTypeWord(bool_type_id);
+                            try self.emitTypeWord(ir_id);
+                            try self.emitted_constants.put(self.alloc, cache_key, ir_id);
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
         // Emit named struct types and global types/pointer types.
         // All other types and constants are emitted on-demand via the two-buffer system.
         // Collect referenced type names first
