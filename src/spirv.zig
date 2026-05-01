@@ -202,8 +202,11 @@ pub const Capability = enum(u32) {
 pub const BuiltIn = enum(u32) {
     position = 0,
     point_size = 1,
+    clip_distance = 3,
+    cull_distance = 4,
     vertex_id = 5,
     instance_id = 6,
+    frag_depth = 22,
     layer = 9,
     view_index = 10,
     frag_coord = 15,
@@ -282,6 +285,11 @@ pub const Decoration = enum(u32) {
 
 pub const ExecutionMode = enum(u32) {
     OriginUpperLeft = 7,
+    EarlyFragmentTests = 9,
+    DepthReplacing = 12,
+    DepthGreater = 14,
+    DepthLess = 15,
+    DepthUnchanged = 16,
     LocalSize = 17,
     _,
 };

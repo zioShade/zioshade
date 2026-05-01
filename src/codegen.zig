@@ -565,6 +565,35 @@ const Codegen = struct {
             try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
             try self.emitWord(entry_id);
             try self.emitWord(@intFromEnum(spirv.ExecutionMode.OriginUpperLeft));
+
+            if (self.module.early_fragment_tests) {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.EarlyFragmentTests));
+            }
+            // If gl_FragDepth is used, emit DepthReplacing
+            var has_frag_depth = false;
+            for (self.module.globals) |g| {
+                if (std.mem.eql(u8, g.name, "gl_FragDepth")) {
+                    has_frag_depth = true;
+                    break;
+                }
+            }
+            if (has_frag_depth) {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.DepthReplacing));
+            }
+            if (self.module.depth_greater) {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.DepthGreater));
+            }
+            if (self.module.depth_less) {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.DepthLess));
+            }
         }
         if (stage == .compute) {
             if (self.module.local_size) |ls| {
@@ -1822,6 +1851,9 @@ const Codegen = struct {
             }
             if (std.mem.eql(u8, global.name, "gl_FragCoord")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.frag_coord));
+            }
+            if (std.mem.eql(u8, global.name, "gl_FragDepth")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.frag_depth));
             }
             if (std.mem.eql(u8, global.name, "gl_FragColor")) {
                 // gl_FragColor is deprecated, no standard BuiltIn — skip decoration

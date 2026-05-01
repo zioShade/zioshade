@@ -16,6 +16,12 @@ pub const Module = struct {
     // Heap-allocated AST types that must be freed with the module
     heap_types: []*ast.Type = &.{},
     spec_constants: std.StringHashMapUnmanaged(SpecConstant) = .{},
+    // Fragment shader depth / early test flags
+    depth_greater: bool = false,
+    depth_less: bool = false,
+    depth_unchanged: bool = false,
+    early_fragment_tests: bool = false,
+    origin_upper_left: bool = false,
 
     pub fn deinit(self: *Module) void {
         for (self.functions) |func| {
