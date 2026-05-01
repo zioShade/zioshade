@@ -4967,6 +4967,22 @@ const Analyzer = struct {
         if (std.meta.eql(target, source)) return true;
         if (target == .float and source.isScalar()) return true;
         if (target == .uint and source == .int) return true;
+        // Allow float-vector <- int-vector conversions (e.g., vec2 <- ivec2 for textureSize)
+        if ((target == .vec2 and source == .ivec2) or
+            (target == .vec3 and source == .ivec3) or
+            (target == .vec4 and source == .ivec4) or
+            (target == .vec2 and source == .uvec2) or
+            (target == .vec3 and source == .uvec3) or
+            (target == .vec4 and source == .uvec4) or
+            (target == .ivec2 and source == .vec2) or
+            (target == .ivec3 and source == .vec3) or
+            (target == .ivec4 and source == .vec4) or
+            (target == .ivec2 and source == .uvec2) or
+            (target == .ivec3 and source == .uvec3) or
+            (target == .ivec4 and source == .uvec4) or
+            (target == .uvec2 and source == .ivec2) or
+            (target == .uvec3 and source == .ivec3) or
+            (target == .uvec4 and source == .ivec4)) return true;
         // Accept narrowing/widening integer conversions only (int ↔ int8/int16, ivec4 ↔ i8vec4)
         const conv = self.getConversionTag(target, source);
         if (conv != null and (conv.? == .convert_narrow or conv.? == .convert_widen)) return true;
