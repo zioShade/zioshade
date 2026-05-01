@@ -594,6 +594,11 @@ const Codegen = struct {
                 try self.emitWord(entry_id);
                 try self.emitWord(@intFromEnum(spirv.ExecutionMode.DepthLess));
             }
+            if (self.module.depth_unchanged) {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.DepthUnchanged));
+            }
         }
         if (stage == .compute) {
             if (self.module.local_size) |ls| {
