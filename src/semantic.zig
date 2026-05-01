@@ -267,6 +267,7 @@ const Analyzer = struct {
     const_composite_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     load_cache: std.AutoHashMapUnmanaged(u32, u32) = .{}, // ptr_id -> loaded_value_id
+    pure_op_cache: std.AutoHashMapUnmanaged(u64, u32) = .{}, // hash(type, op, operands) -> result_id
     local_size: ?ir.LocalSize = null,
     // Heap-allocated AST types that transfer to Module for cleanup
     heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
@@ -308,6 +309,7 @@ const Analyzer = struct {
         self.const_composite_cache.deinit(self.alloc);
         self.access_chain_cache.deinit(self.alloc);
         self.load_cache.deinit(self.alloc);
+        self.pure_op_cache.deinit(self.alloc);
         {
             var it = self.overloads.iterator();
             while (it.next()) |entry| {
@@ -469,12 +471,44 @@ const Analyzer = struct {
     }
 
     /// Emit a store instruction, invalidating the load cache.
+    /// Emit a pure operation with dedup caching within the current basic block.
+    /// Pure ops: composite_extract, transpose, vector_times_scalar, matrix_times_scalar,
+    ///           vector_shuffle, fadd, fsub, fmul, fdiv, etc.
+    /// Returns the result_id (either newly allocated or from cache).
+    fn emitPureOp(self: *Analyzer, tag: ir.Instruction.Tag, operands: []const ir.Instruction.Operand, ty: ast.Type) !u32 {
+        // Build cache key from tag + ty + operands
+        var key: u64 = @intFromEnum(ty) *% 37 +% @intFromEnum(tag);
+        for (operands) |op| {
+            const op_val: u64 = switch (op) {
+                .id => |id| id,
+                .literal_int => |v| v | (@as(u64, 1) << 62),
+                else => 0,
+            };
+            key = key *% 31 +% op_val;
+        }
+        if (self.pure_op_cache.get(key)) |existing_id| {
+            return existing_id;
+        }
+        const result_id = self.allocId();
+        const ops = try self.alloc.alloc(ir.Instruction.Operand, operands.len);
+        @memcpy(ops, operands);
+        try self.instructions.append(self.alloc, .{
+            .tag = tag,
+            .result_type = null,
+            .result_id = result_id,
+            .operands = ops,
+            .ty = ty,
+        });
+        self.pure_op_cache.put(self.alloc, key, result_id) catch {};
+        return result_id;
+    }
+
     fn emitStore(self: *Analyzer, ptr_id: u32, val_id: u32) !void {
         self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         const ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
         ops[0] = .{ .id = ptr_id };
         ops[1] = .{ .id = val_id };
-        self.load_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
             .tag = .store,
             .result_type = null,
@@ -560,6 +594,7 @@ const Analyzer = struct {
                     store_ops[0] = .{ .id = var_id };
                     store_ops[1] = .{ .id = init_val };
                     self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
                         .tag = .store,
                         .result_type = null,
@@ -578,6 +613,7 @@ const Analyzer = struct {
     fn emitLabel(self: *Analyzer, label_id: u32) !void {
         self.access_chain_cache.clearRetainingCapacity();
         self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
             .tag = .label,
             .result_id = label_id,
@@ -1088,6 +1124,7 @@ const Analyzer = struct {
         self.has_returned = false;
         self.access_chain_cache.clearRetainingCapacity();
         self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.pushScope();
 
         // For overloaded functions, resolve the correct ir_id based on param types
@@ -1150,6 +1187,7 @@ const Analyzer = struct {
                 store_ops[0] = .{ .id = var_id };
                 store_ops[1] = .{ .id = pid };
                 self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
@@ -1309,6 +1347,7 @@ const Analyzer = struct {
                         store_operands[0] = .{ .id = id };
                         store_operands[1] = .{ .id = init_id };
                         self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
@@ -1812,6 +1851,7 @@ const Analyzer = struct {
                         store_ops[0] = .{ .id = var_id };
                         store_ops[1] = .{ .id = sym.ir_id };
                         self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
@@ -1844,6 +1884,7 @@ const Analyzer = struct {
                             store_ops[0] = .{ .id = var_id };
                             store_ops[1] = .{ .id = init_val };
                             self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
                                 .tag = .store,
                                 .result_type = null,
@@ -2382,6 +2423,7 @@ const Analyzer = struct {
                                     store_ops[0] = .{ .id = var_ptr_id };
                                     store_ops[1] = .{ .id = shuffle_id };
                                     self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
                                         .tag = .store,
                                         .result_type = null,
@@ -2434,6 +2476,7 @@ const Analyzer = struct {
                 store_operands[0] = .{ .id = target.id };
                 store_operands[1] = .{ .id = value_id };
                 self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
@@ -2591,6 +2634,7 @@ const Analyzer = struct {
                                     store_ops[0] = .{ .id = var_ptr_id2 };
                                     store_ops[1] = .{ .id = final_shuffle_id };
                                     self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
                                         .tag = .store,
                                         .result_type = null,
@@ -2747,6 +2791,7 @@ const Analyzer = struct {
                 store_operands[0] = .{ .id = target.id };
                 store_operands[1] = .{ .id = computed_id };
                 self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
@@ -3149,6 +3194,7 @@ const Analyzer = struct {
                         store_ops[0] = .{ .id = out_id };
                         store_ops[1] = .{ .id = read_result_id };
                         self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
@@ -4272,17 +4318,10 @@ const Analyzer = struct {
                     if (arg_ty.isVector()) {
                         // Extract first component from vector
                         const element_ty = arg_ty.elementType();
-                        const extract_id = self.allocId();
                         const extract_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                        extract_ops[0] = .{ .id = arg_tids.items[0].id };
-                        extract_ops[1] = .{ .literal_int = 0 };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .composite_extract,
-                            .result_type = null,
-                            .result_id = extract_id,
-                            .operands = extract_ops,
-                            .ty = element_ty,
-                        });
+        extract_ops[0] = .{ .id = arg_tids.items[0].id };
+        extract_ops[1] = .{ .literal_int = 0 };
+        const extract_id = try self.emitPureOp(.composite_extract, extract_ops, element_ty);
                         // Convert element to target type if needed
                         if (std.meta.eql(element_ty, result_ty)) {
                             return .{ .ty = result_ty, .id = extract_id };
@@ -4337,17 +4376,10 @@ const Analyzer = struct {
                             const bool_ops = try self.alloc.alloc(ir.Instruction.Operand, n);
                             const zero_id = try self.getConstInt(0, .int);
                             for (0..n) |i| {
-                                const elem_id = self.allocId();
                                 const elem_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                                elem_ops[0] = .{ .id = arg_tids.items[0].id };
-                                elem_ops[1] = .{ .literal_int = @intCast(i) };
-                                try self.instructions.append(self.alloc, .{
-                                    .tag = .composite_extract,
-                                    .result_type = null,
-                                    .result_id = elem_id,
-                                    .operands = elem_ops,
-                                    .ty = .int,
-                                });
+        elem_ops[0] = .{ .id = arg_tids.items[0].id };
+        elem_ops[1] = .{ .literal_int = @intCast(i) };
+        const elem_id = try self.emitPureOp(.composite_extract, elem_ops, .int);
                                 const cmp_id = self.allocId();
                                 const cmp_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                                 cmp_ops[0] = .{ .id = elem_id };
@@ -4379,11 +4411,10 @@ const Analyzer = struct {
                             const result_ops = try self.alloc.alloc(ir.Instruction.Operand, n);
                             for (0..n) |i| {
                                 // Extract bool component
-                                const bool_id = self.allocId();
                                 const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                                ext_ops[0] = .{ .id = arg_tids.items[0].id };
-                                ext_ops[1] = .{ .literal_int = @intCast(i) };
-                                try self.instructions.append(self.alloc, .{ .tag = .composite_extract, .result_type = null, .result_id = bool_id, .operands = ext_ops, .ty = .bool });
+        ext_ops[0] = .{ .id = arg_tids.items[0].id };
+        ext_ops[1] = .{ .literal_int = @intCast(i) };
+        const bool_id = try self.emitPureOp(.composite_extract, ext_ops, .bool);
                                 // OpSelect: cond=true_id, true=one_id, false=zero_id
                                 const sel_id = self.allocId();
                                 const sel_ops = try self.alloc.alloc(ir.Instruction.Operand, 3);
@@ -4607,17 +4638,10 @@ const Analyzer = struct {
                     // Extract first dst_cols columns from source matrix
                     const col_ids = try self.alloc.alloc(u32, dst_cols);
                     for (0..dst_cols) |i| {
-                        const extracted_col_id = self.allocId();
                         const extract_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                        extract_ops[0] = .{ .id = src_id };
-                        extract_ops[1] = .{ .literal_int = @intCast(i) };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .composite_extract,
-                            .result_type = null,
-                            .result_id = extracted_col_id,
-                            .operands = extract_ops,
-                            .ty = src_col_type,
-                        });
+        extract_ops[0] = .{ .id = src_id };
+        extract_ops[1] = .{ .literal_int = @intCast(i) };
+        const extracted_col_id = try self.emitPureOp(.composite_extract, extract_ops, src_col_type);
                         // If column sizes differ, shrink via vector_shuffle
                         if (dst_col_n < src_col_n) {
                             const shuffle_id = self.allocId();
@@ -4996,17 +5020,10 @@ const Analyzer = struct {
                     // Single-component swizzle (e.g., .x, .y)
                     if (member_name.len == 1) {
                         const idx = self.swizzleIndex(member_name[0]);
-                        const result_id = self.allocId();
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                        operands[0] = .{ .id = base_tid.id };
-                        operands[1] = .{ .literal_int = idx };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .composite_extract,
-                            .result_type = null,
-                            .result_id = result_id,
-                            .operands = operands,
-                            .ty = elem_ty,
-                        });
+        operands[0] = .{ .id = base_tid.id };
+        operands[1] = .{ .literal_int = idx };
+        const result_id = try self.emitPureOp(.composite_extract, operands, elem_ty);
                         return .{ .ty = elem_ty, .id = result_id };
                     }
                     // Multi-component swizzle (e.g., .xyz, .xy, .xz)
@@ -5088,17 +5105,10 @@ const Analyzer = struct {
                                 return .{ .ty = member_ty, .id = result_id, .is_ptr = true };
                             } else {
                                 // Value base → composite_extract (value result)
-                                const result_id = self.allocId();
                                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                                operands[0] = .{ .id = base_tid.id };
-                                operands[1] = .{ .literal_int = idx };
-                                try self.instructions.append(self.alloc, .{
-                                    .tag = .composite_extract,
-                                    .result_type = null,
-                                    .result_id = result_id,
-                                    .operands = operands,
-                                    .ty = member_ty,
-                                });
+        operands[0] = .{ .id = base_tid.id };
+        operands[1] = .{ .literal_int = idx };
+        const result_id = try self.emitPureOp(.composite_extract, operands, member_ty);
                                 return .{ .ty = member_ty, .id = result_id };
                             }
                         }
@@ -5231,6 +5241,7 @@ const Analyzer = struct {
                 store_ops[0] = .{ .id = lval.id };
                 store_ops[1] = .{ .id = new_val_id };
                 self.load_cache.clearRetainingCapacity();
+        self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
