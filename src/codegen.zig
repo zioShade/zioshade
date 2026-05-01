@@ -409,6 +409,24 @@ const Codegen = struct {
                 try self.emitWord(@intFromEnum(spirv.Capability.texture_block_match_qcom));
             }
         }
+        // Ray query capabilities
+        var has_ray_query_types = self.module.uses_ray_query;
+        if (!has_ray_query_types) {
+            for (self.module.globals) |global| {
+                if (global.ty == .acceleration_structure_ext or global.ty == .ray_query_ext) {
+                    has_ray_query_types = true;
+                    break;
+                }
+            }
+        }
+        if (has_ray_query_types) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.ray_query_khr));
+        }
+        if (self.module.uses_ray_query_position_fetch) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.ray_query_position_fetch_khr));
+        }
     }
 
     fn typeUsesFloat16(self: *Codegen, ty: ast.Type) bool {
@@ -537,6 +555,42 @@ const Codegen = struct {
             }
             for (qcom_ew) |w| try self.emitWord(w);
             self.alloc.free(qcom_ew);
+        }
+        // Ray query extensions
+        var needs_rq_ext = self.module.uses_ray_query;
+        if (!needs_rq_ext) {
+            for (self.module.globals) |global| {
+                if (global.ty == .acceleration_structure_ext or global.ty == .ray_query_ext) {
+                    needs_rq_ext = true;
+                    break;
+                }
+            }
+        }
+        if (needs_rq_ext) {
+            const rq_ext = "SPV_KHR_ray_query";
+            const rq_wc: u16 = 1 + @as(u16, @intCast(std.math.divCeil(usize, rq_ext.len + 1, 4) catch unreachable));
+            try self.emitWord(spirv.encodeInstructionHeader(rq_wc, @intFromEnum(spirv.Op.Extension)));
+            const rq_nw = std.math.divCeil(usize, rq_ext.len + 1, 4) catch unreachable;
+            const rq_ew = try self.alloc.alloc(u32, rq_nw);
+            @memset(rq_ew, 0);
+            for (rq_ext, 0..) |byte, idx| {
+                rq_ew[idx / 4] |= @as(u32, byte) << @intCast((idx % 4) * 8);
+            }
+            for (rq_ew) |w| try self.emitWord(w);
+            self.alloc.free(rq_ew);
+        }
+        if (self.module.uses_ray_query_position_fetch) {
+            const rpf_ext = "SPV_KHR_ray_tracing_position_fetch";
+            const rpf_wc: u16 = 1 + @as(u16, @intCast(std.math.divCeil(usize, rpf_ext.len + 1, 4) catch unreachable));
+            try self.emitWord(spirv.encodeInstructionHeader(rpf_wc, @intFromEnum(spirv.Op.Extension)));
+            const rpf_nw = std.math.divCeil(usize, rpf_ext.len + 1, 4) catch unreachable;
+            const rpf_ew = try self.alloc.alloc(u32, rpf_nw);
+            @memset(rpf_ew, 0);
+            for (rpf_ext, 0..) |byte, idx| {
+                rpf_ew[idx / 4] |= @as(u32, byte) << @intCast((idx % 4) * 8);
+            }
+            for (rpf_ew) |w| try self.emitWord(w);
+            self.alloc.free(rpf_ew);
         }
     }
 
@@ -1761,6 +1815,14 @@ const Codegen = struct {
                 try self.emitTypeWord(2); // Sampled = 2 (no sampler needed)
                 try self.emitTypeWord(0); // ImageFormat = Unknown
             },
+            .acceleration_structure_ext => {
+                try self.emitTypeWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.TypeAccelerationStructureKHR)));
+                try self.emitTypeWord(id);
+            },
+            .ray_query_ext => {
+                try self.emitTypeWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.TypeRayQueryKHR)));
+                try self.emitTypeWord(id);
+            },
         }
         // Cache for simple types
         if (normalized != .named and normalized != .array) {
@@ -2700,10 +2762,20 @@ const Codegen = struct {
                             else => return,
                         };
                         const bool_type_id = try self.ensureType(.bool);
+                        const cache_key = (@as(u64, bool_type_id) << 32) | @as(u64, val);
+                        if (self.emitted_constants.get(cache_key)) |existing_id| {
+                            const ir_id = resolved.result_id orelse return;
+                            if (ir_id != existing_id) {
+                                try self.constant_alias.put(self.alloc, ir_id, existing_id);
+                            }
+                            return;
+                        }
                         const op: spirv.Op = if (val != 0) .ConstantTrue else .ConstantFalse;
                         try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(op)));
                         try self.emitTypeWord(bool_type_id);
-                        try self.emitTypeWord(resolved.result_id orelse return);
+                        const ir_id = resolved.result_id orelse return;
+                        try self.emitTypeWord(ir_id);
+                        try self.emitted_constants.put(self.alloc, cache_key, ir_id);
                     },
                     else => {},
                 }
@@ -3637,6 +3709,60 @@ const Codegen = struct {
                 try self.emitWord(sampled_image_id);
                 try self.emitWord(coord_id);
                 try self.emitWord(weights_id);
+            },
+            .ray_query_initialize => {
+                // OpRayQueryInitializeKHR: query accel flags mask origin tmin dir tmax
+                const query_id = self.operandId(resolved, 0);
+                const accel_id = self.operandId(resolved, 1);
+                const flags_id = self.operandId(resolved, 2);
+                const mask_id = self.operandId(resolved, 3);
+                const origin_id = self.operandId(resolved, 4);
+                const tmin_id = self.operandId(resolved, 5);
+                const dir_id = self.operandId(resolved, 6);
+                const tmax_id = self.operandId(resolved, 7);
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.RayQueryInitializeKHR)));
+                try self.emitWord(query_id);
+                try self.emitWord(accel_id);
+                try self.emitWord(flags_id);
+                try self.emitWord(mask_id);
+                try self.emitWord(origin_id);
+                try self.emitWord(tmin_id);
+                try self.emitWord(dir_id);
+                try self.emitWord(tmax_id);
+            },
+            .ray_query_proceed => {
+                // OpRayQueryProceedKHR: result_type result query
+                const result_type_id = try self.ensureType(.bool);
+                const result_id = resolved.result_id orelse return;
+                const query_id = self.operandId(resolved, 0);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.RayQueryProceedKHR)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(query_id);
+            },
+            .ray_query_get_intersection_type => {
+                // OpRayQueryGetIntersectionTypeKHR: result_type result query committed
+                const result_type_id = try self.ensureType(.uint);
+                const result_id = resolved.result_id orelse return;
+                const query_id = self.operandId(resolved, 0);
+                const committed_id = self.operandId(resolved, 1);
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.RayQueryGetIntersectionTypeKHR)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(query_id);
+                try self.emitWord(committed_id);
+            },
+            .ray_query_get_triangle_vertex_positions => {
+                // OpRayQueryGetIntersectionTriangleVertexPositionsKHR: result_type result query committed
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const query_id = self.operandId(resolved, 0);
+                const committed_id = self.operandId(resolved, 1);
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.RayQueryGetIntersectionTriangleVertexPositionsKHR)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(query_id);
+                try self.emitWord(committed_id);
             },
             .atomic_iadd => {
                 try self.emitAtomicOp(resolved, spirv.Op.AtomicIAdd);

@@ -84,6 +84,12 @@ pub const Op = enum(u16) {
     ImageBoxFilterQCOM = 4481,
     ImageBlockMatchSSDQCOM = 4482,
     ImageBlockMatchSADQCOM = 4483,
+    RayQueryInitializeKHR = 4473,
+    RayQueryProceedKHR = 4477,
+    RayQueryGetIntersectionTypeKHR = 4479,
+    RayQueryGetIntersectionTriangleVertexPositionsKHR = 5340,
+    TypeAccelerationStructureKHR = 5341,
+    TypeRayQueryKHR = 4472,
     Transpose = 84,
     ConvertFToS = 110,
     ConvertSToF = 111,
@@ -203,6 +209,8 @@ pub const Capability = enum(u32) {
     texture_sample_weighted_qcom = 4484,
     texture_box_filter_qcom = 4485,
     texture_block_match_qcom = 4486,
+    ray_query_khr = 4472,
+    ray_query_position_fetch_khr = 5391,
     _,
 };
 
