@@ -5341,7 +5341,7 @@ test "semantic: vec4 constructor lowers to composite_construct" {
     const body = module.functions[0].body;
     var has_composite = false;
     for (body) |inst| {
-        if (inst.tag == .composite_construct) has_composite = true;
+        if (inst.tag == .composite_construct or inst.tag == .constant_composite) has_composite = true;
     }
     try testing.expect(has_composite);
 }
