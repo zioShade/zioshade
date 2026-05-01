@@ -31,6 +31,7 @@ pub fn generate(
         .next_id = module.next_id_start,
         .emitted_types = .{},
         .emitted_array_types = .{},
+        .emitted_tensor_types = .{},
         .emitted_array_stride = .{},
         .emitted_struct_layout = .{},
         .emitted_named_types = .{},
@@ -118,6 +119,7 @@ const Codegen = struct {
     next_id: u32,
     emitted_types: std.AutoHashMapUnmanaged(u32, u32), // @intFromEnum(ty) -> type_id
     emitted_array_types: std.AutoHashMapUnmanaged(u64, u32), // hash -> type_id
+    emitted_tensor_types: std.AutoHashMapUnmanaged(u64, u32), // hash -> type_id
     emitted_array_stride: std.AutoHashMapUnmanaged(u32, void), // array type_ids with ArrayStride already emitted
     emitted_struct_layout: std.AutoHashMapUnmanaged(u32, void), // struct type_ids with layout decorations already emitted
     emitted_named_types: std.StringHashMapUnmanaged(u32), // struct name -> type_id
@@ -427,6 +429,17 @@ const Codegen = struct {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.ray_query_position_fetch_khr));
         }
+        // ARM tensor capability
+        var needs_tensor_cap = self.module.uses_arm_tensors;
+        if (!needs_tensor_cap) {
+            for (self.module.globals) |global| {
+                if (global.ty == .tensor_arm) { needs_tensor_cap = true; break; }
+            }
+        }
+        if (needs_tensor_cap) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.tensors_arm));
+        }
     }
 
     fn typeUsesFloat16(self: *Codegen, ty: ast.Type) bool {
@@ -591,6 +604,26 @@ const Codegen = struct {
             }
             for (rpf_ew) |w| try self.emitWord(w);
             self.alloc.free(rpf_ew);
+        }
+        // ARM tensor extension
+        var needs_tensor_ext = self.module.uses_arm_tensors;
+        if (!needs_tensor_ext) {
+            for (self.module.globals) |global| {
+                if (global.ty == .tensor_arm) { needs_tensor_ext = true; break; }
+            }
+        }
+        if (needs_tensor_ext) {
+            const arm_ext = "SPV_ARM_tensors";
+            const arm_wc: u16 = 1 + @as(u16, @intCast(std.math.divCeil(usize, arm_ext.len + 1, 4) catch unreachable));
+            try self.emitWord(spirv.encodeInstructionHeader(arm_wc, @intFromEnum(spirv.Op.Extension)));
+            const arm_nw = std.math.divCeil(usize, arm_ext.len + 1, 4) catch unreachable;
+            const arm_ew = try self.alloc.alloc(u32, arm_nw);
+            @memset(arm_ew, 0);
+            for (arm_ext, 0..) |byte, idx| {
+                arm_ew[idx / 4] |= @as(u32, byte) << @intCast((idx % 4) * 8);
+            }
+            for (arm_ew) |w| try self.emitWord(w);
+            self.alloc.free(arm_ew);
         }
     }
 
@@ -762,9 +795,20 @@ const Codegen = struct {
             else => ty,
         };
         // Dedup: for simple (non-payload) types, return cached ID if already emitted
-        if (normalized != .named and normalized != .array) {
+        if (normalized != .named and normalized != .array and normalized != .tensor_arm) {
             const key = @intFromEnum(normalized);
             if (self.emitted_types.get(key)) |cached_id| {
+                return cached_id;
+            }
+        }
+        // Dedup tensor types by (element_type, rank)
+        if (ty == .tensor_arm) {
+            const ta = ty.tensor_arm;
+            // We need the element type ID, but ensureType isn't available here recursively
+            // Instead, hash based on AST type enum + rank
+            const elem_key = @intFromEnum(ta.element.*);
+            const tensor_key = (@as(u64, elem_key) << 32) | @as(u64, ta.rank);
+            if (self.emitted_tensor_types.get(tensor_key)) |cached_id| {
                 return cached_id;
             }
         }
@@ -1823,9 +1867,21 @@ const Codegen = struct {
                 try self.emitTypeWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.TypeRayQueryKHR)));
                 try self.emitTypeWord(id);
             },
+            .tensor_arm => |ta| {
+                const elem_type_id = try self.ensureType(ta.element.*);
+                const rank_id = try self.emitIntConstant(ta.rank);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeTensorARM)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(elem_type_id);
+                try self.emitTypeWord(rank_id);
+                // Cache for dedup
+                const elem_key = @intFromEnum(ta.element.*);
+                const tensor_key = (@as(u64, elem_key) << 32) | @as(u64, ta.rank);
+                try self.emitted_tensor_types.put(self.alloc, tensor_key, id);
+            },
         }
         // Cache for simple types
-        if (normalized != .named and normalized != .array) {
+        if (normalized != .named and normalized != .array and normalized != .tensor_arm) {
             const key = @intFromEnum(normalized);
             try self.emitted_types.put(self.alloc, key, id);
         }
@@ -3763,6 +3819,28 @@ const Codegen = struct {
                 try self.emitWord(result_id);
                 try self.emitWord(query_id);
                 try self.emitWord(committed_id);
+            },
+            .tensor_query_size_arm => {
+                const result_type_id = try self.ensureType(.uint);
+                const result_id = resolved.result_id orelse return;
+                const tensor_id = self.operandId(resolved, 0);
+                const dim_id = self.operandId(resolved, 1);
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.TensorQuerySizeARM)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(tensor_id);
+                try self.emitWord(dim_id);
+            },
+            .tensor_read_arm => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const tensor_id = self.operandId(resolved, 0);
+                const coords_id = self.operandId(resolved, 1);
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.TensorReadARM)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(tensor_id);
+                try self.emitWord(coords_id);
             },
             .atomic_iadd => {
                 try self.emitAtomicOp(resolved, spirv.Op.AtomicIAdd);
