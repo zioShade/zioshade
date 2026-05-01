@@ -43,3 +43,15 @@ All output store mismatches resolved. Perfect correctness achieved.
 - **Load caching**: Too aggressive via constant_alias. Caused massive regression. Would need per-block mapping without global aliasing.
 - **Struct type dedup**: Multiple struct types with same layout are emitted separately. Could share types.
 - **SSA variable elimination**: Variables stored once and loaded once could be replaced with direct value propagation. Requires use-def analysis.
+
+## Session 2026-05-01 (Phase 4 continued):
+- **Semantic-level constant composite dedup**: IMPLEMENTED (-309 IDs). Cache key (type, operand_ids) prevents duplicate OpConstantComposite and element constants.
+- **AccessChain caching within basic blocks**: IMPLEMENTED (-217 IDs). Clear at labels/functions for dominance. 
+- **Load caching within basic blocks**: IMPLEMENTED (-168 IDs). Clear at labels, functions, and stores. PITFALL: must also clear at function boundaries (cross-function caching causes dominance violations).
+- **Pure op CSE (composite_extract)**: IMPLEMENTED (-12 IDs). Modest gain.
+- **Per-pointer store invalidation**: Investigated but too complex (aliasing concerns).
+- **Dead instruction elimination**: 568 dead IDs total (296 labels, 45 loads, 43 function calls, 29 constants). Hard to eliminate at semantic level without lazy evaluation.
+- **ID compaction pass**: Requires remapping IDs in both IR and codegen. High risk without complete opcode ID-position table.
+- **Cross-block load caching**: 322 remaining duplicate loads across block boundaries. Requires dominance analysis.
+- **Additional pure op caching**: vector_shuffle (15 dups), bitcast (15 dups), image_texel_pointer (12 dups). Potential ~40 more IDs but requires restructuring to check cache before allocId.
+- **Total progress**: 10881 → 10175 (-706 IDs, -6.5%)
