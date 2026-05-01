@@ -231,7 +231,7 @@ const Parser = struct {
             .kw_image2d_array, .kw_iimage2d_array, .kw_uimage2d_array,
             .kw_image_cube_array, .kw_iimage_cube_array, .kw_uimage_cube_array,
             .kw_image_buffer, .kw_image2d_ms, .kw_image2d_ms_array,
-            .kw_acceleration_structure_ext, .kw_ray_query_ext,
+            .kw_acceleration_structure_ext, .kw_ray_query_ext, .kw_tensor_arm,
             .kw_subpass_input, .kw_subpass_input_ms,
             .kw_float16, .kw_int16, .kw_uint16,
             .kw_isampler2d, .kw_usampler2d,
@@ -536,6 +536,52 @@ const Parser = struct {
             .kw_texture2d_ms => { _ = self.advance(); return .texture2d_ms_plain; },
             .kw_acceleration_structure_ext => { _ = self.advance(); return .acceleration_structure_ext; },
             .kw_ray_query_ext => { _ = self.advance(); return .ray_query_ext; },
+            .kw_tensor_arm => {
+                _ = self.advance(); // consume tensorARM
+                if (self.current().tag == .lt) {
+                    _ = self.advance(); // consume <
+                    // Parse element type directly from token — don't use tryType
+                    // because int32_t/uint32_t are identifiers that would become .named (struct)
+                    const elem_ty: ast.Type = blk: {
+                        // Check for explicit arithmetic type keywords (int8_t, uint8_t, etc.)
+                        switch (self.current().tag) {
+                            .kw_int => { _ = self.advance(); break :blk .int; },
+                            .kw_uint => { _ = self.advance(); break :blk .uint; },
+                            .kw_float => { _ = self.advance(); break :blk .float; },
+                            .kw_bool => { _ = self.advance(); break :blk .bool; },
+                            .kw_int8 => { _ = self.advance(); break :blk .int8; },
+                            .kw_uint8 => { _ = self.advance(); break :blk .uint8; },
+                            .kw_int16 => { _ = self.advance(); break :blk .int16; },
+                            .kw_uint16 => { _ = self.advance(); break :blk .uint16; },
+                            .kw_float16 => { _ = self.advance(); break :blk .float16; },
+                            else => {},
+                        }
+                        // Check for int32_t/uint32_t/float32_t as identifiers
+                        if (self.current().tag == .identifier) {
+                            const name = self.text(self.current());
+                            if (std.mem.eql(u8, name, "int32_t")) { _ = self.advance(); break :blk .int; }
+                            if (std.mem.eql(u8, name, "uint32_t")) { _ = self.advance(); break :blk .uint; }
+                            if (std.mem.eql(u8, name, "float32_t")) { _ = self.advance(); break :blk .float; }
+                            if (std.mem.eql(u8, name, "int8_t")) { _ = self.advance(); break :blk .int8; }
+                            if (std.mem.eql(u8, name, "uint8_t")) { _ = self.advance(); break :blk .uint8; }
+                            if (std.mem.eql(u8, name, "int16_t")) { _ = self.advance(); break :blk .int16; }
+                            if (std.mem.eql(u8, name, "uint16_t")) { _ = self.advance(); break :blk .uint16; }
+                            if (std.mem.eql(u8, name, "float16_t")) { _ = self.advance(); break :blk .float16; }
+                            if (std.mem.eql(u8, name, "double")) { _ = self.advance(); break :blk .double; }
+                        }
+                        break :blk .void;
+                    };
+                    if (self.current().tag == .comma) _ = self.advance();
+                    const rank_tok = self.current();
+                    const rank = std.fmt.parseInt(u32, self.text(rank_tok), 0) catch 4;
+                    _ = self.advance(); // consume rank
+                    if (self.current().tag == .gt) _ = self.advance(); // consume >
+                    const elem_ptr = self.alloc.create(ast.Type) catch return null;
+                    elem_ptr.* = elem_ty;
+                    return .{ .tensor_arm = .{ .element = elem_ptr, .rank = rank } };
+                }
+                return .void;
+            },
             .kw_subpass_input => { _ = self.advance(); return .subpass_input; },
             .kw_subpass_input_ms => { _ = self.advance(); return .subpass_input_ms; },
             .kw_sampler_shadow, .kw_sampler_plain => { _ = self.advance(); return .sampler_plain; },
