@@ -73,7 +73,7 @@ def get_output_stores(dis):
             elif sc == 'StorageBuffer':
                 buf_vars.add(vid)
     
-    # Track AccessChain results that point into output/buffer vars
+    # Track AccessChain results that point into output/buffer vars (transitive)
     ac_targets = {}  # result_id -> 'out' or 'buf'
     for l in dis.split('\n'):
         l = l.strip()
@@ -87,6 +87,9 @@ def get_output_stores(dis):
                 ac_targets[result_id] = 'out'
             elif base_id in buf_vars:
                 ac_targets[result_id] = 'buf'
+            elif base_id in ac_targets:
+                # Transitive: base is itself an access chain into output/buffer
+                ac_targets[result_id] = ac_targets[base_id]
     
     out_count = 0
     buf_count = 0
