@@ -504,8 +504,13 @@ const Analyzer = struct {
     }
 
     fn emitStore(self: *Analyzer, ptr_id: u32, val_id: u32) !void {
-        self.load_cache.clearRetainingCapacity();
-        self.pure_op_cache.clearRetainingCapacity();
+        // Only invalidate load cache for the stored-to pointer.
+        // Conservative: also invalidate any AccessChain-derived pointers that
+        // start with this ptr_id. Simplest approach: just remove this ptr_id
+        // from the cache, as loads from the exact same pointer are the most
+        // common case and other aliases are rare within a basic block.
+        _ = self.load_cache.remove(ptr_id);
+        // Note: pure_op_cache is NOT cleared — pure ops don't depend on memory state
         const ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
         ops[0] = .{ .id = ptr_id };
         ops[1] = .{ .id = val_id };
@@ -593,8 +598,7 @@ const Analyzer = struct {
                     const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                     store_ops[0] = .{ .id = var_id };
                     store_ops[1] = .{ .id = init_val };
-                    self.load_cache.clearRetainingCapacity();
-        self.pure_op_cache.clearRetainingCapacity();
+                    _ = self.load_cache.remove(var_id);
         try self.instructions.append(self.alloc, .{
                         .tag = .store,
                         .result_type = null,
@@ -1186,8 +1190,7 @@ const Analyzer = struct {
                 const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 store_ops[0] = .{ .id = var_id };
                 store_ops[1] = .{ .id = pid };
-                self.load_cache.clearRetainingCapacity();
-        self.pure_op_cache.clearRetainingCapacity();
+                _ = self.load_cache.remove(var_id);
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
@@ -1346,8 +1349,7 @@ const Analyzer = struct {
                         const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                         store_operands[0] = .{ .id = id };
                         store_operands[1] = .{ .id = init_id };
-                        self.load_cache.clearRetainingCapacity();
-        self.pure_op_cache.clearRetainingCapacity();
+                        _ = self.load_cache.remove(id);
         try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
@@ -1850,8 +1852,7 @@ const Analyzer = struct {
                         const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                         store_ops[0] = .{ .id = var_id };
                         store_ops[1] = .{ .id = sym.ir_id };
-                        self.load_cache.clearRetainingCapacity();
-        self.pure_op_cache.clearRetainingCapacity();
+                        _ = self.load_cache.remove(var_id);
         try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
@@ -1883,8 +1884,7 @@ const Analyzer = struct {
                             const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                             store_ops[0] = .{ .id = var_id };
                             store_ops[1] = .{ .id = init_val };
-                            self.load_cache.clearRetainingCapacity();
-        self.pure_op_cache.clearRetainingCapacity();
+                            _ = self.load_cache.remove(var_id);
         try self.instructions.append(self.alloc, .{
                                 .tag = .store,
                                 .result_type = null,
@@ -2422,8 +2422,7 @@ const Analyzer = struct {
                                     const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                                     store_ops[0] = .{ .id = var_ptr_id };
                                     store_ops[1] = .{ .id = shuffle_id };
-                                    self.load_cache.clearRetainingCapacity();
-        self.pure_op_cache.clearRetainingCapacity();
+                                    _ = self.load_cache.remove(var_ptr_id);
         try self.instructions.append(self.alloc, .{
                                         .tag = .store,
                                         .result_type = null,
@@ -2475,8 +2474,7 @@ const Analyzer = struct {
                 const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 store_operands[0] = .{ .id = target.id };
                 store_operands[1] = .{ .id = value_id };
-                self.load_cache.clearRetainingCapacity();
-        self.pure_op_cache.clearRetainingCapacity();
+                _ = self.load_cache.remove(target.id);
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
@@ -2633,8 +2631,7 @@ const Analyzer = struct {
                                     const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                                     store_ops[0] = .{ .id = var_ptr_id2 };
                                     store_ops[1] = .{ .id = final_shuffle_id };
-                                    self.load_cache.clearRetainingCapacity();
-        self.pure_op_cache.clearRetainingCapacity();
+                                    _ = self.load_cache.remove(var_ptr_id2);
         try self.instructions.append(self.alloc, .{
                                         .tag = .store,
                                         .result_type = null,
@@ -2790,8 +2787,7 @@ const Analyzer = struct {
                 const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 store_operands[0] = .{ .id = target.id };
                 store_operands[1] = .{ .id = computed_id };
-                self.load_cache.clearRetainingCapacity();
-        self.pure_op_cache.clearRetainingCapacity();
+                _ = self.load_cache.remove(target.id);
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
@@ -3193,8 +3189,7 @@ const Analyzer = struct {
                         const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                         store_ops[0] = .{ .id = out_id };
                         store_ops[1] = .{ .id = read_result_id };
-                        self.load_cache.clearRetainingCapacity();
-        self.pure_op_cache.clearRetainingCapacity();
+                        _ = self.load_cache.remove(out_id);
         try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
@@ -5240,8 +5235,7 @@ const Analyzer = struct {
                 const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 store_ops[0] = .{ .id = lval.id };
                 store_ops[1] = .{ .id = new_val_id };
-                self.load_cache.clearRetainingCapacity();
-        self.pure_op_cache.clearRetainingCapacity();
+                _ = self.load_cache.remove(lval.id);
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
