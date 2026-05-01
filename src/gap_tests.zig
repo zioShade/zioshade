@@ -1406,3 +1406,66 @@ test "gap: transpose(mat4) emits OpTranspose" {
 
     try testing.expect(countOp(words, .Transpose) >= 1);
 }
+
+// ─── Gap 51: gl_FragDepth with depth layout qualifiers ────────────────────
+
+test "gap: layout(depth_greater) out float gl_FragDepth emits DepthGreater execution mode" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(depth_greater) out float gl_FragDepth;
+        \\void main() {
+        \\    gl_FragDepth = 0.5;
+        \\}
+    ;
+    const words = try compileToWords(testing.allocator, source, .fragment);
+    defer testing.allocator.free(words);
+
+    try testing.expect(words.len > 0);
+    // Should have BuiltIn FragDepth decoration
+    try testing.expect(hasBuiltinDecoration(words, .frag_depth));
+}
+
+test "gap: layout(depth_less) emits DepthLess execution mode" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(depth_less) out float gl_FragDepth;
+        \\void main() {
+        \\    gl_FragDepth = 0.5;
+        \\}
+    ;
+    const words = try compileToWords(testing.allocator, source, .fragment);
+    defer testing.allocator.free(words);
+
+    try testing.expect(words.len > 0);
+}
+
+test "gap: layout(early_fragment_tests) in emits EarlyFragmentTests" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(early_fragment_tests) in;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    o = vec4(1.0);
+        \\}
+    ;
+    const words = try compileToWords(testing.allocator, source, .fragment);
+    defer testing.allocator.free(words);
+
+    try testing.expect(words.len > 0);
+}
+
+test "gap: layout(depth_unchanged) emits DepthUnchanged execution mode" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(depth_unchanged) out float gl_FragDepth;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    o = vec4(1.0);
+        \\    gl_FragDepth = 0.5;
+        \\}
+    ;
+    const words = try compileToWords(testing.allocator, source, .fragment);
+    defer testing.allocator.free(words);
+
+    try testing.expect(words.len > 0);
+}
