@@ -614,6 +614,16 @@ const Parser = struct {
         while (self.current().tag != .r_paren and self.current().tag != .eof) {
             const p_qual = self.tryQualifier();
             const p_type = self.tryType() orelse return error.UnexpectedToken;
+            // Handle unnamed parameters: type followed by , or ) without identifier
+            if (self.current().tag == .comma or self.current().tag == .r_paren) {
+                try params.append(self.alloc, .{
+                    .name = "",
+                    .ty = p_type,
+                    .qualifier = p_qual,
+                });
+                if (self.current().tag == .comma) _ = self.advance();
+                continue;
+            }
             const p_name = self.current();
             if (p_name.tag != .identifier) return error.UnexpectedToken;
             _ = self.advance();
