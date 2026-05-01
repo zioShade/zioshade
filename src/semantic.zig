@@ -94,6 +94,8 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .early_fragment_tests = analyzer.has_early_fragment_tests,
         .origin_upper_left = analyzer.has_origin_upper_left,
         .uses_qcom_image_processing = analyzer.uses_qcom_image_processing,
+        .uses_ray_query = analyzer.uses_ray_query,
+        .uses_ray_query_position_fetch = analyzer.uses_ray_query_position_fetch,
     };
     // Dead function elimination: only keep functions reachable from main()
     mod = eliminateDeadFunctions(alloc, mod);
@@ -272,6 +274,8 @@ const Analyzer = struct {
     has_depth_less: bool = false,
     has_depth_unchanged: bool = false,
     uses_qcom_image_processing: bool = false,
+    uses_ray_query: bool = false,
+    uses_ray_query_position_fetch: bool = false,
 
     fn deinit(self: *Analyzer) void {
         // Free heap-allocated AST types (if not transferred to Module)
@@ -2023,7 +2027,24 @@ const Analyzer = struct {
                     }
                     return .{ .ty = sym.ty, .id = sym.ir_id };
                 }
-                // Handle void builtins used as statements (e.g., demote)
+                // Handle ray query constants
+                if (std.mem.eql(u8, node.data.name, "gl_RayFlagsTerminateOnFirstHitEXT")) {
+                    const cid = try self.getConstInt(4, .uint);
+                    return .{ .ty = .uint, .id = cid };
+                }
+                if (std.mem.eql(u8, node.data.name, "gl_RayFlagsNoneEXT") or
+                    std.mem.eql(u8, node.data.name, "gl_RayFlagsNoneKHR") or
+                    std.mem.eql(u8, node.data.name, "gl_RayQueryCommittedIntersectionNoneEXT") or
+                    std.mem.eql(u8, node.data.name, "gl_RayQueryCommittedIntersectionNoneKHR")) {
+                    const cid = try self.getConstInt(0, .uint);
+                    return .{ .ty = .uint, .id = cid };
+                }
+                if (std.mem.eql(u8, node.data.name, "gl_RayQueryCommittedIntersectionTriangleEXT") or
+                    std.mem.eql(u8, node.data.name, "gl_RayQueryCommittedIntersectionTriangleKHR")) {
+                    const cid = try self.getConstInt(1, .uint);
+                    return .{ .ty = .uint, .id = cid };
+                }
+                // Handle barrier builtins used as expressions (void)
                 if (self.isBarrierBuiltin(node.data.name)) {
                     return .{ .ty = .void, .id = 0 };
                 }
@@ -3016,6 +3037,87 @@ const Analyzer = struct {
                         });
                         self.uses_qcom_image_processing = true;
                         return .{ .ty = .vec4, .id = result_id };
+                    }
+                    // === Ray query builtins ===
+                    // rayQueryInitializeEXT(query, accel, flags, mask, origin, tmin, dir, tmax)
+                    if (std.mem.eql(u8, node.data.name, "rayQueryInitializeEXT")) {
+                        const query_ptr = if (node.data.children.len > 0) self.analyzeLValue(node.data.children[0]) catch arg_tids.items[0] else arg_tids.items[0];
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        operands[0] = .{ .id = query_ptr.id };
+                        for (arg_tids.items[1..], 1..) |tid, idx| {
+                            operands[idx] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .ray_query_initialize,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = operands,
+                            .ty = .void,
+                        });
+                        self.uses_ray_query = true;
+                        return .{ .ty = .void, .id = result_id };
+                    }
+                    // rayQueryProceedEXT(query) → bool
+                    if (std.mem.eql(u8, node.data.name, "rayQueryProceedEXT")) {
+                        const query_ptr = if (node.data.children.len > 0) self.analyzeLValue(node.data.children[0]) catch arg_tids.items[0] else arg_tids.items[0];
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = query_ptr.id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .ray_query_proceed,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .bool,
+                        });
+                        self.uses_ray_query = true;
+                        return .{ .ty = .bool, .id = result_id };
+                    }
+                    // rayQueryGetIntersectionTypeEXT(query, committed) → uint
+                    if (std.mem.eql(u8, node.data.name, "rayQueryGetIntersectionTypeEXT")) {
+                        const query_ptr = if (node.data.children.len > 0) self.analyzeLValue(node.data.children[0]) catch arg_tids.items[0] else arg_tids.items[0];
+                        // committed arg must be int (GLSL uses true/false → 1/0)
+                        var committed_id = arg_tids.items[1].id;
+                        if (arg_tids.items[1].ty == .bool) {
+                            const conv_id = try self.getConstInt(1, .int);
+                            committed_id = conv_id;
+                        }
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        operands[0] = .{ .id = query_ptr.id };
+                        operands[1] = .{ .id = committed_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .ray_query_get_intersection_type,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .uint,
+                        });
+                        self.uses_ray_query = true;
+                        return .{ .ty = .uint, .id = result_id };
+                    }
+                    // rayQueryGetIntersectionTriangleVertexPositionsEXT(query, committed, out_array)
+                    if (std.mem.eql(u8, node.data.name, "rayQueryGetIntersectionTriangleVertexPositionsEXT")) {
+                        const query_ptr = if (node.data.children.len > 0) self.analyzeLValue(node.data.children[0]) catch arg_tids.items[0] else arg_tids.items[0];
+                        const arr_base = try self.alloc.create(ast.Type);
+                        arr_base.* = .vec3;
+                        const ret_ty: ast.Type = .{ .array = .{ .base = arr_base, .size = 3 } };
+                        try self.heap_types.append(self.alloc, arr_base);
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        operands[0] = .{ .id = query_ptr.id };
+                        var committed_id2 = arg_tids.items[1].id; // committed
+                        if (arg_tids.items[1].ty == .bool) {
+                            committed_id2 = try self.getConstInt(1, .int);
+                        }
+                        operands[1] = .{ .id = committed_id2 };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .ray_query_get_triangle_vertex_positions,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = ret_ty,
+                        });
+                        self.uses_ray_query = true;
+                        self.uses_ray_query_position_fetch = true;
+                        return .{ .ty = ret_ty, .id = result_id };
                     }
                     // === Buffer/SSBO atomics (atomicAdd/Or/Xor/And/Min/Max/Exchange/CompSwap) ===
                     const is_buffer_atomic = std.mem.eql(u8, node.data.name, "atomicAdd") or
@@ -5306,6 +5408,9 @@ const Analyzer = struct {
             "subgroupBarrier", "subgroupElect", "subgroupAll", "subgroupAny", "subgroupAllEqual",
             // QCOM image processing builtins
             "textureBoxFilterQCOM", "textureBlockMatchSADQCOM", "textureBlockMatchSSDQCOM", "textureWeightedQCOM",
+            // Ray query builtins
+            "rayQueryInitializeEXT", "rayQueryProceedEXT", "rayQueryGetIntersectionTypeEXT",
+            "rayQueryGetIntersectionTriangleVertexPositionsEXT",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
