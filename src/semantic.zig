@@ -264,6 +264,7 @@ const Analyzer = struct {
     next_id: u32 = 1,
     // Constant dedup: (type_tag << 32 | value_bits) -> ir_id
     const_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
+    const_composite_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     local_size: ?ir.LocalSize = null,
     // Heap-allocated AST types that transfer to Module for cleanup
     heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
@@ -302,6 +303,7 @@ const Analyzer = struct {
         self.errors.deinit(self.alloc);
         self.loop_stack.deinit(self.alloc);
         self.const_cache.deinit(self.alloc);
+        self.const_composite_cache.deinit(self.alloc);
         {
             var it = self.overloads.iterator();
             while (it.next()) |entry| {
@@ -392,6 +394,21 @@ const Analyzer = struct {
     /// Try to upgrade the last instruction from composite_construct to constant_composite
     /// if all operand IDs reference constant instructions.
     /// Returns true if upgraded.
+    /// Compute a dedup key for a constant composite from its type and operand IDs.
+    fn constCompositeKey(self: *Analyzer, ty: ast.Type, operands: []const ir.Instruction.Operand) u64 {
+        _ = self;
+        var key: u64 = @intFromEnum(ty);
+        for (operands) |op| {
+            const op_val: u64 = switch (op) {
+                .id => |id| id,
+                .literal_int => |v| v,
+                else => 0,
+            };
+            key = key *% 31 +% op_val;
+        }
+        return key;
+    }
+
     fn tryUpgradeToConstantComposite(self: *Analyzer) bool {
         if (self.instructions.items.len == 0) return false;
         const last = &self.instructions.items[self.instructions.items.len - 1];
@@ -405,6 +422,11 @@ const Analyzer = struct {
             }
         }
         last.tag = .constant_composite;
+        // Cache this composite for dedup
+        if (last.result_id) |rid| {
+            const key = self.constCompositeKey(last.ty, last.operands);
+            self.const_composite_cache.put(self.alloc, key, rid) catch {};
+        }
         return true;
     }
 
@@ -4519,13 +4541,16 @@ const Analyzer = struct {
                                 .uvec2, .uvec3, .uvec4 => .uint,
                                 else => .int,
                             };
+                            // Build operand IDs for dedup key (use a single repeated ID)
+                            const splat_comp_id = try self.getConstInt(val, comp_ty);
                             const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, n);
                             for (0..n) |i| {
-                                const comp_id = self.allocId();
-                                const ci_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                                ci_ops[0] = .{ .literal_int = val };
-                                try self.instructions.append(self.alloc, .{ .tag = .constant_int, .result_type = null, .result_id = comp_id, .operands = ci_ops, .ty = comp_ty });
-                                cc_ops[i] = .{ .id = comp_id };
+                                cc_ops[i] = .{ .id = splat_comp_id };
+                            }
+                            // Check cache for existing composite
+                            const key = self.constCompositeKey(result_ty, cc_ops);
+                            if (self.const_composite_cache.get(key)) |existing_id| {
+                                return .{ .ty = result_ty, .id = existing_id };
                             }
                             try self.instructions.append(self.alloc, .{
                                 .tag = .constant_composite,
@@ -4534,6 +4559,7 @@ const Analyzer = struct {
                                 .operands = cc_ops,
                                 .ty = result_ty,
                             });
+                            try self.const_composite_cache.put(self.alloc, key, result_id);
                             return .{ .ty = result_ty, .id = result_id };
                         }
                     }
@@ -4545,12 +4571,14 @@ const Analyzer = struct {
                         if (arg_node.tag == .float_literal) {
                             const val: f32 = @floatCast(arg_node.data.float_val);
                             const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, n);
-                            const comp_id = self.allocId();
-                            const cf_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                            cf_ops[0] = .{ .literal_float = val };
-                            try self.instructions.append(self.alloc, .{ .tag = .constant_float, .result_type = null, .result_id = comp_id, .operands = cf_ops, .ty = .float });
+                            // Use getConstFloat for dedup
+                            const comp_id = try self.getConstFloat(val);
                             for (0..n) |i| {
                                 cc_ops[i] = .{ .id = comp_id };
+                            }
+                            const key = self.constCompositeKey(result_ty, cc_ops);
+                            if (self.const_composite_cache.get(key)) |existing_id| {
+                                return .{ .ty = result_ty, .id = existing_id };
                             }
                             try self.instructions.append(self.alloc, .{
                                 .tag = .constant_composite,
@@ -4559,6 +4587,7 @@ const Analyzer = struct {
                                 .operands = cc_ops,
                                 .ty = result_ty,
                             });
+                            try self.const_composite_cache.put(self.alloc, key, result_id);
                             return .{ .ty = result_ty, .id = result_id };
                         }
                     }
@@ -4828,26 +4857,26 @@ const Analyzer = struct {
                 }
                 if (all_const_ints and (result_ty == .ivec2 or result_ty == .ivec3 or result_ty == .ivec4 or result_ty == .uvec2 or result_ty == .uvec3 or result_ty == .uvec4)) {
                     const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, node.data.children.len);
+                    const comp_ty: ast.Type = switch (result_ty) {
+                        .ivec2, .ivec3, .ivec4 => .int,
+                        .uvec2, .uvec3, .uvec4 => .uint,
+                        else => .int,
+                    };
                     for (node.data.children, 0..) |arg, i| {
                         const val: u32 = blk: {
                             if (arg.tag == .int_literal) break :blk @bitCast(@as(i32, @intCast(arg.data.int_val)));
                             if (arg.tag == .uint_literal) break :blk @intCast(@as(u64, @bitCast(arg.data.int_val)));
-                            // unary minus of int literal
                             if (arg.tag == .unary_op and arg.data.children.len > 0 and arg.data.children[0].tag == .int_literal)
                                 break :blk @bitCast(-@as(i32, @intCast(arg.data.children[0].data.int_val)));
                             break :blk 0;
                         };
-                        // Emit a constant for each component with the correct type
-                        const comp_ty: ast.Type = switch (result_ty) {
-                            .ivec2, .ivec3, .ivec4 => .int,
-                            .uvec2, .uvec3, .uvec4 => .uint,
-                            else => .int,
-                        };
-                        const comp_id = self.allocId();
-                        const ci_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                        ci_ops[0] = .{ .literal_int = val };
-                        try self.instructions.append(self.alloc, .{ .tag = .constant_int, .result_type = null, .result_id = comp_id, .operands = ci_ops, .ty = comp_ty });
+                        const comp_id = try self.getConstInt(val, comp_ty);
                         cc_ops[i] = .{ .id = comp_id };
+                    }
+                    // Check cache
+                    const key = self.constCompositeKey(result_ty, cc_ops);
+                    if (self.const_composite_cache.get(key)) |existing_id| {
+                        return .{ .ty = result_ty, .id = existing_id };
                     }
                     try self.instructions.append(self.alloc, .{
                         .tag = .constant_composite,
@@ -4856,6 +4885,7 @@ const Analyzer = struct {
                         .operands = cc_ops,
                         .ty = result_ty,
                     });
+                    try self.const_composite_cache.put(self.alloc, key, result_id);
                     return .{ .ty = result_ty, .id = result_id };
                 }
                 // Array constructors with all-constant int args: emit as constant_composite
@@ -4870,11 +4900,12 @@ const Analyzer = struct {
                                 if (arg.tag == .uint_literal) break :blk @intCast(@as(u64, @bitCast(arg.data.int_val)));
                                 break :blk 0;
                             };
-                            const comp_id = self.allocId();
-                            const ci_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                            ci_ops[0] = .{ .literal_int = val };
-                            try self.instructions.append(self.alloc, .{ .tag = .constant_int, .result_type = null, .result_id = comp_id, .operands = ci_ops, .ty = base_ty });
+                            const comp_id = try self.getConstInt(val, base_ty);
                             cc_ops[i] = .{ .id = comp_id };
+                        }
+                        const key = self.constCompositeKey(result_ty, cc_ops);
+                        if (self.const_composite_cache.get(key)) |existing_id| {
+                            return .{ .ty = result_ty, .id = existing_id };
                         }
                         try self.instructions.append(self.alloc, .{
                             .tag = .constant_composite,
@@ -4883,6 +4914,7 @@ const Analyzer = struct {
                             .operands = cc_ops,
                             .ty = result_ty,
                         });
+                        try self.const_composite_cache.put(self.alloc, key, result_id);
                         return .{ .ty = result_ty, .id = result_id };
                     }
                 }
@@ -4899,25 +4931,22 @@ const Analyzer = struct {
                 if (all_const_floats and (result_ty == .vec2 or result_ty == .vec3 or result_ty == .vec4)) {
                     const num_comps = result_ty.numComponents();
                     const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
-                    // Check for scalar-to-vector splat (single float literal arg)
                     if (node.data.children.len == 1) {
                         const val: f32 = @floatCast(node.data.children[0].data.float_val);
-                        const comp_id = self.allocId();
-                        const cf_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                        cf_ops[0] = .{ .literal_float = val };
-                        try self.instructions.append(self.alloc, .{ .tag = .constant_float, .result_type = null, .result_id = comp_id, .operands = cf_ops, .ty = .float });
+                        const comp_id = try self.getConstFloat(val);
                         for (0..num_comps) |i| {
                             cc_ops[i] = .{ .id = comp_id };
                         }
                     } else {
                         for (node.data.children, 0..) |arg, i| {
                             const val: f32 = @floatCast(arg.data.float_val);
-                            const comp_id = self.allocId();
-                            const cf_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                            cf_ops[0] = .{ .literal_float = val };
-                            try self.instructions.append(self.alloc, .{ .tag = .constant_float, .result_type = null, .result_id = comp_id, .operands = cf_ops, .ty = .float });
+                            const comp_id = try self.getConstFloat(val);
                             cc_ops[i] = .{ .id = comp_id };
                         }
+                    }
+                    const key = self.constCompositeKey(result_ty, cc_ops);
+                    if (self.const_composite_cache.get(key)) |existing_id| {
+                        return .{ .ty = result_ty, .id = existing_id };
                     }
                     try self.instructions.append(self.alloc, .{
                         .tag = .constant_composite,
@@ -4926,6 +4955,7 @@ const Analyzer = struct {
                         .operands = cc_ops,
                         .ty = result_ty,
                     });
+                    try self.const_composite_cache.put(self.alloc, key, result_id);
                     return .{ .ty = result_ty, .id = result_id };
                 }
 
