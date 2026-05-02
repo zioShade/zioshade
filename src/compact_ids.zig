@@ -693,7 +693,50 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
         pos += wc;
     }
 
-    // Second pass: merge AccessChains where base is a single-use AC result
+    // Identify AC results whose ONLY users are other AccessChain instructions
+    var all_ac_users = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer all_ac_users.deinit();
+    // Initially mark all ACs as having all-AC users
+    var ac_iter = ac_map.iterator();
+    while (ac_iter.next()) |entry| {
+        all_ac_users.set(entry.key_ptr.*);
+    }
+    // Unmark any AC that is referenced by a non-AC instruction
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        if (wc == 0) break;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (opcode != 65) { // Not an AccessChain
+            const info = getOpInfo(opcode) orelse { pos += wc; continue; };
+            var wi: u32 = pos + 1;
+            switch (info.fixed) {
+                1 => { if (wi < pos + wc) { if (wi < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]); wi += 1; } },
+                2 => { if (wi < pos + wc) wi += 1; if (wi < pos + wc) wi += 1; }, // skip result_type + result
+                3 => { if (wi < pos + wc) wi += 1; }, // skip result
+                else => {},
+            }
+            for (info.ops) |ch| {
+                if (wi >= pos + wc) break;
+                switch (ch) {
+                    'i' => { if (wi < bound and words[wi] < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]); wi += 1; },
+                    'I' => { while (wi < pos + wc) : (wi += 1) { if (wi < bound and words[wi] < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]); } },
+                    'l' => { wi += 1; },
+                    'L' => { wi = pos + wc; },
+                    's' => { wi = pos + wc; },
+                    'M' => { if (wi < pos + wc) { wi += 1; while (wi < pos + wc) : (wi += 1) { if (wi < bound and words[wi] < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]); } } },
+                    'W' => { while (wi + 1 < pos + wc) { wi += 1; if (wi < bound and words[wi] < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]); wi += 1; } if (wi < pos + wc) wi += 1; },
+                    else => { wi += 1; },
+                }
+            }
+        }
+        pos += wc;
+    }
+
+    // Second pass: merge AccessChains
+    // For single-use bases: merge as before
+    // For multi-use bases where ALL users are ACs: merge all users with the base
     var result = std.ArrayListUnmanaged(u32){};
     try result.appendSlice(alloc, words[0..5]); // copy header
 
@@ -719,11 +762,18 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
             
             var current_base = base_id;
             while (ac_map.get(current_base)) |base_ac| {
-                // Only merge if the base AC is referenced exactly once (by us)
                 const refs = ref_count.get(current_base) orelse 0;
-                if (refs != 1) break;
-                try index_groups.append(alloc, .{ .start = base_ac.indices_start, .count = base_ac.indices_count });
-                current_base = base_ac.base_id;
+                // Merge if: single-use (refs==1) OR all users are ACs and this base hasn't been merged yet
+                if (refs == 1) {
+                    try index_groups.append(alloc, .{ .start = base_ac.indices_start, .count = base_ac.indices_count });
+                    current_base = base_ac.base_id;
+                } else if (refs > 1 and current_base < bound and all_ac_users.isSet(current_base)) {
+                    // Multi-use base where all users are ACs — safe to merge
+                    try index_groups.append(alloc, .{ .start = base_ac.indices_start, .count = base_ac.indices_count });
+                    current_base = base_ac.base_id;
+                } else {
+                    break;
+                }
             }
 
             if (index_groups.items.len > 1) {
