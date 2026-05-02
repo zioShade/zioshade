@@ -86,7 +86,7 @@ fn getOpInfo(opcode: u16) ?OpInfo {
         87 => rt(2, "iiM"),        // OpImageSampleImplicitLod: sampled, coord, [img-ops]
         88 => rt(2, "iiM"),        // OpImageSampleExplicitLod: sampled, coord, img-ops(mask+IDs)
         89 => rt(2, "iiiM"),       // OpImageSampleDrefImplicitLod: sampled, coord, dref, [img-ops]
-        90 => rt(2, "iiiiM"),      // OpImageSampleDrefExplicitLod
+        90 => rt(2, "iiiM"),        // OpImageSampleDrefExplicitLod: sampled, coord, dref, img-ops
         91 => rt(2, "iiM"),        // OpImageSampleProjImplicitLod
         93 => rt(2, "iiii"),       // OpImageSampleProjDrefImplicitLod
         95 => rt(2, "iiM"),        // OpImageFetch: image, coord, [img-ops]
