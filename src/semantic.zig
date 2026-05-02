@@ -507,9 +507,10 @@ const Analyzer = struct {
             .ty = ty,
         });
         self.load_cache.put(self.alloc, ptr_id, ld) catch {};
-        // Cache in global cache if we're in a dominating block (entry + loop headers)
-        // ALL loads are safe to cache — stores invalidate the cache for the stored ptr_id
-        if (self.cache_globals) {
+        // Cache in global cache:
+        // - Always for global pointers (Input/Uniform/PushConstant/UniformConstant) since their values don't change
+        // - From dominating blocks for other pointers (entry + loop headers)
+        if (self.global_ptr_ids.contains(ptr_id) or self.cache_globals) {
             self.global_load_cache.put(self.alloc, ptr_id, ld) catch {};
         }
         return ld;
