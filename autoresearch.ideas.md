@@ -55,3 +55,13 @@ All output store mismatches resolved. Perfect correctness achieved.
 - **Cross-block load caching**: 322 remaining duplicate loads across block boundaries. Requires dominance analysis.
 - **Additional pure op caching**: vector_shuffle (15 dups), bitcast (15 dups), image_texel_pointer (12 dups). Potential ~40 more IDs but requires restructuring to check cache before allocId.
 - **Total progress**: 10881 → 10175 (-706 IDs, -6.5%)
+
+## Session 2026-05-01 (Phase 4 continued - iteration 2):
+- **Targeted store invalidation**: IMPLEMENTED (-138 IDs). Only remove stored-to ptr from load_cache instead of clearing entire cache. Stores to output vars don't affect uniform/input loads.
+- **Vector shuffle dedup**: IMPLEMENTED (-28 IDs). Converted 5 vector_shuffle emission sites to emitPureOp.
+- **ImageTexelPointer dedup**: IMPLEMENTED (-12 IDs). Converted to emitPureOp.
+- **Transpose dedup attempt**: Works for dedup but doesn't reduce bound (result_id pre-allocated). `next_id -= 1` rollback causes ID collisions in codegen.
+- **Rollback lesson**: `next_id -= 1` is UNSAFE because `module.next_id_start = analyzer.next_id` and codegen starts allocating from that value. Lowering it causes codegen IDs to collide with IR IDs.
+- **CompositeConstruct dedup**: Only 2 duplicates across all shaders. Not worth converting.
+- **Remaining duplicates**: 291 total. 190 OpLoad (cross-block), 21 OpAccessChain (cross-block), 18 OpBitcast (pre-allocated). Need dominance analysis or pre-allocation restructuring for further gains.
+- **Total progress this session**: 10881 → 9997 (-884 IDs, -8.1%)
