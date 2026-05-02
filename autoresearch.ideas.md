@@ -65,3 +65,14 @@ All output store mismatches resolved. Perfect correctness achieved.
 - **CompositeConstruct dedup**: Only 2 duplicates across all shaders. Not worth converting.
 - **Remaining duplicates**: 291 total. 190 OpLoad (cross-block), 21 OpAccessChain (cross-block), 18 OpBitcast (pre-allocated). Need dominance analysis or pre-allocation restructuring for further gains.
 - **Total progress this session**: 10881 → 9997 (-884 IDs, -8.1%)
+
+## Session 2026-05-01 (Phase 4 - iteration 3):
+- **Cross-block load caching for global pointers**: IMPLEMENTED (-36 IDs). global_load_cache persists across blocks (only cleared at function boundaries). Only populated from entry block to avoid dominance violations.
+- **Dominance pitfall**: Can only cache loads from the entry block (which dominates all blocks). Caching from conditional blocks causes "ID does not dominate its use" spirv-val errors.
+- **Remaining 157 OpLoad duplicates**: Cross-block loads from non-entry blocks, function-local pointers, sub-function loads. Would need per-block load caching with dominance analysis for further gains.
+- **Total progress**: 10881 → 9961 (-920 IDs, -8.5%), all 7 optimizations combined.
+- **Future ideas**:
+  - Per-function global_load_cache (pre-populate from entry block, pass to sub-functions)
+  - AccessChain caching across blocks (currently cleared at labels for dominance safety)
+  - Pre-allocation restructuring for transpose/bitcast to enable emitPureOp for those ops
+  - Dead code elimination at IR level (568 dead IDs, but doesn't reduce bound without compaction)
