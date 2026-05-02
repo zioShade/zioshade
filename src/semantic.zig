@@ -2950,6 +2950,46 @@ const Analyzer = struct {
                             break :blk existing_id;
                         }
                     }
+                    // Bitcast builtins: compute target type and check cache
+                    if (std.mem.eql(u8, node.data.name, "floatBitsToUint") or
+                        std.mem.eql(u8, node.data.name, "floatBitsToInt") or
+                        std.mem.eql(u8, node.data.name, "intBitsToFloat") or
+                        std.mem.eql(u8, node.data.name, "uintBitsToFloat"))
+                    {
+                        const arg_ty = arg_tids.items[0].ty;
+                        const bitcast_ty: ast.Type = blk2: {
+                            if (std.mem.eql(u8, node.data.name, "floatBitsToUint")) {
+                                if (arg_ty == .float) break :blk2 .uint;
+                                if (arg_ty == .vec2) break :blk2 .uvec2;
+                                if (arg_ty == .vec3) break :blk2 .uvec3;
+                                if (arg_ty == .vec4) break :blk2 .uvec4;
+                            }
+                            if (std.mem.eql(u8, node.data.name, "floatBitsToInt")) {
+                                if (arg_ty == .float) break :blk2 .int;
+                                if (arg_ty == .vec2) break :blk2 .ivec2;
+                                if (arg_ty == .vec3) break :blk2 .ivec3;
+                                if (arg_ty == .vec4) break :blk2 .ivec4;
+                            }
+                            if (std.mem.eql(u8, node.data.name, "intBitsToFloat")) {
+                                if (arg_ty == .int) break :blk2 .float;
+                                if (arg_ty == .ivec2) break :blk2 .vec2;
+                                if (arg_ty == .ivec3) break :blk2 .vec3;
+                                if (arg_ty == .ivec4) break :blk2 .vec4;
+                            }
+                            if (std.mem.eql(u8, node.data.name, "uintBitsToFloat")) {
+                                if (arg_ty == .uint) break :blk2 .float;
+                                if (arg_ty == .uvec2) break :blk2 .vec2;
+                                if (arg_ty == .uvec3) break :blk2 .vec3;
+                                if (arg_ty == .uvec4) break :blk2 .vec4;
+                            }
+                            break :blk2 result_ty;
+                        };
+                        var key: u64 = @intFromEnum(bitcast_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.bitcast);
+                        key = key *% 31 +% @as(u64, arg_tids.items[0].id);
+                        if (self.pure_op_cache.get(key)) |existing_id| {
+                            break :blk existing_id;
+                        }
+                    }
                     break :blk null;
                 };
                 if (maybe_cached_builtin) |cached_id| {
@@ -3308,23 +3348,15 @@ const Analyzer = struct {
                         // Convert value to match return type if needed
                         var value_id = if (arg_tids.items.len > 1) arg_tids.items[1].id else 0;
                         if (arg_tids.items.len > 1 and !std.meta.eql(arg_tids.items[1].ty, ret_ty)) {
-                            const converted = self.allocId();
-                            const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                            conv_ops[0] = .{ .id = arg_tids.items[1].id };
                             const conv_tag: ir.Instruction.Tag = blk: {
                                 if (ret_ty == .uint and arg_tids.items[1].ty == .int) break :blk .convert_iti;
                                 if (ret_ty == .int and arg_tids.items[1].ty == .uint) break :blk .convert_uti;
                                 if (ret_ty == .float) break :blk .convert_itof;
                                 break :blk .bitcast;
                             };
-                            try self.instructions.append(self.alloc, .{
-                                .tag = conv_tag,
-                                .result_type = null,
-                                .result_id = converted,
-                                .operands = conv_ops,
-                                .ty = ret_ty,
-                            });
-                            value_id = converted;
+                            const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            conv_ops[0] = .{ .id = arg_tids.items[1].id };
+                            value_id = try self.emitPureOp(conv_tag, conv_ops, ret_ty);
                         }
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                         operands[0] = .{ .id = ptr_tid.id };
@@ -4177,6 +4209,10 @@ const Analyzer = struct {
                             .operands = operands,
                             .ty = bitcast_ty,
                         });
+                        // Cache for dedup
+                        var bc_key: u64 = @intFromEnum(bitcast_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.bitcast);
+                        bc_key = bc_key *% 31 +% @as(u64, arg_tids.items[0].id);
+                        self.pure_op_cache.put(self.alloc, bc_key, result_id) catch {};
                         return .{ .ty = bitcast_ty, .id = result_id };
                     } else {
                         const glsl_id = self.glslExtInstruction(node.data.name) orelse 1;
@@ -4221,16 +4257,9 @@ const Analyzer = struct {
                                     break :blk null;
                                 };
                                 if (conv_tag) |tag| {
-                                    const conv_id = self.allocId();
                                     const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                                     conv_ops[0] = .{ .id = arg_tids.items[0].id };
-                                    try self.instructions.append(self.alloc, .{
-                                        .tag = tag,
-                                        .result_type = null,
-                                        .result_id = conv_id,
-                                        .operands = conv_ops,
-                                        .ty = result_ty,
-                                    });
+                                    const conv_id = try self.emitPureOp(tag, conv_ops, result_ty);
                                     return .{ .ty = result_ty, .id = conv_id };
                                 }
                             }
@@ -4438,16 +4467,9 @@ const Analyzer = struct {
                             }
                             break :blk .convert_ftoi;
                         };
-                        const conv_id = self.allocId();
                         const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         conv_ops[0] = .{ .id = extract_id };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = conv_tag,
-                            .result_type = null,
-                            .result_id = conv_id,
-                            .operands = conv_ops,
-                            .ty = result_ty,
-                        });
+                        const conv_id = try self.emitPureOp(conv_tag, conv_ops, result_ty);
                         return .{ .ty = result_ty, .id = conv_id };
                     }
                 }
@@ -4590,17 +4612,9 @@ const Analyzer = struct {
                             if (self.getConversionTag(result_scalar, splat_ty)) |tag| break :blk tag;
                             break :blk .composite_construct;
                         };
-                        const conv_id = self.allocId();
                         const conv_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         conv_operands[0] = .{ .id = splat_id };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = conv_tag,
-                            .result_type = null,
-                            .result_id = conv_id,
-                            .operands = conv_operands,
-                            .ty = result_scalar,
-                        });
-                        splat_id = conv_id;
+                        splat_id = try self.emitPureOp(conv_tag, conv_operands, result_scalar);
                     }
                     // Scalar splat — check if arg is a literal and result is int/uint vector
                     if ((arg_tids.items[0].ty == .int or arg_tids.items[0].ty == .uint) and
@@ -4709,17 +4723,10 @@ const Analyzer = struct {
                         if (self.getConversionTag(to, from)) |tag| break :blk tag;
                         break :blk .composite_construct; // fallback
                     };
-                    const result_id2 = self.allocId();
                     const conv_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                     conv_operands[0] = .{ .id = arg_tids.items[0].id };
-                    try self.instructions.append(self.alloc, .{
-                        .tag = conv_tag,
-                        .result_type = null,
-                        .result_id = result_id2,
-                        .operands = conv_operands,
-                        .ty = result_ty,
-                    });
-                    return .{ .ty = result_ty, .id = result_id2 };
+                    const conv_result = try self.emitPureOp(conv_tag, conv_operands, result_ty);
+                    return .{ .ty = result_ty, .id = conv_result };
                 }
 
                 // Matrix-to-matrix conversion: mat3(mat4_m) → extract columns, shrink, build smaller matrix
@@ -4859,7 +4866,6 @@ const Analyzer = struct {
                             if (self.getConversionTag(result_scalar, arg_scalar)) |tag| break :blk tag;
                             break :blk .composite_construct;
                         };
-                        const conv_id = self.allocId();
                         const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         conv_ops[0] = .{ .id = arg_id };
                         const conv_result_ty: ast.Type = if (arg_ty.isVector()) blk: {
@@ -4887,14 +4893,7 @@ const Analyzer = struct {
                                 else => result_ty,
                             };
                         } else result_scalar;
-                        try self.instructions.append(self.alloc, .{
-                            .tag = conv_tag,
-                            .result_type = null,
-                            .result_id = conv_id,
-                            .operands = conv_ops,
-                            .ty = conv_result_ty,
-                        });
-                        arg_id = conv_id;
+                        arg_id = try self.emitPureOp(conv_tag, conv_ops, conv_result_ty);
                     }
                     converted_ids[i] = arg_id;
                 }
