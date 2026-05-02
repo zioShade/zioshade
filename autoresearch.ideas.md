@@ -1,9 +1,9 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 199/199 spirv-val, 0/199 mismatches, 0 failures
-## Best commit: 1fc1356 (ID compaction)
-## Total bound: 8177 across 199 shaders (-24.9% from 10881)
-## After spirv-opt --compact-ids: 8149 (28 IDs lower than our compaction)
+## Best commit: 26b3969 (DCE + ID compaction)
+## Total bound: 8059 across 199 shaders (-25.9% from 10881)
+## After spirv-opt --compact-ids: also 8059 (we match!)
 
 ## PHASE 4: SPIR-V Output Size Optimization
 - Baseline: 10881 total bound across 199 shaders

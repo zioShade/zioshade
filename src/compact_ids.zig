@@ -505,33 +505,34 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     }.check;
 
     // Iterative DCE
+    var current_words = words;
     for (0..5) |_| {
         // Find dead instructions
         var any_removed = false;
-        var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+        var result = std.ArrayList(u32).initCapacity(alloc, current_words.len) catch return current_words;
         // Copy header
-        result.appendSliceAssumeCapacity(words[0..5]);
+        result.appendSliceAssumeCapacity(current_words[0..5]);
 
         pos = 5;
-        while (pos < words.len) {
-            const hdr = words[pos];
+        while (pos < current_words.len) {
+            const hdr = current_words[pos];
             const wc: u32 = hdr >> 16;
             const opcode: u16 = @truncate(hdr & 0xFFFF);
             if (wc == 0) break;
             const inst_end = pos + wc;
-            if (inst_end > words.len) break;
+            if (inst_end > current_words.len) break;
 
             // Check if this instruction is dead
             if (is_dead_safe(opcode)) {
                 const info = getOpInfo(opcode) orelse {
-                    result.appendSliceAssumeCapacity(words[pos..inst_end]);
+                    result.appendSliceAssumeCapacity(current_words[pos..inst_end]);
                     pos = inst_end;
                     continue;
                 };
                 var result_id: ?u32 = null;
                 switch (info.fixed) {
-                    2 => { if (pos + 2 < inst_end) result_id = words[pos + 2]; },
-                    3 => { if (pos + 1 < inst_end) result_id = words[pos + 1]; },
+                    2 => { if (pos + 2 < inst_end) result_id = current_words[pos + 2]; },
+                    3 => { if (pos + 1 < inst_end) result_id = current_words[pos + 1]; },
                     else => {},
                 }
                 if (result_id) |rid| {
@@ -544,7 +545,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 }
             }
 
-            result.appendSliceAssumeCapacity(words[pos..inst_end]);
+            result.appendSliceAssumeCapacity(current_words[pos..inst_end]);
             pos = inst_end;
         }
 
@@ -554,8 +555,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         }
 
         // Rebuild referenced set for next iteration
-        const new_words = result.toOwnedSlice(alloc) catch return words;
-        // Recompute referenced on new_words
+        const new_words = result.toOwnedSlice(alloc) catch return current_words;
         var ri: usize = 0;
         while (ri < bound) : (ri += 1) referenced.unset(ri);
         pos = 5;
@@ -590,11 +590,9 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             }
             pos = ie2;
         }
-        // Use new_words as input for next iteration or final result
-        // Note: old `words` slice is owned by caller, don't free here
-        // Return new_words which will be compacted next
-        return new_words;
+        // Use new_words as input for next iteration
+        current_words = new_words;
     }
 
-    return words;
+    return current_words;
 }
