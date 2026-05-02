@@ -504,6 +504,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 39 => true, // TypeForwardPointer
                 4472, 5341, 4163 => true, // TypeRayQueryKHR, TypeAccelerationStructureKHR, TypeTensorARM
                 59 => true, // OpVariable (Function-local only — safe to remove if unreferenced)
+                4428, 4429 => true, // OpSubgroupAllKHR, OpSubgroupAnyKHR (pure)
                 else => false,
             };
         }
