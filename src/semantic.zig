@@ -2898,6 +2898,24 @@ const Analyzer = struct {
                     arg_tids.items[0].ty
                 else if (sym) |s| s.ty
                 else .void;
+
+                // Pre-check pure op cache for known pure GLSL builtins BEFORE allocating result_id.
+                const maybe_cached_builtin: ?u32 = blk: {
+                    if (std.mem.eql(u8, node.data.name, "transpose")) {
+                        var key: u64 = @intFromEnum(result_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.transpose);
+                        for (arg_tids.items) |tid| {
+                            key = key *% 31 +% tid.id;
+                        }
+                        if (self.pure_op_cache.get(key)) |existing_id| {
+                            break :blk existing_id;
+                        }
+                    }
+                    break :blk null;
+                };
+                if (maybe_cached_builtin) |cached_id| {
+                    return .{ .ty = result_ty, .id = cached_id };
+                }
+
                 const result_id = self.allocId();
 
                 if (self.isGLSLBuiltin(node.data.name)) {
@@ -3747,6 +3765,12 @@ const Analyzer = struct {
                             .operands = operands,
                             .ty = result_ty,
                         });
+                        // Cache for dedup
+                        var key: u64 = @intFromEnum(result_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.transpose);
+                        for (arg_tids.items) |tid| {
+                            key = key *% 31 +% tid.id;
+                        }
+                        self.pure_op_cache.put(self.alloc, key, result_id) catch {};
                     } else if (std.mem.eql(u8, node.data.name, "dFdx") or std.mem.eql(u8, node.data.name, "dFdy") or
                               std.mem.eql(u8, node.data.name, "dFdxFine") or std.mem.eql(u8, node.data.name, "dFdyFine") or
                               std.mem.eql(u8, node.data.name, "dFdxCoarse") or std.mem.eql(u8, node.data.name, "dFdyCoarse")) {
@@ -4256,6 +4280,27 @@ const Analyzer = struct {
                     }
                     break :blk ty;
                 };
+
+                // Pre-check pure op cache for known pure operations BEFORE allocating result_id.
+                // This avoids wasting IDs when the same pure op is computed multiple times.
+                const maybe_cached_id: ?u32 = blk: {
+                    if (std.mem.eql(u8, node.data.name, "transpose")) {
+                        var key: u64 = @intFromEnum(result_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.transpose);
+                        for (arg_tids.items) |tid| {
+                            key = key *% 31 +% tid.id;
+                        }
+                        if (self.pure_op_cache.get(key)) |existing_id| {
+                            break :blk existing_id;
+                        }
+                        break :blk null;
+                    }
+                    // Add more pure ops here (bitcast, etc.)
+                    break :blk null;
+                };
+                if (maybe_cached_id) |cached_id| {
+                    return .{ .ty = result_ty, .id = cached_id };
+                }
+
                 const result_id = self.allocId();
 
                 // Handle sampler2D(tex, samp) → OpSampledImage (separate sampler/texture)
