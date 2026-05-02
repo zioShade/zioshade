@@ -2247,21 +2247,28 @@ const Analyzer = struct {
                         } else {
                             // Splat left scalar to vector
                             const num_comps = result_ty.numComponents();
-                            const splat_id = self.allocId();
+                            // Check const_composite_cache for existing splat
                             const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
                             for (0..num_comps) |i| {
                                 splat_operands[i] = .{ .id = left_id };
                             }
-                            try self.instructions.append(self.alloc, .{
-                                .tag = .composite_construct,
-                                .result_type = null,
-                                .result_id = splat_id,
-                                .operands = splat_operands,
-                                .ty = result_ty,
-                            });
-                            _ = self.tryUpgradeToConstantComposite();
-                            left_id = splat_id;
-                            did_splat = true;
+                            const splat_key = self.constCompositeKey(result_ty, splat_operands);
+                            if (self.const_composite_cache.get(splat_key)) |existing_id| {
+                                left_id = existing_id;
+                                did_splat = true;
+                            } else {
+                                const splat_id = self.allocId();
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .composite_construct,
+                                    .result_type = null,
+                                    .result_id = splat_id,
+                                    .operands = splat_operands,
+                                    .ty = result_ty,
+                                });
+                                _ = self.tryUpgradeToConstantComposite();
+                                left_id = splat_id;
+                                did_splat = true;
+                            }
                         }
                     } else if (!left.ty.isScalar() and right.ty.isScalar()) {
                         // Check if we can use vector-scalar op instead of splat
@@ -2271,21 +2278,27 @@ const Analyzer = struct {
                         } else {
                             // Splat right scalar to vector
                             const num_comps = result_ty.numComponents();
-                            const splat_id = self.allocId();
                             const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
                             for (0..num_comps) |i| {
                                 splat_operands[i] = .{ .id = right_id };
                             }
-                            try self.instructions.append(self.alloc, .{
-                                .tag = .composite_construct,
-                                .result_type = null,
-                                .result_id = splat_id,
-                                .operands = splat_operands,
-                                .ty = result_ty,
-                            });
-                            _ = self.tryUpgradeToConstantComposite();
-                            right_id = splat_id;
-                            did_splat = true;
+                            const splat_key = self.constCompositeKey(result_ty, splat_operands);
+                            if (self.const_composite_cache.get(splat_key)) |existing_id| {
+                                right_id = existing_id;
+                                did_splat = true;
+                            } else {
+                                const splat_id = self.allocId();
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .composite_construct,
+                                    .result_type = null,
+                                    .result_id = splat_id,
+                                    .operands = splat_operands,
+                                    .ty = result_ty,
+                                });
+                                _ = self.tryUpgradeToConstantComposite();
+                                right_id = splat_id;
+                                did_splat = true;
+                            }
                         }
                     }
                 }
@@ -2593,16 +2606,21 @@ const Analyzer = struct {
                                         for (0..swizzle_len) |i| {
                                             splat_ops[i] = .{ .id = value.id };
                                         }
-                                        const splat_id = self.allocId();
-                                        try self.instructions.append(self.alloc, .{
-                                            .tag = .composite_construct,
-                                            .result_type = null,
-                                            .result_id = splat_id,
-                                            .operands = splat_ops,
-                                            .ty = swizzled_ty,
-                                        });
-                                        _ = self.tryUpgradeToConstantComposite();
-                                        value_id = splat_id;
+                                        const splat_key = self.constCompositeKey(swizzled_ty, splat_ops);
+                                        if (self.const_composite_cache.get(splat_key)) |existing_id| {
+                                            value_id = existing_id;
+                                        } else {
+                                            const splat_id = self.allocId();
+                                            try self.instructions.append(self.alloc, .{
+                                                .tag = .composite_construct,
+                                                .result_type = null,
+                                                .result_id = splat_id,
+                                                .operands = splat_ops,
+                                                .ty = swizzled_ty,
+                                            });
+                                            _ = self.tryUpgradeToConstantComposite();
+                                            value_id = splat_id;
+                                        }
                                     }
 
                                     // 4. Apply the compound operation
