@@ -3521,16 +3521,9 @@ const Analyzer = struct {
                             arg_tids.items[0].ty == .sampler_cube_array_shadow or
                             arg_tids.items[0].ty == .isampler1d_array or arg_tids.items[0].ty == .usampler1d_array)
                         {
-                            const extracted = self.allocId();
                             const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ext_ops[0] = .{ .id = arg_tids.items[0].id };
-                            try self.instructions.append(self.alloc, .{
-                                .tag = .extract_image,
-                                .result_type = null,
-                                .result_id = extracted,
-                                .operands = ext_ops,
-                                .ty = arg_tids.items[0].ty,
-                            });
+                            const extracted = try self.emitPureOp(.extract_image, ext_ops, arg_tids.items[0].ty);
                             img_id = extracted;
                         }
                         if (arg_tids.items.len > 1) {
@@ -3569,16 +3562,9 @@ const Analyzer = struct {
                             arg_tids.items[0].ty == .sampler_cube_array_shadow
                         )
                         {
-                            const extracted = self.allocId();
                             const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ext_ops[0] = .{ .id = arg_tids.items[0].id };
-                            try self.instructions.append(self.alloc, .{
-                                .tag = .extract_image,
-                                .result_type = null,
-                                .result_id = extracted,
-                                .operands = ext_ops,
-                                .ty = arg_tids.items[0].ty,
-                            });
+                            const extracted = try self.emitPureOp(.extract_image, ext_ops, arg_tids.items[0].ty);
                             img_id = extracted;
                         }
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
@@ -3664,16 +3650,9 @@ const Analyzer = struct {
                         var img_id = arg_tids.items[0].id;
                         if (arg_tids.items[0].ty.isCombinedSampler() or
                             arg_tids.items[0].ty == .sampler2d_ms or arg_tids.items[0].ty == .sampler2d_ms_array) {
-                            const extracted = self.allocId();
                             const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ext_ops[0] = .{ .id = arg_tids.items[0].id };
-                            try self.instructions.append(self.alloc, .{
-                                .tag = .extract_image,
-                                .result_type = null,
-                                .result_id = extracted,
-                                .operands = ext_ops,
-                                .ty = arg_tids.items[0].ty,
-                            });
+                            const extracted = try self.emitPureOp(.extract_image, ext_ops, arg_tids.items[0].ty);
                             img_id = extracted;
                         }
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
@@ -3765,16 +3744,9 @@ const Analyzer = struct {
                             // If first arg is a sampler, extract image first
                             const fetch_args = arg_tids.items;
                             if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler3d or fetch_args[0].ty == .sampler2d_array or fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array or fetch_args[0].ty == .sampler_cube or fetch_args[0].ty == .sampler_buffer or fetch_args[0].ty == .sampler1d or fetch_args[0].ty == .isampler2d or fetch_args[0].ty == .usampler2d or fetch_args[0].ty == .isampler3d or fetch_args[0].ty == .usampler3d or fetch_args[0].ty == .isampler_cube or fetch_args[0].ty == .usampler_cube or fetch_args[0].ty == .isampler2d_array or fetch_args[0].ty == .usampler2d_array or fetch_args[0].ty == .isampler2d_ms or fetch_args[0].ty == .usampler2d_ms or fetch_args[0].ty == .isampler2d_ms_array or fetch_args[0].ty == .usampler2d_ms_array or fetch_args[0].ty == .isampler_buffer or fetch_args[0].ty == .usampler_buffer or fetch_args[0].ty == .isampler1d or fetch_args[0].ty == .usampler1d)) {
-                                const extracted_id = self.allocId();
                                 const extract_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                                 extract_operands[0] = .{ .id = fetch_args[0].id };
-                                try self.instructions.append(self.alloc, .{
-                                    .tag = .extract_image,
-                                    .result_type = null,
-                                    .result_id = extracted_id,
-                                    .operands = extract_operands,
-                                    .ty = fetch_args[0].ty, // pass sampler type so codegen can find correct inner image ID
-                                });
+                                const extracted_id = try self.emitPureOp(.extract_image, extract_operands, fetch_args[0].ty);
                                 // Replace first arg with extracted image
                                 var new_args = try self.alloc.alloc(ir.Instruction.Operand, fetch_args.len);
                                 new_args[0] = .{ .id = extracted_id };
@@ -5229,20 +5201,13 @@ const Analyzer = struct {
             .swizzle_access => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
                 const base = try self.analyzeExpression(node.data.children[0]);
-                const result_id = self.allocId();
                 // Single-component swizzle → CompositeExtract
                 if (node.data.name.len == 1) {
                     const idx = self.swizzleIndex(node.data.name[0]);
                     const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                     operands[0] = .{ .id = base.id };
                     operands[1] = .{ .literal_int = idx };
-                    try self.instructions.append(self.alloc, .{
-                        .tag = .composite_extract,
-                        .result_type = null,
-                        .result_id = result_id,
-                        .operands = operands,
-                        .ty = base.ty.elementType(),
-                    });
+                    const result_id = try self.emitPureOp(.composite_extract, operands, base.ty.elementType());
                     return .{ .ty = base.ty.elementType(), .id = result_id };
                 }
                 // Multi-component swizzle: simplified, just return base for now
