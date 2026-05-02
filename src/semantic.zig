@@ -4163,6 +4163,12 @@ const Analyzer = struct {
                             }
                             break :blk result_ty;
                         };
+                        // Check pure_op_cache for dedup before emitting
+                        var bc_key: u64 = @intFromEnum(bitcast_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.bitcast);
+                        bc_key = bc_key *% 31 +% @as(u64, arg_tids.items[0].id);
+                        if (self.pure_op_cache.get(bc_key)) |existing_id| {
+                            return .{ .ty = bitcast_ty, .id = existing_id };
+                        }
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         operands[0] = .{ .id = arg_tids.items[0].id };
                         try self.instructions.append(self.alloc, .{
@@ -4173,8 +4179,6 @@ const Analyzer = struct {
                             .ty = bitcast_ty,
                         });
                         // Cache for dedup
-                        var bc_key: u64 = @intFromEnum(bitcast_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.bitcast);
-                        bc_key = bc_key *% 31 +% @as(u64, arg_tids.items[0].id);
                         self.pure_op_cache.put(self.alloc, bc_key, result_id) catch {};
                         return .{ .ty = bitcast_ty, .id = result_id };
                     } else {
@@ -4384,6 +4388,12 @@ const Analyzer = struct {
                             }
                             const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ops[0] = .{ .id = ptr_id };
+                            // Check cache for dedup
+                            var bc_key2: u64 = @intFromEnum(result_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.bitcast);
+                            bc_key2 = bc_key2 *% 31 +% @as(u64, ptr_id);
+                            if (self.pure_op_cache.get(bc_key2)) |existing_id| {
+                                return .{ .ty = result_ty, .id = existing_id };
+                            }
                             try self.instructions.append(self.alloc, .{
                                 .tag = .bitcast,
                                 .result_type = null,
@@ -4391,6 +4401,7 @@ const Analyzer = struct {
                                 .operands = ops,
                                 .ty = result_ty,
                             });
+                            self.pure_op_cache.put(self.alloc, bc_key2, result_id) catch {};
                             return .{ .ty = result_ty, .id = result_id };
                         }
                     }
@@ -4531,14 +4542,8 @@ const Analyzer = struct {
                         };
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         operands[0] = .{ .id = arg_tids.items[0].id };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = conv_tag,
-                            .result_type = null,
-                            .result_id = result_id,
-                            .operands = operands,
-                            .ty = result_ty,
-                        });
-                        return .{ .ty = result_ty, .id = result_id };
+                        const conv_id = try self.emitPureOp(conv_tag, operands, result_ty);
+                        return .{ .ty = result_ty, .id = conv_id };
                     }
 
                     // Convert scalar type if needed (e.g., vec4(int_val) → convert int→float first)
