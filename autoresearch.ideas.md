@@ -1,169 +1,105 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 199/199 spirv-val, 0/199 mismatches, 0 failures
-## Commit: 565b1ac (Codegen dref extraction cache)
-
-## CURRENT METRICS:
-- 199/199 spirv-val ✅
-- 0/199 output store mismatches (100% match!) ✅
-- 0 total failures ✅
-- 149/149 gap tests ✅
-- Total bound: 9809 across 199 shaders (-9.9% from 10881)
-
-## PHASE 1 COMPLETE ✅
-All output store mismatches resolved. Perfect correctness achieved.
+## Best commit: 0252972 (Store-to-load forwarding)
+## Total bound: 9721 across 199 shaders (-10.6% from 10881)
 
 ## PHASE 4: SPIR-V Output Size Optimization
 - Baseline: 10881 total bound across 199 shaders
-- Current: 9809 (-1072 IDs, -9.9%)
+- Current: 9721 (-1160 IDs, -10.6%)
 - Average ratio vs glslang: ~0.79x (we're already smaller on average)
 
-## OPTIMIZATIONS IMPLEMENTED (this session):
+## OPTIMIZATIONS IMPLEMENTED (all sessions combined):
 1. Semantic-level constant composite dedup (-309 IDs)
 2. AccessChain caching within basic blocks (-217 IDs)
 3. Load caching within basic blocks (-168 IDs)
-4. Pure op CSE for composite_extract (-12 IDs)
-5. Targeted store invalidation (-138 IDs)
-6. Vector shuffle dedup via emitPureOp (-28 IDs)
-7. ImageTexelPointer dedup via emitPureOp (-12 IDs)
+4. Targeted store invalidation (-138 IDs)
+5. Store-to-load forwarding (-119 IDs)
+6. Index access via emitAccessChainCached + emitPureOp (-34 IDs)
+7. Struct layout dedup in codegen (-41 IDs)
 8. Cross-block load caching for global pointers from entry block (-36 IDs)
-9. Scalar splat constant composite cache (-8 IDs)
-10. General composite_construct fallback cache (-2 IDs)
-11. Struct layout dedup in codegen (-41 IDs)
-12. Conversion sites to emitPureOp (-17 IDs)
-13. Unary op emitPureOp (-9 IDs)
-14. Binary op pure_op_cache pre-check (-15 IDs)
-15. Extract image dedup via emitPureOp (-4 IDs)
-16. Index access via emitAccessChainCached + emitPureOp (-34 IDs)
-17. Codegen dref extraction + coordinate shrink cache (-6 IDs)
+9. Vector shuffle dedup via emitPureOp (-28 IDs)
+10. Conversion sites to emitPureOp (-17 IDs)
+11. Binary op pure_op_cache pre-check (-15 IDs)
+12. Global AccessChain cache from entry block (-15 IDs)
+13. Scalar splat constant composite cache (-8 IDs)
+14. Unary op emitPureOp (-9 IDs)
+15. Codegen dref extraction + coordinate shrink cache (-6 IDs)
+16. Extract image dedup via emitPureOp (-4 IDs)
+17. Composite construct dedup via emitPureOp (-3 IDs)
+18. Loop header global cache (-1 ID)
 
-## REMAINING OPTIMIZATION OPPORTUNITIES:
-- **Dead constant elimination**: 45 constant IDs wasted. Attempted but caused +1 regression because type references (OpTypeArray size) weren't tracked in the scan. Need to also scan type emissions for constant references.
-- **Dead label elimination**: 276 unreferenced label IDs. Would require ID compaction pass or restructuring block emission.
-- **Dead function call/load elimination**: 43 unused function call results + 39 unused loads. These feed into dead stores. Requires multi-pass dead code elimination.
-- **Cross-block load caching with dominance analysis**: 92 OpLoad duplicates, all cross-block. Would save ~92 IDs.
-- **ID compaction pass**: 488 total wasted IDs (5.0% of bound). Would require complete opcode ID-position table for safe remapping. Complex but highest potential impact.
-- **Store-to-load forwarding to global cache**: Tried but no effect — stores to global pointers rarely happen in dominating blocks.
+## CORRECTNESS FIXES:
+- Fixed global_load_cache invalidation bug in 6 store handlers (compound_assign, assign_op, swizzle assign, pre/post increment, output stores). Was causing stale load results to be reused after stores to global pointers.
 
-## CURRENT METRICS:
-- 199/199 spirv-val ✅
-- 0/199 output store mismatches (100% match!) ✅
-- 0 total failures ✅
-- 149/149 gap tests ✅
-- Total bound: 10881 across 199 shaders
+## REMAINING WASTE ANALYSIS (488 IDs, 5.0% of bound):
+- OpLabel: 276 (unreferenced labels from dead blocks)
+- OpFunctionCall: 43 (unused results from void-context calls)
+- OpLoad: 39 (loads feeding dead stores)
+- OpConstant: 29 (constants defined but never referenced in output)
+- OpConstantComposite: 16 (composite constants never referenced)
+- OpAtomicIAdd/And/Or/Xor: 26 (atomic return values discarded)
+- OpBitcast: 8 (unused conversion results)
+- Other: 51
 
-## PHASE 1 COMPLETE ✅
-All output store mismatches resolved. Perfect correctness achieved.
+## REMAINING DUPLICATES (426 total):
+- OpVariable: 208 (can't dedup — each is unique storage)
+- OpLoad: 92 (ALL cross-block — need dominance analysis)
+- OpFunctionParameter: 45 (can't dedup)
+- OpFunction: 40 (can't dedup)
+- OpAccessChain: 11 (cross-block)
+- OpBitcast: 4 (pre-allocated result_id)
+- OpExtInst: 3 (pre-allocated result_id)
+- OpFunctionCall: 3 (side effects, can't dedup)
+- OpConvertSToF: 3 (cross-block, in switch cases)
+- Other arithmetic: ~14 (all cross-block)
 
-## PHASE 4: SPIR-V Output Size Optimization
-- Baseline: 10881 total bound across 199 shaders
-- Average ratio vs glslang: ~0.79x (we're already smaller on average)
-- Some shaders are 2x+ larger than glslang (atomic.comp, array-of-buffer-reference)
+## HOW TO CONTINUE IN NEXT SESSION
 
-## OPTIMIZATION IDEAS:
-- **Constant composite dedup in codegen**: Prevents emitting duplicate OpConstantComposite instructions. Works but doesn't reduce bound (IDs pre-allocated in semantic analysis). Reduces actual binary size.
-- **ID compaction pass**: Remap SPIR-V IDs to eliminate gaps from dedup. Requires full opcode table for correct ID position identification. Complex but high impact.
-- **Semantic-level constant composite dedup**: Before allocId(), check if same (type, operands) already exists. Would reduce bound by preventing duplicate ID allocation.
-- **Dead constant elimination**: Remove constants that are defined but never referenced. Requires use-def analysis across all sections.
-- **Type dedup improvements**: Already done for simple types, tensor types. Could extend to struct types with same layout.
-- **Instruction selection**: Some patterns emit more instructions than needed (e.g., separate OpBitcast for each int→uint conversion when a single OpCompositeConstruct with type coercion would suffice).
+### Option A: ID Compaction Pass (highest potential, ~488 IDs)
+Implement a post-processing pass that remaps SPIR-V IDs to eliminate gaps:
+1. Parse the SPIR-V binary instruction by instruction
+2. Collect all defined IDs and all referenced IDs
+3. Build compact mapping: old_id → new_id (sequential, no gaps)
+4. Rewrite all ID references using the mapping
+5. Update the Bound header field
 
-## IMPLEMENTED THIS SESSION (Phase 1):
-1. ARM tensor type support (tensorARM<type,N>, OpTypeTensorARM, tensorSizeARM/tensorReadARM builtins)
-2. int32_t/uint32_t/float32_t as lexer keywords mapping to int/uint/float
-3. Unnamed function parameters
-4. gl_TensorOperandsOutOfBoundsValueARM constant
-5. uint8→float conversion in getConversionTag
-6. Array constant composite with uint base (uint[](1,2,3))
-7. Float64 capability for double tensor types
-8. Tensor type dedup by (element_type, rank)
-9. Transitive AccessChain tracking in benchmark
+**Requires**: Complete opcode ID-position table (knowing which words are IDs vs literals for each of ~140 opcodes). Can be built from the SPIR-V spec grammar.
 
-## PHASE 4 OPTIMIZATION ATTEMPTS (2026-05-01):
-- **constant_composite codegen dedup**: Works, reduces binary size but not bound (IDs pre-allocated). Need semantic-level dedup for bound reduction.
-- **ID compaction pass**: Too risky without full opcode table. Would need to know which words are IDs vs literals for every opcode.
-- **Load caching**: Too aggressive via constant_alias. Caused massive regression. Would need per-block mapping without global aliasing.
-- **Struct type dedup**: Multiple struct types with same layout are emitted separately. Could share types.
-- **SSA variable elimination**: Variables stored once and loaded once could be replaced with direct value propagation. Requires use-def analysis.
+**Risk**: Getting ID positions wrong corrupts the binary. Validate with spirv-val after compaction.
 
-## Session 2026-05-01 (Phase 4 continued):
-- **Semantic-level constant composite dedup**: IMPLEMENTED (-309 IDs). Cache key (type, operand_ids) prevents duplicate OpConstantComposite and element constants.
-- **AccessChain caching within basic blocks**: IMPLEMENTED (-217 IDs). Clear at labels/functions for dominance. 
-- **Load caching within basic blocks**: IMPLEMENTED (-168 IDs). Clear at labels, functions, and stores. PITFALL: must also clear at function boundaries (cross-function caching causes dominance violations).
-- **Pure op CSE (composite_extract)**: IMPLEMENTED (-12 IDs). Modest gain.
-- **Per-pointer store invalidation**: Investigated but too complex (aliasing concerns).
-- **Dead instruction elimination**: 568 dead IDs total (296 labels, 45 loads, 43 function calls, 29 constants). Hard to eliminate at semantic level without lazy evaluation.
-- **ID compaction pass**: Requires remapping IDs in both IR and codegen. High risk without complete opcode ID-position table.
-- **Cross-block load caching**: 322 remaining duplicate loads across block boundaries. Requires dominance analysis.
-- **Additional pure op caching**: vector_shuffle (15 dups), bitcast (15 dups), image_texel_pointer (12 dups). Potential ~40 more IDs but requires restructuring to check cache before allocId.
-- **Total progress**: 10881 → 10175 (-706 IDs, -6.5%)
+**Implementation**: Best done as a Python post-processing script that modifies the binary after codegen. Keep it separate from the Zig code.
 
-## Session 2026-05-01 (Phase 4 continued - iteration 2):
-- **Targeted store invalidation**: IMPLEMENTED (-138 IDs). Only remove stored-to ptr from load_cache instead of clearing entire cache. Stores to output vars don't affect uniform/input loads.
-- **Vector shuffle dedup**: IMPLEMENTED (-28 IDs). Converted 5 vector_shuffle emission sites to emitPureOp.
-- **ImageTexelPointer dedup**: IMPLEMENTED (-12 IDs). Converted to emitPureOp.
-- **Transpose dedup attempt**: Works for dedup but doesn't reduce bound (result_id pre-allocated). `next_id -= 1` rollback causes ID collisions in codegen.
-- **Rollback lesson**: `next_id -= 1` is UNSAFE because `module.next_id_start = analyzer.next_id` and codegen starts allocating from that value. Lowering it causes codegen IDs to collide with IR IDs.
-- **CompositeConstruct dedup**: Only 2 duplicates across all shaders. Not worth converting.
-- **Remaining duplicates**: 291 total. 190 OpLoad (cross-block), 21 OpAccessChain (cross-block), 18 OpBitcast (pre-allocated). Need dominance analysis or pre-allocation restructuring for further gains.
-- **Total progress this session**: 10881 → 9997 (-884 IDs, -8.1%)
+### Option B: Dead Constant Elimination (~45 IDs)
+Fix the reverted dead constant elimination:
+1. The scan must also check type references (OpTypeArray references a constant for array size)
+2. Need to track which constants are used by `ensureType` calls
+3. Alternative: two-pass codegen — first pass emits everything, second pass removes dead constants
 
-## Session 2026-05-01 (Phase 4 - iteration 3):
-- **Cross-block load caching for global pointers**: IMPLEMENTED (-36 IDs). global_load_cache persists across blocks (only cleared at function boundaries). Only populated from entry block to avoid dominance violations.
-- **Dominance pitfall**: Can only cache loads from the entry block (which dominates all blocks). Caching from conditional blocks causes "ID does not dominate its use" spirv-val errors.
-- **Remaining 157 OpLoad duplicates**: Cross-block loads from non-entry blocks, function-local pointers, sub-function loads. Would need per-block load caching with dominance analysis for further gains.
-- **Total progress**: 10881 → 9961 (-920 IDs, -8.5%), all 7 optimizations combined.
-- **Future ideas**:
-  - Per-function global_load_cache (pre-populate from entry block, pass to sub-functions)
-  - AccessChain caching across blocks (currently cleared at labels for dominance safety)
-  - Pre-allocation restructuring for transpose/bitcast to enable emitPureOp for those ops
-  - Dead code elimination at IR level (568 dead IDs, but doesn't reduce bound without compaction)
+### Option C: Cross-Block Load Caching with Dominance (~92 IDs)
+Extend load caching across block boundaries using structured dominance:
+1. Track which blocks are headers (if/else headers, loop headers)
+2. Per-block load caching with dominance frontier analysis
+3. Only cache loads from blocks that dominate the current block
+4. Requires tracking the control flow graph during semantic analysis
 
-## Session 2026-05-01 (Phase 4 - iteration 4):
-- **Scalar splat constant composite cache**: IMPLEMENTED (-8 IDs). Check const_composite_cache before allocating splat_id in binary op scalar-to-vector splat. Prevents duplicate vec2(10.0, 10.0) etc.
-- **General composite_construct fallback cache**: IMPLEMENTED (-2 IDs). Check cache for all-constant composites in the general type_constructor path.
-- **Struct constructor cache attempt**: REVERTED. constCompositeKey uses @intFromEnum(ty) which doesn't distinguish named types. Would need to hash the type name string for named types. Only saves 1 ID, not worth the risk.
-- **False alarm: 1025 waste IDs**: The earlier analysis using symbolic disassembly names was completely wrong. Using `--raw-id` flag, actual waste is only 49 IDs across all 199 shaders.
-- **Cross-block cache attempt**: REVERTED. Tried to preserve caches across unconditional branches (only clear after conditional branches). Caused dominance violations because unconditional branch from then-block to merge doesn't mean then-block dominates merge.
-- **Total progress**: 10881 → 9951 (-930 IDs, -8.5%), all 9 optimizations combined.
-- **Remaining optimization opportunities**:
-  - Fix constCompositeKey for named types (hash the type name string too) — would save 1 more ID
-  - Cross-block load caching with dominance analysis (157 remaining OpLoad duplicates)
-  - ID compaction pass at codegen level (only 49 IDs waste)
-  - The optimization is approaching diminishing returns — further gains require complex analysis
+### Option D: Dead Store + Load Elimination (~82 IDs)
+Multi-pass dead code elimination:
+1. Identify variables that are stored but never loaded (200 dead variables)
+2. Remove stores to dead variables
+3. Remove loads that only feed dead stores (39 unused loads)
+4. Remove computations that only feed dead stores/loads
+5. This is a backward dataflow analysis
 
-## Session 2026-05-01 (Phase 4 - iteration 5):
-- **Global AccessChain cache**: IMPLEMENTED (-15 IDs). AccessChains from entry block persist across all blocks.
-- **Struct layout dedup**: IMPLEMENTED (-41 IDs). emitted_struct_layouts cache keyed by member type IDs. All 28 OpTypeStruct duplicates eliminated.
-- **Conversion site emitPureOp**: IMPLEMENTED (-17 IDs). Converted 6 conversion emission sites to use emitPureOp. Eliminated 14 of 18 OpBitcast duplicates.
-  - Key learning: sites using pre-allocated result_id from outer scope MUST keep using it. Converting to emitPureOp wastes the pre-allocated ID. Only convert sites that allocate their own conv_id.
-  - Reverted one site (vector conversion in type_constructor) that caused +9 regression.
-- **Bitcast pre-check**: Added to GLSL builtin handler. Checks pure_op_cache before allocating result_id for bitcast builtins.
-- **Total progress**: 10881 → 9877 (-1004 IDs, -9.2%), 199/199 pass, 0 mismatches
-- **Remaining duplicates**: 4 OpBitcast, ~155 OpLoad, 11 OpAccessChain, 6 OpConvertSToF, 6 OpCompositeExtract
+### Option E: Simpler micro-optimizations
+- Eliminate unused OpFunctionCall result IDs (43 IDs) — for void-context calls, don't allocate result_id
+- Skip dead label IDs (276 IDs) — requires restructuring block emission to not allocate labels for dead blocks
+- Atomic operation result optimization (26 IDs) — don't allocate result_id for atomic ops in statement context
 
-## Session 2026-05-01 (Phase 4 - iteration 6):
-- **Binary op pure_op_cache pre-check**: IMPLEMENTED (-15 IDs). Moved result_id allocation AFTER cache check. Covers fadd, iadd, fsub, isub, fmul, imul, fdiv, idiv, fmod, umod, rem, bit_and, bit_or, bit_xor, shift_left, shift_right. Excludes comparison operators.
-  - Key technique: moved allocId AFTER cache check so no IDs are wasted on cache hits.
-  - Eliminated: OpFAdd (5→0), OpIAdd (4→0), OpBitwiseAnd (3→0), OpSNegate (was already 0 from unary conversion).
-- **Total progress**: 10881 → 9853 (-1028 IDs, -9.4%), 199/199 pass, 0 mismatches
-- **Remaining duplicates**: 509 total. OpVariable 208, OpLoad 155, OpFunctionParameter 45, OpFunction 40 (all can't dedup). Actionable: OpAccessChain 11, OpCompositeExtract 6, OpBitcast 4, OpCompositeConstruct 4, OpImage 4, OpExtInst 3.
-
-## Session 2026-05-01 (Phase 4 - iteration 7):
-- **Index access via emitAccessChainCached**: IMPLEMENTED (-34 IDs). Root cause: index_access handler bypassed emitAccessChainCached, allocating new IR IDs for each AccessChain. Even though codegen deduplicates the SPIR-V output, semantic-level load_cache couldn't match different IR IDs.
-- **Extract image dedup via emitPureOp**: IMPLEMENTED (-4 IDs). Converted all 4 extract_image sites to emitPureOp. Same sampler always produces same image.
-- **Binary op pure_op_cache pre-check**: IMPLEMENTED (-15 IDs). Moved result_id allocation AFTER cache check. Covers all arithmetic ops. Key: no IDs wasted on cache hits.
-- **Codegen dref extraction cache**: IMPLEMENTED (-6 IDs). Added codegen_pure_cache for OpCompositeExtract (dref) and OpVectorShuffle (coord shrinking) in shadow sampler codegen handlers. Eliminated 3 composite_extract + 3 vector_shuffle duplicates.
-- **Conversion sites to emitPureOp**: REVERTED (no bound change). Converted remaining conversion emission sites but they had no duplicates.
-- **ExtInst pure_op_cache pre-check**: TRIED but doesn't help bound. Pre-allocated result_id is wasted on cache hit (net 0 bound effect).
-- **Total progress**: 10881 → 9809 (-1072 IDs, -9.9%), 199/199 pass
-- **Remaining actionable duplicates**: 489 total. OpLoad 148 (all cross-block/store-inval), OpAccessChain 11 (cross-block), OpBitcast 4, OpCompositeConstruct 4, OpExtInst 3, OpFunctionCall 3.
-- **21 SSA-eligible variables** (1 store, 1 load) could be eliminated. Would save ~63 IDs. Requires dead code elimination at codegen or semantic level.
-- **200 dead variables** (stored but never loaded). Could potentially eliminate stores and computing expressions.
-- **Diminishing returns**: Further optimization requires complex analysis (dominance analysis for cross-block load caching, dead code elimination, constant propagation, SSA construction).
-
-## Session 2026-05-01 (Phase 4 - iteration 10):
-- **Store-to-load forwarding**: IMPLEMENTED (-119 IDs). After emitting a store, add the stored value to load_cache so subsequent loads of same pointer within same basic block skip the OpLoad. This is safe because within a SPIR-V basic block, stores are visible to subsequent loads.
-- **Remaining OpLoad duplicates**: 92 (ALL cross-block). Store-to-load forwarding eliminated all within-block load duplicates.
-- **Total remaining duplicates**: 426 (down from 485). Most are unactionable (OpVariable 208, OpFunctionParameter 45, OpFunction 40).
-- **True bound**: 9721 (-10.6% from 10881 baseline)
+## THINGS THAT DIDN'T WORK:
+- Global pure op cache (no effect — conversions in non-dominating blocks)
+- Store-to-load forwarding to global cache (no effect — rare in dominating blocks)
+- Transpose dedup (pre-allocated result_id, `next_id -= 1` is unsafe)
+- ID compaction via `next_id -= 1` rollback (causes ID collisions)
+- Cross-block cache preserving after unconditional branches (dominance violations)
+- ensureType lazy allocation for phantom IDs (chicken-and-egg with recursive types)
