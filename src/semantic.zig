@@ -266,7 +266,10 @@ const Analyzer = struct {
     const_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     const_composite_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
-    load_cache: std.AutoHashMapUnmanaged(u32, u32) = .{}, // ptr_id -> loaded_value_id
+    load_cache: std.AutoHashMapUnmanaged(u32, u32) = .{}, // ptr_id -> loaded_value_id (cleared at labels)
+    global_load_cache: std.AutoHashMapUnmanaged(u32, u32) = .{}, // ptr_id -> loaded_value_id (persists across blocks)
+    global_ptr_ids: std.AutoHashMapUnmanaged(u32, void) = .{}, // set of ptr_ids that point into global (Input/Uniform/Output) variables
+    in_entry_block: bool = true,
     pure_op_cache: std.AutoHashMapUnmanaged(u64, u32) = .{}, // hash(type, op, operands) -> result_id
     local_size: ?ir.LocalSize = null,
     // Heap-allocated AST types that transfer to Module for cleanup
@@ -309,6 +312,8 @@ const Analyzer = struct {
         self.const_composite_cache.deinit(self.alloc);
         self.access_chain_cache.deinit(self.alloc);
         self.load_cache.deinit(self.alloc);
+        self.global_load_cache.deinit(self.alloc);
+        self.global_ptr_ids.deinit(self.alloc);
         self.pure_op_cache.deinit(self.alloc);
         {
             var it = self.overloads.iterator();
@@ -446,6 +451,10 @@ const Analyzer = struct {
             .ty = result_ty,
         });
         self.access_chain_cache.put(self.alloc, key, ptr_id) catch {};
+        // If base is a global pointer, the AccessChain result is also a global pointer
+        if (self.global_ptr_ids.contains(base_id)) {
+            self.global_ptr_ids.put(self.alloc, ptr_id, {}) catch {};
+        }
         return ptr_id;
     }
 
@@ -453,8 +462,17 @@ const Analyzer = struct {
     /// Caches are invalidated on stores and at block boundaries.
     /// Returns the loaded value's result_id.
     fn emitLoadCached(self: *Analyzer, ptr_id: u32, ty: ast.Type) !u32 {
+        // Check local (per-block) cache first
         if (self.load_cache.get(ptr_id)) |existing_id| {
             return existing_id;
+        }
+        // Check global (cross-block) cache for global pointers
+        if (self.global_ptr_ids.contains(ptr_id)) {
+            if (self.global_load_cache.get(ptr_id)) |existing_id| {
+                // Also cache in local cache for faster lookup within this block
+                self.load_cache.put(self.alloc, ptr_id, existing_id) catch {};
+                return existing_id;
+            }
         }
         const ld = self.allocId();
         const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
@@ -467,6 +485,11 @@ const Analyzer = struct {
             .ty = ty,
         });
         self.load_cache.put(self.alloc, ptr_id, ld) catch {};
+        // Cache in global cache if this is a global pointer AND we're in the entry block
+        // (entry block dominates all other blocks, so cached values are safe to reuse)
+        if (self.in_entry_block and self.global_ptr_ids.contains(ptr_id)) {
+            self.global_load_cache.put(self.alloc, ptr_id, ld) catch {};
+        }
         return ld;
     }
 
@@ -510,6 +533,7 @@ const Analyzer = struct {
         // from the cache, as loads from the exact same pointer are the most
         // common case and other aliases are rare within a basic block.
         _ = self.load_cache.remove(ptr_id);
+        _ = self.global_load_cache.remove(ptr_id);
         // Note: pure_op_cache is NOT cleared — pure ops don't depend on memory state
         const ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
         ops[0] = .{ .id = ptr_id };
@@ -615,9 +639,12 @@ const Analyzer = struct {
     }
 
     fn emitLabel(self: *Analyzer, label_id: u32) !void {
+        self.in_entry_block = false;
         self.access_chain_cache.clearRetainingCapacity();
         self.load_cache.clearRetainingCapacity();
         self.pure_op_cache.clearRetainingCapacity();
+        // Note: global_load_cache is NOT cleared — it persists across blocks
+        // But we only cache global loads from the entry block (in_entry_block flag)
         try self.instructions.append(self.alloc, .{
             .tag = .label,
             .result_id = label_id,
@@ -826,6 +853,7 @@ const Analyzer = struct {
                     .storage_class = b.sc,
                     .result_id = id,
                 }) catch return null;
+                self.global_ptr_ids.put(self.alloc, id, {}) catch {};
                 const sym = Symbol{ .kind = .var_sym, .ty = b.ty, .ir_id = id };
                 // Declare in global scope (index 0) so all functions share it
                 self.scopes.items[0].put(self.alloc, b.name, sym) catch return null;
@@ -949,6 +977,10 @@ const Analyzer = struct {
                     .storage_class = storage_class,
                     .result_id = ir_id,
                 });
+                // Track as global pointer for cross-block load caching
+                if (storage_class == .input or storage_class == .output or storage_class == .uniform or storage_class == .uniform_constant) {
+                    self.global_ptr_ids.put(self.alloc, ir_id, {}) catch {};
+                }
                 try self.declare(node.data.name, .{
                     .kind = .var_sym,
                     .ty = node.data.ty orelse .void,
@@ -1005,6 +1037,10 @@ const Analyzer = struct {
                     .storage_class = storage_class,
                     .result_id = ir_id,
                 });
+                // Track as global pointer for cross-block load caching
+                if (storage_class == .input or storage_class == .output or storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant or storage_class == .uniform_constant) {
+                    self.global_ptr_ids.put(self.alloc, ir_id, {}) catch {};
+                }
                 // Declare the block variable under both names (type name and instance name)
                 try self.declare(name, .{
                     .kind = .var_sym,
@@ -1126,9 +1162,12 @@ const Analyzer = struct {
 
     fn analyzeFunction(self: *Analyzer, node: ast.Node) !void {
         self.has_returned = false;
+        self.in_entry_block = true;
         self.access_chain_cache.clearRetainingCapacity();
         self.load_cache.clearRetainingCapacity();
         self.pure_op_cache.clearRetainingCapacity();
+        self.global_load_cache.clearRetainingCapacity();
+        // Note: global_ptr_ids is NOT cleared — populated during collectTopLevel, shared across functions
         try self.pushScope();
 
         // For overloaded functions, resolve the correct ir_id based on param types
