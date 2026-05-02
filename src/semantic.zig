@@ -563,6 +563,9 @@ const Analyzer = struct {
         // common case and other aliases are rare within a basic block.
         _ = self.load_cache.remove(ptr_id);
         _ = self.global_load_cache.remove(ptr_id);
+        // Store-to-load forwarding: within the same basic block, a load of the
+        // same pointer after this store can use the stored value directly.
+        self.load_cache.put(self.alloc, ptr_id, val_id) catch {};
         // Note: pure_op_cache is NOT cleared — pure ops don't depend on memory state
         const ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
         ops[0] = .{ .id = ptr_id };
@@ -2510,6 +2513,7 @@ const Analyzer = struct {
                                     store_ops[1] = .{ .id = shuffle_id };
                                     _ = self.load_cache.remove(var_ptr_id);
                                     _ = self.global_load_cache.remove(var_ptr_id);
+                                    self.load_cache.put(self.alloc, var_ptr_id, shuffle_id) catch {}; // Forward
         try self.instructions.append(self.alloc, .{
                                         .tag = .store,
                                         .result_type = null,
@@ -2563,6 +2567,7 @@ const Analyzer = struct {
                 store_operands[1] = .{ .id = value_id };
                 _ = self.load_cache.remove(target.id);
                 _ = self.global_load_cache.remove(target.id);
+                self.load_cache.put(self.alloc, target.id, value_id) catch {}; // Forward stored value
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
@@ -2704,6 +2709,7 @@ const Analyzer = struct {
                                     store_ops[1] = .{ .id = final_shuffle_id };
                                     _ = self.load_cache.remove(var_ptr_id2);
                                     _ = self.global_load_cache.remove(var_ptr_id2);
+                                    self.load_cache.put(self.alloc, var_ptr_id2, final_shuffle_id) catch {}; // Forward
         try self.instructions.append(self.alloc, .{
                                         .tag = .store,
                                         .result_type = null,
@@ -2837,6 +2843,7 @@ const Analyzer = struct {
                 store_operands[1] = .{ .id = computed_id };
                 _ = self.load_cache.remove(target.id);
                 _ = self.global_load_cache.remove(target.id);
+                self.load_cache.put(self.alloc, target.id, computed_id) catch {}; // Forward stored value
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
@@ -3298,6 +3305,7 @@ const Analyzer = struct {
                         store_ops[1] = .{ .id = read_result_id };
                         _ = self.load_cache.remove(out_id);
                         _ = self.global_load_cache.remove(out_id);
+                        self.load_cache.put(self.alloc, out_id, read_result_id) catch {}; // Forward
         try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
@@ -5276,6 +5284,7 @@ const Analyzer = struct {
                 store_ops[1] = .{ .id = new_val_id };
                 _ = self.load_cache.remove(lval.id);
                 _ = self.global_load_cache.remove(lval.id);
+                self.load_cache.put(self.alloc, lval.id, new_val_id) catch {}; // Forward
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
