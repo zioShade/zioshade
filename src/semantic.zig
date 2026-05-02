@@ -4998,6 +4998,21 @@ const Analyzer = struct {
                 }
                 self.alloc.free(converted_ids);
 
+                // Check if all operands are constants — if so, check cache for dedup
+                var all_const = true;
+                for (operands) |op| {
+                    if (op == .id and !self.isConstantId(op.id)) {
+                        all_const = false;
+                        break;
+                    }
+                }
+                if (all_const) {
+                    const key = self.constCompositeKey(result_ty, operands);
+                    if (self.const_composite_cache.get(key)) |existing_id| {
+                        return .{ .ty = result_ty, .id = existing_id };
+                    }
+                }
+
                 try self.instructions.append(self.alloc, .{
                     .tag = .composite_construct,
                     .result_type = null,
