@@ -2409,14 +2409,7 @@ const Analyzer = struct {
                                         }
                                     }
 
-                                    const shuffle_id = self.allocId();
-                                    try self.instructions.append(self.alloc, .{
-                                        .tag = .vector_shuffle,
-                                        .result_type = null,
-                                        .result_id = shuffle_id,
-                                        .operands = shuffle_ops,
-                                        .ty = base_ty,
-                                    });
+                                    const shuffle_id = try self.emitPureOp(.vector_shuffle, shuffle_ops, base_ty);
 
                                     // Store the shuffled vector back
                                     const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
@@ -2514,7 +2507,6 @@ const Analyzer = struct {
                                     for (0..swizzle_len) |i| {
                                         swizzle_ops[2 + i] = .{ .literal_int = self.swizzleIndex(swizzle_name[i]) };
                                     }
-                                    const swizzled_id = self.allocId();
                                     const swizzled_ty: ast.Type = switch (base_ty) {
                                         .vec2, .vec3, .vec4 => switch (swizzle_len) {
                                             2 => ast.Type.vec2,
@@ -2542,13 +2534,7 @@ const Analyzer = struct {
                                         },
                                         else => base_ty,
                                     };
-                                    try self.instructions.append(self.alloc, .{
-                                        .tag = .vector_shuffle,
-                                        .result_type = null,
-                                        .result_id = swizzled_id,
-                                        .operands = swizzle_ops,
-                                        .ty = swizzled_ty,
-                                    });
+                                    const swizzled_id = try self.emitPureOp(.vector_shuffle, swizzle_ops, swizzled_ty);
 
                                     // 3. Evaluate RHS
                                     var value = try self.analyzeExpression(node.data.children[1]);
@@ -2618,14 +2604,7 @@ const Analyzer = struct {
                                             final_shuffle_ops[2 + i] = .{ .literal_int = @intCast(i) };
                                         }
                                     }
-                                    const final_shuffle_id = self.allocId();
-                                    try self.instructions.append(self.alloc, .{
-                                        .tag = .vector_shuffle,
-                                        .result_type = null,
-                                        .result_id = final_shuffle_id,
-                                        .operands = final_shuffle_ops,
-                                        .ty = base_ty,
-                                    });
+                                    const final_shuffle_id = try self.emitPureOp(.vector_shuffle, final_shuffle_ops, base_ty);
 
                                     // 6. Store back
                                     const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
@@ -4639,20 +4618,13 @@ const Analyzer = struct {
         const extracted_col_id = try self.emitPureOp(.composite_extract, extract_ops, src_col_type);
                         // If column sizes differ, shrink via vector_shuffle
                         if (dst_col_n < src_col_n) {
-                            const shuffle_id = self.allocId();
                             const shuffle_ops = try self.alloc.alloc(ir.Instruction.Operand, 2 + dst_col_n);
                             shuffle_ops[0] = .{ .id = extracted_col_id };
                             shuffle_ops[1] = .{ .id = extracted_col_id };
                             for (0..dst_col_n) |j| {
                                 shuffle_ops[2 + j] = .{ .literal_int = @intCast(j) };
                             }
-                            try self.instructions.append(self.alloc, .{
-                                .tag = .vector_shuffle,
-                                .result_type = null,
-                                .result_id = shuffle_id,
-                                .operands = shuffle_ops,
-                                .ty = dst_col_type,
-                            });
+                            const shuffle_id = try self.emitPureOp(.vector_shuffle, shuffle_ops, dst_col_type);
                             col_ids[i] = shuffle_id;
                         } else {
                             col_ids[i] = extracted_col_id;
@@ -5058,7 +5030,6 @@ const Analyzer = struct {
                             }
                             if (is_identity) return base_tid;
                         }
-                        const result_id = self.allocId();
                         // vector_shuffle operands: vec1, vec2, literal indices...
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 2 + num_comps);
                         operands[0] = .{ .id = base_tid.id }; // vec1
@@ -5066,13 +5037,7 @@ const Analyzer = struct {
                         for (member_name, 0..) |c, i| {
                             operands[2 + i] = .{ .literal_int = self.swizzleIndex(c) };
                         }
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .vector_shuffle,
-                            .result_type = null,
-                            .result_id = result_id,
-                            .operands = operands,
-                            .ty = result_ty,
-                        });
+                        const result_id = try self.emitPureOp(.vector_shuffle, operands, result_ty);
                         return .{ .ty = result_ty, .id = result_id };
                     }
                     return base_tid;
