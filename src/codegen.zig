@@ -105,11 +105,10 @@ pub fn generate(
     cg.words.items[3] = cg.next_id;
 
     const raw = try cg.words.toOwnedSlice(alloc);
-    // DCE temporarily disabled — has circular reference bug
-    // const dce = compact_ids.deadCodeElim(alloc, raw) catch return raw;
-    // if (dce.ptr != raw.ptr) alloc.free(raw);
-    const compacted = compact_ids.compactIds(alloc, raw) catch return raw;
-    if (compacted.ptr != raw.ptr) alloc.free(raw);
+    const dce = compact_ids.deadCodeElim(alloc, raw) catch return raw;
+    if (dce.ptr != raw.ptr) alloc.free(raw);
+    const compacted = compact_ids.compactIds(alloc, dce) catch return dce;
+    if (compacted.ptr != dce.ptr) alloc.free(dce);
     return compacted;
 }
 
