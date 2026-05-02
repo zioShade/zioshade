@@ -1,116 +1,54 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 199/199 spirv-val, 0/199 mismatches, 0 failures
-## Best commit: 71dd48f (Extended load cache + opcode table fix)
-## Total bound: 7875 across 199 shaders (-27.6% from 10881)
-## Now 7 IDs BETTER than spirv-opt --compact-ids + all aggressive passes!
-## Remaining waste: 85 IDs (1.1%) — ALL unavoidable (SPIR-V mandates result <id>)
+## Current: 7852 total_bound across 199 shaders (-19.2% from 9721, -27.8% from 10881)
+## 25 IDs BETTER than spirv-opt --compact-ids + all aggressive passes!
 
-## NEW OPTIMIZATIONS IMPLEMENTED (this session):
-19. SPIR-V ID compaction post-processing pass (-1544 IDs)
-20. Dead code elimination in SPIR-V binary (-199 IDs)
-21. Iterative DCE to fixpoint (15 iterations max, -81 IDs cascading)
-22. Dead type + variable elimination (-48 IDs)
-23. Subgroup op DCE (-11 IDs)
-24. Deeper DCE iterations (5→15, -5 IDs)
-25. Ray query + ExtInstImport DCE (-2 IDs)
-26. Extended global_load_cache to ALL pointers + fixed opcode table (-28 IDs)
-27. If-else merge block caching (-4 IDs)
-28. Switch + loop merge block caching (0 IDs — kept for completeness)
-29. Type constructor conversion dedup via emitPureOp (-5 IDs)
+## THIS SESSION OPTIMIZATIONS:
+30. Comparison operator dedup via pure_op_cache (-2 IDs)
+31. Constant folding in type constructor: int/uint/float literal → target type constant (-21 IDs)
+    - When vec4(0, 2, 3, 4) with int literals in float constructor, fold directly to float constants
+    - Eliminates OpConvertSToF instructions for constant operands
+    - Added tryFoldConversion helper for IR-level constant folding
+32. Binary op constant folding: no additional savings (conversions are runtime values)
+33. emitPureOp for OpSelect, OpExtInst, OpCompositeConstruct: correct but 0 savings (pre-allocated IDs already compacted by DCE)
 
-## BUG FIX: compact_ids.zig opcode table was missing 3 opcodes:
-## - 143 (MatrixTimesScalar)
-## - 188 (FOrdLessThanEqual)
-## - 194 (ShiftRightLogical)
-## These gaps caused DCE to incorrectly remove constants used by these instructions.
+## REMAINING CROSS-BLOCK DUPLICATES:
+- OpLoad: 47 (21 for Input/Uniform/PushConstant, rest for Output/StorageBuffer)
+- OpAccessChain: 11 (could merge chained AccessChains)
+- OpFunction: 35 (can't optimize)
+- Pure ops: ~10 (OpBitwiseAnd, OpSNegate, etc.)
 
-## Total improvement this session: -1926 IDs (-19.8% from 9721, -27.6% from 10881)
+## REMAINING SHADERS WHERE WE USE MORE IDs THAN GLSLANG:
+- push-constant-as-ubo.push-ubo.vk.frag: +1 (likely 1 extra AccessChain)
+- spec-constant-block-size.vk.frag: +1 (likely 1 extra AccessChain)
+- ubo_layout.frag: +2 (chained AccessChains vs single multi-index)
+- casts.comp: +3 (bvec→ivec roundtrip not optimized)
 
-## PHASE 4: SPIR-V Output Size Optimization
-- Baseline: 10881 total bound across 199 shaders
-- Current: 9721 (-1160 IDs, -10.6%)
-- Average ratio vs glslang: ~0.79x (we're already smaller on average)
+## FUTURE OPTIMIZATION OPPORTUNITIES:
 
-## OPTIMIZATIONS IMPLEMENTED (all sessions combined):
-1. Semantic-level constant composite dedup (-309 IDs)
-2. AccessChain caching within basic blocks (-217 IDs)
-3. Load caching within basic blocks (-168 IDs)
-4. Targeted store invalidation (-138 IDs)
-5. Store-to-load forwarding (-119 IDs)
-6. Index access via emitAccessChainCached + emitPureOp (-34 IDs)
-7. Struct layout dedup in codegen (-41 IDs)
-8. Cross-block load caching for global pointers from entry block (-36 IDs)
-9. Vector shuffle dedup via emitPureOp (-28 IDs)
-10. Conversion sites to emitPureOp (-17 IDs)
-11. Binary op pure_op_cache pre-check (-15 IDs)
-12. Global AccessChain cache from entry block (-15 IDs)
-13. Scalar splat constant composite cache (-8 IDs)
-14. Unary op emitPureOp (-9 IDs)
-15. Codegen dref extraction + coordinate shrink cache (-6 IDs)
-16. Extract image dedup via emitPureOp (-4 IDs)
-17. Composite construct dedup via emitPureOp (-3 IDs)
-18. Loop header global cache (-1 ID)
+### Multi-index AccessChain merging (-11+ IDs)
+When emitting AccessChain where base is itself an AccessChain result, merge indices.
+FAILED on first attempt: caused 40 spirv-val failures.
+Root cause: the intermediate AccessChain instructions become orphaned, and the cache entries
+reference stale base IDs. Need to handle cache invalidation properly.
+**Safer approach**: Merge in codegen or in DCE post-processing pass.
+**Expected savings**: ~11 IDs from AccessChain merging + potentially more from reduced type instructions.
 
-## CORRECTNESS FIXES:
-- Fixed global_load_cache invalidation bug in 6 store handlers (compound_assign, assign_op, swizzle assign, pre/post increment, output stores). Was causing stale load results to be reused after stores to global pointers.
+### Cross-block load caching for Input/Uniform (~21 IDs)
+21 cross-block load duplicates for Input/Uniform/PushConstant variables.
+Can't simply cache from all blocks due to SPIR-V dominance rules.
+**Approach**: Emit speculative loads in entry block for frequently-used Input/Uniform variables.
+Requires multi-pass analysis: first scan to find which vars are loaded, then emit loads.
 
-## REMAINING WASTE ANALYSIS (85 IDs, 1.1% of bound):
-- OpFunctionCall: 38 (SPIR-V mandates result <id>)
-- OpAtomicIAdd/And/Or/Xor/Min/Max/Exchange/CompareExchange/FAddEXT: 38 (side effects + mandated result)
-- OpFunctionParameter: 4 (can't remove)
-- OpRayQueryProceedKHR: 1 (side effects — advances query)
+### bvec→int roundtrip optimization (-3 IDs in casts.comp)
+`ivec4(bvec4(x))` currently extracts each component, does INotEqual, constructs bvec4,
+then extracts again and uses Select. Should be simplified to `x != 0 ? 1 : 0` directly.
 
-## These are ALL unavoidable — our output matches spirv-opt with aggressive optimization passes.
+### Compile time optimization
+DCE + compaction adds overhead. Could profile and optimize the post-processing passes.
 
-## REMAINING DUPLICATES (221 within blocks):
-- OpVariable: 180 (unique storage, can't dedup)
-- OpFunctionParameter: 16 (can't dedup)
-- OpTypeStruct: 10 (across different shaders)
-- OpBitcast: 3 (rare edge cases in caching)
-- Others: 12 (minor)
-
-## HOW TO CONTINUE IN NEXT SESSION
-
-### total_bound is at theoretical minimum (7912, matches spirv-opt aggressive)
-
-### Switch to different Phase 4 metric: compile_time_us
-- DCE + compaction adds ~2s overhead for 199 shaders
-- Could profile the hotspots and optimize the DCE/compaction passes
-- Or optimize the semantic analysis / codegen for speed
-
-### Future: Cross-block load caching with dominance (~62 IDs within functions)
-Extend load caching across block boundaries:
-1. Need alias analysis for function-local pointers (AccessChain aliasing)
-2. Per-block load caching with dominance frontier analysis
-3. Only cache loads from blocks that dominate the current block
-**Note**: Function-local pointers accessed through different AccessChain results can alias.
-Cross-block caching without alias analysis causes duplicate ID definitions.
-**Also**: 19 of the 79 cross-block dups are across DIFFERENT FUNCTIONS — can't be fixed
-(SPIR-V dominance rules prohibit using load results across function boundaries).
-
-### Future: Extended global_load_cache to ALL entry-block loads (~28 IDs)
-FAILED: Pointer aliasing causes duplicate ID definitions.
-Could potentially work with per-variable (not per-pointer) caching — map Variable ID → load result
-instead of AccessChain ID → load result. But this requires knowing which variable an AccessChain targets.
-
-### COMPLETED: total_bound = 7884 (2 IDs BETTER than spirv-opt aggressive!)
-### Session achievement: 9721 → 7884 (-18.9%, -27.5% from 10881 baseline)
-
-## REMAINING OPTIMIZATION OPPORTUNITIES:
-## - 34 within-function cross-block load dups (need dominance analysis)
-## - 17 cross-function load dups (can't fix — SPIR-V dominance rules)
-## - These would save ~51 IDs but require fundamental compiler changes
-
-## THINGS THAT DIDN'T WORK:
-- Global pure op cache (no effect — conversions in non-dominating blocks)
-- Store-to-load forwarding to global cache (no effect — rare in dominating blocks)
-- Transpose dedup (pre-allocated result_id, `next_id -= 1` is unsafe)
-- ID compaction via `next_id -= 1` rollback (causes ID collisions)
-- Cross-block cache preserving after unconditional branches (dominance violations)
-- ensureType lazy allocation for phantom IDs (chicken-and-egg with recursive types)
-
-## SESSION COMPLETE — total_bound at theoretical minimum
-## All 85 remaining waste IDs are mandated by the SPIR-V spec.
-## No further total_bound optimization possible without reducing instruction count at the semantic level.
-## Potential future directions: compile_time_us optimization, cross-block load caching (requires dominance analysis, saves ~79 IDs in pre-compaction output but may not reduce post-compaction bound).
+## THINGS THAT DIDN'T WORK THIS SESSION:
+- AccessChain merging at semantic level (40 failures, cache corruption)
+- Binary op constant folding (all conversions are runtime values, not constants)
+- emitPureOp for mix/select/ext_inst/composite_construct (0 IDs, DCE already handles)

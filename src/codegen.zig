@@ -105,8 +105,10 @@ pub fn generate(
     cg.words.items[3] = cg.next_id;
 
     const raw = try cg.words.toOwnedSlice(alloc);
-    const dce = compact_ids.deadCodeElim(alloc, raw) catch return raw;
-    if (dce.ptr != raw.ptr) alloc.free(raw);
+    const merged = compact_ids.mergeAccessChains(alloc, raw) catch raw;
+    if (merged.ptr != raw.ptr) alloc.free(raw);
+    const dce = compact_ids.deadCodeElim(alloc, merged) catch return merged;
+    if (dce.ptr != merged.ptr) alloc.free(merged);
     const compacted = compact_ids.compactIds(alloc, dce) catch return dce;
     if (compacted.ptr != dce.ptr) alloc.free(dce);
     return compacted;
