@@ -266,6 +266,7 @@ const Analyzer = struct {
     const_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     const_composite_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
+    global_access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .{}, // key -> ptr_id (persists across blocks, populated from entry block)
     load_cache: std.AutoHashMapUnmanaged(u32, u32) = .{}, // ptr_id -> loaded_value_id (cleared at labels)
     global_load_cache: std.AutoHashMapUnmanaged(u32, u32) = .{}, // ptr_id -> loaded_value_id (persists across blocks)
     global_ptr_ids: std.AutoHashMapUnmanaged(u32, void) = .{}, // set of ptr_ids that point into global (Input/Uniform/Output) variables
@@ -311,6 +312,7 @@ const Analyzer = struct {
         self.const_cache.deinit(self.alloc);
         self.const_composite_cache.deinit(self.alloc);
         self.access_chain_cache.deinit(self.alloc);
+        self.global_access_chain_cache.deinit(self.alloc);
         self.load_cache.deinit(self.alloc);
         self.global_load_cache.deinit(self.alloc);
         self.global_ptr_ids.deinit(self.alloc);
@@ -445,6 +447,10 @@ const Analyzer = struct {
             };
             key = key *% 33 +% op_val;
         }
+        // Check global cache first (entry-block AccessChains dominate all blocks)
+        if (self.global_access_chain_cache.get(key)) |existing_id| {
+            return existing_id;
+        }
         if (self.access_chain_cache.get(key)) |existing_id| {
             return existing_id;
         }
@@ -462,6 +468,10 @@ const Analyzer = struct {
             .ty = result_ty,
         });
         self.access_chain_cache.put(self.alloc, key, ptr_id) catch {};
+        // Populate global cache from entry block (dominates all subsequent blocks)
+        if (self.in_entry_block) {
+            self.global_access_chain_cache.put(self.alloc, key, ptr_id) catch {};
+        }
         // If base is a global pointer, the AccessChain result is also a global pointer
         if (self.global_ptr_ids.contains(base_id)) {
             self.global_ptr_ids.put(self.alloc, ptr_id, {}) catch {};
@@ -1178,6 +1188,7 @@ const Analyzer = struct {
         self.load_cache.clearRetainingCapacity();
         self.pure_op_cache.clearRetainingCapacity();
         self.global_load_cache.clearRetainingCapacity();
+        self.global_access_chain_cache.clearRetainingCapacity();
         // Note: global_ptr_ids is NOT cleared — populated during collectTopLevel, shared across functions
         try self.pushScope();
 
