@@ -409,6 +409,17 @@ const Analyzer = struct {
     fn constCompositeKey(self: *Analyzer, ty: ast.Type, operands: []const ir.Instruction.Operand) u64 {
         _ = self;
         var key: u64 = @intFromEnum(ty);
+        // For named types, include the name string to avoid collisions
+        if (ty == .named) {
+            for (ty.named) |ch| {
+                key = key *% 31 +% @as(u64, ch);
+            }
+        }
+        // For array types, include size and base type hash
+        if (ty == .array) {
+            key = key *% 31 +% @as(u64, ty.array.size);
+            key = key *% 31 +% @intFromEnum(ty.array.base.*);
+        }
         for (operands) |op| {
             const op_val: u64 = switch (op) {
                 .id => |id| id,
@@ -4241,6 +4252,11 @@ const Analyzer = struct {
                                 }
                             }
                             operands[i] = .{ .id = tid.id };
+                        }
+                        // Check const_composite_cache for dedup before emitting
+                        const cache_key = self.constCompositeKey(result_ty, operands);
+                        if (self.const_composite_cache.get(cache_key)) |existing_id| {
+                            return .{ .ty = result_ty, .id = existing_id };
                         }
                         try self.instructions.append(self.alloc, .{
                             .tag = .composite_construct,
