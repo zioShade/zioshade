@@ -76,3 +76,16 @@ All output store mismatches resolved. Perfect correctness achieved.
   - AccessChain caching across blocks (currently cleared at labels for dominance safety)
   - Pre-allocation restructuring for transpose/bitcast to enable emitPureOp for those ops
   - Dead code elimination at IR level (568 dead IDs, but doesn't reduce bound without compaction)
+
+## Session 2026-05-01 (Phase 4 - iteration 4):
+- **Scalar splat constant composite cache**: IMPLEMENTED (-8 IDs). Check const_composite_cache before allocating splat_id in binary op scalar-to-vector splat. Prevents duplicate vec2(10.0, 10.0) etc.
+- **General composite_construct fallback cache**: IMPLEMENTED (-2 IDs). Check cache for all-constant composites in the general type_constructor path.
+- **Struct constructor cache attempt**: REVERTED. constCompositeKey uses @intFromEnum(ty) which doesn't distinguish named types. Would need to hash the type name string for named types. Only saves 1 ID, not worth the risk.
+- **False alarm: 1025 waste IDs**: The earlier analysis using symbolic disassembly names was completely wrong. Using `--raw-id` flag, actual waste is only 49 IDs across all 199 shaders.
+- **Cross-block cache attempt**: REVERTED. Tried to preserve caches across unconditional branches (only clear after conditional branches). Caused dominance violations because unconditional branch from then-block to merge doesn't mean then-block dominates merge.
+- **Total progress**: 10881 → 9951 (-930 IDs, -8.5%), all 9 optimizations combined.
+- **Remaining optimization opportunities**:
+  - Fix constCompositeKey for named types (hash the type name string too) — would save 1 more ID
+  - Cross-block load caching with dominance analysis (157 remaining OpLoad duplicates)
+  - ID compaction pass at codegen level (only 49 IDs waste)
+  - The optimization is approaching diminishing returns — further gains require complex analysis
