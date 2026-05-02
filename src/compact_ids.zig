@@ -420,3 +420,181 @@ pub fn compactIds(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemor
 
     return result.toOwnedSlice(alloc);
 }
+
+/// Dead code elimination: remove instructions whose result ID is never referenced.
+/// Returns the same slice if nothing changed, or a new shorter slice with dead instructions removed.
+pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    const mark = struct {
+        fn markId(bs: *std.DynamicBitSet, w: u32, bnd: u32) void {
+            if (w >= 1 and w < bnd) bs.set(w);
+        }
+    }.markId;
+
+    // Collect only REFERENCES (not definitions)
+    var referenced = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer referenced.deinit();
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const inst_end = pos + wc;
+        if (inst_end > words.len) break;
+
+        const info = getOpInfo(opcode) orelse { pos = inst_end; continue; };
+        var wi: u32 = pos + 1;
+
+        // result_type is a REFERENCE
+        switch (info.fixed) {
+            1 => { if (wi < inst_end) { mark(&referenced, words[wi], bound); wi += 1; } },
+            2 => {
+                if (wi < inst_end) { mark(&referenced, words[wi], bound); wi += 1; }
+                if (wi < inst_end) { wi += 1; } // skip result (definition)
+            },
+            3 => { if (wi < inst_end) { wi += 1; } }, // skip result (definition)
+            else => {},
+        }
+
+        for (info.ops) |ch| {
+            if (wi >= inst_end) break;
+            switch (ch) {
+                'i' => { mark(&referenced, words[wi], bound); wi += 1; },
+                'l' => { wi += 1; },
+                'I' => { while (wi < inst_end) : (wi += 1) mark(&referenced, words[wi], bound); },
+                'L' => { wi = inst_end; },
+                's' => { wi = inst_end; },
+                'M' => { if (wi < inst_end) { wi += 1; while (wi < inst_end) : (wi += 1) mark(&referenced, words[wi], bound); } },
+                'W' => { while (wi + 1 < inst_end) { wi += 1; mark(&referenced, words[wi], bound); wi += 1; } if (wi < inst_end) wi += 1; },
+                'E' => { while (wi < inst_end) { const w = words[wi]; wi += 1; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < inst_end) : (wi += 1) mark(&referenced, words[wi], bound); },
+                else => {},
+            }
+        }
+        pos = inst_end;
+    }
+
+    // Identify side-effect-free dead instructions and remove them (fixpoint)
+    const is_dead_safe = struct {
+        fn check(op: u16) bool {
+            return switch (op) {
+                41, 42, 43, 44, 50 => true, // Constants
+                61 => true, // Load
+                65 => true, // AccessChain
+                77, 79, 80, 81 => true, // Composite ops
+                84 => true, // Transpose
+                100, 103, 104, 105, 106, 107 => true, // Image queries
+                109, 110, 111, 112, 114, 124 => true, // Conversions
+                126, 127 => true, // Negate
+                128...133, 135...138, 141, 142 => true, // Arithmetic
+                144...148 => true, // Matrix/vector ops
+                154...157 => true, // All/Any/IsNan/IsInf
+                166...168, 170, 171 => true, // LogicalOr/And/Not/Equal/NotEqual
+                169 => true, // Select
+                173, 177 => true, // Comparisons
+                180, 182, 184, 186 => true, // FOrd comparisons
+                196, 198, 199, 200 => true, // Bit ops
+                207...215 => true, // Derivatives
+                12 => true, // ExtInst
+                else => false,
+            };
+        }
+    }.check;
+
+    // Iterative DCE
+    for (0..5) |_| {
+        // Find dead instructions
+        var any_removed = false;
+        var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+        // Copy header
+        result.appendSliceAssumeCapacity(words[0..5]);
+
+        pos = 5;
+        while (pos < words.len) {
+            const hdr = words[pos];
+            const wc: u32 = hdr >> 16;
+            const opcode: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break;
+            const inst_end = pos + wc;
+            if (inst_end > words.len) break;
+
+            // Check if this instruction is dead
+            if (is_dead_safe(opcode)) {
+                const info = getOpInfo(opcode) orelse {
+                    result.appendSliceAssumeCapacity(words[pos..inst_end]);
+                    pos = inst_end;
+                    continue;
+                };
+                var result_id: ?u32 = null;
+                switch (info.fixed) {
+                    2 => { if (pos + 2 < inst_end) result_id = words[pos + 2]; },
+                    3 => { if (pos + 1 < inst_end) result_id = words[pos + 1]; },
+                    else => {},
+                }
+                if (result_id) |rid| {
+                    if (rid >= 1 and rid < bound and !referenced.isSet(rid)) {
+                        // Dead instruction — skip it
+                        any_removed = true;
+                        pos = inst_end;
+                        continue;
+                    }
+                }
+            }
+
+            result.appendSliceAssumeCapacity(words[pos..inst_end]);
+            pos = inst_end;
+        }
+
+        if (!any_removed) {
+            result.deinit(alloc);
+            break;
+        }
+
+        // Rebuild referenced set for next iteration
+        const new_words = result.toOwnedSlice(alloc) catch return words;
+        // Recompute referenced on new_words
+        var ri: usize = 0;
+        while (ri < bound) : (ri += 1) referenced.unset(ri);
+        pos = 5;
+        while (pos < new_words.len) {
+            const hdr2 = new_words[pos];
+            const wc2: u32 = hdr2 >> 16;
+            const opcode2: u16 = @truncate(hdr2 & 0xFFFF);
+            if (wc2 == 0) break;
+            const ie2 = pos + wc2;
+            if (ie2 > new_words.len) break;
+            const info2 = getOpInfo(opcode2) orelse { pos = ie2; continue; };
+            var wi2: u32 = pos + 1;
+            switch (info2.fixed) {
+                1 => { if (wi2 < ie2) { mark(&referenced, new_words[wi2], bound); wi2 += 1; } },
+                2 => { if (wi2 < ie2) { mark(&referenced, new_words[wi2], bound); wi2 += 1; } if (wi2 < ie2) wi2 += 1; },
+                3 => { if (wi2 < ie2) wi2 += 1; },
+                else => {},
+            }
+            for (info2.ops) |ch| {
+                if (wi2 >= ie2) break;
+                switch (ch) {
+                    'i' => { mark(&referenced, new_words[wi2], bound); wi2 += 1; },
+                    'l' => { wi2 += 1; },
+                    'I' => { while (wi2 < ie2) : (wi2 += 1) mark(&referenced, new_words[wi2], bound); },
+                    'L' => { wi2 = ie2; },
+                    's' => { wi2 = ie2; },
+                    'M' => { if (wi2 < ie2) { wi2 += 1; while (wi2 < ie2) : (wi2 += 1) mark(&referenced, new_words[wi2], bound); } },
+                    'W' => { while (wi2 + 1 < ie2) { wi2 += 1; mark(&referenced, new_words[wi2], bound); wi2 += 1; } if (wi2 < ie2) wi2 += 1; },
+                    'E' => { while (wi2 < ie2) { const w = new_words[wi2]; wi2 += 1; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi2 < ie2) : (wi2 += 1) mark(&referenced, new_words[wi2], bound); },
+                    else => {},
+                }
+            }
+            pos = ie2;
+        }
+        // Use new_words as input for next iteration or final result
+        // Note: old `words` slice is owned by caller, don't free here
+        // Return new_words which will be compacted next
+        return new_words;
+    }
+
+    return words;
+}
