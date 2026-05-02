@@ -162,9 +162,9 @@ All output store mismatches resolved. Perfect correctness achieved.
 - **200 dead variables** (stored but never loaded). Could potentially eliminate stores and computing expressions.
 - **Diminishing returns**: Further optimization requires complex analysis (dominance analysis for cross-block load caching, dead code elimination, constant propagation, SSA construction).
 
-## PHANTOM ID ANALYSIS (58 IDs across 20 shaders):
-- Phantom IDs are allocated by the semantic analyzer but never emitted by the codegen
-- Root cause: codegen deduplicates AccessChains (access_chain_cache), but the semantic analyzer already allocated IDs for the duplicates
-- The semantic-level AccessChain caching (emitAccessChainCached) catches many duplicates, but some slip through because the index_access handler previously bypassed it
-- Even after fixing index_access, some AccessChains in the function_call handler and other paths bypass emitAccessChainCached
-- Fix options: (a) convert all AccessChain emission to use emitAccessChainCached, (b) implement ID compaction at codegen level
+## Session 2026-05-01 (Phase 4 - iteration 8):
+- **Loop header global cache**: IMPLEMENTED (-1 ID). Extended global_load_cache and global_access_chain_cache to also populate from loop headers (for/while/do-while). Added `cache_globals` flag. Small impact because most loop variables are stored inside the loop body.
+- **ensureType lazy allocation for phantom IDs**: ATTEMPTED but failed. The pre-allocated `id` at the top of ensureType is wasted for struct layout dedup hits. Moving allocation after dedup check requires handling recursive types with forward declarations (chicken-and-egg problem). Rolling back `next_id` doesn't work because member type IDs are allocated between the struct ID allocation and the dedup check.
+- **Conversion sites to emitPureOp (re-attempt)**: REVERTED (no bound change). The binary op scalar/vector conversion sites already use emitPureOp. The remaining 3 OpConvertSToF duplicates are cross-block (switch cases create new blocks, clearing pure_op_cache).
+- **Total progress**: 10881 → 9808 (-1073 IDs, -9.9%), 199/199 pass
+- **Key insight**: All remaining duplicates (488) are either can't-dedup (293), cross-block (148 OpLoad, 11 OpAccessChain), or pre-allocated result_id (44). Further optimization requires: (a) cross-block caching with dominance analysis, (b) ID compaction pass, or (c) dead code elimination.

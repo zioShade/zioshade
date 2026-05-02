@@ -2285,16 +2285,8 @@ const Analyzer = struct {
                                 left_id = existing_id;
                                 did_splat = true;
                             } else {
-                                const splat_id = self.allocId();
-                                try self.instructions.append(self.alloc, .{
-                                    .tag = .composite_construct,
-                                    .result_type = null,
-                                    .result_id = splat_id,
-                                    .operands = splat_operands,
-                                    .ty = result_ty,
-                                });
+                                left_id = try self.emitPureOp(.composite_construct, splat_operands, result_ty);
                                 _ = self.tryUpgradeToConstantComposite();
-                                left_id = splat_id;
                                 did_splat = true;
                             }
                         }
@@ -2315,16 +2307,8 @@ const Analyzer = struct {
                                 right_id = existing_id;
                                 did_splat = true;
                             } else {
-                                const splat_id = self.allocId();
-                                try self.instructions.append(self.alloc, .{
-                                    .tag = .composite_construct,
-                                    .result_type = null,
-                                    .result_id = splat_id,
-                                    .operands = splat_operands,
-                                    .ty = result_ty,
-                                });
+                                right_id = try self.emitPureOp(.composite_construct, splat_operands, result_ty);
                                 _ = self.tryUpgradeToConstantComposite();
-                                right_id = splat_id;
                                 did_splat = true;
                             }
                         }
@@ -2651,16 +2635,8 @@ const Analyzer = struct {
                                         if (self.const_composite_cache.get(splat_key)) |existing_id| {
                                             value_id = existing_id;
                                         } else {
-                                            const splat_id = self.allocId();
-                                            try self.instructions.append(self.alloc, .{
-                                                .tag = .composite_construct,
-                                                .result_type = null,
-                                                .result_id = splat_id,
-                                                .operands = splat_ops,
-                                                .ty = swizzled_ty,
-                                            });
+                                            value_id = try self.emitPureOp(.composite_construct, splat_ops, swizzled_ty);
                                             _ = self.tryUpgradeToConstantComposite();
-                                            value_id = splat_id;
                                         }
                                     }
 
@@ -2749,58 +2725,34 @@ const Analyzer = struct {
                         .ty = .float,
                     });
                     // Splat float to vector
-                    const splat_id = self.allocId();
                     const num_comps = target.ty.numComponents();
                     const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
                     for (0..num_comps) |i| {
                         splat_operands[i] = .{ .id = float_id };
                     }
-                    try self.instructions.append(self.alloc, .{
-                        .tag = .composite_construct,
-                        .result_type = null,
-                        .result_id = splat_id,
-                        .operands = splat_operands,
-                        .ty = target.ty,
-                    });
-                    value_id = splat_id;
+                    value_id = try self.emitPureOp(.composite_construct, splat_operands, target.ty);
                     value_ty = target.ty;
                 } else if (target.ty.isVector() and value_ty == .float) {
                     // For multiplication, skip splat — we'll use vec_scalar_mul instead
                     const is_mul = node.data.op == .mul_assign;
                     if (!is_mul) {
                         // float → splat to vector (needed for +=, -=, /= etc.)
-                        const splat_id = self.allocId();
                         const num_comps = target.ty.numComponents();
                         const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
                         for (0..num_comps) |i| {
                             splat_operands[i] = .{ .id = value.id };
                         }
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .composite_construct,
-                            .result_type = null,
-                            .result_id = splat_id,
-                            .operands = splat_operands,
-                            .ty = target.ty,
-                        });
-                        value_id = splat_id;
+                        value_id = try self.emitPureOp(.composite_construct, splat_operands, target.ty);
                         value_ty = target.ty;
                     }
                 } else if (target.ty.isVector() and value_ty.isScalar() and !value_ty.isVector()) {
                     // Any other scalar → splat to vector (handles int8, int16, uint8, uint16, etc.)
-                    const splat_id = self.allocId();
                     const num_comps = target.ty.numComponents();
                     const splat_operands = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
                     for (0..num_comps) |i| {
                         splat_operands[i] = .{ .id = value.id };
                     }
-                    try self.instructions.append(self.alloc, .{
-                        .tag = .composite_construct,
-                        .result_type = null,
-                        .result_id = splat_id,
-                        .operands = splat_operands,
-                        .ty = target.ty,
-                    });
-                    value_id = splat_id;
+                    value_id = try self.emitPureOp(.composite_construct, splat_operands, target.ty);
                     value_ty = target.ty;
                 } else if (target.ty == .float and value_ty == .int) {
                     // int → float
@@ -3612,18 +3564,11 @@ const Analyzer = struct {
                             img_id = loaded;
                         }
                         // Create ivec2(0, 0) coordinate
-                        const coord_id = self.allocId();
                         const zero_id = try self.getConstInt(0, .int);
                         const coord_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                         coord_ops[0] = .{ .id = zero_id };
                         coord_ops[1] = .{ .id = zero_id };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .composite_construct,
-                            .result_type = null,
-                            .result_id = coord_id,
-                            .operands = coord_ops,
-                            .ty = .ivec2,
-                        });
+                        const coord_id = try self.emitPureOp(.composite_construct, coord_ops, .ivec2);
                         // OpImageRead — with optional Sample operand for MS
                         if (arg_tids.items.len >= 2) {
                             // MS subpassLoad: subpassLoad(img, sampleIndex)
