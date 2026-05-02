@@ -512,7 +512,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
 
     // Iterative DCE
     var current_words = words;
-    for (0..5) |_| {
+    for (0..15) |_| {
         // Find dead instructions
         var any_removed = false;
         var result = std.ArrayList(u32).initCapacity(alloc, current_words.len) catch return current_words;

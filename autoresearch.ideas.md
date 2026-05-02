@@ -1,9 +1,18 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 199/199 spirv-val, 0/199 mismatches, 0 failures
-## Best commit: fd1d4c7 (Extended DCE + ID compaction)
-## Total bound: 7930 across 199 shaders (-27.1% from 10881)
-## Matches spirv-opt --compact-ids (before DCE; our DCE goes further)
+## Best commit: 8296714 (Extended DCE + ID compaction)
+## Total bound: 7919 across 199 shaders (-27.2% from 10881)
+## Remaining waste: 80 IDs (1.0%) — mostly unavoidable (function call results, atomic returns)
+
+## NEW OPTIMIZATIONS IMPLEMENTED (this session):
+19. SPIR-V ID compaction post-processing pass (-1544 IDs)
+20. Dead code elimination in SPIR-V binary (-199 IDs)
+21. Iterative DCE to fixpoint (-81 IDs cascading)
+22. Dead type + variable elimination (-48 IDs)
+23. Subgroup op DCE (-11 IDs)
+
+## Total improvement this session: -1883 IDs (-19.2% from 9721)
 
 ## PHASE 4: SPIR-V Output Size Optimization
 - Baseline: 10881 total bound across 199 shaders
