@@ -2405,7 +2405,6 @@ const Analyzer = struct {
             .unary_op => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
                 const operand = try self.analyzeExpression(node.data.children[0]);
-                const result_id = self.allocId();
 
                 const is_float = operand.ty == .float or operand.ty == .double or operand.ty.isVector();
 
@@ -2418,13 +2417,7 @@ const Analyzer = struct {
 
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                 operands[0] = .{ .id = operand.id };
-                try self.instructions.append(self.alloc, .{
-                    .tag = tag,
-                    .result_type = null,
-                    .result_id = result_id,
-                    .operands = operands,
-                    .ty = operand.ty,
-                });
+                const result_id = try self.emitPureOp(tag, operands, operand.ty);
                 return .{ .ty = operand.ty, .id = result_id };
             },
             .assign_op => {
