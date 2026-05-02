@@ -39,6 +39,7 @@ pub fn generate(
         .emitted_constants = .{},
         .constant_alias = .{},
         .emitted_func_types = .{},
+        .emitted_struct_layouts = .{},
         .layout_visited = .{},
         .default_row_major = false,
         .ptr_storage_class = .{},
@@ -127,6 +128,7 @@ const Codegen = struct {
     emitted_constants: std.AutoHashMapUnmanaged(u64, u32), // (type_id << 32 | value) -> const_id
     constant_alias: std.AutoHashMapUnmanaged(u32, u32), // IR result_id -> actual constant_id (dedup)
     emitted_func_types: std.AutoHashMapUnmanaged(u64, u32), // hash(ret+params) -> func_type_id
+    emitted_struct_layouts: std.AutoHashMapUnmanaged(u64, u32), // hash(member_types) -> struct_type_id
     layout_visited: std.AutoHashMapUnmanaged(u32, void), // struct type_ids currently being laid out (cycle detection)
     default_row_major: bool, // current block-level matrix layout
     ptr_storage_class: std.AutoHashMapUnmanaged(u32, ir.SPIRVStorageClass), // result_id -> storage class for pointers
@@ -159,6 +161,7 @@ const Codegen = struct {
         self.emitted_constants.deinit(self.alloc);
         self.constant_alias.deinit(self.alloc);
         self.emitted_func_types.deinit(self.alloc);
+        self.emitted_struct_layouts.deinit(self.alloc);
         self.layout_visited.deinit(self.alloc);
         self.ptr_storage_class.deinit(self.alloc);
         self.access_chain_cache.deinit(self.alloc);
@@ -1712,12 +1715,24 @@ const Codegen = struct {
                     }
                     try member_ids.append(self.alloc, try self.ensureType(member.ty));
                 }
+                // Check if a struct with the same member layout was already emitted
+                var layout_key: u64 = @as(u64, member_ids.items.len);
+                for (member_ids.items) |mid| {
+                    layout_key = layout_key *% 33 +% @as(u64, mid);
+                }
+                if (self.emitted_struct_layouts.get(layout_key)) |cached_id| {
+                    // Reuse existing struct type — update name mapping too
+                    try self.emitted_named_types.put(self.alloc, name, cached_id);
+                    return cached_id;
+                }
+
                 const word_count: u16 = 2 + @as(u16, @intCast(member_ids.items.len));
                 try self.emitTypeWord(spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.TypeStruct)));
                 try self.emitTypeWord(id);
                 for (member_ids.items) |mid| {
                     try self.emitTypeWord(mid);
                 }
+                try self.emitted_struct_layouts.put(self.alloc, layout_key, id);
                 // Emit OpName for this struct type
                 try self.emitNameSectionName(id, name);
                 // Emit OpMemberName for each struct member
