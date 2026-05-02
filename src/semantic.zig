@@ -2200,7 +2200,7 @@ const Analyzer = struct {
                     right = .{ .ty = right.ty, .id = ld };
                 }
                 const result_ty = self.promoteTypes(left.ty, right.ty) orelse return error.TypeMismatch;
-                const result_id = self.allocId();
+                // NOTE: result_id is allocated later, after pure_op_cache check
 
                 // Convert int/uint to float if needed for mixed comparisons/arithmetic
                 var left_conv_id: ?u32 = null;
@@ -2393,14 +2393,34 @@ const Analyzer = struct {
                     final_result_ty = left.ty.columnType();
                 }
 
+                // Check pure_op_cache for arithmetic/logical ops (fadd, iadd, etc.)
+                const cacheable_ty = if (returns_bool) .bool else final_result_ty;
+                if (!returns_bool) {
+                    var cache_key: u64 = @intFromEnum(cacheable_ty) *% 37 +% @intFromEnum(tag);
+                    cache_key = cache_key *% 31 +% @as(u64, left_id);
+                    cache_key = cache_key *% 31 +% @as(u64, right_id);
+                    if (self.pure_op_cache.get(cache_key)) |existing_id| {
+                        return .{ .ty = cacheable_ty, .id = existing_id };
+                    }
+                }
+
+                const result_id = self.allocId();
+
                 try self.instructions.append(self.alloc, .{
                     .tag = tag,
                     .result_type = null,
                     .result_id = result_id,
                     .operands = operands,
-                    .ty = if (returns_bool) .bool else final_result_ty,
+                    .ty = cacheable_ty,
                 });
-                return .{ .ty = if (returns_bool) .bool else final_result_ty, .id = result_id };
+                // Cache for dedup (only pure ops, not comparisons)
+                if (!returns_bool) {
+                    var cache_key: u64 = @intFromEnum(cacheable_ty) *% 37 +% @intFromEnum(tag);
+                    cache_key = cache_key *% 31 +% @as(u64, left_id);
+                    cache_key = cache_key *% 31 +% @as(u64, right_id);
+                    self.pure_op_cache.put(self.alloc, cache_key, result_id) catch {};
+                }
+                return .{ .ty = cacheable_ty, .id = result_id };
             },
             .unary_op => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
