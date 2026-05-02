@@ -608,3 +608,157 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
 
     return current_words;
 }
+
+/// Merge chained AccessChain instructions where the base is itself an AccessChain result
+/// and the base AccessChain is only used once (by the current one).
+pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Build result_id -> instruction position map for AccessChains
+    const AC = struct { pos: u32, base_id: u32, indices_start: u32, indices_count: u32, result_id: u32 };
+    var ac_map = std.AutoHashMapUnmanaged(u32, AC){}; // result_id -> AC info
+    defer ac_map.deinit(alloc);
+
+    // First pass: find all AccessChains
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 65) { // OpAccessChain
+            // Layout: result_type(1), result_id(1), base_id(1), indices...(rest)
+            if (wc >= 5) {
+                const result_id = words[pos + 2];
+                const base_id = words[pos + 3];
+                ac_map.put(alloc, result_id, .{
+                    .pos = pos,
+                    .base_id = base_id,
+                    .indices_start = pos + 4,
+                    .indices_count = wc - 4,
+                    .result_id = result_id,
+                }) catch {};
+            }
+        }
+        pos += wc;
+    }
+
+    // Build reference count for AccessChain results
+    var ref_count = std.AutoHashMapUnmanaged(u32, u32){};
+    defer ref_count.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        if (wc == 0) break;
+        // Count references to AccessChain results (skip the definition itself)
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const info = getOpInfo(opcode) orelse { pos += wc; continue; };
+        var wi: u32 = pos + 1;
+        switch (info.fixed) {
+            1 => { if (wi < pos + wc) wi += 1; }, // skip result_type (not an AC result ref)
+            2 => { if (wi < pos + wc) wi += 1; if (wi < pos + wc) wi += 1; }, // skip result_type + result
+            3 => { if (wi < pos + wc) wi += 1; }, // skip result
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= pos + wc) break;
+            switch (ch) {
+                'i' => {
+                    const w = words[wi];
+                    if (ac_map.contains(w)) {
+                        const entry = ref_count.getOrPutValue(alloc, w, 0) catch null;
+                        if (entry != null) entry.?.value_ptr.* += 1;
+                    }
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < pos + wc) : (wi += 1) {
+                        const w = words[wi];
+                        if (ac_map.contains(w)) {
+                            const entry = ref_count.getOrPutValue(alloc, w, 0) catch null;
+                            if (entry != null) entry.?.value_ptr.* += 1;
+                        }
+                    }
+                },
+                'l' => { wi += 1; },
+                'L' => { wi = pos + wc; },
+                's' => { wi = pos + wc; },
+                'M' => { if (wi < pos + wc) { wi += 1; while (wi < pos + wc) : (wi += 1) { const w = words[wi]; if (ac_map.contains(w)) { const entry = ref_count.getOrPutValue(alloc, w, 0) catch null; if (entry != null) entry.?.value_ptr.* += 1; } } } },
+                'W' => { while (wi + 1 < pos + wc) { wi += 1; const w = words[wi]; if (ac_map.contains(w)) { const entry = ref_count.getOrPutValue(alloc, w, 0) catch null; if (entry != null) entry.?.value_ptr.* += 1; } wi += 1; } if (wi < pos + wc) wi += 1; },
+                else => { wi += 1; },
+            }
+        }
+        pos += wc;
+    }
+
+    // Second pass: merge AccessChains where base is a single-use AC result
+    var result = std.ArrayListUnmanaged(u32){};
+    try result.appendSlice(alloc, words[0..5]); // copy header
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const inst_end = pos + wc;
+
+        if (opcode == 65 and wc >= 5) { // OpAccessChain
+            const ac_result_id = words[pos + 2];
+            const base_id = words[pos + 3];
+
+            // Try to merge with base AccessChain
+            // Collect index groups from innermost to outermost
+            var index_groups = std.ArrayListUnmanaged(struct { start: u32, count: u32 }){};
+            defer index_groups.deinit(alloc);
+            
+            // Our own indices first (innermost)
+            try index_groups.append(alloc, .{ .start = pos + 4, .count = wc - 4 });
+            
+            var current_base = base_id;
+            while (ac_map.get(current_base)) |base_ac| {
+                // Only merge if the base AC is referenced exactly once (by us)
+                const refs = ref_count.get(current_base) orelse 0;
+                if (refs != 1) break;
+                try index_groups.append(alloc, .{ .start = base_ac.indices_start, .count = base_ac.indices_count });
+                current_base = base_ac.base_id;
+            }
+
+            if (index_groups.items.len > 1) {
+                // Merge: emit indices from outermost (last in list) to innermost (first in list)
+                var total_indices: u32 = 0;
+                for (index_groups.items) |g| total_indices += g.count;
+                const new_wc: u32 = 4 + total_indices;
+                const new_hdr = (new_wc << 16) | 65;
+                try result.append(alloc, new_hdr);
+                try result.append(alloc, words[pos + 1]); // result_type
+                try result.append(alloc, ac_result_id); // result_id
+                try result.append(alloc, current_base); // merged base
+                // Emit from outermost to innermost
+                var gi: usize = index_groups.items.len;
+                while (gi > 0) {
+                    gi -= 1;
+                    const g = index_groups.items[gi];
+                    for (g.start..g.start + g.count) |j| {
+                        try result.append(alloc, words[j]);
+                    }
+                }
+                pos = inst_end;
+                continue;
+            }
+        }
+
+        try result.appendSlice(alloc, words[pos..inst_end]);
+        pos = inst_end;
+    }
+
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
+
+    // Update bound (may be the same or lower after DCE runs)
+    return result.toOwnedSlice(alloc);
+}
