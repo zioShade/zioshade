@@ -1,7 +1,49 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 199/199 spirv-val, 0/199 mismatches, 0 failures
-## Commit: bc822d7 (Float64 for double tensors → perfect score)
+## Commit: 565b1ac (Codegen dref extraction cache)
+
+## CURRENT METRICS:
+- 199/199 spirv-val ✅
+- 0/199 output store mismatches (100% match!) ✅
+- 0 total failures ✅
+- 149/149 gap tests ✅
+- Total bound: 9809 across 199 shaders (-9.9% from 10881)
+
+## PHASE 1 COMPLETE ✅
+All output store mismatches resolved. Perfect correctness achieved.
+
+## PHASE 4: SPIR-V Output Size Optimization
+- Baseline: 10881 total bound across 199 shaders
+- Current: 9809 (-1072 IDs, -9.9%)
+- Average ratio vs glslang: ~0.79x (we're already smaller on average)
+
+## OPTIMIZATIONS IMPLEMENTED (this session):
+1. Semantic-level constant composite dedup (-309 IDs)
+2. AccessChain caching within basic blocks (-217 IDs)
+3. Load caching within basic blocks (-168 IDs)
+4. Pure op CSE for composite_extract (-12 IDs)
+5. Targeted store invalidation (-138 IDs)
+6. Vector shuffle dedup via emitPureOp (-28 IDs)
+7. ImageTexelPointer dedup via emitPureOp (-12 IDs)
+8. Cross-block load caching for global pointers from entry block (-36 IDs)
+9. Scalar splat constant composite cache (-8 IDs)
+10. General composite_construct fallback cache (-2 IDs)
+11. Struct layout dedup in codegen (-41 IDs)
+12. Conversion sites to emitPureOp (-17 IDs)
+13. Unary op emitPureOp (-9 IDs)
+14. Binary op pure_op_cache pre-check (-15 IDs)
+15. Extract image dedup via emitPureOp (-4 IDs)
+16. Index access via emitAccessChainCached + emitPureOp (-34 IDs)
+17. Codegen dref extraction + coordinate shrink cache (-6 IDs)
+
+## REMAINING OPTIMIZATION OPPORTUNITIES:
+- **Cross-block load caching with dominance analysis**: 148 OpLoad duplicates remain, all cross-block or store-invalidated. Would need per-block load caching with dominance frontier analysis.
+- **ID compaction pass**: Remap SPIR-V IDs to eliminate gaps. Would recover ~49 wasted IDs. Requires full opcode ID-position table.
+- **Dead code elimination**: 534 dead IDs total (293 labels, 43 function calls, 39 loads, 29 constants). Doesn't reduce bound without compaction.
+- **SSA variable elimination**: 21 variables stored once and loaded once. Could save ~63 IDs. Requires use-def analysis.
+- **Dead variable elimination**: 200 variables stored but never loaded. Could eliminate stores and computing expressions.
+- **Moving result_id allocation in function_call handler**: Would enable emitPureOp for ext_inst and conversions, saving ~10 IDs. Complex refactoring.
 
 ## CURRENT METRICS:
 - 199/199 spirv-val ✅
@@ -106,3 +148,23 @@ All output store mismatches resolved. Perfect correctness achieved.
   - Eliminated: OpFAdd (5→0), OpIAdd (4→0), OpBitwiseAnd (3→0), OpSNegate (was already 0 from unary conversion).
 - **Total progress**: 10881 → 9853 (-1028 IDs, -9.4%), 199/199 pass, 0 mismatches
 - **Remaining duplicates**: 509 total. OpVariable 208, OpLoad 155, OpFunctionParameter 45, OpFunction 40 (all can't dedup). Actionable: OpAccessChain 11, OpCompositeExtract 6, OpBitcast 4, OpCompositeConstruct 4, OpImage 4, OpExtInst 3.
+
+## Session 2026-05-01 (Phase 4 - iteration 7):
+- **Index access via emitAccessChainCached**: IMPLEMENTED (-34 IDs). Root cause: index_access handler bypassed emitAccessChainCached, allocating new IR IDs for each AccessChain. Even though codegen deduplicates the SPIR-V output, semantic-level load_cache couldn't match different IR IDs.
+- **Extract image dedup via emitPureOp**: IMPLEMENTED (-4 IDs). Converted all 4 extract_image sites to emitPureOp. Same sampler always produces same image.
+- **Binary op pure_op_cache pre-check**: IMPLEMENTED (-15 IDs). Moved result_id allocation AFTER cache check. Covers all arithmetic ops. Key: no IDs wasted on cache hits.
+- **Codegen dref extraction cache**: IMPLEMENTED (-6 IDs). Added codegen_pure_cache for OpCompositeExtract (dref) and OpVectorShuffle (coord shrinking) in shadow sampler codegen handlers. Eliminated 3 composite_extract + 3 vector_shuffle duplicates.
+- **Conversion sites to emitPureOp**: REVERTED (no bound change). Converted remaining conversion emission sites but they had no duplicates.
+- **ExtInst pure_op_cache pre-check**: TRIED but doesn't help bound. Pre-allocated result_id is wasted on cache hit (net 0 bound effect).
+- **Total progress**: 10881 → 9809 (-1072 IDs, -9.9%), 199/199 pass
+- **Remaining actionable duplicates**: 489 total. OpLoad 148 (all cross-block/store-inval), OpAccessChain 11 (cross-block), OpBitcast 4, OpCompositeConstruct 4, OpExtInst 3, OpFunctionCall 3.
+- **21 SSA-eligible variables** (1 store, 1 load) could be eliminated. Would save ~63 IDs. Requires dead code elimination at codegen or semantic level.
+- **200 dead variables** (stored but never loaded). Could potentially eliminate stores and computing expressions.
+- **Diminishing returns**: Further optimization requires complex analysis (dominance analysis for cross-block load caching, dead code elimination, constant propagation, SSA construction).
+
+## PHANTOM ID ANALYSIS (58 IDs across 20 shaders):
+- Phantom IDs are allocated by the semantic analyzer but never emitted by the codegen
+- Root cause: codegen deduplicates AccessChains (access_chain_cache), but the semantic analyzer already allocated IDs for the duplicates
+- The semantic-level AccessChain caching (emitAccessChainCached) catches many duplicates, but some slip through because the index_access handler previously bypassed it
+- Even after fixing index_access, some AccessChains in the function_call handler and other paths bypass emitAccessChainCached
+- Fix options: (a) convert all AccessChain emission to use emitAccessChainCached, (b) implement ID compaction at codegen level
