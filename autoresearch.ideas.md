@@ -99,3 +99,10 @@ All output store mismatches resolved. Perfect correctness achieved.
 - **Bitcast pre-check**: Added to GLSL builtin handler. Checks pure_op_cache before allocating result_id for bitcast builtins.
 - **Total progress**: 10881 → 9877 (-1004 IDs, -9.2%), 199/199 pass, 0 mismatches
 - **Remaining duplicates**: 4 OpBitcast, ~155 OpLoad, 11 OpAccessChain, 6 OpConvertSToF, 6 OpCompositeExtract
+
+## Session 2026-05-01 (Phase 4 - iteration 6):
+- **Binary op pure_op_cache pre-check**: IMPLEMENTED (-15 IDs). Moved result_id allocation AFTER cache check. Covers fadd, iadd, fsub, isub, fmul, imul, fdiv, idiv, fmod, umod, rem, bit_and, bit_or, bit_xor, shift_left, shift_right. Excludes comparison operators.
+  - Key technique: moved allocId AFTER cache check so no IDs are wasted on cache hits.
+  - Eliminated: OpFAdd (5→0), OpIAdd (4→0), OpBitwiseAnd (3→0), OpSNegate (was already 0 from unary conversion).
+- **Total progress**: 10881 → 9853 (-1028 IDs, -9.4%), 199/199 pass, 0 mismatches
+- **Remaining duplicates**: 509 total. OpVariable 208, OpLoad 155, OpFunctionParameter 45, OpFunction 40 (all can't dedup). Actionable: OpAccessChain 11, OpCompositeExtract 6, OpBitcast 4, OpCompositeConstruct 4, OpImage 4, OpExtInst 3.
