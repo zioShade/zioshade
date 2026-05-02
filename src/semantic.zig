@@ -273,6 +273,7 @@ const Analyzer = struct {
     in_entry_block: bool = true,
     cache_globals: bool = true, // true in entry block and loop headers (blocks that dominate subsequent blocks)
     pure_op_cache: std.AutoHashMapUnmanaged(u64, u32) = .{}, // hash(type, op, operands) -> result_id
+    global_pure_op_cache: std.AutoHashMapUnmanaged(u64, u32) = .{}, // persists across blocks, populated from entry/loop-header blocks
     local_size: ?ir.LocalSize = null,
     // Heap-allocated AST types that transfer to Module for cleanup
     heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
@@ -318,6 +319,7 @@ const Analyzer = struct {
         self.global_load_cache.deinit(self.alloc);
         self.global_ptr_ids.deinit(self.alloc);
         self.pure_op_cache.deinit(self.alloc);
+        self.global_pure_op_cache.deinit(self.alloc);
         {
             var it = self.overloads.iterator();
             while (it.next()) |entry| {
@@ -531,7 +533,12 @@ const Analyzer = struct {
             };
             key = key *% 31 +% op_val;
         }
+        // Check local cache first
         if (self.pure_op_cache.get(key)) |existing_id| {
+            return existing_id;
+        }
+        // Check global cache (populated from entry/loop-header blocks)
+        if (self.global_pure_op_cache.get(key)) |existing_id| {
             return existing_id;
         }
         const result_id = self.allocId();
@@ -661,6 +668,14 @@ const Analyzer = struct {
     }
 
     fn emitLabel(self: *Analyzer, label_id: u32) !void {
+        // If the previous block was a global-dominating block (entry/loop-header),
+        // save its pure_op_cache entries to global_pure_op_cache before clearing
+        if (self.cache_globals) {
+            var it = self.pure_op_cache.iterator();
+            while (it.next()) |entry| {
+                self.global_pure_op_cache.put(self.alloc, entry.key_ptr.*, entry.value_ptr.*) catch {};
+            }
+        }
         self.in_entry_block = false;
         self.cache_globals = false; // Only re-enable in loop headers
         self.access_chain_cache.clearRetainingCapacity();
@@ -1192,6 +1207,7 @@ const Analyzer = struct {
         self.pure_op_cache.clearRetainingCapacity();
         self.global_load_cache.clearRetainingCapacity();
         self.global_access_chain_cache.clearRetainingCapacity();
+        self.global_pure_op_cache.clearRetainingCapacity();
         // Note: global_ptr_ids is NOT cleared — populated during collectTopLevel, shared across functions
         try self.pushScope();
 
@@ -2493,6 +2509,7 @@ const Analyzer = struct {
                                     store_ops[0] = .{ .id = var_ptr_id };
                                     store_ops[1] = .{ .id = shuffle_id };
                                     _ = self.load_cache.remove(var_ptr_id);
+                                    _ = self.global_load_cache.remove(var_ptr_id);
         try self.instructions.append(self.alloc, .{
                                         .tag = .store,
                                         .result_type = null,
@@ -2545,6 +2562,7 @@ const Analyzer = struct {
                 store_operands[0] = .{ .id = target.id };
                 store_operands[1] = .{ .id = value_id };
                 _ = self.load_cache.remove(target.id);
+                _ = self.global_load_cache.remove(target.id);
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
@@ -2685,6 +2703,7 @@ const Analyzer = struct {
                                     store_ops[0] = .{ .id = var_ptr_id2 };
                                     store_ops[1] = .{ .id = final_shuffle_id };
                                     _ = self.load_cache.remove(var_ptr_id2);
+                                    _ = self.global_load_cache.remove(var_ptr_id2);
         try self.instructions.append(self.alloc, .{
                                         .tag = .store,
                                         .result_type = null,
@@ -2817,6 +2836,7 @@ const Analyzer = struct {
                 store_operands[0] = .{ .id = target.id };
                 store_operands[1] = .{ .id = computed_id };
                 _ = self.load_cache.remove(target.id);
+                _ = self.global_load_cache.remove(target.id);
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
@@ -3277,6 +3297,7 @@ const Analyzer = struct {
                         store_ops[0] = .{ .id = out_id };
                         store_ops[1] = .{ .id = read_result_id };
                         _ = self.load_cache.remove(out_id);
+                        _ = self.global_load_cache.remove(out_id);
         try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
@@ -5254,6 +5275,7 @@ const Analyzer = struct {
                 store_ops[0] = .{ .id = lval.id };
                 store_ops[1] = .{ .id = new_val_id };
                 _ = self.load_cache.remove(lval.id);
+                _ = self.global_load_cache.remove(lval.id);
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
