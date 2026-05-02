@@ -117,6 +117,7 @@ fn getOpInfo(opcode: u16) ?OpInfo {
         138 => rt(2, "ii"),        // OpSRem
         141 => rt(2, "ii"),        // OpFMod
         142 => rt(2, "ii"),        // OpVectorTimesScalar
+        143 => rt(2, "ii"),        // OpMatrixTimesScalar
         144...148 => rt(2, "ii"),  // OpVectorTimesMatrix..OpDot
         // --- Relational ---
         154...155 => rt(2, "i"),   // OpAll, OpAny
@@ -130,7 +131,9 @@ fn getOpInfo(opcode: u16) ?OpInfo {
         182 => rt(2, "ii"),        // OpFOrdNotEqual
         184 => rt(2, "ii"),        // OpFOrdLessThan
         186 => rt(2, "ii"),        // OpFOrdGreaterThan
+        188 => rt(2, "ii"),        // OpFOrdLessThanEqual
         // --- Bit ---
+        194 => rt(2, "ii"),        // OpShiftRightLogical
         196 => rt(2, "ii"),        // OpShiftLeftLogical
         198...199 => rt(2, "ii"),  // OpBitwiseXor, OpBitwiseAnd
         200 => rt(2, "i"),         // OpNot
@@ -490,13 +493,14 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 109, 110, 111, 112, 114, 124 => true, // Conversions
                 126, 127 => true, // Negate
                 128...133, 135...138, 141, 142 => true, // Arithmetic
+                143 => true, // OpMatrixTimesScalar
                 144...148 => true, // Matrix/vector ops
                 154...157 => true, // All/Any/IsNan/IsInf
                 166...168, 170, 171 => true, // LogicalOr/And/Not/Equal/NotEqual
                 169 => true, // Select
                 173, 177 => true, // Comparisons
-                180, 182, 184, 186 => true, // FOrd comparisons
-                196, 198, 199, 200 => true, // Bit ops
+                180, 182, 184, 186, 188 => true, // FOrd comparisons + FOrdLessThanEqual
+                194, 196, 198, 199, 200 => true, // Shift + Bit ops
                 207...215 => true, // Derivatives
                 12 => true, // ExtInst
                 // Type instructions (result_only, no side effects)
