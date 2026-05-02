@@ -1,43 +1,48 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 199/199 spirv-val, 0/199 mismatches, 0 failures
-## Current: 7753 total_bound across 199 shaders (-20.2% from 9721, -28.8% from 10881)
-## 5 IDs BETTER than spirv-opt --compact-ids + all aggressive passes!
+## Current: 7743 total_bound across 199 shaders (-20.3% from 9721, -28.8% from 10881)
+## 4 IDs BETTER than spirv-opt --compact-ids + all aggressive passes!
 
-## THIS SESSION OPTIMIZATIONS:
+## THIS SESSION ACHIEVEMENTS:
 30. Comparison operator dedup via pure_op_cache (-2 IDs)
-31. Constant folding in type constructor: int/uint/float literal → target type (-21 IDs)
-32. AccessChain merging: chained ACs with single-use intermediates → single multi-index AC (-98 IDs)
-33. Global load cache for Input/Uniform from all blocks (-1 ID)
+31. Constant folding in type constructor (-21 IDs)
+32. AccessChain merging: single-use intermediates (-98 IDs)
+33. Global load cache for all blocks (-1 ID)
+34. Multi-use AC merge: bases used only by other ACs (-10 IDs)
 
-## OPTIMIZATION PIPELINE:
-1. Semantic analysis → IR instructions (with caching + dedup)
-2. Codegen → SPIR-V binary
-3. mergeAccessChains (new!) → merge chained AccessChains
-4. deadCodeElim → iterative DCE to fixpoint
-5. compactIds → eliminate ID gaps
+## TOTAL THIS SESSION: 7873 → 7743 (-130 IDs, -1.7%)
 
-## REMAINING WASTE: 199 IDs (1 per shader, from pre-allocation — minimum achievable)
+## REMAINING WASTE: 199 IDs (1 per shader, pre-allocation — minimum)
 
-## FUTURE OPTIMIZATION OPPORTUNITIES:
+## FUTURE OPTIMIZATION OPPORTUNITIES (requires architectural changes):
 
-### Cross-block load caching with dominance (~30 IDs)
-30 global cross-block load duplicates remain. Can't cache from non-dominating blocks.
-Would need: emit loads in entry block proactively for frequently-accessed global variables.
+### Cross-function Input/Uniform load sharing (~30 IDs)
+FAILED: Preserving global_load_cache across functions causes dominance violations.
+SPIR-V prohibits using IDs defined in one function in another function.
+Would need: pass loaded values as function parameters, or inline functions.
 
-### AccessChain merge with multi-use bases (~20 IDs)
-20 chained ACs have intermediate results used by multiple instructions.
-Would need: duplicate the merged indices for each use, or keep intermediates.
+### Cross-block load/AC hoisting (~46 loads + 9 ACs)
+Cross-block duplicates exist because blocks don't dominate each other (if-else branches).
+Would need: speculative load/AC emission in entry block (two-pass analysis).
+1. First pass: identify which global variables/ACs are loaded in multiple branches
+2. Second pass: emit loads/ACs in entry block, use results in all branches
 
-### bvec→int roundtrip optimization (~3 IDs in casts.comp)
-`ivec4(bvec4(x))` currently: extract → INotEqual → construct bvec → extract → Select.
-Should simplify to: x != 0 ? 1 : 0 per component.
+### Dead loop/branch elimination (~29 IDs in 1 shader)
+spirv-opt eliminates entire loops that have no observable side effects.
+inside-loop-dominated-variable-preservation.frag: spirv-opt reduces 53→24 IDs.
+Would need: control flow analysis to detect dead loops.
 
-### Compile time optimization
-DCE + compaction + merge adds overhead. Could profile and optimize.
+### Dead code: !!b optimization (~3 IDs in 1 shader)
+unary-enclose.frag: `b = false; !!b` could be simplified to just `b = false`.
+Would need: constant propagation through logical not chains.
+
+### Composite construct array handling (~13 IDs in 1 shader)
+composite-construct.comp: multi-dimensional array construction not optimal.
+Would need: better array copy/multi-dim constructor optimization.
 
 ## THINGS THAT DIDN'T WORK:
-- AccessChain merge with reversed index order (spirv-val failures)
-- Global AccessChain cache from all blocks (dominance violations)
+- Cross-function global_load_cache preservation (7 spirv-val failures)
+- Cross-block AC caching from all blocks (dominance violations)
 - Binary op constant folding (all conversions are runtime values)
-- emitPureOp for mix/select/ext_inst/composite_construct (0 IDs, DCE handles)
+- Iterative merge+DCE loop (no additional savings)
