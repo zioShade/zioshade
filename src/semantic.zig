@@ -4811,6 +4811,28 @@ const Analyzer = struct {
                         else => .void,
                     } else arg_ty;
                     if (!std.meta.eql(arg_scalar, result_scalar) and result_scalar.isScalar() and arg_scalar.isScalar()) {
+                        // Constant folding: int/uint literal → float literal
+                        if (result_scalar == .float and (arg_scalar == .int or arg_scalar == .uint)) {
+                            const child = node.data.children[i];
+                            if (child.tag == .int_literal or child.tag == .uint_literal) {
+                                const val: u32 = @intCast(child.data.int_val);
+                                const fval: f32 = @floatFromInt(val);
+                                arg_id = try self.getConstFloat(fval);
+                                converted_ids[i] = arg_id;
+                                continue;
+                            }
+                        }
+                        // Constant folding: float literal → int/uint literal
+                        if ((result_scalar == .int or result_scalar == .uint) and arg_scalar == .float) {
+                            const child = node.data.children[i];
+                            if (child.tag == .float_literal) {
+                                const fval: f32 = @floatCast(child.data.float_val);
+                                const ival: u32 = @intFromFloat(fval);
+                                arg_id = try self.getConstInt(ival, if (result_scalar == .uint) .uint else .int);
+                                converted_ids[i] = arg_id;
+                                continue;
+                            }
+                        }
                         // Need type conversion
                         const conv_tag: ir.Instruction.Tag = blk: {
                             if (result_scalar == .float) {
