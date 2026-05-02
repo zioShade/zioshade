@@ -3290,17 +3290,10 @@ const Analyzer = struct {
                                 image_ptr_id = lval.id;
                             } else |_| {}
                         }
-                        const texel_ptr_id = self.allocId();
                         const tp_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                         tp_ops[0] = .{ .id = image_ptr_id }; // image pointer
                         tp_ops[1] = .{ .id = arg_tids.items[1].id }; // coord
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .image_texel_pointer,
-                            .result_type = null,
-                            .result_id = texel_ptr_id,
-                            .operands = tp_ops,
-                            .ty = ret_ty,
-                        });
+                        const texel_ptr_id = try self.emitPureOp(.image_texel_pointer, tp_ops, ret_ty);
                         if (std.mem.eql(u8, node.data.name, "imageAtomicCompSwap")) {
                             // imageAtomicCompSwap(image, coord, comparator, value)
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, 3);
