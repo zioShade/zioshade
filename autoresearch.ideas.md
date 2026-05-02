@@ -2,8 +2,8 @@
 
 ## STATUS: 199/199 spirv-val, 0/199 mismatches, 0 failures
 ## Best commit: 71dd48f (Extended load cache + opcode table fix)
-## Total bound: 7880 across 199 shaders (-27.6% from 10881)
-## 2 IDs BETTER than spirv-opt --compact-ids + all aggressive passes!
+## Total bound: 7875 across 199 shaders (-27.6% from 10881)
+## Now 7 IDs BETTER than spirv-opt --compact-ids + all aggressive passes!
 ## Remaining waste: 85 IDs (1.1%) — ALL unavoidable (SPIR-V mandates result <id>)
 
 ## NEW OPTIMIZATIONS IMPLEMENTED (this session):
@@ -15,6 +15,9 @@
 24. Deeper DCE iterations (5→15, -5 IDs)
 25. Ray query + ExtInstImport DCE (-2 IDs)
 26. Extended global_load_cache to ALL pointers + fixed opcode table (-28 IDs)
+27. If-else merge block caching (-4 IDs)
+28. Switch + loop merge block caching (0 IDs — kept for completeness)
+29. Type constructor conversion dedup via emitPureOp (-5 IDs)
 
 ## BUG FIX: compact_ids.zig opcode table was missing 3 opcodes:
 ## - 143 (MatrixTimesScalar)
@@ -22,7 +25,7 @@
 ## - 194 (ShiftRightLogical)
 ## These gaps caused DCE to incorrectly remove constants used by these instructions.
 
-## Total improvement this session: -1917 IDs (-19.5% from 9721, -27.5% from 10881)
+## Total improvement this session: -1926 IDs (-19.8% from 9721, -27.6% from 10881)
 
 ## PHASE 4: SPIR-V Output Size Optimization
 - Baseline: 10881 total bound across 199 shaders
