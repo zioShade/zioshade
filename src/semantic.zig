@@ -5228,8 +5228,6 @@ const Analyzer = struct {
                 else
                     return error.TypeMismatch;
 
-                const result_id = self.allocId();
-
                 // For matrix/array indexing with constant index, use OpCompositeExtract
                 // But only if the base is a VALUE, not a pointer
                 if (!base_tid.is_ptr and (base_tid.ty.isMatrix() or base_tid.ty == .array)) {
@@ -5259,34 +5257,32 @@ const Analyzer = struct {
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                         operands[0] = .{ .id = base_tid.id };
                         operands[1] = .{ .literal_int = idx };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .composite_extract,
-                            .result_type = null,
-                            .result_id = result_id,
-                            .operands = operands,
-                            .ty = element_ty,
-                        });
+                        const result_id = try self.emitPureOp(.composite_extract, operands, element_ty);
                         return .{ .ty = element_ty, .id = result_id };
                     }
                 }
 
+                // Use emitAccessChainCached for pointer-based array/buffer indexing
+                if (!base_tid.ty.isVector()) {
+                    const ptr_id = try self.emitAccessChainCached(base_tid.id, &[1]ir.Instruction.Operand{.{ .id = index_tid.id }}, element_ty);
+                    return .{ .ty = element_ty, .id = ptr_id, .is_ptr = true };
+                }
+
+                // Vector dynamic indexing
+                const result_id = self.allocId();
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 operands[0] = .{ .id = base_tid.id };
                 operands[1] = .{ .id = index_tid.id };
 
-                // Use vector_extract_dynamic for runtime indexing into loaded vectors
-                const tag: ir.Instruction.Tag = if (base_tid.ty.isVector()) .vector_extract_dynamic else .access_chain;
                 try self.instructions.append(self.alloc, .{
-                    .tag = tag,
+                    .tag = .vector_extract_dynamic,
                     .result_type = null,
                     .result_id = result_id,
                     .operands = operands,
                     .ty = element_ty,
                 });
 
-                // Access chains produce pointers, vector_extract_dynamic produces values
-                const is_ptr_result = tag == .access_chain;
-                return .{ .ty = element_ty, .id = result_id, .is_ptr = is_ptr_result };
+                return .{ .ty = element_ty, .id = result_id };
             },
             .post_increment, .post_decrement, .pre_increment, .pre_decrement => {
                 if (node.data.children.len < 1) return error.SemanticFailed;
