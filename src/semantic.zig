@@ -412,12 +412,19 @@ const Analyzer = struct {
     /// Returns true if upgraded.
     /// Compute a dedup key for a constant composite from its type and operand IDs.
     fn constCompositeKey(self: *Analyzer, ty: ast.Type, operands: []const ir.Instruction.Operand) u64 {
-        _ = self;
         var key: u64 = @intFromEnum(ty);
-        // For named types, include the name string to avoid collisions
+        // For named types, use member type layout instead of name string
+        // This allows dedup of structs with the same layout but different names
         if (ty == .named) {
-            for (ty.named) |ch| {
-                key = key *% 31 +% @as(u64, ch);
+            if (self.types.get(ty.named)) |td| {
+                for (td.members) |member| {
+                    key = key *% 31 +% @intFromEnum(member.ty);
+                }
+            } else {
+                // Fallback to name hash if type not found
+                for (ty.named) |ch| {
+                    key = key *% 31 +% @as(u64, ch);
+                }
             }
         }
         // For array types, include size and base type hash
