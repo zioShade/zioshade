@@ -89,3 +89,13 @@ All output store mismatches resolved. Perfect correctness achieved.
   - Cross-block load caching with dominance analysis (157 remaining OpLoad duplicates)
   - ID compaction pass at codegen level (only 49 IDs waste)
   - The optimization is approaching diminishing returns — further gains require complex analysis
+
+## Session 2026-05-01 (Phase 4 - iteration 5):
+- **Global AccessChain cache**: IMPLEMENTED (-15 IDs). AccessChains from entry block persist across all blocks.
+- **Struct layout dedup**: IMPLEMENTED (-41 IDs). emitted_struct_layouts cache keyed by member type IDs. All 28 OpTypeStruct duplicates eliminated.
+- **Conversion site emitPureOp**: IMPLEMENTED (-17 IDs). Converted 6 conversion emission sites to use emitPureOp. Eliminated 14 of 18 OpBitcast duplicates.
+  - Key learning: sites using pre-allocated result_id from outer scope MUST keep using it. Converting to emitPureOp wastes the pre-allocated ID. Only convert sites that allocate their own conv_id.
+  - Reverted one site (vector conversion in type_constructor) that caused +9 regression.
+- **Bitcast pre-check**: Added to GLSL builtin handler. Checks pure_op_cache before allocating result_id for bitcast builtins.
+- **Total progress**: 10881 → 9877 (-1004 IDs, -9.2%), 199/199 pass, 0 mismatches
+- **Remaining duplicates**: 4 OpBitcast, ~155 OpLoad, 11 OpAccessChain, 6 OpConvertSToF, 6 OpCompositeExtract
