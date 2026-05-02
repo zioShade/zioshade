@@ -69,14 +69,23 @@
 - Could profile the hotspots and optimize the DCE/compaction passes
 - Or optimize the semantic analysis / codegen for speed
 
-### Future: Cross-block load caching with dominance (~79 IDs)
-Extend load caching across block boundaries using structured dominance:
-1. Track which blocks are headers (if/else headers, loop headers)
+### Future: Cross-block load caching with dominance (~62 IDs within functions)
+Extend load caching across block boundaries:
+1. Need alias analysis for function-local pointers (AccessChain aliasing)
 2. Per-block load caching with dominance frontier analysis
 3. Only cache loads from blocks that dominate the current block
-4. Requires tracking the control flow graph during semantic analysis
-**Note**: This reduces IDs BEFORE compaction, so it might not reduce total_bound
-since compaction already eliminates gaps. Would need to verify.
+**Note**: Function-local pointers accessed through different AccessChain results can alias.
+Cross-block caching without alias analysis causes duplicate ID definitions.
+**Also**: 19 of the 79 cross-block dups are across DIFFERENT FUNCTIONS — can't be fixed
+(SPIR-V dominance rules prohibit using load results across function boundaries).
+
+### Future: Extended global_load_cache to ALL entry-block loads (~28 IDs)
+FAILED: Pointer aliasing causes duplicate ID definitions.
+Could potentially work with per-variable (not per-pointer) caching — map Variable ID → load result
+instead of AccessChain ID → load result. But this requires knowing which variable an AccessChain targets.
+
+### COMPLETED: total_bound = 7912 (matches spirv-opt aggressive)
+### Session achievement: 9721 → 7912 (-18.6%, -27.2% from 10881 baseline)
 
 ## THINGS THAT DIDN'T WORK:
 - Global pure op cache (no effect — conversions in non-dominating blocks)

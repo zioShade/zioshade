@@ -490,13 +490,11 @@ const Analyzer = struct {
         if (self.load_cache.get(ptr_id)) |existing_id| {
             return existing_id;
         }
-        // Check global (cross-block) cache for global pointers
-        if (self.global_ptr_ids.contains(ptr_id)) {
-            if (self.global_load_cache.get(ptr_id)) |existing_id| {
-                // Also cache in local cache for faster lookup within this block
-                self.load_cache.put(self.alloc, ptr_id, existing_id) catch {};
-                return existing_id;
-            }
+        // Check global (cross-block) cache for any pointer
+        // (entry block loads are safe to reuse in subsequent blocks due to dominance)
+        if (self.global_load_cache.get(ptr_id)) |existing_id| {
+            self.load_cache.put(self.alloc, ptr_id, existing_id) catch {};
+            return existing_id;
         }
         const ld = self.allocId();
         const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
@@ -509,9 +507,9 @@ const Analyzer = struct {
             .ty = ty,
         });
         self.load_cache.put(self.alloc, ptr_id, ld) catch {};
-        // Cache in global cache if this is a global pointer AND we're in a dominating block
-        // (entry block or loop headers dominate subsequent blocks, so cached values are safe to reuse)
-        if (self.cache_globals and self.global_ptr_ids.contains(ptr_id)) {
+        // Cache in global cache if we're in a dominating block (entry + loop headers)
+        // ALL loads are safe to cache — stores invalidate the cache for the stored ptr_id
+        if (self.cache_globals) {
             self.global_load_cache.put(self.alloc, ptr_id, ld) catch {};
         }
         return ld;
