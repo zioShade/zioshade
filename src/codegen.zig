@@ -61,6 +61,7 @@ pub fn generate(
         .sampled_image_cube_inner_id = 0,
         .glsl_std_450_id = 0,
         .access_chain_cache = .{},
+        .codegen_pure_cache = .{},
     };
     defer cg.deinit();
 
@@ -150,6 +151,7 @@ const Codegen = struct {
     sampled_image_cube_inner_id: u32, // TypeImage (Dim=Cube, Sampled=1)
     glsl_std_450_id: u32,
     access_chain_cache: std.AutoHashMapUnmanaged(u64, u32), // (base_id << 32 | index_id) -> result_id, cleared per function
+    codegen_pure_cache: std.AutoHashMapUnmanaged(u64, u32), // general pure op cache for codegen-level dedup
 
     fn deinit(self: *Codegen) void {
         self.emitted_types.deinit(self.alloc);
@@ -165,6 +167,7 @@ const Codegen = struct {
         self.layout_visited.deinit(self.alloc);
         self.ptr_storage_class.deinit(self.alloc);
         self.access_chain_cache.deinit(self.alloc);
+        self.codegen_pure_cache.deinit(self.alloc);
         self.words.deinit(self.alloc);
         self.type_section.deinit(self.alloc);
         self.decoration_section.deinit(self.alloc);
@@ -2746,6 +2749,7 @@ const Codegen = struct {
 
             // Clear per-function caches
             self.access_chain_cache.clearRetainingCapacity();
+            self.codegen_pure_cache.clearRetainingCapacity();
 
             // SPIR-V requires all OpVariable be first in the first block
             for (func.body) |inst| {
@@ -3309,12 +3313,6 @@ const Codegen = struct {
                     try self.emitWord(dref_id);
                 } else {
                 const coord_id = self.operandId(resolved, 1);
-                // Extract Dref from last component of coord
-                const dref_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
-                try self.emitWord(float_id);
-                try self.emitWord(dref_id);
-                try self.emitWord(coord_id);
                 // Determine last component index based on sampler type
                 const last_idx: u32 = switch (inst.ty) {
                     .sampler2d_shadow => 2, // vec3(u,v,dref) → extract [2]
@@ -3323,8 +3321,19 @@ const Codegen = struct {
                     .sampler1d_shadow => 1, // vec2(u,dref) → extract [1]
                     else => 3,
                 };
-                try self.emitWord(last_idx);
-                // Shrink coordinate: use VectorShuffle to drop last component
+                // Extract Dref from last component of coord (with caching)
+                const dref_key: u64 = @as(u64, coord_id) *% 31 +% @as(u64, last_idx) + 0x1000;
+                const dref_id: u32 = if (self.codegen_pure_cache.get(dref_key)) |cached| cached else blk: {
+                    const new_id = self.allocId();
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
+                    try self.emitWord(float_id);
+                    try self.emitWord(new_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(last_idx);
+                    self.codegen_pure_cache.put(self.alloc, dref_key, new_id) catch {};
+                    break :blk new_id;
+                };
+                // Shrink coordinate (with caching)
                 const shrink_ty: ast.Type = switch (inst.ty) {
                     .sampler2d_shadow => .vec2, // vec3 → vec2
                     .sampler2d_array_shadow => .vec3, // vec4 → vec3
@@ -3333,16 +3342,21 @@ const Codegen = struct {
                     else => .vec3,
                 };
                 const shrink_type_id = try self.ensureType(shrink_ty);
-                const shrunk_coord_id = self.allocId();
-                if (shrink_ty == .float) {
-                    // 1D shadow: extract scalar coordinate from vec2
+                const shrink_key: u64 = @as(u64, coord_id) *% 31 +% @as(u64, @intFromEnum(shrink_ty)) + 0x2000;
+                const shrunk_coord_id: u32 = if (shrink_ty == .float) blk: {
+                    if (self.codegen_pure_cache.get(shrink_key)) |cached| break :blk cached;
+                    const new_id = self.allocId();
                     const float_type_id = try self.ensureType(.float);
                     try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
                     try self.emitWord(float_type_id);
-                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(new_id);
                     try self.emitWord(coord_id);
-                    try self.emitWord(0); // extract first component
-                } else {
+                    try self.emitWord(0);
+                    self.codegen_pure_cache.put(self.alloc, shrink_key, new_id) catch {};
+                    break :blk new_id;
+                } else blk: {
+                    if (self.codegen_pure_cache.get(shrink_key)) |cached| break :blk cached;
+                    const new_id = self.allocId();
                     const num_comp: u32 = switch (shrink_ty) {
                         .vec2 => 2,
                         .vec3 => 3,
@@ -3350,11 +3364,13 @@ const Codegen = struct {
                     };
                     try self.emitWord(spirv.encodeInstructionHeader(@as(u16, @intCast(5 + num_comp)), @intFromEnum(spirv.Op.VectorShuffle)));
                     try self.emitWord(shrink_type_id);
-                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(new_id);
                     try self.emitWord(coord_id);
                     try self.emitWord(coord_id);
                     for (0..num_comp) |i| try self.emitWord(@intCast(i));
-                }
+                    self.codegen_pure_cache.put(self.alloc, shrink_key, new_id) catch {};
+                    break :blk new_id;
+                };
                 // Emit the Dref instruction
                 if (resolved.operands.len >= 4) {
                     // textureOffset(shadow, coord, offset, bias) → Bias|ConstOffset
@@ -3397,12 +3413,6 @@ const Codegen = struct {
                 const sampled_image_id = self.operandId(resolved, 0);
                 const coord_id = self.operandId(resolved, 1);
                 const float_id = try self.ensureType(.float);
-                // Extract Dref from last component of coord
-                const dref_id = self.allocId();
-                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
-                try self.emitWord(float_id);
-                try self.emitWord(dref_id);
-                try self.emitWord(coord_id);
                 const last_idx: u32 = switch (inst.ty) {
                     .sampler2d_shadow => 2,
                     .sampler2d_array_shadow => 3,
@@ -3410,8 +3420,19 @@ const Codegen = struct {
                     .sampler1d_shadow => 1,
                     else => 3,
                 };
-                try self.emitWord(last_idx);
-                // Shrink coordinate
+                // Extract Dref from last component of coord (with caching)
+                const dref_key: u64 = @as(u64, coord_id) *% 31 +% @as(u64, last_idx) + 0x1000; // CompositeExtract
+                const dref_id: u32 = if (self.codegen_pure_cache.get(dref_key)) |cached| cached else blk: {
+                    const new_id = self.allocId();
+                    try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
+                    try self.emitWord(float_id);
+                    try self.emitWord(new_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(last_idx);
+                    self.codegen_pure_cache.put(self.alloc, dref_key, new_id) catch {};
+                    break :blk new_id;
+                };
+                // Shrink coordinate (with caching)
                 const shrink_ty: ast.Type = switch (inst.ty) {
                     .sampler2d_shadow => .vec2,
                     .sampler2d_array_shadow => .vec3,
@@ -3420,15 +3441,21 @@ const Codegen = struct {
                     else => .vec3,
                 };
                 const shrink_type_id = try self.ensureType(shrink_ty);
-                const shrunk_coord_id = self.allocId();
-                if (shrink_ty == .float) {
+                const shrink_key: u64 = @as(u64, coord_id) *% 31 +% @as(u64, @intFromEnum(shrink_ty)) + 0x2000; // VectorShuffle
+                const shrunk_coord_id: u32 = if (shrink_ty == .float) blk: {
+                    if (self.codegen_pure_cache.get(shrink_key)) |cached| break :blk cached;
+                    const new_id = self.allocId();
                     const float_type_id = try self.ensureType(.float);
                     try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
                     try self.emitWord(float_type_id);
-                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(new_id);
                     try self.emitWord(coord_id);
                     try self.emitWord(0);
-                } else {
+                    self.codegen_pure_cache.put(self.alloc, shrink_key, new_id) catch {};
+                    break :blk new_id;
+                } else blk: {
+                    if (self.codegen_pure_cache.get(shrink_key)) |cached| break :blk cached;
+                    const new_id = self.allocId();
                     const num_comp: u32 = switch (shrink_ty) {
                         .vec2 => 2,
                         .vec3 => 3,
@@ -3436,11 +3463,13 @@ const Codegen = struct {
                     };
                     try self.emitWord(spirv.encodeInstructionHeader(@as(u16, @intCast(5 + num_comp)), @intFromEnum(spirv.Op.VectorShuffle)));
                     try self.emitWord(shrink_type_id);
-                    try self.emitWord(shrunk_coord_id);
+                    try self.emitWord(new_id);
                     try self.emitWord(coord_id);
                     try self.emitWord(coord_id);
                     for (0..num_comp) |i| try self.emitWord(@intCast(i));
-                }
+                    self.codegen_pure_cache.put(self.alloc, shrink_key, new_id) catch {};
+                    break :blk new_id;
+                };
                 const lod_id = if (resolved.operands.len >= 3) self.operandId(resolved, 2) else return;
                 if (resolved.operands.len >= 4) {
                     // textureLodOffset with shadow sampler: sampler, coord, lod, offset → Lod|ConstOffset
