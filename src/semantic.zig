@@ -2408,9 +2408,9 @@ const Analyzer = struct {
                     final_result_ty = left.ty.columnType();
                 }
 
-                // Check pure_op_cache for arithmetic/logical ops (fadd, iadd, etc.)
+                // Check pure_op_cache for all binary ops (including comparisons)
                 const cacheable_ty = if (returns_bool) .bool else final_result_ty;
-                if (!returns_bool) {
+                {
                     var cache_key: u64 = @intFromEnum(cacheable_ty) *% 37 +% @intFromEnum(tag);
                     cache_key = cache_key *% 31 +% @as(u64, left_id);
                     cache_key = cache_key *% 31 +% @as(u64, right_id);
@@ -2428,13 +2428,11 @@ const Analyzer = struct {
                     .operands = operands,
                     .ty = cacheable_ty,
                 });
-                // Cache for dedup (only pure ops, not comparisons)
-                if (!returns_bool) {
-                    var cache_key: u64 = @intFromEnum(cacheable_ty) *% 37 +% @intFromEnum(tag);
-                    cache_key = cache_key *% 31 +% @as(u64, left_id);
-                    cache_key = cache_key *% 31 +% @as(u64, right_id);
-                    self.pure_op_cache.put(self.alloc, cache_key, result_id) catch {};
-                }
+                // Cache for dedup (comparisons are pure too — same inputs = same output)
+                var cache_key: u64 = @intFromEnum(cacheable_ty) *% 37 +% @intFromEnum(tag);
+                cache_key = cache_key *% 31 +% @as(u64, left_id);
+                cache_key = cache_key *% 31 +% @as(u64, right_id);
+                self.pure_op_cache.put(self.alloc, cache_key, result_id) catch {};
                 return .{ .ty = cacheable_ty, .id = result_id };
             },
             .unary_op => {
