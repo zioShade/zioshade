@@ -3943,19 +3943,11 @@ const Analyzer = struct {
                             var alpha_id = arg_tids.items[2].id;
                             if (result_ty.isVector() and !arg_tids.items[2].ty.isVector()) {
                                 const num_comps = result_ty.numComponents();
-                                const splat_id = self.allocId();
                                 const splat_ops = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
                                 for (0..num_comps) |i| {
                                     splat_ops[i] = .{ .id = alpha_id };
                                 }
-                                try self.instructions.append(self.alloc, .{
-                                    .tag = .composite_construct,
-                                    .result_type = null,
-                                    .result_id = splat_id,
-                                    .operands = splat_ops,
-                                    .ty = result_ty,
-                                });
-                                alpha_id = splat_id;
+                                alpha_id = try self.emitPureOp(.composite_construct, splat_ops, result_ty);
                             }
                             const glsl_id: u32 = 46;
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
