@@ -1,9 +1,9 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 199/199 spirv-val, 0/199 mismatches, 0 failures
-## Best commit: 32273bf (DCE + ID compaction, fully optimized)
-## Total bound: 7912 across 199 shaders (-27.2% from 10881)
-## Matches spirv-opt --compact-ids + all aggressive passes exactly!
+## Best commit: 71dd48f (Extended load cache + opcode table fix)
+## Total bound: 7884 across 199 shaders (-27.5% from 10881)
+## Now 2 IDs BETTER than spirv-opt --compact-ids + all aggressive passes!
 ## Remaining waste: 85 IDs (1.1%) — ALL unavoidable (SPIR-V mandates result <id>)
 
 ## NEW OPTIMIZATIONS IMPLEMENTED (this session):
@@ -14,8 +14,15 @@
 23. Subgroup op DCE (-11 IDs)
 24. Deeper DCE iterations (5→15, -5 IDs)
 25. Ray query + ExtInstImport DCE (-2 IDs)
+26. Extended global_load_cache to ALL pointers + fixed opcode table (-28 IDs)
 
-## Total improvement this session: -1889 IDs (-19.3% from 9721, -27.2% from 10881)
+## BUG FIX: compact_ids.zig opcode table was missing 3 opcodes:
+## - 143 (MatrixTimesScalar)
+## - 188 (FOrdLessThanEqual)
+## - 194 (ShiftRightLogical)
+## These gaps caused DCE to incorrectly remove constants used by these instructions.
+
+## Total improvement this session: -1917 IDs (-19.5% from 9721, -27.5% from 10881)
 
 ## PHASE 4: SPIR-V Output Size Optimization
 - Baseline: 10881 total bound across 199 shaders
@@ -84,8 +91,13 @@ FAILED: Pointer aliasing causes duplicate ID definitions.
 Could potentially work with per-variable (not per-pointer) caching — map Variable ID → load result
 instead of AccessChain ID → load result. But this requires knowing which variable an AccessChain targets.
 
-### COMPLETED: total_bound = 7912 (matches spirv-opt aggressive)
-### Session achievement: 9721 → 7912 (-18.6%, -27.2% from 10881 baseline)
+### COMPLETED: total_bound = 7884 (2 IDs BETTER than spirv-opt aggressive!)
+### Session achievement: 9721 → 7884 (-18.9%, -27.5% from 10881 baseline)
+
+## REMAINING OPTIMIZATION OPPORTUNITIES:
+## - 34 within-function cross-block load dups (need dominance analysis)
+## - 17 cross-function load dups (can't fix — SPIR-V dominance rules)
+## - These would save ~51 IDs but require fundamental compiler changes
 
 ## THINGS THAT DIDN'T WORK:
 - Global pure op cache (no effect — conversions in non-dominating blocks)

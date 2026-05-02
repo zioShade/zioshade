@@ -1541,7 +1541,10 @@ const Analyzer = struct {
                         self.has_returned = saved_has_returned;
                     }
                 }
+                // Merge block dominates all subsequent blocks in this scope
+                // so caching loads here is safe (set after emitLabel which clears it)
                 try self.emitLabel(merge_label);
+                self.cache_globals = true;
             },
             .switch_stmt => {
                 if (node.data.children.len < 2) return;
