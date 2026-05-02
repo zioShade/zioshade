@@ -1,54 +1,43 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 199/199 spirv-val, 0/199 mismatches, 0 failures
-## Current: 7852 total_bound across 199 shaders (-19.2% from 9721, -27.8% from 10881)
-## 25 IDs BETTER than spirv-opt --compact-ids + all aggressive passes!
+## Current: 7753 total_bound across 199 shaders (-20.2% from 9721, -28.8% from 10881)
+## 5 IDs BETTER than spirv-opt --compact-ids + all aggressive passes!
 
 ## THIS SESSION OPTIMIZATIONS:
 30. Comparison operator dedup via pure_op_cache (-2 IDs)
-31. Constant folding in type constructor: int/uint/float literal → target type constant (-21 IDs)
-    - When vec4(0, 2, 3, 4) with int literals in float constructor, fold directly to float constants
-    - Eliminates OpConvertSToF instructions for constant operands
-    - Added tryFoldConversion helper for IR-level constant folding
-32. Binary op constant folding: no additional savings (conversions are runtime values)
-33. emitPureOp for OpSelect, OpExtInst, OpCompositeConstruct: correct but 0 savings (pre-allocated IDs already compacted by DCE)
+31. Constant folding in type constructor: int/uint/float literal → target type (-21 IDs)
+32. AccessChain merging: chained ACs with single-use intermediates → single multi-index AC (-98 IDs)
+33. Global load cache for Input/Uniform from all blocks (-1 ID)
 
-## REMAINING CROSS-BLOCK DUPLICATES:
-- OpLoad: 47 (21 for Input/Uniform/PushConstant, rest for Output/StorageBuffer)
-- OpAccessChain: 11 (could merge chained AccessChains)
-- OpFunction: 35 (can't optimize)
-- Pure ops: ~10 (OpBitwiseAnd, OpSNegate, etc.)
+## OPTIMIZATION PIPELINE:
+1. Semantic analysis → IR instructions (with caching + dedup)
+2. Codegen → SPIR-V binary
+3. mergeAccessChains (new!) → merge chained AccessChains
+4. deadCodeElim → iterative DCE to fixpoint
+5. compactIds → eliminate ID gaps
 
-## REMAINING SHADERS WHERE WE USE MORE IDs THAN GLSLANG:
-- push-constant-as-ubo.push-ubo.vk.frag: +1 (likely 1 extra AccessChain)
-- spec-constant-block-size.vk.frag: +1 (likely 1 extra AccessChain)
-- ubo_layout.frag: +2 (chained AccessChains vs single multi-index)
-- casts.comp: +3 (bvec→ivec roundtrip not optimized)
+## REMAINING WASTE: 199 IDs (1 per shader, from pre-allocation — minimum achievable)
 
 ## FUTURE OPTIMIZATION OPPORTUNITIES:
 
-### Multi-index AccessChain merging (-11+ IDs)
-When emitting AccessChain where base is itself an AccessChain result, merge indices.
-FAILED on first attempt: caused 40 spirv-val failures.
-Root cause: the intermediate AccessChain instructions become orphaned, and the cache entries
-reference stale base IDs. Need to handle cache invalidation properly.
-**Safer approach**: Merge in codegen or in DCE post-processing pass.
-**Expected savings**: ~11 IDs from AccessChain merging + potentially more from reduced type instructions.
+### Cross-block load caching with dominance (~30 IDs)
+30 global cross-block load duplicates remain. Can't cache from non-dominating blocks.
+Would need: emit loads in entry block proactively for frequently-accessed global variables.
 
-### Cross-block load caching for Input/Uniform (~21 IDs)
-21 cross-block load duplicates for Input/Uniform/PushConstant variables.
-Can't simply cache from all blocks due to SPIR-V dominance rules.
-**Approach**: Emit speculative loads in entry block for frequently-used Input/Uniform variables.
-Requires multi-pass analysis: first scan to find which vars are loaded, then emit loads.
+### AccessChain merge with multi-use bases (~20 IDs)
+20 chained ACs have intermediate results used by multiple instructions.
+Would need: duplicate the merged indices for each use, or keep intermediates.
 
-### bvec→int roundtrip optimization (-3 IDs in casts.comp)
-`ivec4(bvec4(x))` currently extracts each component, does INotEqual, constructs bvec4,
-then extracts again and uses Select. Should be simplified to `x != 0 ? 1 : 0` directly.
+### bvec→int roundtrip optimization (~3 IDs in casts.comp)
+`ivec4(bvec4(x))` currently: extract → INotEqual → construct bvec → extract → Select.
+Should simplify to: x != 0 ? 1 : 0 per component.
 
 ### Compile time optimization
-DCE + compaction adds overhead. Could profile and optimize the post-processing passes.
+DCE + compaction + merge adds overhead. Could profile and optimize.
 
-## THINGS THAT DIDN'T WORK THIS SESSION:
-- AccessChain merging at semantic level (40 failures, cache corruption)
-- Binary op constant folding (all conversions are runtime values, not constants)
-- emitPureOp for mix/select/ext_inst/composite_construct (0 IDs, DCE already handles)
+## THINGS THAT DIDN'T WORK:
+- AccessChain merge with reversed index order (spirv-val failures)
+- Global AccessChain cache from all blocks (dominance violations)
+- Binary op constant folding (all conversions are runtime values)
+- emitPureOp for mix/select/ext_inst/composite_construct (0 IDs, DCE handles)
