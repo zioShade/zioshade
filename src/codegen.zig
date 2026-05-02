@@ -5,6 +5,7 @@ const spirv = @import("spirv.zig");
 const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 const semantic = @import("semantic.zig");
+const compact_ids = @import("compact_ids.zig");
 
 pub const Stage = enum { vertex, fragment, compute, geometry };
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
@@ -103,7 +104,10 @@ pub fn generate(
     // Patch header bound field
     cg.words.items[3] = cg.next_id;
 
-    return cg.words.toOwnedSlice(alloc);
+    const raw = try cg.words.toOwnedSlice(alloc);
+    const compacted = compact_ids.compactIds(alloc, raw) catch return raw;
+    alloc.free(raw);
+    return compacted;
 }
 
 const Codegen = struct {
