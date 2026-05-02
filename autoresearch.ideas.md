@@ -38,12 +38,12 @@ All output store mismatches resolved. Perfect correctness achieved.
 17. Codegen dref extraction + coordinate shrink cache (-6 IDs)
 
 ## REMAINING OPTIMIZATION OPPORTUNITIES:
-- **Cross-block load caching with dominance analysis**: 148 OpLoad duplicates remain, all cross-block or store-invalidated. Would need per-block load caching with dominance frontier analysis.
-- **ID compaction pass**: Remap SPIR-V IDs to eliminate gaps. Would recover ~49 wasted IDs. Requires full opcode ID-position table.
-- **Dead code elimination**: 534 dead IDs total (293 labels, 43 function calls, 39 loads, 29 constants). Doesn't reduce bound without compaction.
-- **SSA variable elimination**: 21 variables stored once and loaded once. Could save ~63 IDs. Requires use-def analysis.
-- **Dead variable elimination**: 200 variables stored but never loaded. Could eliminate stores and computing expressions.
-- **Moving result_id allocation in function_call handler**: Would enable emitPureOp for ext_inst and conversions, saving ~10 IDs. Complex refactoring.
+- **Dead constant elimination**: 45 constant IDs wasted. Attempted but caused +1 regression because type references (OpTypeArray size) weren't tracked in the scan. Need to also scan type emissions for constant references.
+- **Dead label elimination**: 276 unreferenced label IDs. Would require ID compaction pass or restructuring block emission.
+- **Dead function call/load elimination**: 43 unused function call results + 39 unused loads. These feed into dead stores. Requires multi-pass dead code elimination.
+- **Cross-block load caching with dominance analysis**: 92 OpLoad duplicates, all cross-block. Would save ~92 IDs.
+- **ID compaction pass**: 488 total wasted IDs (5.0% of bound). Would require complete opcode ID-position table for safe remapping. Complex but highest potential impact.
+- **Store-to-load forwarding to global cache**: Tried but no effect — stores to global pointers rarely happen in dominating blocks.
 
 ## CURRENT METRICS:
 - 199/199 spirv-val ✅
@@ -162,9 +162,8 @@ All output store mismatches resolved. Perfect correctness achieved.
 - **200 dead variables** (stored but never loaded). Could potentially eliminate stores and computing expressions.
 - **Diminishing returns**: Further optimization requires complex analysis (dominance analysis for cross-block load caching, dead code elimination, constant propagation, SSA construction).
 
-## Session 2026-05-01 (Phase 4 - iteration 9):
-- **Composite construct dedup via emitPureOp**: IMPLEMENTED (-3 IDs). Converted binary op scalar splat, compound assignment splat, subpassLoad coordinate to emitPureOp. Eliminated 3 OpCompositeConstruct duplicates.
-- **Global pure op cache**: IMPLEMENTED (0 IDs). Added global_pure_op_cache that persists pure op results from entry/loop-header blocks. No effect because remaining duplicate pure ops are in non-dominating blocks.
-- **CRITICAL CORRECTNESS BUG FOUND AND FIXED**: global_load_cache was not invalidated on stores in 6 handlers (compound_assign, assign_op, swizzle compound assign, pre/post increment, output store). This caused stale load results to be reused after stores to global pointers. The rmw-opt.comp shader was computing wrong values (structurally valid SPIR-V but semantically incorrect). Bound increased from 9805 to 9840 (+35 IDs) because we now emit correct separate loads.
-- **True bound with all optimizations + bug fix**: 9840 (-9.6% from 10881)
-- **Lesson**: The previous -9.9% savings included ~35 IDs from a bug that incorrectly deduplicated loads. The real savings from legitimate optimizations is -9.6%.
+## Session 2026-05-01 (Phase 4 - iteration 10):
+- **Store-to-load forwarding**: IMPLEMENTED (-119 IDs). After emitting a store, add the stored value to load_cache so subsequent loads of same pointer within same basic block skip the OpLoad. This is safe because within a SPIR-V basic block, stores are visible to subsequent loads.
+- **Remaining OpLoad duplicates**: 92 (ALL cross-block). Store-to-load forwarding eliminated all within-block load duplicates.
+- **Total remaining duplicates**: 426 (down from 485). Most are unactionable (OpVariable 208, OpFunctionParameter 45, OpFunction 40).
+- **True bound**: 9721 (-10.6% from 10881 baseline)
