@@ -1651,7 +1651,9 @@ const Analyzer = struct {
                     try self.emitBranch(merge_label);
                 }
 
+                // Switch merge block dominates subsequent blocks
                 try self.emitLabel(merge_label);
+                self.cache_globals = true;
                 _ = self.loop_stack.pop();
             },
             .for_stmt => {
@@ -1718,6 +1720,7 @@ const Analyzer = struct {
 
                 _ = self.loop_stack.pop();
                 try self.emitLabel(merge_label);
+                self.cache_globals = true; // loop merge dominates
 
                 self.popScope();
             },
@@ -1758,6 +1761,7 @@ const Analyzer = struct {
 
                 _ = self.loop_stack.pop();
                 try self.emitLabel(merge_label);
+                self.cache_globals = true; // loop merge dominates
             },
             .do_while_stmt => {
                 const body_label = self.allocId();
@@ -1797,6 +1801,7 @@ const Analyzer = struct {
 
                 _ = self.loop_stack.pop();
                 try self.emitLabel(merge_label);
+                self.cache_globals = true; // loop merge dominates
             },
             .return_stmt => {
                 if (node.data.children.len > 0) {
