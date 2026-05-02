@@ -2,8 +2,8 @@
 
 ## STATUS: 199/199 spirv-val, 0/199 mismatches, 0 failures
 ## Best commit: 71dd48f (Extended load cache + opcode table fix)
-## Total bound: 7884 across 199 shaders (-27.5% from 10881)
-## Now 2 IDs BETTER than spirv-opt --compact-ids + all aggressive passes!
+## Total bound: 7880 across 199 shaders (-27.6% from 10881)
+## 2 IDs BETTER than spirv-opt --compact-ids + all aggressive passes!
 ## Remaining waste: 85 IDs (1.1%) — ALL unavoidable (SPIR-V mandates result <id>)
 
 ## NEW OPTIMIZATIONS IMPLEMENTED (this session):
