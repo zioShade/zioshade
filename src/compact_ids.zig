@@ -499,6 +499,11 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 196, 198, 199, 200 => true, // Bit ops
                 207...215 => true, // Derivatives
                 12 => true, // ExtInst
+                // Type instructions (result_only, no side effects)
+                19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33 => true, // Types
+                39 => true, // TypeForwardPointer
+                4472, 5341, 4163 => true, // TypeRayQueryKHR, TypeAccelerationStructureKHR, TypeTensorARM
+                59 => true, // OpVariable (Function-local only — safe to remove if unreferenced)
                 else => false,
             };
         }
