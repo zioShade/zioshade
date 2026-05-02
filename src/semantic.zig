@@ -271,6 +271,7 @@ const Analyzer = struct {
     global_load_cache: std.AutoHashMapUnmanaged(u32, u32) = .{}, // ptr_id -> loaded_value_id (persists across blocks)
     global_ptr_ids: std.AutoHashMapUnmanaged(u32, void) = .{}, // set of ptr_ids that point into global (Input/Uniform/Output) variables
     in_entry_block: bool = true,
+    cache_globals: bool = true, // true in entry block and loop headers (blocks that dominate subsequent blocks)
     pure_op_cache: std.AutoHashMapUnmanaged(u64, u32) = .{}, // hash(type, op, operands) -> result_id
     local_size: ?ir.LocalSize = null,
     // Heap-allocated AST types that transfer to Module for cleanup
@@ -468,8 +469,8 @@ const Analyzer = struct {
             .ty = result_ty,
         });
         self.access_chain_cache.put(self.alloc, key, ptr_id) catch {};
-        // Populate global cache from entry block (dominates all subsequent blocks)
-        if (self.in_entry_block) {
+        // Populate global cache from dominating blocks (entry + loop headers)
+        if (self.cache_globals) {
             self.global_access_chain_cache.put(self.alloc, key, ptr_id) catch {};
         }
         // If base is a global pointer, the AccessChain result is also a global pointer
@@ -506,9 +507,9 @@ const Analyzer = struct {
             .ty = ty,
         });
         self.load_cache.put(self.alloc, ptr_id, ld) catch {};
-        // Cache in global cache if this is a global pointer AND we're in the entry block
-        // (entry block dominates all other blocks, so cached values are safe to reuse)
-        if (self.in_entry_block and self.global_ptr_ids.contains(ptr_id)) {
+        // Cache in global cache if this is a global pointer AND we're in a dominating block
+        // (entry block or loop headers dominate subsequent blocks, so cached values are safe to reuse)
+        if (self.cache_globals and self.global_ptr_ids.contains(ptr_id)) {
             self.global_load_cache.put(self.alloc, ptr_id, ld) catch {};
         }
         return ld;
@@ -661,11 +662,12 @@ const Analyzer = struct {
 
     fn emitLabel(self: *Analyzer, label_id: u32) !void {
         self.in_entry_block = false;
+        self.cache_globals = false; // Only re-enable in loop headers
         self.access_chain_cache.clearRetainingCapacity();
         self.load_cache.clearRetainingCapacity();
         self.pure_op_cache.clearRetainingCapacity();
         // Note: global_load_cache is NOT cleared — it persists across blocks
-        // But we only cache global loads from the entry block (in_entry_block flag)
+        // But we only cache global loads from entry block and loop headers (cache_globals flag)
         try self.instructions.append(self.alloc, .{
             .tag = .label,
             .result_id = label_id,
@@ -1184,6 +1186,7 @@ const Analyzer = struct {
     fn analyzeFunction(self: *Analyzer, node: ast.Node) !void {
         self.has_returned = false;
         self.in_entry_block = true;
+        self.cache_globals = true;
         self.access_chain_cache.clearRetainingCapacity();
         self.load_cache.clearRetainingCapacity();
         self.pure_op_cache.clearRetainingCapacity();
@@ -1661,6 +1664,7 @@ const Analyzer = struct {
 
                 // Header: condition check, then merge + branch
                 try self.emitLabel(header_label);
+                self.cache_globals = true; // Loop header dominates body and continue blocks
                 if (has_cond) {
                     const cond = try self.analyzeExpression(children[1]);
                     const cond_id = cond.id;
@@ -1716,6 +1720,7 @@ const Analyzer = struct {
 
                 // Header: condition check, LoopMerge, branch
                 try self.emitLabel(header_label);
+                self.cache_globals = true; // Loop header dominates body and continue blocks
                 const cond = try self.analyzeExpression(node.data.children[0]);
                 try self.emitLoopMerge(merge_label, continue_label);
                 try self.emitBranchConditional(cond.id, body_label, merge_label);
@@ -1766,6 +1771,7 @@ const Analyzer = struct {
                 }
 
                 try self.emitLabel(cond_label);
+                self.cache_globals = true; // do-while cond block dominates back-edge to body
                 const cond = try self.analyzeExpression(node.data.children[1]);
                 try self.emitBranchConditional(cond.id, body_label, merge_label);
 
