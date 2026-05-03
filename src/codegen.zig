@@ -119,8 +119,10 @@ pub fn generate(
     if (deduped.ptr != blk_merged.ptr) alloc.free(blk_merged);
     const negated = compact_ids.eliminateDoubleNegate(alloc, deduped) catch return deduped;
     if (negated.ptr != deduped.ptr) alloc.free(deduped);
-    const folded = compact_ids.foldSelect(alloc, negated) catch return negated;
-    if (folded.ptr != negated.ptr) alloc.free(negated);
+    const algebrad = compact_ids.algebraicSimpl(alloc, negated) catch return negated;
+    if (algebrad.ptr != negated.ptr) alloc.free(negated);
+    const folded = compact_ids.foldSelect(alloc, algebrad) catch return algebrad;
+    if (folded.ptr != algebrad.ptr) alloc.free(algebrad);
     const compacted = compact_ids.compactIds(alloc, folded) catch return folded;
     if (compacted.ptr != folded.ptr) alloc.free(folded);
     return compacted;

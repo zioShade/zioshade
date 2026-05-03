@@ -2291,3 +2291,235 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
 }
+
+/// Algebraic simplification: eliminate identity operations at the SPIR-V binary level.
+/// - FAdd(x, 0.0) → x
+/// - FSub(x, 0.0) → x
+/// - IAdd(x, 0) → x
+/// - IMul(x, 1) → x
+/// - FMul(x, 1.0) → x
+/// Also handles vector forms (ConstantComposite of zeros/ones).
+pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Build type map
+    var float_types = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer float_types.deinit();
+    var int_types = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer int_types.deinit();
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 22 and wc >= 3) { // OpTypeFloat
+            const tid = words[pos + 1];
+            if (tid < bound) float_types.set(tid);
+        }
+        if (opcode == 21 and wc >= 3) { // OpTypeInt
+            const tid = words[pos + 1];
+            if (tid < bound) int_types.set(tid);
+        }
+        pos += wc;
+    }
+
+    // Phase 2: Collect zero and one constants
+    var float_zero_ids = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer float_zero_ids.deinit();
+    var float_one_ids = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer float_one_ids.deinit();
+    var int_zero_ids = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer int_zero_ids.deinit();
+    var int_one_ids = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer int_one_ids.deinit();
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 43 and wc >= 4) { // OpConstant
+            const type_id = words[pos + 1];
+            const result_id = words[pos + 2];
+            if (result_id >= bound) { pos += wc; continue; }
+            const val = words[pos + 3];
+            if (float_types.isSet(type_id)) {
+                if (val == 0 or val == 0x80000000) float_zero_ids.set(result_id);
+                if (val == 0x3F800000) float_one_ids.set(result_id);
+            }
+            if (int_types.isSet(type_id)) {
+                if (val == 0) int_zero_ids.set(result_id);
+                if (val == 1) int_one_ids.set(result_id);
+            }
+        }
+        pos += wc;
+    }
+
+    // Propagate through ConstantComposite
+    var changed = true;
+    while (changed) {
+        changed = false;
+        pos = 5;
+        while (pos < words.len) {
+            const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break;
+            if (opcode == 44 and wc >= 4) { // OpConstantComposite
+                const result_id = words[pos + 2];
+                if (result_id >= bound) { pos += wc; continue; }
+                if (float_zero_ids.isSet(result_id) or float_one_ids.isSet(result_id) or
+                    int_zero_ids.isSet(result_id) or int_one_ids.isSet(result_id))
+                {
+                    pos += wc;
+                    continue;
+                }
+                const constituents = words[pos + 3 .. pos + wc];
+                if (constituents.len == 0) { pos += wc; continue; }
+                var all_fz = true;
+                var all_fo = true;
+                var all_iz = true;
+                var all_io = true;
+                for (constituents) |c| {
+                    if (!float_zero_ids.isSet(c)) all_fz = false;
+                    if (!float_one_ids.isSet(c)) all_fo = false;
+                    if (!int_zero_ids.isSet(c)) all_iz = false;
+                    if (!int_one_ids.isSet(c)) all_io = false;
+                }
+                if (all_fz) { float_zero_ids.set(result_id); changed = true; }
+                if (all_fo) { float_one_ids.set(result_id); changed = true; }
+                if (all_iz) { int_zero_ids.set(result_id); changed = true; }
+                if (all_io) { int_one_ids.set(result_id); changed = true; }
+            }
+            pos += wc;
+        }
+    }
+
+    // Phase 3: Find identity operations and build replacement map
+    var replacements = std.AutoHashMapUnmanaged(u32, u32){};
+    defer replacements.deinit(alloc);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (wc >= 5) {
+            const result_id = words[pos + 2];
+            const a = words[pos + 3];
+            const b = words[pos + 4];
+            if (result_id > 0 and result_id < bound and a > 0 and a < bound and b > 0 and b < bound) {
+                switch (opcode) {
+                    129 => { // OpFAdd
+                        if (float_zero_ids.isSet(b)) try replacements.put(alloc, result_id, a);
+                        if (float_zero_ids.isSet(a)) try replacements.put(alloc, result_id, b);
+                    },
+                    131 => { // OpFSub
+                        if (float_zero_ids.isSet(b)) try replacements.put(alloc, result_id, a);
+                    },
+                    128 => { // OpIAdd
+                        if (int_zero_ids.isSet(b)) try replacements.put(alloc, result_id, a);
+                        if (int_zero_ids.isSet(a)) try replacements.put(alloc, result_id, b);
+                    },
+                    132 => { // OpIMul
+                        if (int_one_ids.isSet(b)) try replacements.put(alloc, result_id, a);
+                        if (int_one_ids.isSet(a)) try replacements.put(alloc, result_id, b);
+                    },
+                    133 => { // OpFMul
+                        if (float_one_ids.isSet(b)) try replacements.put(alloc, result_id, a);
+                        if (float_one_ids.isSet(a)) try replacements.put(alloc, result_id, b);
+                    },
+                    else => {},
+                }
+            }
+        }
+        pos += wc;
+    }
+
+    if (replacements.count() == 0) return words;
+
+    // Phase 4: Rewrite
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        // Skip eliminated instructions
+        if (wc >= 3) {
+            const result_id = words[pos + 2];
+            if (result_id > 0 and result_id < bound and replacements.contains(result_id)) {
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Rewrite using getOpInfo for correct operand handling
+        const info = getOpInfo(opcode) orelse {
+            // No info — just copy, but still replace IDs in operands
+            var ri: u32 = pos;
+            while (ri < ie) : (ri += 1) {
+                const w = words[ri];
+                try result.append(alloc, replacements.get(w) orelse w);
+            }
+            pos = ie;
+            continue;
+        };
+
+        var wi: u32 = pos + 1;
+        try result.append(alloc, hdr);
+        // Handle fixed part
+        switch (info.fixed) {
+            0 => {}, // no type or result
+            1 => { // type only
+                if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; }
+            },
+            2 => { // type + result
+                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+            },
+            3 => { // result only
+                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+            },
+            else => {},
+        }
+        // Handle variable operands
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; },
+                'l' => { try result.append(alloc, words[wi]); wi += 1; },
+                'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
+                'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
+                'M' => {
+                    if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                'W' => {
+                    while (wi + 1 < ie) {
+                        try result.append(alloc, words[wi]); wi += 1;
+                        try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1;
+                    }
+                    if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+                },
+                'E' => {
+                    while (wi < ie) {
+                        const w = words[wi]; wi += 1;
+                        try result.append(alloc, w);
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                    }
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                else => { try result.append(alloc, words[wi]); wi += 1; },
+            }
+        }
+        while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dce = deadCodeElim(alloc, nw) catch return nw;
+    if (dce.ptr != nw.ptr) alloc.free(nw);
+    return dce;
+}
