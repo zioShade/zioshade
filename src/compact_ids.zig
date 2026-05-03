@@ -1227,6 +1227,32 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         if (header_label_id == 0) continue;
 
         // Phase 1: check for side effects (stores to non-func-local vars)
+        // Build set of "safe pointers": func-local vars + AccessChains derived from them
+        var safe_ptrs = std.DynamicBitSet.initEmpty(alloc, bound) catch continue;
+        defer safe_ptrs.deinit();
+        // Mark func-local vars as safe
+        var fvi = func_vars.iterator();
+        while (fvi.next()) |kv| {
+            if (kv.key_ptr.* < bound) safe_ptrs.set(kv.key_ptr.*);
+        }
+        // Mark AccessChains whose base is safe (transitive)
+        // Two passes to handle chains
+        for (0..2) |_| {
+            var sp: u32 = 5;
+            while (sp < words.len) {
+                const sh = words[sp]; const swc: u32 = sh >> 16; const sop: u16 = @truncate(sh & 0xFFFF);
+                if (swc == 0) break;
+                if (sop == 65 and swc >= 5) { // OpAccessChain
+                    const base = words[sp + 3];
+                    const result = words[sp + 2];
+                    if (base < bound and safe_ptrs.isSet(base) and result < bound) {
+                        safe_ptrs.set(result);
+                    }
+                }
+                sp += swc;
+            }
+        }
+
         var has_side_effects = false;
         var in_loop = false;
         pos = 5;
@@ -1240,7 +1266,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             }
             if (in_loop and !has_side_effects) {
                 if (opcode == 62 and wc >= 3) { // OpStore
-                    if (!func_vars.contains(words[pos + 1])) has_side_effects = true;
+                    if (!safe_ptrs.isSet(words[pos + 1])) has_side_effects = true;
                 } else if (opcode == 37 or opcode == 234 or opcode == 235 or
                            (opcode >= 57 and opcode <= 60) or
                            (opcode >= 68 and opcode <= 76) or opcode == 99) {
