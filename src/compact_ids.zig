@@ -3694,7 +3694,7 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
 /// CSE (Common Subexpression Elimination) for OpAccessChain within each function.
 /// If two OpAccessChain instructions in the same function have the same
 /// (result_type, base, indices...), the second is replaced with the first's result.
-pub fn cseAccessChains(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
     const bound = words[3];
     if (bound <= 1) return words;
 
@@ -3780,6 +3780,47 @@ pub fn cseAccessChains(alloc: std.mem.Allocator, words: []const u32) error{OutOf
                 }
             }
         }
+
+        // Also CSE OpSampledImage (opcode 86): same (type, image, sampler) = same result
+        if (opcode == 86 and wc >= 5) { // OpSampledImage
+            const result_id = words[pos + 2]; // result
+            const sig_type = words[pos + 1]; // result type
+            const sig_operands = words[pos + 3 .. ie]; // image + sampler
+            const sig_len: u32 = 1 + @as(u32, @intCast(sig_operands.len));
+
+            var found_dup = false;
+            for (block_sigs.items) |entry| {
+                if (entry.sig_len == sig_len) {
+                    const existing_sig = all_sig_words.items[entry.sig_start .. entry.sig_start + sig_len];
+                    if (existing_sig[0] == sig_type and std.mem.eql(u32, existing_sig[1..], sig_operands)) {
+                        try sub_map.put(alloc, result_id, entry.result_id);
+                        found_dup = true;
+                        break;
+                    }
+                }
+            }
+            if (!found_dup) {
+                for (entry_block_sigs.items) |entry| {
+                    if (entry.sig_len == sig_len) {
+                        const existing_sig = all_sig_words.items[entry.sig_start .. entry.sig_start + sig_len];
+                        if (existing_sig[0] == sig_type and std.mem.eql(u32, existing_sig[1..], sig_operands)) {
+                            try sub_map.put(alloc, result_id, entry.result_id);
+                            found_dup = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!found_dup) {
+                const sig_start: u32 = @intCast(all_sig_words.items.len);
+                try all_sig_words.append(alloc, sig_type);
+                try all_sig_words.appendSlice(alloc, sig_operands);
+                try block_sigs.append(alloc, .{ .result_id = result_id, .sig_start = sig_start, .sig_len = sig_len });
+                if (is_entry_block) {
+                    try entry_block_sigs.append(alloc, .{ .result_id = result_id, .sig_start = sig_start, .sig_len = sig_len });
+                }
+            }
+        }
         pos = ie;
     }
 
@@ -3798,8 +3839,8 @@ pub fn cseAccessChains(alloc: std.mem.Allocator, words: []const u32) error{OutOf
         const ie = pos + wc;
         if (ie > words.len) break;
 
-        // Skip duplicate AccessChains
-        if (opcode == 65 and wc >= 4) {
+        // Skip duplicate AccessChains and SampledImages
+        if ((opcode == 65 and wc >= 4) or (opcode == 86 and wc >= 5)) {
             const result_id = words[pos + 2];
             if (sub_map.contains(result_id)) {
                 pos = ie;
