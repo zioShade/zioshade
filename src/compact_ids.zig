@@ -498,6 +498,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 65 => true, // AccessChain
                 77, 79, 80, 81 => true, // Composite ops
                 84 => true, // Transpose
+                86 => true, // OpSampledImage (pure — safe if result unused)
                 100, 103, 104, 105, 106, 107 => true, // Image queries
                 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98 => true, // Image sampling (pure — safe to remove if result unused)
                 109, 110, 111, 112, 114, 124 => true, // Conversions
