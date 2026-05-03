@@ -4279,3 +4279,155 @@ pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
     const out = result.toOwnedSlice(alloc) catch return words;
     return out;
 }
+
+/// Deduplicate ALL type instructions.
+pub fn dedupAllTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Type opcodes that define types (result at pos+1, no result_type prefix)
+    const type_op_set = [_]u16{ 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 32 };
+
+    // Collect type signatures
+    var sig_words = std.ArrayListUnmanaged(u32){};
+    defer sig_words.deinit(alloc);
+    var sig_entries = std.ArrayListUnmanaged(struct { hash: u64, result_id: u32, sig_start: u32, sig_len: u32 }){};
+    defer sig_entries.deinit(alloc);
+
+    var replacements = std.AutoHashMapUnmanaged(u32, u32){};
+    defer replacements.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        var is_type = false;
+        for (&type_op_set) |top| {
+            if (opcode == top) { is_type = true; break; }
+        }
+
+        if (is_type and wc >= 2) {
+            const result_id = words[pos + 1];
+            const sig_start: u32 = @intCast(sig_words.items.len);
+            try sig_words.append(alloc, opcode);
+            try sig_words.appendSlice(alloc, words[pos + 2 .. ie]); // operands after result_id
+            const sig_len: u32 = @intCast(sig_words.items.len - sig_start);
+
+            var h: u64 = @intCast(sig_len);
+            for (sig_words.items[sig_start..]) |w| h = h *% 33 +% @as(u64, w);
+
+            var found_dup: ?u32 = null;
+            for (sig_entries.items) |entry| {
+                if (entry.hash == h and entry.sig_len == sig_len) {
+                    const esig = sig_words.items[entry.sig_start .. entry.sig_start + sig_len];
+                    if (std.mem.eql(u32, sig_words.items[sig_start..], esig)) {
+                        found_dup = entry.result_id;
+                        break;
+                    }
+                }
+            }
+
+            if (found_dup) |first_id| {
+                try replacements.put(alloc, result_id, first_id);
+            } else {
+                try sig_entries.append(alloc, .{ .hash = h, .result_id = result_id, .sig_start = sig_start, .sig_len = sig_len });
+            }
+        }
+        pos = ie;
+    }
+
+    if (replacements.count() == 0) return words;
+
+    // Phase 2: Apply replacement and remove duplicate type defs
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Skip duplicate type definitions
+        var is_type = false;
+        for (&type_op_set) |top| {
+            if (opcode == top) { is_type = true; break; }
+        }
+        if (is_type and wc >= 2 and replacements.contains(words[pos + 1])) {
+            pos = ie;
+            continue;
+        }
+
+        // For non-type instructions, use getOpInfo to replace ID refs (skip result_ids)
+        const info = getOpInfo(opcode) orelse {
+            // Unknown opcode — replace all words that match
+            result.append(alloc, hdr) catch return words;
+            for (words[pos + 1 .. ie]) |w| {
+                result.append(alloc, replacements.get(w) orelse w) catch return words;
+            }
+            pos = ie;
+            continue;
+        };
+
+        result.append(alloc, hdr) catch return words;
+        var wi: u32 = pos + 1;
+        switch (info.fixed) {
+            1 => {
+                result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                wi += 1;
+            },
+            2 => {
+                result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                wi += 1;
+                result.append(alloc, words[wi]) catch return words; // result_id — no replace
+                wi += 1;
+            },
+            3 => {
+                result.append(alloc, words[wi]) catch return words;
+                wi += 1;
+            },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => {
+                    result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                },
+                'l' => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
+                'I', 'M' => {
+                    while (wi < ie) : (wi += 1) {
+                        result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    }
+                },
+                else => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
+            }
+        }
+        while (wi < ie) : (wi += 1) {
+            result.append(alloc, words[wi]) catch return words;
+        }
+        pos = ie;
+    }
+
+    const out = result.toOwnedSlice(alloc) catch return words;
+    const dce = deadCodeElim(alloc, out) catch return out;
+    if (dce.ptr != out.ptr) alloc.free(out);
+    const compact = compactIds(alloc, dce) catch return dce;
+    if (compact.ptr != dce.ptr) alloc.free(dce);
+    return compact;
+}
