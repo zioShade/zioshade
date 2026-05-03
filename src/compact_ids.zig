@@ -2732,131 +2732,202 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
 /// - Has a single basic block (no control flow)
 /// - Body contains no OpVariable, OpLabel (besides entry), OpBranch
 /// Inlining replaces OpFunctionCall with the body instructions.
+/// Inline simple single-block functions with parameter substitution and ID renaming.
+/// A function is inlineable if: single basic block, no OpVariable/OpFunctionCall/branches.
+/// Body result IDs are renamed to fresh IDs to avoid clashes with the caller.
+/// For non-void functions, the return value maps to the call's result ID.
 pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
-    const bound = words[3];
+    var bound = words[3];
     if (bound <= 1) return words;
 
-    // Phase 1: Find all function definitions and classify them
     const FuncInfo = struct {
         func_id: u32,
         type_id: u32,
         start_pos: u32,
         end_pos: u32,
-        body_start: u32, // position after OpLabel
-        body_end: u32, // position of OpReturn/OpBranch
-        is_trivial: bool,
+        body_start: u32,
+        body_end: u32,
+        param_ids: []const u32,
+        return_value_id: u32, // the ID used in OpReturnValue (0 if void)
+        is_inlineable: bool,
     };
     var funcs = std.ArrayListUnmanaged(FuncInfo){};
     defer funcs.deinit(alloc);
+    var param_slices = std.ArrayListUnmanaged([]const u32){};
+    defer {
+        for (param_slices.items) |sl| alloc.free(sl);
+        param_slices.deinit(alloc);
+    }
 
-    // Build void type set
-    var void_types = std.AutoHashMapUnmanaged(u32, void){};
-    defer void_types.deinit(alloc);
-
+    // Scan functions
     var pos: u32 = 5;
     while (pos < words.len) {
         const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
-        if (opcode == 19 and wc >= 2) { // OpTypeVoid
-            try void_types.put(alloc, words[pos + 1], {});
-        }
-        pos += wc;
-    }
-
-    // Scan functions
-    pos = 5;
-    while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
-        if (wc == 0) break;
-
-        if (opcode == 54 and wc >= 5) { // OpFunction: type, result, control, func_type
-            const func_type = words[pos + 1]; // return type
+        const ie = pos + wc;
+        if (opcode == 54 and wc >= 5) { // OpFunction
+            const func_type = words[pos + 1];
             const func_id = words[pos + 2];
-            const func_start = pos;
-            var func_end = pos + wc;
+            var func_end = ie;
             var body_start: u32 = 0;
             var body_end: u32 = 0;
-            var has_params = false;
             var block_count: u32 = 0;
-            var has_var_or_branch = false;
+            var has_var_or_call = false;
+            var return_value_id: u32 = 0;
+            var param_ids = std.ArrayListUnmanaged(u32){};
 
-            // Scan function body
-            var fp = pos + wc;
+            var fp = ie;
             while (fp < words.len) {
                 const fh = words[fp]; const fwc: u32 = fh >> 16; const fop: u16 = @truncate(fh & 0xFFFF);
                 if (fwc == 0) break;
                 const fie = fp + fwc;
-
-                if (fop == 56) { func_end = fie; break; } // OpFunctionEnd
-                if (fop == 55) has_params = true; // OpFunctionParameter
-                if (fop == 248) { // OpLabel
-                    block_count += 1;
-                    if (block_count == 1) body_start = fie; // body starts after first label
-                }
-                if (fop == 59) has_var_or_branch = true; // OpVariable
-                if (fop == 57) has_var_or_branch = true; // OpFunctionCall — function calls make it non-trivial
-                if (fop == 249 or fop == 250 or fop == 251) { // OpBranch, OpBranchConditional, OpSwitch
-                    if (block_count <= 1) has_var_or_branch = true; // branch in entry block = control flow
-                }
-                if (fop == 246 or fop == 247) has_var_or_branch = true; // LoopMerge, SelectionMerge
-                if (fop == 253 or fop == 254) { // OpReturn, OpReturnValue
-                    body_end = fp;
-                }
+                if (fop == 56) { func_end = fie; break; }
+                if (fop == 55 and fwc >= 3) try param_ids.append(alloc, words[fp + 2]);
+                if (fop == 248) { block_count += 1; if (block_count == 1) body_start = fie; }
+                if (fop == 59) has_var_or_call = true; // OpVariable
+                if (fop == 57) has_var_or_call = true; // OpFunctionCall
+                if (fop == 249 or fop == 250 or fop == 251) { if (block_count <= 1) has_var_or_call = true; }
+                if (fop == 246 or fop == 247) has_var_or_call = true;
+                if (fop == 253) body_end = fp; // OpReturn
+                if (fop == 254 and fwc >= 2) { body_end = fp; return_value_id = words[fp + 1]; }
                 fp = fie;
             }
-
-            const is_void = void_types.contains(func_type);
-            const is_trivial = is_void and !has_params and block_count == 1 and !has_var_or_branch and body_start > 0 and body_end > body_start;
-
+            const is_inlineable = block_count == 1 and !has_var_or_call and body_start > 0 and body_end > body_start;
+            const ps = try param_ids.toOwnedSlice(alloc);
+            try param_slices.append(alloc, ps);
             try funcs.append(alloc, .{
-                .func_id = func_id,
-                .type_id = func_type,
-                .start_pos = func_start,
-                .end_pos = func_end,
-                .body_start = body_start,
-                .body_end = body_end,
-                .is_trivial = is_trivial,
+                .func_id = func_id, .type_id = func_type,
+                .start_pos = pos, .end_pos = func_end,
+                .body_start = body_start, .body_end = body_end,
+                .param_ids = ps, .return_value_id = return_value_id,
+                .is_inlineable = is_inlineable,
             });
-
             pos = func_end;
             continue;
         }
-        pos += wc;
+        pos = ie;
     }
 
-    // Build set of trivially inlineable function IDs
-    var trivial_funcs = std.AutoHashMapUnmanaged(u32, *const FuncInfo){}; // func_id -> info
-    defer trivial_funcs.deinit(alloc);
-
+    // Build inlineable set
+    var inlineable = std.AutoHashMapUnmanaged(u32, *const FuncInfo){};
+    defer inlineable.deinit(alloc);
     for (funcs.items) |*fi| {
-        if (fi.is_trivial) {
-            try trivial_funcs.put(alloc, fi.func_id, fi);
-        }
+        if (fi.is_inlineable) try inlineable.put(alloc, fi.func_id, fi);
     }
+    if (inlineable.count() == 0) return words;
 
-    if (trivial_funcs.count() == 0) return words;
-
-    // Phase 2: Check if any OpFunctionCall targets a trivial function
+    // Check for calls
     var has_calls = false;
     pos = 5;
     while (pos < words.len) {
         const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
-        if (opcode == 57 and wc >= 4) { // OpFunctionCall
-            const called_func = words[pos + 3]; // func_id operand
-            if (trivial_funcs.contains(called_func)) {
-                has_calls = true;
-                break;
-            }
-        }
+        if (opcode == 57 and wc >= 4 and inlineable.contains(words[pos + 3])) { has_calls = true; break; }
         pos += wc;
     }
-
     if (!has_calls) return words;
 
-    // Phase 3: Rewrite — inline calls and remove dead function definitions
+    // Helper: collect result IDs from a body range and allocate fresh IDs
+    const allocFreshIds = struct {
+        fn run(allocator: std.mem.Allocator, w: []const u32, bs: u32, be: u32, ret_id: u32, bnd: *u32) !std.AutoHashMapUnmanaged(u32, u32) {
+            var result_ids = std.AutoHashMapUnmanaged(u32, u32){};
+            var bp: u32 = bs;
+            while (bp < be) {
+                const bh = w[bp]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
+                if (bwc == 0) break;
+                const info = getOpInfo(bop) orelse { bp += bwc; continue; };
+                if (info.fixed == 2 and bp + 2 < be) { // type + result
+                    const rid = w[bp + 2];
+                    if (rid != ret_id) { // don't rename return value (it maps to call result)
+                        const fresh = bnd.*;
+                        bnd.* += 1;
+                        try result_ids.put(allocator, rid, fresh);
+                    }
+                } else if (info.fixed == 3 and bp + 1 < be) { // result only
+                    const rid = w[bp + 1];
+                    if (rid != ret_id) {
+                        const fresh = bnd.*;
+                        bnd.* += 1;
+                        try result_ids.put(allocator, rid, fresh);
+                    }
+                }
+                bp += bwc;
+            }
+            return result_ids;
+        }
+    }.run;
+
+    // Helper: copy body with replacements
+    const copyBody = struct {
+        fn run(allocator: std.mem.Allocator, w: []const u32, bs: u32, be: u32, repl: std.AutoHashMapUnmanaged(u32, u32), out: *std.ArrayList(u32)) !void {
+            var bp: u32 = bs;
+            while (bp < be) {
+                const bh = w[bp]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
+                if (bwc == 0) break;
+                const bie = bp + bwc;
+                const info = getOpInfo(bop) orelse {
+                    try out.append(allocator, bh);
+                    var bi: u32 = bp + 1;
+                    while (bi < bie) : (bi += 1) try out.append(allocator, repl.get(w[bi]) orelse w[bi]);
+                    bp = bie; continue;
+                };
+                try out.append(allocator, bh);
+                var wi: u32 = bp + 1;
+                // Handle fixed part: type (no replace), result (replace)
+                switch (info.fixed) {
+                    0 => {},
+                    1 => { // result_type only — don't replace (it's a type)
+                        if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; }
+                    },
+                    2 => { // result_type + result_id
+                        if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; } // type — keep
+                        if (wi < bie) { try out.append(allocator, repl.get(w[wi]) orelse w[wi]); wi += 1; } // result — rename
+                    },
+                    3 => { // result_id only
+                        if (wi < bie) { try out.append(allocator, repl.get(w[wi]) orelse w[wi]); wi += 1; } // result — rename
+                    },
+                    else => {},
+                }
+                // Handle variable operands
+                for (info.ops) |ch| {
+                    if (wi >= bie) break;
+                    switch (ch) {
+                        'i' => { try out.append(allocator, repl.get(w[wi]) orelse w[wi]); wi += 1; },
+                        'l' => { try out.append(allocator, w[wi]); wi += 1; },
+                        'I' => { while (wi < bie) : (wi += 1) try out.append(allocator, repl.get(w[wi]) orelse w[wi]); },
+                        'L', 's' => { while (wi < bie) : (wi += 1) try out.append(allocator, w[wi]); },
+                        'M' => {
+                            if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; }
+                            while (wi < bie) : (wi += 1) try out.append(allocator, repl.get(w[wi]) orelse w[wi]);
+                        },
+                        'W' => {
+                            while (wi + 1 < bie) {
+                                wi += 1; try out.append(allocator, w[wi]);
+                                wi += 1; try out.append(allocator, repl.get(w[wi]) orelse w[wi]);
+                            }
+                            if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; }
+                        },
+                        'E' => {
+                            var in_str = true;
+                            while (wi < bie and in_str) : (wi += 1) {
+                                const ww = w[wi]; try out.append(allocator, ww);
+                                if ((ww & 0xFF) == 0 or ((ww >> 8) & 0xFF) == 0 or ((ww >> 16) & 0xFF) == 0 or ((ww >> 24) & 0xFF) == 0) in_str = false;
+                            }
+                            while (wi < bie) : (wi += 1) try out.append(allocator, repl.get(w[wi]) orelse w[wi]);
+                        },
+                        else => { try out.append(allocator, w[wi]); wi += 1; },
+                    }
+                }
+                while (wi < bie) : (wi += 1) try out.append(allocator, w[wi]);
+                bp = bie;
+            }
+        }
+    }.run;
+
+    // Rewrite
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
-    result.appendSliceAssumeCapacity(words[0..5]);
+    result.appendSliceAssumeCapacity(words[0..4]); // copy header minus bound
+    try result.append(alloc, bound); // placeholder bound, will update
 
     pos = 5;
     while (pos < words.len) {
@@ -2864,42 +2935,55 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
         if (wc == 0) break;
         const ie = pos + wc;
 
-        // Skip OpName for removed functions
-        if (opcode == 5 and wc >= 3) { // OpName: target_id, string...
-            const target_id = words[pos + 1];
-            if (trivial_funcs.contains(target_id)) {
-                pos = ie;
-                continue;
-            }
-        }
+        // Skip OpName for inlineable functions
+        if (opcode == 5 and wc >= 3 and inlineable.contains(words[pos + 1])) { pos = ie; continue; }
 
-        // Check if this is an OpFunction definition for a trivial function — skip entire function
+        // Skip function definitions
         if (opcode == 54 and wc >= 5) {
-            const func_id = words[pos + 2];
-            if (trivial_funcs.contains(func_id)) {
-                // Skip this function definition
-                const fi = trivial_funcs.get(func_id).?;
-                pos = fi.end_pos;
-                continue;
-            }
+            if (inlineable.get(words[pos + 2])) |fi| { pos = fi.end_pos; continue; }
         }
 
-        // Check if this is an OpFunctionCall to a trivial function — inline
+        // Inline OpFunctionCall
         if (opcode == 57 and wc >= 4) {
-            const called_func = words[pos + 3];
-            if (trivial_funcs.contains(called_func)) {
-                const fi = trivial_funcs.get(called_func).?;
-                // Copy body instructions (between body_start and body_end)
-                result.appendSlice(alloc, words[fi.body_start..fi.body_end]) catch return words;
+            if (inlineable.get(words[pos + 3])) |fi| {
+                // Build replacement map
+                var repl = std.AutoHashMapUnmanaged(u32, u32){};
+                errdefer repl.deinit(alloc);
+
+                // Param -> arg
+                const arg_start = pos + 4;
+                for (fi.param_ids, 0..) |pid, i| {
+                    if (arg_start + i < ie) try repl.put(alloc, pid, words[arg_start + i]);
+                }
+
+                // Allocate fresh IDs for body result IDs (except return value)
+                var fresh_map = try allocFreshIds(alloc, words, fi.body_start, fi.body_end, fi.return_value_id, &bound);
+                defer fresh_map.deinit(alloc);
+                var it = fresh_map.iterator();
+                while (it.next()) |entry| try repl.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
+
+                // For non-void: map return value -> call result (not a fresh ID)
+                if (fi.return_value_id != 0) {
+                    const call_result = words[pos + 2];
+                    const resolved_ret = repl.get(fi.return_value_id) orelse fi.return_value_id;
+                    try repl.put(alloc, call_result, resolved_ret);
+                    // Also need to map the return value itself if it was a body-defined ID
+                    // so the instruction that defines it produces call_result
+                    try repl.put(alloc, fi.return_value_id, call_result);
+                }
+
+                try copyBody(alloc, words, fi.body_start, fi.body_end, repl, &result);
                 pos = ie;
                 continue;
             }
         }
 
-        // Copy instruction as-is
         result.appendSlice(alloc, words[pos..ie]) catch return words;
         pos = ie;
     }
+
+    // Update bound
+    result.items[3] = bound;
 
     if (result.items.len == words.len) { result.deinit(alloc); return words; }
     const nw = result.toOwnedSlice(alloc) catch return words;
