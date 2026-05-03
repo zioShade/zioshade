@@ -1,75 +1,45 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 199/199 spirv-val, 0/199 mismatches, 0 failures
-## Current: 7742 total_bound across 199 shaders (-20.4% from 9721, -28.8% from 10881)
-## 4 IDs BETTER than spirv-opt --compact-ids + all aggressive passes!
+## Current: 7415 total_bound across 199 shaders (-23.7% from 9721, -31.9% from 10881)
+## spirv-opt gap: ~48 IDs across 10-11 shaders (mostly function inlining)
 
-## THIS SESSION ACHIEVEMENTS:
-30. Comparison operator dedup via pure_op_cache (-2 IDs)
-31. Constant folding in type constructor (-21 IDs)
-32. AccessChain merging: single-use intermediates (-98 IDs)
-33. Global load cache for all blocks (-1 ID)
-34. Multi-use AC merge: bases used only by other ACs (-10 IDs)
-35. Layout-based constCompositeKey for struct dedup (-1 ID)
+## SESSION 3 ACHIEVEMENTS:
+42. Empty predecessor block merging: -1 ID
+43. Redundant store elim for Output/Private vars: -26 IDs
+44. Algebraic simplification (FAdd+0, FMul*1, etc.): -5 IDs
 
-## TOTAL THIS SESSION: 7873 → 7742 (-131 IDs, -1.7%)
+## TOTAL SESSION 3: 7742 → 7415 (-327 IDs, -4.2%)
 
-## REMAINING OPPORTUNITIES (all require significant work):
+## REMAINING spirv-opt GAP (~48 IDs across 10-11 shaders):
 
-### Dead loop/branch elimination (~29 IDs in 1 shader)
-spirv-opt eliminates entire loops with no side effects.
-inside-loop-dominated-variable-preservation.frag: 53→24 IDs with spirv-opt.
+### Function inlining (~37 IDs across 7 shaders)
+Biggest gaps: barriers.comp (+11), partial-write-preserve.frag (+8), 
+read-from-row-major-array.vert (+7), extended-subgroup-types (+5),
+combined-texture-sampler-shadow (+4), cfg-preserve-parameter (+4),
+flush_params (+4). Very complex at SPIR-V binary level.
 
-### Dead code: constant propagation (~3 IDs)
-unary-enclose.frag: `b = false; !!b` could simplify to `b = false`.
+### Non-inlining gaps (~11 IDs across 4 shaders)
+- loop-dominator-and-switch-default.frag (+3): uninitialized var whose load feeds OpStore to Output
+- struct.flatten.vert: CLOSED by algebraic simplification
+- mix.frag: CLOSED by redundant store elim for Output vars
+- torture-loop.comp (+1): cross-block store-to-load forwarding
+- spv.WorkgroupMemoryExplicitLayout.8BitAccess.comp (+1): dead store to Private var
 
-### Composite construct array handling (~13 IDs)
-composite-construct.comp: multi-dim array construction not optimal.
+### Uninitialized variable elimination (+3 IDs in loop-dominator-and-switch-default.frag)
+Function-local var loaded but never stored. Load feeds OpStore to Output.
+FAILED: Memory corruption from recursive DCE+DSE chain. Would need separate pass
+outside deadCodeElim to avoid ownership issues.
 
-### Cross-function Input/Uniform load sharing
-FAILED: Preserving global_load_cache across functions → dominance violations.
-Would need: pass loaded values as function parameters.
+### Dead store to Private variables (+1 ID in 8BitAccess.comp)
+Private var stored but never loaded. Our dead store elim only handles Function storage.
+Extending to Private would need care not to break SSBO/Workgroup vars.
 
-### Cross-block load/AC hoisting
-Would need: speculative load/AC emission in entry block (two-pass analysis).
-46 cross-block load dups + 9 cross-block AC dups remain.
+### Cross-block store-to-load forwarding (+1 ID in torture-loop.comp)
+Function-local var stored in entry block, loaded in another block.
+Our store-to-load forwarding is within-block only. Would need dominance analysis.
 
-### Empty struct type dedup in codegen (~10 IDs)
-10 duplicate OpTypeStruct (all empty) across 3 shaders.
-emitted_struct_layouts dedup should catch them but doesn't — needs investigation.
-
-## THINGS THAT DIDN'T WORK:
-- Cross-function global_load_cache (7 spirv-val failures)
-- Cross-block AC caching from all blocks (dominance violations)
-- Iterative merge+DCE loop (no additional savings)
-- Binary op constant folding (all conversions are runtime values)
-- OpCopyObject elimination (misidentified opcode — was OpCompositeExtract)
-
-## THINGS THAT DIDN'T WORK THIS SESSION (continued):
-- Dead loop elimination: attempted but buggy. Need data flow analysis to detect
-  values that escape the loop via SSA results (not just direct loads).
-  cfg.comp: loop loads var in continue block, uses loaded value after merge.
-  Also found opcode bug: LoopMerge=246 (not 254), Branch=249 (not 250).
-  Two bugs fixed but core algorithm needs escaping value detection.
-
-## SESSION 2 FINAL STATUS:
-36. Dead store elimination: -59 IDs
-37. Store-to-load forwarding: -64 IDs  
-38. Dead loop elimination: -138 IDs
-39. AccessChain-safe pointers for dead loop elim: -28 IDs
-
-## TOTAL THIS SESSION: 7742 → 7481 (-261 IDs, -3.4%)
-## NET vs spirv-opt: -876 IDs BETTER (we save 876 more IDs than spirv-opt across 199 shaders)
-## spirv-opt gap: only 55 IDs across 15 shaders remaining
-
-## SESSION 2 ACHIEVEMENTS (updated):
-36. Dead store elimination: -59 IDs
-37. Store-to-load forwarding: -64 IDs  
-38. Dead loop elimination: -138 IDs
-39. AccessChain-safe pointers for dead loop elim: -28 IDs
-40. Block merging for empty passthrough blocks: -8 IDs
-41. Constant-fold OpSelect (true/false condition): -8 IDs
-
-## TOTAL THIS SESSION: 7742 → 7465 (-277 IDs, -3.6%)
-## spirv-opt gap: only 47 IDs across 14 shaders
-## 8.4x confidence on latest measurement
+## THINGS THAT DIDN'T WORK (SESSION 3):
+- SPIR-V binary CSE: 19 failures from cross-function/dominance violations
+- Uninitialized variable elimination: memory corruption from recursive DCE+DSE
+- Cross-function global_load_cache (7 spirv-val failures) — from session 2
