@@ -61,3 +61,15 @@ emitted_struct_layouts dedup should catch them but doesn't — needs investigati
 ## TOTAL THIS SESSION: 7742 → 7481 (-261 IDs, -3.4%)
 ## NET vs spirv-opt: -876 IDs BETTER (we save 876 more IDs than spirv-opt across 199 shaders)
 ## spirv-opt gap: only 55 IDs across 15 shaders remaining
+
+## SESSION 2 ACHIEVEMENTS (updated):
+36. Dead store elimination: -59 IDs
+37. Store-to-load forwarding: -64 IDs  
+38. Dead loop elimination: -138 IDs
+39. AccessChain-safe pointers for dead loop elim: -28 IDs
+40. Block merging for empty passthrough blocks: -8 IDs
+41. Constant-fold OpSelect (true/false condition): -8 IDs
+
+## TOTAL THIS SESSION: 7742 → 7465 (-277 IDs, -3.6%)
+## spirv-opt gap: only 47 IDs across 14 shaders
+## 8.4x confidence on latest measurement
