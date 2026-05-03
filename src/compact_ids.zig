@@ -682,6 +682,8 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                                 const base = current_words[pos + 3];
                                 if (base < current_bound and func_vars.isSet(base)) {
                                     loaded_vars.set(base);
+                                    // Conservatively mark as stored too — AC result may be used for stores
+                                    stored_vars.set(base);
                                 }
                             }
                         },
@@ -703,6 +705,19 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                                     if (op < current_bound and func_vars.isSet(op)) {
                                         loaded_vars.set(op);
                                         stored_vars.set(op); // also treated as store (Modf writes to ptr)
+                                    }
+                                }
+                            }
+                        },
+                        54 => { // OpFunctionCall: args after func_id may be read/written
+                            // Layout: result_type, result_id, func_id, arg1, arg2, ...
+                            if (wc >= 5) {
+                                var ai: u32 = pos + 4; // skip header, result_type, result_id, func_id
+                                while (ai < inst_end) : (ai += 1) {
+                                    const op = current_words[ai];
+                                    if (op < current_bound and func_vars.isSet(op)) {
+                                        loaded_vars.set(op);
+                                        stored_vars.set(op); // conservatively mark as stored
                                     }
                                 }
                             }
@@ -2141,9 +2156,11 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
     const bound = words[3];
     if (bound <= 1) return words;
 
-    // Phase 1: Build var -> storage_class map for function-local variables
-    var func_local = try std.DynamicBitSet.initEmpty(alloc, bound);
-    defer func_local.deinit();
+    // Phase 1: Build var -> storage_class map for variables eligible for redundant store elimination
+    // This includes: Function (7), Output (3), and Private (6) storage classes
+    // These are all per-invocation and only the final value matters
+    var trackable = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer trackable.deinit();
 
     var pos: u32 = 5;
     while (pos < words.len) {
@@ -2152,14 +2169,14 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
         if (opcode == 59 and wc >= 4) { // OpVariable: result_type, result_id, storage_class
             const result_id = words[pos + 2];
             const storage_class = words[pos + 3];
-            if (storage_class == 7 and result_id < bound) { // Function
-                func_local.set(result_id);
+            if ((storage_class == 7 or storage_class == 3 or storage_class == 6) and result_id < bound) {
+                trackable.set(result_id);
             }
         }
         pos += wc;
     }
 
-    if (func_local.count() == 0) return words;
+    if (trackable.count() == 0) return words;
 
     // Phase 2: Scan blocks to find redundant stores
     // Track: for each func-local pointer, the position of the last store
@@ -2176,7 +2193,7 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
     defer ac_from_func.deinit(alloc);
 
     // Seed with func-local var ids
-    var fl_it = func_local.iterator(.{});
+    var fl_it = trackable.iterator(.{});
     while (fl_it.next()) |idx| {
         try ac_from_func.put(alloc, @as(u32, @intCast(idx)), {});
     }
