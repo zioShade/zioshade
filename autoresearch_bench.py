@@ -14,6 +14,9 @@ import subprocess, os, sys, json, re, struct
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
+# On Windows, prevent console windows from flashing open
+SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+
 RUNNER = os.path.join(os.getcwd(), ".zig-cache", "bin", "conformance-runner.exe")
 GLSLANG = "C:/VulkanSDK/1.4.341.1/Bin/glslangValidator.exe"
 SPV_DIS = "C:/VulkanSDK/1.4.341.1/Bin/spirv-dis.exe"
@@ -33,7 +36,7 @@ def build():
                        "--dep", "glslpp", "-Mroot=tests/runner.zig", "-Mglslpp=src/root.zig",
                        "--cache-dir", ".zig-cache",
                        "-femit-bin=" + RUNNER],
-                      capture_output=True, timeout=120)
+                      capture_output=True, timeout=120, creationflags=SUBPROCESS_FLAGS)
     if not os.path.exists(RUNNER):
         print("ERROR: build failed", file=sys.stderr)
         return False
@@ -140,7 +143,7 @@ def main():
 
         # Our compiler
         r1 = subprocess.run([RUNNER, fullpath, "--save-spv", ".zig-cache/_bench_ours.spv"],
-                           capture_output=True, timeout=5)
+                           capture_output=True, timeout=5, creationflags=SUBPROCESS_FLAGS)
         # Check if THIS shader passed (not just the summary line)
         # Runner format: "  PASS tests/..." for success, "  FAIL tests/..." for failure
         shader_passed = False
@@ -169,7 +172,7 @@ def main():
             pass
 
         our_dis = subprocess.run([SPV_DIS, ".zig-cache/_bench_ours.spv"],
-                                capture_output=True, text=True, timeout=5).stdout
+                                capture_output=True, text=True, timeout=5, creationflags=SUBPROCESS_FLAGS).stdout
         our_out, our_buf = get_output_stores(our_dis)
 
         # Reference (cached)
@@ -178,13 +181,13 @@ def main():
         else:
             stage_args = get_stage_args(bn)
             r2 = subprocess.run([GLSLANG, "-V"] + stage_args + [fullpath, "-o", ".zig-cache/_bench_ref.spv"],
-                               capture_output=True, timeout=5)
+                               capture_output=True, timeout=5, creationflags=SUBPROCESS_FLAGS)
             if r2.returncode != 0:
                 ref[bn] = [-1, -1]
                 updated_ref = True
                 continue
             ref_dis = subprocess.run([SPV_DIS, ".zig-cache/_bench_ref.spv"],
-                                    capture_output=True, text=True, timeout=5).stdout
+                                    capture_output=True, text=True, timeout=5, creationflags=SUBPROCESS_FLAGS).stdout
             ref_out, ref_buf = get_output_stores(ref_dis)
             ref[bn] = [ref_out, ref_buf]
             updated_ref = True
