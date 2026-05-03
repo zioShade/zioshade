@@ -149,20 +149,73 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
             }
             if (pre_store == null or cont_store == null) continue;
 
-            var header_result: ?u32 = null;
+            // Check: all loads are in loop-dominated blocks (not pre-header store block or merge)
+            // For structured SPIR-V, any block that is NOT the pre-header or merge is dominated by the header
+            const pre_block = pre_store.?.block;
+
+            // First try: load in loop header (existing pattern, reuse load result as phi result)
+            var phi_result: ?u32 = null;
             for (v.loads.items) |l| {
                 if (l.block == hdr_label) {
-                    header_result = l.result_id;
+                    phi_result = l.result_id;
                     break;
                 }
             }
-            if (header_result == null) continue;
 
-            const phi_result = header_result.?;
+            // Second try: no load in header, but all loads in loop-dominated blocks
+            if (phi_result == null) {
+                // Check all loads are NOT in pre-header or merge block
+                var all_dominated = true;
+                for (v.loads.items) |l| {
+                    if (l.block == pre_block) {
+                        all_dominated = false;
+                        break;
+                    }
+                    // Check if load is in the merge block by looking for OpLabel with merge block label
+                    // For simplicity, we check if the load block is the merge target of this loop
+                }
+                if (!all_dominated) continue;
+
+                // Also check: no load in the loop's merge block
+                // Find the merge block by looking for OpLoopMerge in the header block
+                var found_merge: u32 = 0;
+                var mp2: u32 = 5;
+                var in_hdr_block = false;
+                while (mp2 < words.len) {
+                    const mwc: u32 = words[mp2] >> 16;
+                    const mop: u16 = @truncate(words[mp2] & 0xFFFF);
+                    if (mwc == 0) break;
+                    if (mop == 248) in_hdr_block = (words[mp2 + 1] == hdr_label);
+                    if (mop == 246 and in_hdr_block and mwc >= 3) {
+                        found_merge = words[mp2 + 1];
+                        break;
+                    }
+                    if (mop == 249 or mop == 250 or mop == 251) in_hdr_block = false; // terminator ends block
+                    mp2 += mwc;
+                }
+                if (found_merge > 0) {
+                    for (v.loads.items) |l| {
+                        if (l.block == found_merge) {
+                            all_dominated = false;
+                            break;
+                        }
+                    }
+                }
+                if (!all_dominated) continue;
+
+                // All loads are in dominated blocks. Use first load's result as phi result.
+                // But we need a fresh ID for the phi result since no load is in the header.
+                // Actually, we can still reuse any load result — just use the first one.
+                phi_result = v.loads.items[0].result_id;
+                // reuse is fine, we'll just substitute all loads
+            }
+
+            if (phi_result == null) continue;
+
             try phi_inserts.append(alloc, .{
                 .label_id = hdr_label,
                 .type_id = v.pointee_type,
-                .result_id = phi_result,
+                .result_id = phi_result.?,
                 .init_val = pre_store.?.val_id,
                 .init_block = pre_store.?.block,
                 .new_val = cont_store.?.val_id,
@@ -170,7 +223,7 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
             });
 
             for (v.loads.items) |l| {
-                try sub_map.put(alloc, l.result_id, phi_result);
+                try sub_map.put(alloc, l.result_id, phi_result.?);
             }
 
             // Find store positions to remove
