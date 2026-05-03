@@ -1749,3 +1749,122 @@ pub fn foldSelect(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemor
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
 }
+
+/// Deduplicate struct types with identical member layouts.
+/// Multiple OpTypeStruct with same member types → remap to first one, remove duplicates.
+pub fn dedupStructTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Collect struct types: map (member_type_0, member_type_1, ...) → first result_id
+    // Use a simple approach: hash the member types, store in a HashMap
+    var structs = std.AutoHashMapUnmanaged(u64, u32){}; // hash -> first_id
+    defer structs.deinit(alloc);
+
+    // Also build a replacement map for duplicate struct ids
+    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // dup_id -> first_id
+    defer replacements.deinit(alloc);
+
+    // First pass: find duplicate struct types
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 30 and wc >= 2) { // OpTypeStruct
+            const result_id = words[pos + 1];
+            const members = words[pos + 2 .. pos + wc];
+            
+            // Compute hash of member types
+            var h: u64 = @intCast(members.len);
+            for (members) |mid| {
+                h = h *% 33 +% @as(u64, mid);
+            }
+            
+            if (structs.get(h)) |first_id| {
+                // Verify it's actually the same layout (hash collision check)
+                // Find the first struct's members to compare
+                var verify_pos: u32 = 5;
+                var first_members: []const u32 = &[_]u32{};
+                while (verify_pos < words.len) {
+                    const vhdr = words[verify_pos]; const vwc: u32 = vhdr >> 16; const vop: u16 = @truncate(vhdr & 0xFFFF);
+                    if (vwc == 0) break;
+                    if (vop == 30 and vwc >= 2 and words[verify_pos + 1] == first_id) {
+                        first_members = words[verify_pos + 2 .. verify_pos + vwc];
+                        break;
+                    }
+                    verify_pos += vwc;
+                }
+                if (members.len == first_members.len and std.mem.eql(u32, members, first_members)) {
+                    // True duplicate — remap
+                    try replacements.put(alloc, result_id, first_id);
+                } else {
+                    // Hash collision — store separately (use result_id to disambiguate)
+                    try structs.put(alloc, h ^ @as(u64, result_id) *% 0x9E3779B97F4A7C15, result_id);
+                }
+            } else {
+                try structs.put(alloc, h, result_id);
+            }
+        }
+        pos += wc;
+    }
+
+    if (replacements.count() == 0) return words;
+
+    // Also remap: decorations targeting duplicate struct ids, Name entries, etc.
+    // The replacement is straightforward: replace all references to dup_id with first_id
+    // Then DCE will remove the dead OpTypeStruct
+
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        // Skip the duplicate OpTypeStruct entirely
+        if (opcode == 30 and wc >= 2 and replacements.contains(words[pos + 1])) {
+            pos = ie;
+            continue;
+        }
+
+        const info = getOpInfo(opcode) orelse {
+            result.appendSlice(alloc, words[pos..ie]) catch return words;
+            pos = ie; continue;
+        };
+
+        var wi: u32 = pos + 1;
+        try result.append(alloc, hdr);
+        switch (info.fixed) {
+            1 => { if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } },
+            2 => {
+                if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; }
+                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+            },
+            3 => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; },
+                'l' => { try result.append(alloc, words[wi]); wi += 1; },
+                'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
+                'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
+                'M' => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
+                'W' => { while (wi + 1 < ie) { try result.append(alloc, words[wi]); wi += 1; try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+                'E' => { while (wi < ie) { const w = words[wi]; wi += 1; try result.append(alloc, w); if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
+                else => { try result.append(alloc, words[wi]); wi += 1; },
+            }
+        }
+        while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dce = deadCodeElim(alloc, nw) catch return nw;
+    if (dce.ptr != nw.ptr) alloc.free(nw);
+    return dce;
+}
