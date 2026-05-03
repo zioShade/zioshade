@@ -4115,3 +4115,167 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
 }
+
+/// Retarget branches that point to empty passthrough blocks.
+/// An empty passthrough block contains only OpLabel + OpBranch (unconditional).
+/// Branches to such blocks are rewritten to target the ultimate destination.
+/// The empty blocks themselves are removed.
+pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find all empty passthrough blocks and their targets
+    var empty_targets = std.AutoHashMapUnmanaged(u32, u32){};
+    defer empty_targets.deinit(alloc);
+
+    var pos: u32 = 5;
+    var cur_label: u32 = 0;
+    var block_inst_count: u32 = 0;
+    var block_branch_target: u32 = 0;
+    var block_has_merge: bool = false;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        if (op == 248 and wc >= 2) { // OpLabel
+            if (cur_label != 0 and block_inst_count == 1 and block_branch_target != 0 and !block_has_merge) {
+                try empty_targets.put(alloc, cur_label, block_branch_target);
+            }
+            cur_label = words[pos + 1];
+            block_inst_count = 0;
+            block_branch_target = 0;
+            block_has_merge = false;
+        }
+        if (op == 54) { // OpFunction
+            if (cur_label != 0 and block_inst_count == 1 and block_branch_target != 0 and !block_has_merge) {
+                try empty_targets.put(alloc, cur_label, block_branch_target);
+            }
+            cur_label = 0;
+            block_inst_count = 0;
+            block_branch_target = 0;
+            block_has_merge = false;
+        }
+        if (op == 56) { // OpFunctionEnd
+            if (cur_label != 0 and block_inst_count == 1 and block_branch_target != 0 and !block_has_merge) {
+                try empty_targets.put(alloc, cur_label, block_branch_target);
+            }
+            cur_label = 0;
+        }
+        if (op == 246 or op == 247) block_has_merge = true;
+        if (cur_label != 0 and op != 248) block_inst_count += 1;
+        if (op == 249 and wc >= 2) block_branch_target = words[pos + 1];
+        pos = ie;
+    }
+    if (cur_label != 0 and block_inst_count == 1 and block_branch_target != 0 and !block_has_merge) {
+        try empty_targets.put(alloc, cur_label, block_branch_target);
+    }
+
+    if (empty_targets.count() == 0) return words;
+
+    // Resolve transitive chains: A->B->C becomes A->C
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var it = empty_targets.iterator();
+        while (it.next()) |entry| {
+            if (empty_targets.get(entry.value_ptr.*)) |ultimate| {
+                entry.value_ptr.* = ultimate;
+                changed = true;
+            }
+        }
+    }
+
+    // Phase 2: Rewrite branch targets and remove empty blocks
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        // Skip empty passthrough blocks (OpLabel + OpBranch)
+        if (op == 248 and wc >= 2) {
+            const label_id = words[pos + 1];
+            if (empty_targets.contains(label_id)) {
+                // Check next instruction is OpBranch
+                if (ie < words.len) {
+                    const next_hdr = words[ie];
+                    const next_wc: u32 = next_hdr >> 16;
+                    const next_op: u16 = @truncate(next_hdr & 0xFFFF);
+                    if (next_op == 249) {
+                        pos = ie + next_wc;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Rewrite OpBranch targets
+        if (op == 249 and wc >= 2) {
+            const target = words[pos + 1];
+            const new_target = empty_targets.get(target) orelse target;
+            if (new_target != target) {
+                result.append(alloc, (wc << 16) | op) catch return words;
+                result.append(alloc, new_target) catch return words;
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Rewrite OpBranchConditional targets
+        if (op == 250 and wc >= 4) {
+            const t = words[pos + 2];
+            const f = words[pos + 3];
+            const nt = empty_targets.get(t) orelse t;
+            const nf = empty_targets.get(f) orelse f;
+            if (nt != t or nf != f) {
+                result.append(alloc, hdr) catch return words;
+                result.append(alloc, words[pos + 1]) catch return words; // condition
+                result.append(alloc, nt) catch return words;
+                result.append(alloc, nf) catch return words;
+                for (words[pos + 4 .. ie]) |w| result.append(alloc, w) catch return words;
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Rewrite OpLoopMerge target
+        if (op == 246 and wc >= 3) {
+            const merge = words[pos + 1];
+            const nm = empty_targets.get(merge) orelse merge;
+            if (nm != merge) {
+                result.append(alloc, hdr) catch return words;
+                result.append(alloc, nm) catch return words;
+                for (words[pos + 2 .. ie]) |w| result.append(alloc, w) catch return words;
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Rewrite OpSelectionMerge target
+        if (op == 247 and wc >= 2) {
+            const merge = words[pos + 1];
+            const nm = empty_targets.get(merge) orelse merge;
+            if (nm != merge) {
+                result.append(alloc, hdr) catch return words;
+                result.append(alloc, nm) catch return words;
+                for (words[pos + 2 .. ie]) |w| result.append(alloc, w) catch return words;
+                pos = ie;
+                continue;
+            }
+        }
+
+        result.appendSliceAssumeCapacity(words[pos..ie]);
+        pos = ie;
+    }
+
+    const out = result.toOwnedSlice(alloc) catch return words;
+    return out;
+}
