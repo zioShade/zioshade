@@ -2923,8 +2923,8 @@ pub fn elimUnreachableCalls(alloc: std.mem.Allocator, words: []const u32) error{
                 // Replace with OpUndef for the result
                 const result_type = words[pos + 1];
                 const result_id = words[pos + 2];
-                // OpUndef: (2 << 16) | 1, result_type, result_id
-                result.append(alloc, (2 << 16) | 1) catch return words;
+                // OpUndef: (3 << 16) | 1, result_type, result_id
+                result.append(alloc, (3 << 16) | 1) catch return words;
                 result.append(alloc, result_type) catch return words;
                 result.append(alloc, result_id) catch return words;
                 pos = ie;
