@@ -1967,3 +1967,144 @@ pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
 }
+
+/// Redundant store elimination: remove stores to function-local variables
+/// that are overwritten by a subsequent store in the same basic block
+/// without an intervening load.
+pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Build var -> storage_class map for function-local variables
+    var func_local = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer func_local.deinit();
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 59 and wc >= 4) { // OpVariable: result_type, result_id, storage_class
+            const result_id = words[pos + 2];
+            const storage_class = words[pos + 3];
+            if (storage_class == 7 and result_id < bound) { // Function
+                func_local.set(result_id);
+            }
+        }
+        pos += wc;
+    }
+
+    if (func_local.count() == 0) return words;
+
+    // Phase 2: Scan blocks to find redundant stores
+    // Track: for each func-local pointer, the position of the last store
+    // If we see another store to the same pointer, mark the first one as dead
+    // If we see a load from the pointer, clear the tracking (store is needed)
+
+    // We need to also track AccessChain results derived from func-local vars
+    // Stores to AccessChain results also invalidate the var
+    var dead_stores = std.AutoHashMapUnmanaged(u32, void){}; // pos -> dead store
+    defer dead_stores.deinit(alloc);
+
+    // Track AC results derived from func-local vars
+    var ac_from_func = std.AutoHashMapUnmanaged(u32, void){}; // ac_result_id -> void
+    defer ac_from_func.deinit(alloc);
+
+    // Seed with func-local var ids
+    var fl_it = func_local.iterator(.{});
+    while (fl_it.next()) |idx| {
+        try ac_from_func.put(alloc, @as(u32, @intCast(idx)), {});
+    }
+
+    // Propagate through AccessChains
+    var changed = true;
+    while (changed) {
+        changed = false;
+        pos = 5;
+        while (pos < words.len) {
+            const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break;
+            if (opcode == 65 and wc >= 4) { // OpAccessChain
+                const result_id = words[pos + 2];
+                const base_ptr = words[pos + 3];
+                if (ac_from_func.contains(base_ptr) and !ac_from_func.contains(result_id) and result_id < bound) {
+                    try ac_from_func.put(alloc, result_id, {});
+                    changed = true;
+                }
+            }
+            pos += wc;
+        }
+    }
+
+    // Scan per-block
+    var last_store_pos = std.AutoHashMapUnmanaged(u32, u32){}; // ptr -> last store pos
+    defer last_store_pos.deinit(alloc);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+
+        if (opcode == 248) { // OpLabel - new block, reset tracking
+            last_store_pos.clearRetainingCapacity();
+            pos += wc;
+            continue;
+        }
+
+        if (opcode == 62 and wc >= 2) { // OpStore: ptr, value
+            const ptr = words[pos + 1];
+            if (ac_from_func.contains(ptr)) {
+                // Check if there's a previous store to this pointer
+                if (last_store_pos.get(ptr)) |prev_pos| {
+                    // Previous store is dead (overwritten without intervening load)
+                    try dead_stores.put(alloc, prev_pos, {});
+                }
+                try last_store_pos.put(alloc, ptr, pos);
+            }
+            pos += wc;
+            continue;
+        }
+
+        if (opcode == 61 and wc >= 4) { // OpLoad: type, result, ptr
+            const ptr = words[pos + 3];
+            // If we load from a tracked pointer, the previous store is NOT dead
+            if (ac_from_func.contains(ptr)) {
+                // Remove tracking for this pointer (store is needed)
+                _ = last_store_pos.remove(ptr);
+            }
+            pos += wc;
+            continue;
+        }
+
+        pos += wc;
+    }
+
+    if (dead_stores.count() == 0) return words;
+
+    // Phase 3: Build new binary, skipping dead stores
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16;
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        if (dead_stores.contains(pos)) {
+            // Skip this dead store
+            pos = ie;
+            continue;
+        }
+
+        result.appendSlice(alloc, words[pos..ie]) catch return words;
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    // Re-run DCE to clean up values that were only stored in dead stores
+    const dce = deadCodeElim(alloc, nw) catch return nw;
+    if (dce.ptr != nw.ptr) alloc.free(nw);
+    return dce;
+}
