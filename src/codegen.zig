@@ -152,8 +152,8 @@ pub fn generate(
     // Eliminate redundant loads of read-only variables
     const no_rle = compact_ids.elimRedundantLoads(alloc, compacted) catch return compacted;
     if (no_rle.ptr != compacted.ptr) alloc.free(compacted);
-    // CSE duplicate OpAccessChain within each function
-    const no_dup_ac = compact_ids.cseAccessChains(alloc, no_rle) catch return no_rle;
+    // CSE duplicate OpAccessChain and OpSampledImage within blocks
+    const no_dup_ac = compact_ids.cseWithinBlocks(alloc, no_rle) catch return no_rle;
     if (no_dup_ac.ptr != no_rle.ptr) alloc.free(no_rle);
     // Fold CompositeExtract from CompositeConstruct
     const folded_ce = compact_ids.foldCompositeExtract(alloc, no_dup_ac) catch return no_dup_ac;
