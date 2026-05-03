@@ -158,8 +158,10 @@ pub fn generate(
     // Eliminate uninit vars (loaded but never stored)
     const no_uninit = compact_ids.elimUninitVars(alloc, folded_ce) catch return folded_ce;
     if (no_uninit.ptr != folded_ce.ptr) alloc.free(folded_ce);
-    const final_compact = compact_ids.compactIds(alloc, no_uninit) catch return no_uninit;
-    if (final_compact.ptr != no_uninit.ptr) alloc.free(no_uninit);
+    const final_dce = compact_ids.deadCodeElim(alloc, no_uninit) catch return no_uninit;
+    if (final_dce.ptr != no_uninit.ptr) alloc.free(no_uninit);
+    const final_compact = compact_ids.compactIds(alloc, final_dce) catch return final_dce;
+    if (final_compact.ptr != final_dce.ptr) alloc.free(final_dce);
     return final_compact;
 }
 
