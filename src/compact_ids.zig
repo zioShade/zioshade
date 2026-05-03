@@ -2792,7 +2792,7 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 if (fop == 254 and fwc >= 2) { body_end = fp; return_value_id = words[fp + 1]; }
                 fp = fie;
             }
-            const is_inlineable = block_count == 1 and !has_var_or_call and body_start > 0 and body_end > body_start;
+            const is_inlineable = block_count == 1 and !has_var_or_call and body_start > 0 and body_end >= body_start;
             const ps = try param_ids.toOwnedSlice(alloc);
             try param_slices.append(alloc, ps);
             try funcs.append(alloc, .{
@@ -2924,10 +2924,74 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
         }
     }.run;
 
-    // Rewrite
+    // Rewrite with persistent substitution map for cross-instruction replacement
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
-    result.appendSliceAssumeCapacity(words[0..4]); // copy header minus bound
-    try result.append(alloc, bound); // placeholder bound, will update
+    result.appendSliceAssumeCapacity(words[0..4]);
+    try result.append(alloc, bound);
+
+    // Persistent substitution map: for non-void inlines where return value is
+    // not a body-defined ID (e.g., a constant), replace call_result with return
+    // value in all subsequent instructions.
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32){};
+    defer sub_map.deinit(alloc);
+
+    // Helper: apply sub_map to a single instruction and append to result
+    const applySub = struct {
+        fn run(allocator: std.mem.Allocator, w: []const u32, p: u32, _ie: u32, sm: std.AutoHashMapUnmanaged(u32, u32), out: *std.ArrayList(u32)) !void {
+            _ = _ie;
+            const bh = w[p]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
+            const bie = p + bwc;
+            const info = getOpInfo(bop) orelse {
+                // Unknown opcode — simple word-by-word substitution
+                try out.append(allocator, bh);
+                var bi: u32 = p + 1;
+                while (bi < bie) : (bi += 1) try out.append(allocator, sm.get(w[bi]) orelse w[bi]);
+                return;
+            };
+            try out.append(allocator, bh);
+            var wi: u32 = p + 1;
+            switch (info.fixed) {
+                0 => {},
+                1 => { if (wi < bie) { try out.append(allocator, sm.get(w[wi]) orelse w[wi]); wi += 1; } },
+                2 => {
+                    if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; } // type — keep
+                    if (wi < bie) { try out.append(allocator, sm.get(w[wi]) orelse w[wi]); wi += 1; } // result
+                },
+                3 => { if (wi < bie) { try out.append(allocator, sm.get(w[wi]) orelse w[wi]); wi += 1; } },
+                else => {},
+            }
+            for (info.ops) |ch| {
+                if (wi >= bie) break;
+                switch (ch) {
+                    'i' => { try out.append(allocator, sm.get(w[wi]) orelse w[wi]); wi += 1; },
+                    'l' => { try out.append(allocator, w[wi]); wi += 1; },
+                    'I' => { while (wi < bie) : (wi += 1) try out.append(allocator, sm.get(w[wi]) orelse w[wi]); },
+                    'L', 's' => { while (wi < bie) : (wi += 1) try out.append(allocator, w[wi]); },
+                    'M' => {
+                        if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; }
+                        while (wi < bie) : (wi += 1) try out.append(allocator, sm.get(w[wi]) orelse w[wi]);
+                    },
+                    'W' => {
+                        while (wi + 1 < bie) {
+                            wi += 1; try out.append(allocator, w[wi]);
+                            wi += 1; try out.append(allocator, sm.get(w[wi]) orelse w[wi]);
+                        }
+                        if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; }
+                    },
+                    'E' => {
+                        var in_str = true;
+                        while (wi < bie and in_str) : (wi += 1) {
+                            const ww = w[wi]; try out.append(allocator, ww);
+                            if ((ww & 0xFF) == 0 or ((ww >> 8) & 0xFF) == 0 or ((ww >> 16) & 0xFF) == 0 or ((ww >> 24) & 0xFF) == 0) in_str = false;
+                        }
+                        while (wi < bie) : (wi += 1) try out.append(allocator, sm.get(w[wi]) orelse w[wi]);
+                    },
+                    else => { try out.append(allocator, w[wi]); wi += 1; },
+                }
+            }
+            while (wi < bie) : (wi += 1) try out.append(allocator, w[wi]);
+        }
+    }.run;
 
     pos = 5;
     while (pos < words.len) {
@@ -2946,7 +3010,7 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
         // Inline OpFunctionCall
         if (opcode == 57 and wc >= 4) {
             if (inlineable.get(words[pos + 3])) |fi| {
-                // Build replacement map
+                // Build replacement map for body copying
                 var repl = std.AutoHashMapUnmanaged(u32, u32){};
                 errdefer repl.deinit(alloc);
 
@@ -2962,23 +3026,35 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 var it = fresh_map.iterator();
                 while (it.next()) |entry| try repl.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
 
-                // For non-void: map return value -> call result (not a fresh ID)
+                // For non-void: map return value -> call result
                 if (fi.return_value_id != 0) {
                     const call_result = words[pos + 2];
                     const resolved_ret = repl.get(fi.return_value_id) orelse fi.return_value_id;
-                    try repl.put(alloc, call_result, resolved_ret);
-                    // Also need to map the return value itself if it was a body-defined ID
-                    // so the instruction that defines it produces call_result
-                    try repl.put(alloc, fi.return_value_id, call_result);
+                    // If body is non-empty and return value is body-defined, map it to call_result
+                    // so the body instruction produces the call's result
+                    if (fi.body_start < fi.body_end and fresh_map.count() > 0) {
+                        // Return value is defined in the body — map it to call_result
+                        try repl.put(alloc, fi.return_value_id, call_result);
+                    } else {
+                        // Return value is NOT body-defined (e.g., constant or param)
+                        // Add to persistent sub_map for subsequent instructions
+                        try sub_map.put(alloc, call_result, resolved_ret);
+                    }
                 }
 
                 try copyBody(alloc, words, fi.body_start, fi.body_end, repl, &result);
+                repl.deinit(alloc);
                 pos = ie;
                 continue;
             }
         }
 
-        result.appendSlice(alloc, words[pos..ie]) catch return words;
+        // Apply persistent substitution to non-inlined instructions
+        if (sub_map.count() > 0) {
+            try applySub(alloc, words, pos, ie, sub_map, &result);
+        } else {
+            result.appendSlice(alloc, words[pos..ie]) catch return words;
+        }
         pos = ie;
     }
 
