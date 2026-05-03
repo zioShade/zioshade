@@ -633,7 +633,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 if (opcode == 59 and wc >= 4) { // OpVariable
                     // Layout: result_type, result_id, storage_class
                     const storage_class = current_words[pos + 3];
-                    if (storage_class == 7) { // Function storage class
+                    if (storage_class == 7 or storage_class == 6) { // Function or Private storage class
                         const var_id = current_words[pos + 2];
                         if (var_id >= 1 and var_id < current_bound) {
                             func_vars.set(var_id);
@@ -980,6 +980,207 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 if (re_dce.ptr != fwd_words.ptr) alloc.free(fwd_words);
                 if (current_words.ptr != words.ptr) alloc.free(current_words);
                 return re_dce;
+            }
+        }
+    }
+
+    // Cross-block store-to-load forwarding from entry block
+    // For function-local vars stored exactly once (in entry block, with no other stores anywhere),
+    // replace all loads with the stored value. Safe because entry dominates all blocks.
+    {
+        const xb_bound = current_words[3];
+        if (xb_bound > 1) {
+            // Collect function-local vars (Function storage class only, not Private)
+            var xb_func_vars = try std.DynamicBitSet.initEmpty(alloc, xb_bound);
+            defer xb_func_vars.deinit();
+            pos = 5;
+            while (pos < current_words.len) {
+                const hdr = current_words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+                if (wc == 0) break;
+                if (opcode == 59 and wc >= 4 and current_words[pos + 3] == 7) {
+                    const var_id = current_words[pos + 2];
+                    if (var_id >= 1 and var_id < xb_bound) xb_func_vars.set(var_id);
+                }
+                pos += wc;
+            }
+
+            if (xb_func_vars.count() > 0) {
+                // For each function-local var, count ALL stores and record the entry-block store value
+                var xb_total_stores = std.AutoHashMapUnmanaged(u32, u32){}; // var_id -> total store count
+                defer xb_total_stores.deinit(alloc);
+                var xb_entry_store_val = std.AutoHashMapUnmanaged(u32, u32){}; // var_id -> value (only if 1 entry store)
+                defer xb_entry_store_val.deinit(alloc);
+
+                // Also check for unsafe uses (AccessChain, CopyMemory, ExtInst, FunctionCall)
+                var xb_unsafe_vars = try std.DynamicBitSet.initEmpty(alloc, xb_bound);
+                defer xb_unsafe_vars.deinit();
+
+                var in_func = false;
+                var first_label = true;
+                var in_entry = false;
+                pos = 5;
+                while (pos < current_words.len) {
+                    const hdr = current_words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+                    if (wc == 0) break;
+                    const ie = pos + wc;
+
+                    if (opcode == 54) { in_func = true; first_label = true; in_entry = false; }
+                    if (opcode == 56) { in_func = false; in_entry = false; }
+                    if (opcode == 248 and in_func) {
+                        in_entry = first_label;
+                        first_label = false;
+                    }
+                    if (opcode == 249 or opcode == 250 or opcode == 251) in_entry = false;
+
+                    if (in_func) {
+                        // Count ALL stores to func vars
+                        if (opcode == 62 and wc >= 3) { // OpStore
+                            const ptr = current_words[pos + 1];
+                            const val = current_words[pos + 2];
+                            if (ptr < xb_bound and xb_func_vars.isSet(ptr)) {
+                                const entry = try xb_total_stores.getOrPutValue(alloc, ptr, 0);
+                                entry.value_ptr.* += 1;
+                                if (in_entry and entry.value_ptr.* == 1) {
+                                    try xb_entry_store_val.put(alloc, ptr, val);
+                                } else if (in_entry) {
+                                    _ = xb_entry_store_val.remove(ptr); // multiple entry stores
+                                }
+                            }
+                        }
+                        // Check for AccessChain uses
+                        if ((opcode == 65 or opcode == 66) and wc >= 5) {
+                            const base = current_words[pos + 3];
+                            if (base < xb_bound and xb_func_vars.isSet(base)) xb_unsafe_vars.set(base);
+                        }
+                        // CopyMemory
+                        if (opcode == 37 and wc >= 3) {
+                            const dst = current_words[pos + 1];
+                            const src = current_words[pos + 2];
+                            if (dst < xb_bound and xb_func_vars.isSet(dst)) xb_unsafe_vars.set(dst);
+                            if (src < xb_bound and xb_func_vars.isSet(src)) xb_unsafe_vars.set(src);
+                        }
+                        // ExtInst
+                        if (opcode == 12 and wc >= 6) {
+                            var ei: u32 = pos + 5;
+                            while (ei < ie) : (ei += 1) {
+                                if (current_words[ei] < xb_bound and xb_func_vars.isSet(current_words[ei])) {
+                                    xb_unsafe_vars.set(current_words[ei]);
+                                }
+                            }
+                        }
+                        // FunctionCall args (opcode 57): func args may be read/written
+                        if (opcode == 57 and wc >= 5) {
+                            var ai: u32 = pos + 4; // skip hdr, type, result, func_id
+                            while (ai < ie) : (ai += 1) {
+                                if (current_words[ai] < xb_bound and xb_func_vars.isSet(current_words[ai])) {
+                                    xb_unsafe_vars.set(current_words[ai]);
+                                }
+                            }
+                        }
+                    }
+                    pos = ie;
+                }
+
+                // Identify forwardable vars: exactly 1 total store, stored in entry, no unsafe uses
+                var xb_var_to_value = std.AutoHashMapUnmanaged(u32, u32){};
+                defer xb_var_to_value.deinit(alloc);
+
+                var evi = xb_entry_store_val.iterator();
+                while (evi.next()) |kv| {
+                    const var_id = kv.key_ptr.*;
+                    const total = xb_total_stores.get(var_id) orelse 0;
+                    if (total == 1 and !xb_unsafe_vars.isSet(var_id)) {
+                        try xb_var_to_value.put(alloc, var_id, kv.value_ptr.*);
+                    }
+                }
+
+                if (xb_var_to_value.count() > 0) {
+                    // Build load result -> forwarded value map
+                    var xb_load_fwd = std.AutoHashMapUnmanaged(u32, u32){};
+                    defer xb_load_fwd.deinit(alloc);
+                    pos = 5;
+                    while (pos < current_words.len) {
+                        const hdr = current_words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+                        if (wc == 0) break;
+                        if (opcode == 61 and wc >= 4) { // OpLoad
+                            const ptr = current_words[pos + 3];
+                            const result = current_words[pos + 2];
+                            if (xb_var_to_value.get(ptr)) |val| {
+                                try xb_load_fwd.put(alloc, result, val);
+                            }
+                        }
+                        pos += wc;
+                    }
+
+                    if (xb_load_fwd.count() > 0) {
+                        // Rewrite: skip dead vars, stores, and loads; replace load result uses
+                        var xb_result = std.ArrayList(u32).initCapacity(alloc, current_words.len) catch return current_words;
+                        xb_result.appendSliceAssumeCapacity(current_words[0..5]);
+
+                        pos = 5;
+                        while (pos < current_words.len) {
+                            const hdr = current_words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+                            if (wc == 0) break;
+                            const ie = pos + wc;
+
+                            // Skip dead variable declarations
+                            if (opcode == 59 and wc >= 3 and xb_var_to_value.contains(current_words[pos + 2])) {
+                                pos = ie; continue;
+                            }
+                            // Skip stores to forwardable vars
+                            if (opcode == 62 and wc >= 2 and xb_var_to_value.contains(current_words[pos + 1])) {
+                                pos = ie; continue;
+                            }
+                            // Skip loads of forwardable vars
+                            if (opcode == 61 and wc >= 4 and xb_load_fwd.contains(current_words[pos + 2])) {
+                                pos = ie; continue;
+                            }
+
+                            // Apply replacements using getOpInfo
+                            const info = getOpInfo(opcode) orelse {
+                                xb_result.appendSlice(alloc, current_words[pos..ie]) catch return current_words;
+                                pos = ie; continue;
+                            };
+
+                            try xb_result.append(alloc, hdr);
+                            var wi: u32 = pos + 1;
+                            switch (info.fixed) {
+                                1 => { if (wi < ie) { try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); wi += 1; } },
+                                2 => {
+                                    if (wi < ie) { try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); wi += 1; }
+                                    if (wi < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; }
+                                },
+                                3 => { if (wi < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; } },
+                                else => {},
+                            }
+                            for (info.ops) |ch| {
+                                if (wi >= ie) break;
+                                switch (ch) {
+                                    'i' => { try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); wi += 1; },
+                                    'l' => { try xb_result.append(alloc, current_words[wi]); wi += 1; },
+                                    'I' => { while (wi < ie) : (wi += 1) try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); },
+                                    'L', 's' => { while (wi < ie) : (wi += 1) try xb_result.append(alloc, current_words[wi]); },
+                                    'M' => { if (wi < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; } while (wi < ie) : (wi += 1) try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); },
+                                    'W' => { while (wi + 1 < ie) { wi += 1; try xb_result.append(alloc, current_words[wi]); wi += 1; try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); } if (wi < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; } },
+                                    'E' => { while (wi < ie) { const w = current_words[wi]; wi += 1; try xb_result.append(alloc, w); if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); },
+                                    else => { try xb_result.append(alloc, current_words[wi]); wi += 1; },
+                                }
+                            }
+                            while (wi < ie) : (wi += 1) try xb_result.append(alloc, current_words[wi]);
+                            pos = ie;
+                        }
+
+                        if (xb_result.items.len < current_words.len) {
+                            if (current_words.ptr != words.ptr) alloc.free(current_words);
+                            const xb_words = xb_result.toOwnedSlice(alloc) catch return current_words;
+                            const re_dce = deadCodeElim(alloc, xb_words) catch return xb_words;
+                            if (re_dce.ptr != xb_words.ptr) alloc.free(xb_words);
+                            return re_dce;
+                        } else {
+                            xb_result.deinit(alloc);
+                        }
+                    }
+                }
             }
         }
     }
