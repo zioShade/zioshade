@@ -1868,3 +1868,102 @@ pub fn dedupStructTypes(alloc: std.mem.Allocator, words: []const u32) error{OutO
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
 }
+
+/// Double negation elimination: FNegate(FNegate(x)) → x, SNegate(SNegate(x)) → x.
+/// Also handles LogicalNot(LogicalNot(x)) → x and BitwiseNot(BitwiseNot(x)) → x.
+pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Collect negate instructions: map result_id -> (opcode, operand_id)
+    // OpFNegate = 127, OpSNegate = 128, OpLogicalNot = 133, OpNot (bitwise) = 131
+    var neg_ops = std.AutoHashMapUnmanaged(u32, struct { opcode: u16, operand: u32 }){};
+    defer neg_ops.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if ((opcode == 127 or opcode == 128 or opcode == 131 or opcode == 133) and wc == 4) {
+            const result_id = words[pos + 2];
+            const operand = words[pos + 3];
+            try neg_ops.put(alloc, result_id, .{ .opcode = opcode, .operand = operand });
+        }
+        pos += wc;
+    }
+
+    // Find double negations: negate(negate(x)) → x
+    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> inner_operand
+    defer replacements.deinit(alloc);
+
+    var it = neg_ops.iterator();
+    while (it.next()) |entry| {
+        const outer_result = entry.key_ptr.*;
+        const outer_opcode = entry.value_ptr.opcode;
+        const inner_id = entry.value_ptr.operand;
+        // Check if the inner is also a negate of the same type
+        if (neg_ops.get(inner_id)) |inner| {
+            if (inner.opcode == outer_opcode) {
+                // double negation: outer_result = negate(negate(x)) → x
+                try replacements.put(alloc, outer_result, inner.operand);
+            }
+        }
+    }
+
+    if (replacements.count() == 0) return words;
+
+    // Rewrite: skip negated instructions whose result is replaced, replace operand references
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        // Skip the outer negate instruction if its result is being replaced
+        if ((opcode == 127 or opcode == 128 or opcode == 131 or opcode == 133) and wc >= 4 and replacements.contains(words[pos + 2])) {
+            pos = ie;
+            continue;
+        }
+
+        const info = getOpInfo(opcode) orelse {
+            result.appendSlice(alloc, words[pos..ie]) catch return words;
+            pos = ie; continue;
+        };
+
+        var wi: u32 = pos + 1;
+        try result.append(alloc, hdr);
+        switch (info.fixed) {
+            1 => { if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } },
+            2 => {
+                if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; }
+                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+            },
+            3 => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; },
+                'l' => { try result.append(alloc, words[wi]); wi += 1; },
+                'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
+                'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
+                'M' => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
+                'W' => { while (wi + 1 < ie) { try result.append(alloc, words[wi]); wi += 1; try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+                'E' => { while (wi < ie) { const w = words[wi]; wi += 1; try result.append(alloc, w); if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
+                else => { try result.append(alloc, words[wi]); wi += 1; },
+            }
+        }
+        while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dce = deadCodeElim(alloc, nw) catch return nw;
+    if (dce.ptr != nw.ptr) alloc.free(nw);
+    return dce;
+}
