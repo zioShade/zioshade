@@ -1,13 +1,16 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 199/199 spirv-val, 0/199 mismatches, 0 failures
-## Current: 7061 total_bound across 199 shaders (-0.96% from 7156, -8.8% from 7742, -27.4% from 9721, -35.1% from 10881)
+## Current: 7047 total_bound across 199 shaders (-14 from 7061)
 ## We now BEAT glslang by 5290 IDs total! (12351 vs 7061, -42.8%)
 ## 193 shaders strictly better, 6 equal, 0 worse
 
-## SESSION 5 FINAL STATUS: 7061 total_bound (-95 from session start 7156)
-## Exhaustive search confirms: no further easy wins exist.
-## Tried and failed:
+## SESSION 6 STATUS: 7047 total_bound (-14 from session start 7061)
+## Implemented: Loop counter to OpPhi conversion
+## Remaining function-local var loads+stores: 90 (down from 194)
+## Gap vs spirv-opt -O: only 8 IDs across 3 shaders
+## Further optimization requires dominance analysis or multi-block inlining.
+## No further easy wins exist.
 ##   - OpTypeArray dedup: saves 0 (compactIds already handles)
 ##   - OpCopyObject elim: saves 4 IDs but on non-benchmark shaders
 ##   - Double pipeline iteration: causes timeouts
