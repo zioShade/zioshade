@@ -51,3 +51,13 @@ emitted_struct_layouts dedup should catch them but doesn't — needs investigati
   cfg.comp: loop loads var in continue block, uses loaded value after merge.
   Also found opcode bug: LoopMerge=246 (not 254), Branch=249 (not 250).
   Two bugs fixed but core algorithm needs escaping value detection.
+
+## SESSION 2 FINAL STATUS:
+36. Dead store elimination: -59 IDs
+37. Store-to-load forwarding: -64 IDs  
+38. Dead loop elimination: -138 IDs
+39. AccessChain-safe pointers for dead loop elim: -28 IDs
+
+## TOTAL THIS SESSION: 7742 → 7481 (-261 IDs, -3.4%)
+## NET vs spirv-opt: -876 IDs BETTER (we save 876 more IDs than spirv-opt across 199 shaders)
+## spirv-opt gap: only 55 IDs across 15 shaders remaining
