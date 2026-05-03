@@ -2,6 +2,9 @@
 zig-out/
 .zig-cache/
 
+# Downloaded shader test cache
+.shader_fetch_cache/
+
 # OS files
 .DS_Store
 Thumbs.db
