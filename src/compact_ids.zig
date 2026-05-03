@@ -763,6 +763,212 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         }
     }
 
+    // Store-to-load forwarding within basic blocks
+    // For each block: track last store per pointer. When OpLoad is seen for a stored pointer,
+    // replace all uses of the load result with the stored value.
+    {
+        const fwd_bound = current_words[3];
+        if (fwd_bound > 1) {
+            // Build result_id -> position map for quick replacement
+            // Also build a replacement map: old_id -> new_id
+            var replacements = std.AutoHashMapUnmanaged(u32, u32){};
+            defer replacements.deinit(alloc);
+
+            // First pass: find forwarding opportunities
+            // Track stores per block (cleared at OpLabel)
+            var last_store = std.AutoHashMapUnmanaged(u32, u32){}; // ptr -> val
+            defer last_store.deinit(alloc);
+
+            pos = 5;
+            while (pos < current_words.len) {
+                const hdr = current_words[pos];
+                const wc: u32 = hdr >> 16;
+                const opcode: u16 = @truncate(hdr & 0xFFFF);
+                if (wc == 0) break;
+                const inst_end = pos + wc;
+                if (inst_end > current_words.len) break;
+
+                switch (opcode) {
+                    // OpLabel: clear per-block state
+                    248 => { // OpLabel
+                        last_store.clearRetainingCapacity();
+                    },
+                    // OpStore: track ptr -> val
+                    62 => { // OpStore: ptr, obj, [mem-access]
+                        if (wc >= 3) {
+                            const ptr = current_words[pos + 1];
+                            const val = current_words[pos + 2];
+                            last_store.put(alloc, ptr, val) catch {};
+                        }
+                    },
+                    // OpLoad: check if we have a forwarded value
+                    61 => { // OpLoad: result_type, result_id, ptr
+                        if (wc >= 4) {
+                            const load_result = current_words[pos + 2];
+                            const ptr = current_words[pos + 3];
+                            if (last_store.get(ptr)) |val| {
+                                // Forward: replace load_result -> val
+                                if (load_result >= 1 and load_result < fwd_bound) {
+                                    replacements.put(alloc, load_result, val) catch {};
+                                }
+                            }
+                        }
+                    },
+                    // OpCopyMemory: clear store tracking for dst
+                    37 => { // OpCopyMemory: dst, src
+                        if (wc >= 3) {
+                            const dst = current_words[pos + 1];
+                            // Don't forward from dst anymore
+                            _ = last_store.remove(dst);
+                        }
+                    },
+                    else => {},
+                }
+                pos = inst_end;
+            }
+
+            if (replacements.count() > 0) {
+                // Apply replacements and remove dead loads
+                var fwd_result = std.ArrayList(u32).initCapacity(alloc, current_words.len) catch return current_words;
+                fwd_result.appendSliceAssumeCapacity(current_words[0..5]);
+
+                pos = 5;
+                while (pos < current_words.len) {
+                    const hdr = current_words[pos];
+                    const wc: u32 = hdr >> 16;
+                    const opcode: u16 = @truncate(hdr & 0xFFFF);
+                    if (wc == 0) break;
+                    const inst_end = pos + wc;
+                    if (inst_end > current_words.len) break;
+
+                    // Skip OpLoad that was forwarded (it's dead)
+                    if (opcode == 61 and wc >= 4) { // OpLoad
+                        const load_result = current_words[pos + 2];
+                        if (replacements.contains(load_result)) {
+                            pos = inst_end;
+                            continue;
+                        }
+                    }
+
+                    // Apply replacements to all ID operands
+                    const info = getOpInfo(opcode) orelse {
+                        fwd_result.appendSliceAssumeCapacity(current_words[pos..inst_end]);
+                        pos = inst_end;
+                        continue;
+                    };
+
+                    try fwd_result.append(alloc, hdr); // header
+                    var wi: u32 = pos + 1;
+
+                    // Handle fixed operands (result_type, result_id)
+                    switch (info.fixed) {
+                        1 => {
+                            if (wi < inst_end) {
+                                const w = current_words[wi];
+                                try fwd_result.append(alloc, replacements.get(w) orelse w);
+                                wi += 1;
+                            }
+                        },
+                        2 => {
+                            if (wi < inst_end) {
+                                const w = current_words[wi];
+                                try fwd_result.append(alloc, replacements.get(w) orelse w);
+                                wi += 1;
+                            }
+                            if (wi < inst_end) {
+                                try fwd_result.append(alloc, current_words[wi]); // result_id — never replace
+                                wi += 1;
+                            }
+                        },
+                        3 => {
+                            if (wi < inst_end) {
+                                try fwd_result.append(alloc, current_words[wi]); // result_id — never replace
+                                wi += 1;
+                            }
+                        },
+                        else => {},
+                    }
+
+                    // Handle variable operands
+                    for (info.ops) |ch| {
+                        if (wi >= inst_end) break;
+                        switch (ch) {
+                            'i' => {
+                                const w = current_words[wi];
+                                try fwd_result.append(alloc, replacements.get(w) orelse w);
+                                wi += 1;
+                            },
+                            'l' => {
+                                try fwd_result.append(alloc, current_words[wi]);
+                                wi += 1;
+                            },
+                            'I' => {
+                                while (wi < inst_end) : (wi += 1) {
+                                    const w = current_words[wi];
+                                    try fwd_result.append(alloc, replacements.get(w) orelse w);
+                                }
+                            },
+                            'L' => { while (wi < inst_end) : (wi += 1) try fwd_result.append(alloc, current_words[wi]); },
+                            's' => { while (wi < inst_end) : (wi += 1) try fwd_result.append(alloc, current_words[wi]); },
+                            'M' => {
+                                if (wi < inst_end) {
+                                    try fwd_result.append(alloc, current_words[wi]); // image
+                                    wi += 1;
+                                }
+                                while (wi < inst_end) : (wi += 1) {
+                                    const w = current_words[wi];
+                                    try fwd_result.append(alloc, replacements.get(w) orelse w);
+                                }
+                            },
+                            'W' => {
+                                while (wi + 1 < inst_end) {
+                                    wi += 1;
+                                    try fwd_result.append(alloc, current_words[wi]); // literal
+                                    wi += 1;
+                                    const w = current_words[wi];
+                                    try fwd_result.append(alloc, replacements.get(w) orelse w);
+                                }
+                                if (wi < inst_end) {
+                                    try fwd_result.append(alloc, current_words[wi]);
+                                    wi += 1;
+                                }
+                            },
+                            'E' => {
+                                // Literal string + IDs
+                                var in_string = true;
+                                while (wi < inst_end and in_string) : (wi += 1) {
+                                    try fwd_result.append(alloc, current_words[wi]);
+                                    const w = current_words[wi];
+                                    if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) in_string = false;
+                                }
+                                while (wi < inst_end) : (wi += 1) {
+                                    const w = current_words[wi];
+                                    try fwd_result.append(alloc, replacements.get(w) orelse w);
+                                }
+                            },
+                            else => {
+                                try fwd_result.append(alloc, current_words[wi]);
+                                wi += 1;
+                            },
+                        }
+                    }
+                    // Append any remaining words
+                    while (wi < inst_end) : (wi += 1) {
+                        try fwd_result.append(alloc, current_words[wi]);
+                    }
+                    pos = inst_end;
+                }
+
+                const fwd_words = fwd_result.toOwnedSlice(alloc) catch return current_words;
+                // Re-run DCE to clean up dead stores and cascading dead code
+                const re_dce = deadCodeElim(alloc, fwd_words) catch return fwd_words;
+                if (re_dce.ptr != fwd_words.ptr) alloc.free(fwd_words);
+                if (current_words.ptr != words.ptr) alloc.free(current_words);
+                return re_dce;
+            }
+        }
+    }
+
     return current_words;
 }
 
