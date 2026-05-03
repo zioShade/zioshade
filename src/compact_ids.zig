@@ -1734,7 +1734,7 @@ pub fn foldSelect(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemor
                 'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
                 'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
                 'M' => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                'W' => { while (wi + 1 < ie) { wi += 1; try result.append(alloc, words[wi]); wi += 1; try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); } if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+                'W' => { while (wi + 1 < ie) { try result.append(alloc, words[wi]); wi += 1; try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
                 'E' => { while (wi < ie) { const w = words[wi]; wi += 1; try result.append(alloc, w); if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
                 else => { try result.append(alloc, words[wi]); wi += 1; },
             }
