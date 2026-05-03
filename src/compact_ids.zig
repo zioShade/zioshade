@@ -1652,9 +1652,175 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
 
     // Re-run DCE to clean up dead labels/branches
     const nw = result.toOwnedSlice(alloc) catch return words;
-    const dce = deadCodeElim(alloc, nw) catch return nw;
-    if (dce.ptr != nw.ptr) alloc.free(nw);
-    return dce;
+    var dce_result = deadCodeElim(alloc, nw) catch return nw;
+    if (dce_result.ptr != nw.ptr) alloc.free(nw);
+
+    // Pass 4: Empty predecessor merging
+    // Find blocks that are ONLY OpLabel + OpBranch and have a single-successor target.
+    // If the target has only this one predecessor, merge the predecessor into the target
+    // by removing the OpBranch and keeping the predecessor's label (renaming target).
+    {
+        const dce_bound = dce_result[3];
+        if (dce_bound > 1) {
+            // Rebuild label_pos and predecessors for the DCE'd output
+            var lp2 = std.AutoHashMapUnmanaged(u32, u32){};
+            defer lp2.deinit(alloc);
+            var preds2 = std.AutoHashMapUnmanaged(u32, u32){};
+            defer preds2.deinit(alloc);
+            var bt2 = std.AutoHashMapUnmanaged(u32, u32){}; // from_label -> to_label
+            defer bt2.deinit(alloc);
+            var func_entries2 = try std.DynamicBitSet.initEmpty(alloc, dce_bound);
+            defer func_entries2.deinit();
+            var structured2 = try std.DynamicBitSet.initEmpty(alloc, dce_bound);
+            defer structured2.deinit();
+
+            pos = 5;
+            var in_func = false;
+            var cur_label: u32 = 0;
+            while (pos < dce_result.len) {
+                const hdr2 = dce_result[pos]; const wc2: u32 = hdr2 >> 16; const op2: u16 = @truncate(hdr2 & 0xFFFF);
+                if (wc2 == 0) break;
+                if (op2 == 54) { in_func = true; cur_label = 0; }
+                if (op2 == 56) { in_func = false; }
+                if (op2 == 248 and wc2 >= 2 and in_func) {
+                    const lid = dce_result[pos + 1];
+                    if (lid < dce_bound) {
+                        try lp2.put(alloc, lid, pos);
+                        if (cur_label == 0) func_entries2.set(lid); // first label in function
+                        // Count predecessors: just track via branch_target
+                        cur_label = lid;
+                    }
+                }
+                if (op2 == 249 and wc2 >= 2 and in_func and cur_label > 0) {
+                    const target = dce_result[pos + 1];
+                    if (target < dce_bound) {
+                        try bt2.put(alloc, cur_label, target);
+                        const entry = try preds2.getOrPutValue(alloc, target, 0);
+                        entry.value_ptr.* += 1;
+                    }
+                }
+                if (op2 == 250 and wc2 >= 4 and in_func and cur_label > 0) {
+                    const t1 = dce_result[pos + 2]; const t2 = dce_result[pos + 3];
+                    if (t1 < dce_bound) { const e = try preds2.getOrPutValue(alloc, t1, 0); e.value_ptr.* += 1; }
+                    if (t2 < dce_bound) { const e = try preds2.getOrPutValue(alloc, t2, 0); e.value_ptr.* += 1; }
+                    structured2.set(cur_label);
+                }
+                if (op2 == 251 and wc2 >= 3 and in_func and cur_label > 0) {
+                    structured2.set(cur_label);
+                    // Default + cases
+                    const default = dce_result[pos + 1];
+                    if (default < dce_bound) { const e = try preds2.getOrPutValue(alloc, default, 0); e.value_ptr.* += 1; }
+                    var si: u32 = pos + 3;
+                    while (si + 1 < pos + wc2) : (si += 2) {
+                        const case_target = dce_result[si + 1];
+                        if (case_target < dce_bound) { const e = try preds2.getOrPutValue(alloc, case_target, 0); e.value_ptr.* += 1; }
+                    }
+                }
+                if (op2 == 246 or op2 == 247 or op2 == 254) structured2.set(cur_label);
+                pos += wc2;
+            }
+
+            // Find mergeable empty predecessors
+            var empty_preds = std.AutoHashMapUnmanaged(u32, u32){}; // from_label -> to_label
+            defer empty_preds.deinit(alloc);
+
+            var bt_iter2 = bt2.iterator();
+            while (bt_iter2.next()) |kv| {
+                const from = kv.key_ptr.*;
+                const to = kv.value_ptr.*;
+                if (from == to) continue;
+                // Don't skip function entries — they CAN be empty predecessors
+                // that can merge into their single successor
+                if (structured2.isSet(from)) continue;
+                if (structured2.isSet(to)) continue;
+                if (to >= dce_bound) continue;
+                const to_preds = preds2.get(to) orelse 0;
+                if (to_preds != 1) continue;
+                // Check that from-block is empty (only Label + Branch)
+                const fpos = lp2.get(from) orelse continue;
+                const flabel_wc = dce_result[fpos] >> 16;
+                const next_p = fpos + flabel_wc;
+                if (next_p >= dce_result.len) continue;
+                const next_hdr = dce_result[next_p];
+                const next_wc = next_hdr >> 16;
+                const next_op: u16 = @truncate(next_hdr & 0xFFFF);
+                if (next_op != 249) continue; // must be OpBranch
+                if (next_p + next_wc >= dce_result.len) continue;
+                const after_op_hdr = dce_result[next_p + next_wc];
+                const after_op: u16 = @truncate(after_op_hdr & 0xFFFF);
+                if (after_op == 248 or after_op == 56) { // next block or function end
+                    try empty_preds.put(alloc, from, to);
+                }
+            }
+
+            if (empty_preds.count() > 0) {
+                // Merge: when we encounter the target's OpLabel, replace it with the predecessor's label
+                // When we encounter the predecessor's OpLabel + OpBranch, skip them entirely
+                var r2 = std.ArrayList(u32).initCapacity(alloc, dce_result.len) catch return dce_result;
+                r2.appendSliceAssumeCapacity(dce_result[0..5]);
+
+                pos = 5;
+                while (pos < dce_result.len) {
+                    const hdr2 = dce_result[pos]; const wc2: u32 = hdr2 >> 16; const op2: u16 = @truncate(hdr2 & 0xFFFF);
+                    if (wc2 == 0) break;
+                    const ie2 = pos + wc2;
+
+                    // Skip empty predecessor blocks entirely (label + branch)
+                    if (op2 == 248 and wc2 >= 2 and empty_preds.contains(dce_result[pos + 1])) {
+                        // Skip the label
+                        // Also skip the following OpBranch
+                        const next_p2 = pos + wc2;
+                        if (next_p2 < dce_result.len) {
+                            const next_hdr2 = dce_result[next_p2];
+                            const next_op2: u16 = @truncate(next_hdr2 & 0xFFFF);
+                            if (next_op2 == 249) {
+                                pos = next_p2 + (next_hdr2 >> 16);
+                                continue;
+                            }
+                        }
+                        // Just skip the label, keep the branch (shouldn't happen)
+                        pos = ie2;
+                        continue;
+                    }
+
+                    // Replace target label with predecessor label
+                    if (op2 == 248 and wc2 >= 2) {
+                        const target_label = dce_result[pos + 1];
+                        // Find which predecessor maps to this target
+                        var ep_iter = empty_preds.iterator();
+                        while (ep_iter.next()) |kv| {
+                            if (kv.value_ptr.* == target_label) {
+                                // Replace target label with predecessor label
+                                try r2.append(alloc, hdr2);
+                                try r2.append(alloc, kv.key_ptr.*);
+                                pos = ie2;
+                                break;
+                            }
+                        } else {
+                            r2.appendSlice(alloc, dce_result[pos..ie2]) catch return dce_result;
+                            pos = ie2;
+                            continue;
+                        }
+                        continue;
+                    }
+
+                    r2.appendSlice(alloc, dce_result[pos..ie2]) catch return dce_result;
+                    pos = ie2;
+                }
+
+                if (r2.items.len < dce_result.len) {
+                    alloc.free(dce_result);
+                    const final_dce = deadCodeElim(alloc, r2.items) catch return r2.items;
+                    if (final_dce.ptr != r2.items.ptr) alloc.free(r2.items);
+                    return final_dce;
+                } else {
+                    r2.deinit(alloc);
+                }
+            }
+        }
+    }
+
+    return dce_result;
 }
 
 /// Constant-fold OpSelect: when the condition is OpConstantTrue or OpConstantFalse,
