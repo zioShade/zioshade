@@ -683,14 +683,8 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                             }
                         },
                         65 => { // OpAccessChain: base is operand 3
-                            if (wc >= 5) {
-                                const base = current_words[pos + 3];
-                                if (base < current_bound and func_vars.isSet(base)) {
-                                    loaded_vars.set(base);
-                                    // Conservatively mark as stored too — AC result may be used for stores
-                                    stored_vars.set(base);
-                                }
-                            }
+                            // Don't mark as loaded/stored yet — track AC results separately
+                            // AC just computes a pointer; actual read/write is at use site
                         },
                         37 => { // OpCopyMemory: dst=op1, src=op2
                             if (wc >= 3) {
@@ -725,6 +719,98 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                                         stored_vars.set(op); // conservatively mark as stored
                                     }
                                 }
+                            }
+                        },
+                        else => {},
+                    }
+                    pos = inst_end;
+                }
+
+                // Phase 2: Track AccessChain results transitively
+                // Build map: AC_result_id -> root_var_id (the function-local var it ultimately derives from)
+                var ac_to_root = std.AutoHashMapUnmanaged(u32, u32){};
+                defer ac_to_root.deinit(alloc);
+
+                // Build AC result -> root var map (transitive)
+                pos = 5;
+                while (pos < current_words.len) {
+                    const hdr = current_words[pos];
+                    const wc: u32 = hdr >> 16;
+                    const opcode: u16 = @truncate(hdr & 0xFFFF);
+                    if (wc == 0) break;
+                    const inst_end = pos + wc;
+                    if (inst_end > current_words.len) break;
+
+                    if (opcode == 65 and wc >= 5) { // OpAccessChain
+                        const ac_result = current_words[pos + 2];
+                        const ac_base_ptr = current_words[pos + 3];
+                        // Resolve root: if base is a func var, it's the root
+                        if (ac_base_ptr < current_bound and func_vars.isSet(ac_base_ptr)) {
+                            try ac_to_root.put(alloc, ac_result, ac_base_ptr);
+                        } else if (ac_to_root.get(ac_base_ptr)) |root| {
+                            try ac_to_root.put(alloc, ac_result, root);
+                        }
+                    }
+                    pos = inst_end;
+                }
+
+                // Now scan for loads/stores of AC results and propagate to root vars
+                pos = 5;
+                while (pos < current_words.len) {
+                    const hdr = current_words[pos];
+                    const wc: u32 = hdr >> 16;
+                    const opcode: u16 = @truncate(hdr & 0xFFFF);
+                    if (wc == 0) break;
+                    const inst_end = pos + wc;
+                    if (inst_end > current_words.len) break;
+
+                    switch (opcode) {
+                        61 => { // OpLoad: check if ptr is an AC result from a func var
+                            if (wc >= 4) {
+                                const ptr = current_words[pos + 3];
+                                if (ac_to_root.get(ptr)) |root| {
+                                    loaded_vars.set(root);
+                                }
+                            }
+                        },
+                        62 => { // OpStore: check if ptr is an AC result from a func var
+                            if (wc >= 3) {
+                                const ptr = current_words[pos + 1];
+                                if (ac_to_root.get(ptr)) |root| {
+                                    stored_vars.set(root);
+                                }
+                            }
+                        },
+                        54 => { // OpFunctionCall: args may be AC results -> conservatively load+store
+                            if (wc >= 5) {
+                                var ai: u32 = pos + 4;
+                                while (ai < inst_end) : (ai += 1) {
+                                    const op = current_words[ai];
+                                    if (ac_to_root.get(op)) |root| {
+                                        loaded_vars.set(root);
+                                        stored_vars.set(root);
+                                    }
+                                }
+                            }
+                        },
+                        12 => { // OpExtInst: pointer args may be AC results
+                            if (wc >= 6) {
+                                var ei: u32 = pos + 5;
+                                while (ei < inst_end) : (ei += 1) {
+                                    const op = current_words[ei];
+                                    if (ac_to_root.get(op)) |root| {
+                                        loaded_vars.set(root);
+                                        stored_vars.set(root);
+                                    }
+                                }
+                            }
+                        },
+                        37 => { // OpCopyMemory
+                            if (wc >= 3) {
+                                const dst = current_words[pos + 1];
+                                const src = current_words[pos + 2];
+                                if (ac_to_root.get(dst)) |root| stored_vars.set(root);
+                                if (ac_to_root.get(src)) |root| loaded_vars.set(root);
                             }
                         },
                         else => {},
