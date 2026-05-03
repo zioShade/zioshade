@@ -3372,7 +3372,7 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
         if (opcode == 59 and wc >= 4) { // OpVariable
             const var_id = words[pos + 2];
             const storage_class = words[pos + 3];
-            if ((storage_class == 1 or storage_class == 2 or storage_class == 5) and var_id < bound) {
+            if ((storage_class == 0 or storage_class == 1 or storage_class == 2) and var_id < bound) {
                 readonly_vars.set(var_id);
             }
         }
@@ -3704,11 +3704,15 @@ pub fn cseAccessChains(alloc: std.mem.Allocator, words: []const u32) error{OutOf
 
     // Phase 1b: For each AccessChain, store its signature words so we can dedup
     // Per-block: track signatures and their first result IDs (must be same block for dominance)
+    // Also track entry-block AccessChains for cross-block dedup (entry block dominates all)
     const SigEntry = struct { result_id: u32, sig_start: u32, sig_len: u32 };
     var block_sigs = std.ArrayListUnmanaged(SigEntry){}; // entries for current block
     defer block_sigs.deinit(alloc);
+    var entry_block_sigs = std.ArrayListUnmanaged(SigEntry){}; // entries from function entry block
+    defer entry_block_sigs.deinit(alloc);
     var all_sig_words = std.ArrayListUnmanaged(u32){}; // packed signature words
     defer all_sig_words.deinit(alloc);
+    var is_entry_block = true; // track if we're in the function entry block
 
     var pos: u32 = 5;
     while (pos < words.len) {
@@ -3719,9 +3723,19 @@ pub fn cseAccessChains(alloc: std.mem.Allocator, words: []const u32) error{OutOf
         const ie = pos + wc;
         if (ie > words.len) break;
 
-        // Reset per-block state on OpLabel (start of new basic block)
-        if (opcode == 248) { // OpLabel
-            block_sigs.clearRetainingCapacity();
+        // Track function and block boundaries
+        if (opcode == 54) { // OpFunction — reset
+            entry_block_sigs.clearRetainingCapacity();
+            is_entry_block = true;
+        }
+        if (opcode == 248) { // OpLabel — new block
+            if (!is_entry_block) {
+                block_sigs.clearRetainingCapacity();
+            }
+        }
+        // Any non-Label instruction after first OpLabel ends entry block status
+        if (opcode != 248 and opcode != 54 and opcode != 55 and opcode != 56) {
+            is_entry_block = false;
         }
 
         if (opcode == 65 and wc >= 4) { // OpAccessChain
@@ -3730,7 +3744,7 @@ pub fn cseAccessChains(alloc: std.mem.Allocator, words: []const u32) error{OutOf
             const sig_base_and_indices = words[pos + 3 .. ie]; // base + indices
             const sig_len: u32 = 1 + @as(u32, @intCast(sig_base_and_indices.len));
 
-            // Check for duplicate in current block
+            // Check for duplicate in current block first
             var found_dup = false;
             for (block_sigs.items) |entry| {
                 if (entry.sig_len == sig_len) {
@@ -3742,11 +3756,28 @@ pub fn cseAccessChains(alloc: std.mem.Allocator, words: []const u32) error{OutOf
                     }
                 }
             }
+            // If not found in current block, check entry block (dominates all)
+            if (!found_dup) {
+                for (entry_block_sigs.items) |entry| {
+                    if (entry.sig_len == sig_len) {
+                        const existing_sig = all_sig_words.items[entry.sig_start .. entry.sig_start + sig_len];
+                        if (existing_sig[0] == sig_type and std.mem.eql(u32, existing_sig[1..], sig_base_and_indices)) {
+                            try sub_map.put(alloc, result_id, entry.result_id);
+                            found_dup = true;
+                            break;
+                        }
+                    }
+                }
+            }
             if (!found_dup) {
                 const sig_start: u32 = @intCast(all_sig_words.items.len);
                 try all_sig_words.append(alloc, sig_type);
                 try all_sig_words.appendSlice(alloc, sig_base_and_indices);
                 try block_sigs.append(alloc, .{ .result_id = result_id, .sig_start = sig_start, .sig_len = sig_len });
+                // Also add to entry_block_sigs if we're in the entry block
+                if (is_entry_block) {
+                    try entry_block_sigs.append(alloc, .{ .result_id = result_id, .sig_start = sig_start, .sig_len = sig_len });
+                }
             }
         }
         pos = ie;
