@@ -155,8 +155,11 @@ pub fn generate(
     // Fold CompositeExtract from CompositeConstruct
     const folded_ce = compact_ids.foldCompositeExtract(alloc, no_rle) catch return no_rle;
     if (folded_ce.ptr != no_rle.ptr) alloc.free(no_rle);
-    const final_compact = compact_ids.compactIds(alloc, folded_ce) catch return folded_ce;
-    if (final_compact.ptr != folded_ce.ptr) alloc.free(folded_ce);
+    // Eliminate uninit vars (loaded but never stored)
+    const no_uninit = compact_ids.elimUninitVars(alloc, folded_ce) catch return folded_ce;
+    if (no_uninit.ptr != folded_ce.ptr) alloc.free(folded_ce);
+    const final_compact = compact_ids.compactIds(alloc, no_uninit) catch return no_uninit;
+    if (final_compact.ptr != no_uninit.ptr) alloc.free(no_uninit);
     return final_compact;
 }
 

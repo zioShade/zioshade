@@ -29,6 +29,7 @@ fn getOpInfo(opcode: u16) ?OpInfo {
     // fixed: 0=none, 1=result_type, 2=result_type+result, 3=result_only
     return switch (opcode) {
         // --- Core ---
+        1 => rt(2, ""),          // OpUndef: result_type, result
         3 => rt(0, "lls"),         // OpSource: lang, ver, [file(id), source(str)] -- simplified: treat file as lit
         5 => rt(0, "is"),          // OpName
         6 => rt(0, "ils"),         // OpMemberName
@@ -3230,6 +3231,32 @@ pub fn elimUninitVars(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                     if (base < bound and func_vars.isSet(base)) {
                         loaded_vars.set(base);
                         stored_vars.set(base);
+                    }
+                }
+            },
+            12 => { // OpExtInst: may implicitly write to pointer args (Modf, Frexp, etc.)
+                // Layout: result_type, result_id, set, literal, then IDs...
+                if (wc >= 6) {
+                    var ei: u32 = pos + 5;
+                    while (ei < ie) : (ei += 1) {
+                        const op = words[ei];
+                        if (op < bound and func_vars.isSet(op)) {
+                            loaded_vars.set(op);
+                            stored_vars.set(op); // Modf/Frexp write to pointer arg
+                        }
+                    }
+                }
+            },
+            54 => { // OpFunctionCall: args may be read/written
+                // Layout: result_type, result_id, func_id, arg1, arg2, ...
+                if (wc >= 5) {
+                    var ai: u32 = pos + 4;
+                    while (ai < ie) : (ai += 1) {
+                        const op = words[ai];
+                        if (op < bound and func_vars.isSet(op)) {
+                            loaded_vars.set(op);
+                            stored_vars.set(op); // conservatively mark as stored
+                        }
                     }
                 }
             },
