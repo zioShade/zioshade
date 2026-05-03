@@ -6,6 +6,7 @@ const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 const semantic = @import("semantic.zig");
 const compact_ids = @import("compact_ids.zig");
+const loop_phi = @import("loop_counter_phi.zig");
 
 pub const Stage = enum { vertex, fragment, compute, geometry };
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
@@ -135,8 +136,11 @@ pub fn generate(
         alloc.free(compact2);
         inlined = next;
     }
-    const rse = compact_ids.redundantStoreElim(alloc, inlined) catch return inlined;
-    if (rse.ptr != inlined.ptr) alloc.free(inlined);
+    // Convert loop counter variables to OpPhi
+    const phi = loop_phi.loopCounterToPhi(alloc, inlined) catch return inlined;
+    if (phi.ptr != inlined.ptr) alloc.free(inlined);
+    const rse = compact_ids.redundantStoreElim(alloc, phi) catch return phi;
+    if (rse.ptr != phi.ptr) alloc.free(phi);
     const blk_merged = compact_ids.mergeBlocks(alloc, rse) catch return rse;
     if (blk_merged.ptr != rse.ptr) alloc.free(rse);
     const deduped = compact_ids.dedupStructTypes(alloc, blk_merged) catch return blk_merged;

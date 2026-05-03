@@ -25,7 +25,7 @@ inline fn rt(id_count: u8, comptime ops: []const u8) OpInfo {
     return .{ .fixed = id_count, .ops = ops };
 }
 
-fn getOpInfo(opcode: u16) ?OpInfo {
+pub fn getOpInfo(opcode: u16) ?OpInfo {
     // fixed: 0=none, 1=result_type, 2=result_type+result, 3=result_only
     return switch (opcode) {
         // --- Core ---
@@ -155,6 +155,7 @@ fn getOpInfo(opcode: u16) ?OpInfo {
         234 => rt(2, "iiii"),      // OpAtomicIAdd: ptr, scope, sem, value
         236...242 => rt(2, "iiii"),// OpAtomicSMin..OpAtomicXor
         // --- Control Flow ---
+        245 => rt(2, "I"),          // OpPhi: result_type, result, (value, parent)...
         246 => rt(0, "iil"),       // OpLoopMerge: merge, continue, control
         247 => rt(0, "il"),        // OpSelectionMerge: merge, control
         248 => rt(3, ""),           // OpLabel (result_only)
@@ -515,6 +516,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33 => true, // Types
                 39 => true, // TypeForwardPointer
                 4472, 5341, 4163 => true, // TypeRayQueryKHR, TypeAccelerationStructureKHR, TypeTensorARM
+                245 => true, // OpPhi (safe to remove if result unused)
                 59 => true, // OpVariable (Function-local only — safe to remove if unreferenced)
                 4428, 4429 => true, // OpSubgroupAllKHR, OpSubgroupAnyKHR (pure)
                 5340 => true, // OpRayQueryGetIntersectionTriangleVertexPositionsKHR (pure query)
