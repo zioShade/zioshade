@@ -111,17 +111,18 @@ pub fn generate(
     if (dce.ptr != merged.ptr) alloc.free(merged);
     const loop_elim = compact_ids.deadLoopElim(alloc, dce) catch return dce;
     if (loop_elim.ptr != dce.ptr) alloc.free(dce);
-    // Iterative inlining: inline, DCE+compact, repeat until inline has no changes
+    // Iterative inlining: inline, moveVar+DCE+compact, repeat until inline has no changes
     var inlined = compact_ids.inlineTrivialFuncs(alloc, loop_elim) catch return loop_elim;
     if (inlined.ptr != loop_elim.ptr) alloc.free(loop_elim);
     var iter: u32 = 0;
     while (iter < 5) : (iter += 1) {
+        // Fix OpVariable ordering after inlining (vars may be placed mid-block)
+        const var_fixed = compact_ids.moveVarToEntry(alloc, inlined) catch inlined;
+        if (var_fixed.ptr != inlined.ptr) alloc.free(inlined);
         // DCE + compact after inlining
-        const dce2 = compact_ids.deadCodeElim(alloc, inlined) catch break;
-        const compact2 = if (dce2.ptr != inlined.ptr) blk: {
-            alloc.free(inlined);
-            break :blk compact_ids.compactIds(alloc, dce2) catch { inlined = dce2; break; };
-        } else inlined;
+        const dce2 = compact_ids.deadCodeElim(alloc, var_fixed) catch break;
+        if (dce2.ptr != var_fixed.ptr) alloc.free(var_fixed);
+        const compact2 = compact_ids.compactIds(alloc, dce2) catch { inlined = dce2; break; };
         if (compact2.ptr != dce2.ptr) alloc.free(dce2);
         // Try next round of inlining
         const next = compact_ids.inlineTrivialFuncs(alloc, compact2) catch { inlined = compact2; break; };
