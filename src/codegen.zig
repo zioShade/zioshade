@@ -152,8 +152,11 @@ pub fn generate(
     // Eliminate redundant loads of read-only variables
     const no_rle = compact_ids.elimRedundantLoads(alloc, compacted) catch return compacted;
     if (no_rle.ptr != compacted.ptr) alloc.free(compacted);
-    const final_compact = compact_ids.compactIds(alloc, no_rle) catch return no_rle;
-    if (final_compact.ptr != no_rle.ptr) alloc.free(no_rle);
+    // Fold CompositeExtract from CompositeConstruct
+    const folded_ce = compact_ids.foldCompositeExtract(alloc, no_rle) catch return no_rle;
+    if (folded_ce.ptr != no_rle.ptr) alloc.free(no_rle);
+    const final_compact = compact_ids.compactIds(alloc, folded_ce) catch return folded_ce;
+    if (final_compact.ptr != folded_ce.ptr) alloc.free(folded_ce);
     return final_compact;
 }
 
