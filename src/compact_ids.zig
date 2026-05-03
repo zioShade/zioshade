@@ -2772,7 +2772,8 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
             var body_start: u32 = 0;
             var body_end: u32 = 0;
             var block_count: u32 = 0;
-            var has_var_or_call = false;
+            var has_call_or_cf = false; // calls, branch, merge — prevents inlining
+            var has_var = false; // OpVariable in body — allowed but needs var reordering
             var return_value_id: u32 = 0;
             var param_ids = std.ArrayListUnmanaged(u32){};
 
@@ -2784,15 +2785,15 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 if (fop == 56) { func_end = fie; break; }
                 if (fop == 55 and fwc >= 3) try param_ids.append(alloc, words[fp + 2]);
                 if (fop == 248) { block_count += 1; if (block_count == 1) body_start = fie; }
-                if (fop == 59) has_var_or_call = true; // OpVariable
-                if (fop == 57) has_var_or_call = true; // OpFunctionCall
-                if (fop == 249 or fop == 250 or fop == 251) { if (block_count <= 1) has_var_or_call = true; }
-                if (fop == 246 or fop == 247) has_var_or_call = true;
+                if (fop == 59) has_var = true; // OpVariable — allowed for single-block inlining
+                if (fop == 57) has_call_or_cf = true; // OpFunctionCall
+                if (fop == 249 or fop == 250 or fop == 251) { if (block_count <= 1) has_call_or_cf = true; }
+                if (fop == 246 or fop == 247) has_call_or_cf = true;
                 if (fop == 253) body_end = fp; // OpReturn
                 if (fop == 254 and fwc >= 2) { body_end = fp; return_value_id = words[fp + 1]; }
                 fp = fie;
             }
-            const is_inlineable = block_count == 1 and !has_var_or_call and body_start > 0 and body_end >= body_start;
+            const is_inlineable = block_count == 1 and !has_call_or_cf and body_start > 0 and body_end >= body_start;
             const ps = try param_ids.toOwnedSlice(alloc);
             try param_slices.append(alloc, ps);
             try funcs.append(alloc, .{
@@ -3066,4 +3067,101 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
     const dce = deadCodeElim(alloc, nw) catch return nw;
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
+}
+
+/// Move OpVariable instructions to the beginning of their function's entry block.
+/// This is needed after inlining functions that contain function-local variables,
+/// since SPIR-V requires all OpVariable declarations to appear before any other
+/// instructions in a function's entry block.
+pub fn moveVarToEntry(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]); // header
+
+    var pos: u32 = 5;
+    var any_moved = false;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const inst_end = pos + wc;
+        if (inst_end > words.len) break;
+
+        if (opcode != 54 or wc < 5) { // not OpFunction
+            result.appendSliceAssumeCapacity(words[pos..inst_end]);
+            pos = inst_end;
+            continue;
+        }
+
+        // Copy OpFunction + parameters
+        result.appendSliceAssumeCapacity(words[pos..inst_end]);
+        pos = inst_end;
+        while (pos < words.len) {
+            const ph = words[pos]; const pwc: u32 = ph >> 16; const pop: u16 = @truncate(ph & 0xFFFF);
+            if (pwc == 0 or pop != 55) break;
+            const pie = pos + pwc;
+            result.appendSliceAssumeCapacity(words[pos..pie]);
+            pos = pie;
+        }
+
+        // Copy first OpLabel
+        if (pos >= words.len) break;
+        {
+            const lh = words[pos]; const lwc: u32 = lh >> 16; const lop: u16 = @truncate(lh & 0xFFFF);
+            if (lop != 248) continue;
+            result.appendSliceAssumeCapacity(words[pos .. pos + lwc]);
+            pos += lwc;
+        }
+
+        // Scan rest of function body until OpFunctionEnd
+        // Separate OpVariable instructions from everything else
+        var var_insts = std.ArrayList(u32).initCapacity(alloc, 64) catch return words;
+        var other_insts = std.ArrayList(u32).initCapacity(alloc, words.len - pos) catch { var_insts.deinit(alloc); return words; };
+        var found_misplaced = false;
+
+        while (pos < words.len) {
+            const bh = words[pos];
+            const bwc: u32 = bh >> 16;
+            const bop: u16 = @truncate(bh & 0xFFFF);
+            if (bwc == 0) break;
+            const bie = pos + bwc;
+
+            if (bop == 56) { // OpFunctionEnd
+                // Emit: all vars, then all others, then OpFunctionEnd
+                if (var_insts.items.len > 0) result.appendSliceAssumeCapacity(var_insts.items);
+                if (other_insts.items.len > 0) result.appendSliceAssumeCapacity(other_insts.items);
+                result.appendSliceAssumeCapacity(words[pos..bie]);
+                pos = bie;
+                break;
+            }
+
+            if (bop == 248) { // OpLabel — new block starts, flush buffers
+                if (var_insts.items.len > 0) result.appendSliceAssumeCapacity(var_insts.items);
+                if (other_insts.items.len > 0) result.appendSliceAssumeCapacity(other_insts.items);
+                var_insts.clearRetainingCapacity();
+                other_insts.clearRetainingCapacity();
+                result.appendSliceAssumeCapacity(words[pos..bie]);
+                pos = bie;
+                continue;
+            }
+
+            if (bop == 59) { // OpVariable
+                if (other_insts.items.len > 0) found_misplaced = true;
+                var_insts.appendSliceAssumeCapacity(words[pos..bie]);
+            } else {
+                other_insts.appendSliceAssumeCapacity(words[pos..bie]);
+            }
+            pos = bie;
+        }
+
+        if (found_misplaced) any_moved = true;
+        var_insts.deinit(alloc);
+        other_insts.deinit(alloc);
+    }
+
+    if (!any_moved) {
+        result.deinit(alloc);
+        return words;
+    }
+    return result.toOwnedSlice(alloc) catch return words;
 }
