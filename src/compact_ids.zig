@@ -2825,6 +2825,122 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
 /// Inlining replaces OpFunctionCall with the body instructions.
 /// Inline simple single-block functions with parameter substitution and ID renaming.
 /// A function is inlineable if: single basic block, no OpVariable/OpFunctionCall/branches.
+/// Replace OpFunctionCall to functions whose body is only OpUnreachable with OpUndef.
+/// This allows subsequent inlining to handle the caller (which no longer has OpFunctionCall).
+pub fn elimUnreachableCalls(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find functions whose body (after OpLabel) is only OpUnreachable
+    var unreachable_funcs = std.AutoHashMapUnmanaged(u32, void){};
+    defer unreachable_funcs.deinit(alloc);
+
+    var cur_func: u32 = 0;
+    var body_after_label = std.ArrayListUnmanaged(u16){};
+    defer body_after_label.deinit(alloc);
+    var in_body = false;
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 54 and wc >= 3) { // OpFunction
+            // Check previous function
+            if (cur_func > 0 and in_body) {
+                var all_unreachable = true;
+                for (body_after_label.items) |op| {
+                    if (op != 255) { all_unreachable = false; break; } // not OpUnreachable
+                }
+                if (all_unreachable and body_after_label.items.len > 0) {
+                    unreachable_funcs.put(alloc, cur_func, {}) catch return words;
+                }
+            }
+            cur_func = words[pos + 2];
+            in_body = false;
+            body_after_label.clearRetainingCapacity();
+        }
+        if (opcode == 248 and cur_func > 0) { // OpLabel — body starts
+            in_body = true;
+            body_after_label.clearRetainingCapacity();
+        }
+        if (opcode == 56) { // OpFunctionEnd
+            if (cur_func > 0 and in_body) {
+                var all_unreachable = true;
+                for (body_after_label.items) |op| {
+                    if (op != 255) { all_unreachable = false; break; }
+                }
+                if (all_unreachable and body_after_label.items.len > 0) {
+                    unreachable_funcs.put(alloc, cur_func, {}) catch return words;
+                }
+            }
+            cur_func = 0;
+            in_body = false;
+        }
+        if (in_body and opcode != 248) {
+            body_after_label.append(alloc, opcode) catch return words;
+        }
+        pos = ie;
+    }
+
+    if (unreachable_funcs.count() == 0) return words;
+
+    // Phase 2: Replace OpFunctionCall to unreachable funcs with OpUndef for the result
+    // Also remove the unreachable function definitions
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]); // header
+
+    var skip_func: ?u32 = null;
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Skip unreachable function definitions
+        if (opcode == 54) {
+            if (unreachable_funcs.contains(words[pos + 2])) {
+                skip_func = words[pos + 2];
+            }
+        }
+        if (opcode == 56) skip_func = null;
+        if (skip_func != null) {
+            pos = ie;
+            continue;
+        }
+
+        // Replace OpFunctionCall to unreachable func
+        if (opcode == 57 and wc >= 4) { // OpFunctionCall
+            const called_func = words[pos + 3];
+            if (unreachable_funcs.contains(called_func)) {
+                // Replace with OpUndef for the result
+                const result_type = words[pos + 1];
+                const result_id = words[pos + 2];
+                // OpUndef: (2 << 16) | 1, result_type, result_id
+                result.append(alloc, (2 << 16) | 1) catch return words;
+                result.append(alloc, result_type) catch return words;
+                result.append(alloc, result_id) catch return words;
+                pos = ie;
+                continue;
+            }
+        }
+
+        result.appendSliceAssumeCapacity(words[pos..ie]);
+        pos = ie;
+    }
+
+    const out = result.toOwnedSlice(alloc) catch return words;
+    return out;
+}
+
+/// Inline single-block functions with parameters and/or return values.
 /// Body result IDs are renamed to fresh IDs to avoid clashes with the caller.
 /// For non-void functions, the return value maps to the call's result ID.
 pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
