@@ -109,8 +109,10 @@ pub fn generate(
     if (merged.ptr != raw.ptr) alloc.free(raw);
     const dce = compact_ids.deadCodeElim(alloc, merged) catch return merged;
     if (dce.ptr != merged.ptr) alloc.free(merged);
-    const compacted = compact_ids.compactIds(alloc, dce) catch return dce;
-    if (compacted.ptr != dce.ptr) alloc.free(dce);
+    const loop_elim = compact_ids.deadLoopElim(alloc, dce) catch return dce;
+    if (loop_elim.ptr != dce.ptr) alloc.free(dce);
+    const compacted = compact_ids.compactIds(alloc, loop_elim) catch return loop_elim;
+    if (compacted.ptr != loop_elim.ptr) alloc.free(loop_elim);
     return compacted;
 }
 
