@@ -111,7 +111,7 @@ pub fn generate(
     if (dce.ptr != merged.ptr) alloc.free(merged);
     const loop_elim = compact_ids.deadLoopElim(alloc, dce) catch return dce;
     if (loop_elim.ptr != dce.ptr) alloc.free(dce);
-    // Iterative inlining: inline, moveVar+DCE+compact, repeat until inline has no changes
+    // Iterative inlining: inline, moveVar+elimUninit+DCE+compact, repeat until inline has no changes
     var inlined = compact_ids.inlineTrivialFuncs(alloc, loop_elim) catch return loop_elim;
     if (inlined.ptr != loop_elim.ptr) alloc.free(loop_elim);
     var iter: u32 = 0;
@@ -119,9 +119,14 @@ pub fn generate(
         // Fix OpVariable ordering after inlining (vars may be placed mid-block)
         const var_fixed = compact_ids.moveVarToEntry(alloc, inlined) catch inlined;
         if (var_fixed.ptr != inlined.ptr) alloc.free(inlined);
+        // Eliminate uninitialized vars (loaded but never stored)
+        // Disabled for debugging
+        // const no_uninit = compact_ids.elimUninitVars(alloc, var_fixed) catch var_fixed;
+        // if (no_uninit.ptr != var_fixed.ptr) alloc.free(var_fixed);
+        const no_uninit = var_fixed;
         // DCE + compact after inlining
-        const dce2 = compact_ids.deadCodeElim(alloc, var_fixed) catch break;
-        if (dce2.ptr != var_fixed.ptr) alloc.free(var_fixed);
+        const dce2 = compact_ids.deadCodeElim(alloc, no_uninit) catch break;
+        if (dce2.ptr != no_uninit.ptr) alloc.free(no_uninit);
         const compact2 = compact_ids.compactIds(alloc, dce2) catch { inlined = dce2; break; };
         if (compact2.ptr != dce2.ptr) alloc.free(dce2);
         // Try next round of inlining
@@ -144,7 +149,12 @@ pub fn generate(
     if (folded.ptr != algebrad.ptr) alloc.free(algebrad);
     const compacted = compact_ids.compactIds(alloc, folded) catch return folded;
     if (compacted.ptr != folded.ptr) alloc.free(folded);
-    return compacted;
+    // Eliminate redundant loads of read-only variables
+    const no_rle = compact_ids.elimRedundantLoads(alloc, compacted) catch return compacted;
+    if (no_rle.ptr != compacted.ptr) alloc.free(compacted);
+    const final_compact = compact_ids.compactIds(alloc, no_rle) catch return no_rle;
+    if (final_compact.ptr != no_rle.ptr) alloc.free(no_rle);
+    return final_compact;
 }
 
 const Codegen = struct {
