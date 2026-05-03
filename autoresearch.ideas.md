@@ -44,3 +44,10 @@ emitted_struct_layouts dedup should catch them but doesn't — needs investigati
 - Iterative merge+DCE loop (no additional savings)
 - Binary op constant folding (all conversions are runtime values)
 - OpCopyObject elimination (misidentified opcode — was OpCompositeExtract)
+
+## THINGS THAT DIDN'T WORK THIS SESSION (continued):
+- Dead loop elimination: attempted but buggy. Need data flow analysis to detect
+  values that escape the loop via SSA results (not just direct loads).
+  cfg.comp: loop loads var in continue block, uses loaded value after merge.
+  Also found opcode bug: LoopMerge=246 (not 254), Branch=249 (not 250).
+  Two bugs fixed but core algorithm needs escaping value detection.
