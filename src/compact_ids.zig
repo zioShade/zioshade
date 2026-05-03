@@ -1175,3 +1175,224 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
     // Update bound (may be the same or lower after DCE runs)
     return result.toOwnedSlice(alloc);
 }
+
+/// Dead loop elimination: remove loops whose bodies have no observable side effects
+/// and whose computed values are never used after the loop.
+pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Collect function-local variable IDs
+    var func_vars = std.AutoHashMapUnmanaged(u32, void){};
+    defer func_vars.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 59 and wc >= 4) { // OpVariable Function
+            if (words[pos + 3] == 7) func_vars.put(alloc, words[pos + 2], {}) catch {};
+        }
+        pos += wc;
+    }
+
+    // Find all OpLoopMerge instructions
+    const LI = struct { header_pos: u32, merge_id: u32 };
+    var loops = std.ArrayListUnmanaged(LI){};
+    defer loops.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 246 and wc >= 3) loops.append(alloc, .{ .header_pos = pos, .merge_id = words[pos + 1] }) catch {};
+        pos += wc;
+    }
+    if (loops.items.len == 0) return words;
+
+    var dead_loops = std.DynamicBitSet.initEmpty(alloc, loops.items.len) catch return words;
+    defer dead_loops.deinit();
+
+    for (loops.items, 0..) |loop_info, li| {
+        // Find header label
+        var header_label_id: u32 = 0;
+        { var sp: u32 = 5; while (sp < loop_info.header_pos) {
+            const h = words[sp]; const w = h >> 16; if (w == 0) break;
+            if ((@as(u16, @truncate(h & 0xFFFF)) == 248) and w >= 2) header_label_id = words[sp + 1];
+            sp += w;
+        }}
+        if (header_label_id == 0) continue;
+
+        // Phase 1: check for side effects (stores to non-func-local vars)
+        var has_side_effects = false;
+        var in_loop = false;
+        pos = 5;
+        while (pos < words.len) {
+            const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break;
+            if (opcode == 248 and wc >= 2) {
+                const lbl = words[pos + 1];
+                if (lbl == header_label_id) in_loop = true;
+                if (lbl == loop_info.merge_id) in_loop = false;
+            }
+            if (in_loop and !has_side_effects) {
+                if (opcode == 62 and wc >= 3) { // OpStore
+                    if (!func_vars.contains(words[pos + 1])) has_side_effects = true;
+                } else if (opcode == 37 or opcode == 234 or opcode == 235 or
+                           (opcode >= 57 and opcode <= 60) or
+                           (opcode >= 68 and opcode <= 76) or opcode == 99) {
+                    has_side_effects = true;
+                }
+            }
+            pos += wc;
+        }
+        if (has_side_effects) continue;
+
+        // Phase 2: collect all result IDs defined in the loop body
+        var loop_defined = std.DynamicBitSet.initEmpty(alloc, bound) catch continue;
+        defer loop_defined.deinit();
+        in_loop = false;
+        pos = 5;
+        while (pos < words.len) {
+            const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break;
+            if (opcode == 248 and wc >= 2) {
+                const lbl = words[pos + 1];
+                if (lbl == header_label_id) in_loop = true;
+                if (lbl == loop_info.merge_id) in_loop = false;
+            }
+            if (in_loop) {
+                // Find result ID for this instruction
+                const info = getOpInfo(opcode) orelse { pos += wc; continue; };
+                var result_id: u32 = 0;
+                switch (info.fixed) {
+                    2 => { if (wc >= 3) result_id = words[pos + 2]; },
+                    3 => { if (wc >= 2) result_id = words[pos + 1]; },
+                    else => {},
+                }
+                if (result_id > 0 and result_id < bound) loop_defined.set(result_id);
+                // Also mark labels as defined in the loop
+                if (opcode == 248 and wc >= 2) {
+                    const lbl = words[pos + 1];
+                    if (lbl > 0 and lbl < bound) loop_defined.set(lbl);
+                }
+            }
+            pos += wc;
+        }
+
+        // Phase 3: check if any loop-defined value is referenced after the merge block
+        var value_escapes = false;
+        var past_merge = false;
+        pos = 5;
+        while (pos < words.len) {
+            const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break;
+            if (opcode == 248 and wc >= 2) {
+                if (words[pos + 1] == loop_info.merge_id) past_merge = true;
+            }
+            if (past_merge and !value_escapes) {
+                // Check all operand IDs for references to loop-defined values
+                const info = getOpInfo(opcode) orelse { pos += wc; continue; };
+                var wi: u32 = pos + 1;
+                switch (info.fixed) {
+                    1 => { if (wi < pos + wc) { if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; wi += 1; } },
+                    2 => { if (wi < pos + wc) { if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; wi += 1; } if (wi < pos + wc) wi += 1; },
+                    3 => { if (wi < pos + wc) wi += 1; }, // skip result
+                    else => {},
+                }
+                for (info.ops) |ch| {
+                    if (wi >= pos + wc) break;
+                    switch (ch) {
+                        'i' => { if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; wi += 1; },
+                        'I' => { while (wi < pos + wc) : (wi += 1) { if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; } },
+                        'M' => { if (wi < pos + wc) wi += 1; while (wi < pos + wc) : (wi += 1) { if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; } },
+                        'W' => { while (wi + 1 < pos + wc) { wi += 1; if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; wi += 1; } if (wi < pos + wc) wi += 1; },
+                        'E' => { while (wi < pos + wc) { const w = words[wi]; wi += 1; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < pos + wc) : (wi += 1) { if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; } },
+                        else => { wi += 1; },
+                    }
+                }
+            }
+            pos += wc;
+        }
+
+        if (!value_escapes) dead_loops.set(li);
+    }
+
+    if (dead_loops.count() == 0) return words;
+
+    // Filter inner loops contained within dead outer loops
+    var dead_ranges = std.ArrayListUnmanaged(struct { header_label: u32, merge_label: u32, hdr_pos: u32, mrg_pos: u32 }){};
+    defer dead_ranges.deinit(alloc);
+    for (loops.items, 0..) |li, idx| {
+        if (!dead_loops.isSet(idx)) continue;
+        var ll: u32 = 0;
+        { var sp: u32 = 5; while (sp < li.header_pos) {
+            const h = words[sp]; const w = h >> 16; if (w == 0) break;
+            if ((@as(u16, @truncate(h & 0xFFFF)) == 248) and w >= 2) ll = words[sp + 1];
+            sp += w;
+        }}
+        if (ll == 0) continue;
+        var mp: u32 = @intCast(words.len);
+        { var sp: u32 = 5; while (sp < words.len) {
+            const h = words[sp]; const w = h >> 16; if (w == 0) break;
+            if ((@as(u16, @truncate(h & 0xFFFF)) == 248) and w >= 2 and words[sp + 1] == li.merge_id) { mp = sp; break; }
+            sp += w;
+        }}
+        dead_ranges.append(alloc, .{ .header_label = ll, .merge_label = li.merge_id, .hdr_pos = li.header_pos, .mrg_pos = mp }) catch {};
+    }
+
+    var outermost = std.DynamicBitSet.initFull(alloc, dead_ranges.items.len) catch return words;
+    defer outermost.deinit();
+    for (dead_ranges.items, 0..) |dr, i| {
+        for (dead_ranges.items, 0..) |dr2, j| {
+            if (i != j and dr.hdr_pos > dr2.hdr_pos and dr.hdr_pos < dr2.mrg_pos) {
+                outermost.unset(i); break;
+            }
+        }
+    }
+
+    var dead_header_labels = std.AutoHashMapUnmanaged(u32, u32){};
+    defer dead_header_labels.deinit(alloc);
+    for (dead_ranges.items, 0..) |dr, idx| {
+        if (outermost.isSet(idx)) dead_header_labels.put(alloc, dr.header_label, dr.merge_label) catch {};
+    }
+
+    // Remove dead loop bodies: replace header with Label + OpBranch to merge, skip everything until merge
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+    pos = 5;
+    var in_dead_loop = false;
+    var dead_merge_id: u32 = 0;
+    var skip_block = false;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (opcode == 248 and wc >= 2) { // OpLabel
+            const lbl = words[pos + 1];
+            if (dead_header_labels.get(lbl)) |mid| {
+                in_dead_loop = true; dead_merge_id = mid; skip_block = true;
+                result.appendSlice(alloc, words[pos..ie]) catch return words;
+                result.append(alloc, (2 << 16) | 249) catch return words; // OpBranch
+                result.append(alloc, mid) catch return words;
+                pos = ie; continue;
+            }
+            if (in_dead_loop and lbl == dead_merge_id) {
+                in_dead_loop = false; skip_block = false;
+                result.appendSlice(alloc, words[pos..ie]) catch return words;
+                pos = ie; continue;
+            }
+        }
+        if (in_dead_loop or skip_block) { pos = ie; continue; }
+        result.appendSlice(alloc, words[pos..ie]) catch return words;
+        pos = ie;
+    }
+    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dce = deadCodeElim(alloc, nw) catch return nw;
+    if (dce.ptr != nw.ptr) alloc.free(nw);
+    return dce;
+}
