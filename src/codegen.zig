@@ -111,8 +111,10 @@ pub fn generate(
     if (dce.ptr != merged.ptr) alloc.free(merged);
     const loop_elim = compact_ids.deadLoopElim(alloc, dce) catch return dce;
     if (loop_elim.ptr != dce.ptr) alloc.free(dce);
-    const blk_merged = compact_ids.mergeBlocks(alloc, loop_elim) catch return loop_elim;
-    if (blk_merged.ptr != loop_elim.ptr) alloc.free(loop_elim);
+    const rse = compact_ids.redundantStoreElim(alloc, loop_elim) catch return loop_elim;
+    if (rse.ptr != loop_elim.ptr) alloc.free(loop_elim);
+    const blk_merged = compact_ids.mergeBlocks(alloc, rse) catch return rse;
+    if (blk_merged.ptr != rse.ptr) alloc.free(rse);
     const deduped = compact_ids.dedupStructTypes(alloc, blk_merged) catch return blk_merged;
     if (deduped.ptr != blk_merged.ptr) alloc.free(blk_merged);
     const negated = compact_ids.eliminateDoubleNegate(alloc, deduped) catch return deduped;
