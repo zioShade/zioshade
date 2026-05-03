@@ -144,8 +144,10 @@ pub fn generate(
     if (phi.ptr != inlined.ptr) alloc.free(inlined);
     const rse = compact_ids.redundantStoreElim(alloc, phi) catch return phi;
     if (rse.ptr != phi.ptr) alloc.free(phi);
-    const blk_merged = compact_ids.mergeBlocks(alloc, rse) catch return rse;
-    if (blk_merged.ptr != rse.ptr) alloc.free(rse);
+    const retargeted = compact_ids.retargetEmptyBlocks(alloc, rse) catch return rse;
+    if (retargeted.ptr != rse.ptr) alloc.free(rse);
+    const blk_merged = compact_ids.mergeBlocks(alloc, retargeted) catch return retargeted;
+    if (blk_merged.ptr != retargeted.ptr) alloc.free(retargeted);
     const deduped = compact_ids.dedupStructTypes(alloc, blk_merged) catch return blk_merged;
     if (deduped.ptr != blk_merged.ptr) alloc.free(blk_merged);
     const negated = compact_ids.eliminateDoubleNegate(alloc, deduped) catch return deduped;
