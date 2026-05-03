@@ -111,8 +111,10 @@ pub fn generate(
     if (dce.ptr != merged.ptr) alloc.free(merged);
     const loop_elim = compact_ids.deadLoopElim(alloc, dce) catch return dce;
     if (loop_elim.ptr != dce.ptr) alloc.free(dce);
-    const compacted = compact_ids.compactIds(alloc, loop_elim) catch return loop_elim;
-    if (compacted.ptr != loop_elim.ptr) alloc.free(loop_elim);
+    const blk_merged = compact_ids.mergeBlocks(alloc, loop_elim) catch return loop_elim;
+    if (blk_merged.ptr != loop_elim.ptr) alloc.free(loop_elim);
+    const compacted = compact_ids.compactIds(alloc, blk_merged) catch return blk_merged;
+    if (compacted.ptr != blk_merged.ptr) alloc.free(blk_merged);
     return compacted;
 }
 

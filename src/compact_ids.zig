@@ -1422,3 +1422,237 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
 }
+
+/// Block merging: when block A ends with OpBranch %B and B has exactly one predecessor (A),
+/// merge B into A by appending B's instructions (minus the label) to A.
+pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Pass 1: Build label -> position map and count predecessors
+    var label_pos = std.AutoHashMapUnmanaged(u32, u32){}; // label_id -> pos of OpLabel
+    defer label_pos.deinit(alloc);
+    var predecessors = std.AutoHashMapUnmanaged(u32, u32){}; // label_id -> count
+    defer predecessors.deinit(alloc);
+    var branch_target = std.AutoHashMapUnmanaged(u32, u32){}; // label_id -> branch target (only for OpBranch)
+    defer branch_target.deinit(alloc);
+
+    // Also track which labels are function entry points (first label in each function)
+    var func_entries = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer func_entries.deinit();
+
+    var pos: u32 = 5;
+    var current_label: u32 = 0;
+    var in_function = false;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+
+        if (opcode == 54 and wc >= 3) { // OpFunction
+            in_function = true;
+            current_label = 0;
+        }
+        if (opcode == 56 and wc >= 1) { // OpFunctionEnd
+            in_function = false;
+            current_label = 0;
+        }
+
+        if (opcode == 248 and wc >= 2) { // OpLabel
+            current_label = words[pos + 1];
+            label_pos.put(alloc, current_label, pos) catch {};
+            if (in_function and !func_entries.isSet(current_label)) {
+                // First label in a function is tracked below
+            }
+        }
+
+        if (opcode == 249 and wc >= 2) { // OpBranch
+            const target = words[pos + 1];
+            if (current_label != 0) {
+                branch_target.put(alloc, current_label, target) catch {};
+            }
+            const entry = predecessors.getOrPutValue(alloc, target, 0) catch null;
+            if (entry) |e| e.value_ptr.* += 1;
+        }
+
+        if (opcode == 250 and wc >= 4) { // OpBranchConditional
+            const t = words[pos + 2];
+            const f = words[pos + 3];
+            const et = predecessors.getOrPutValue(alloc, t, 0) catch null;
+            if (et) |e| e.value_ptr.* += 1;
+            const ef = predecessors.getOrPutValue(alloc, f, 0) catch null;
+            if (ef) |e| e.value_ptr.* += 1;
+        }
+
+        if (opcode == 252 and wc >= 2) { // OpSwitch
+            const default = words[pos + 1];
+            const ed = predecessors.getOrPutValue(alloc, default, 0) catch null;
+            if (ed) |e| e.value_ptr.* += 1;
+            var si: u32 = 2;
+            while (si + 1 < wc) : (si += 2) {
+                const st = words[pos + si + 1];
+                const est = predecessors.getOrPutValue(alloc, st, 0) catch null;
+                if (est) |e| e.value_ptr.* += 1;
+            }
+        }
+
+        pos += wc;
+    }
+
+    // Pass 2: Find mergeable blocks
+    // Block B is mergeable if:
+    // 1. Exactly one predecessor (A)
+    // 2. A branches unconditionally to B (OpBranch)
+    // 3. B is not a function entry point
+    // 4. B is not a loop merge target or continue target
+
+    // Collect loop merge and continue targets
+    var loop_targets = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer loop_targets.deinit();
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 246 and wc >= 3) { // OpLoopMerge
+            if (words[pos + 1] < bound) loop_targets.set(words[pos + 1]); // merge
+            if (words[pos + 2] < bound) loop_targets.set(words[pos + 2]); // continue
+        }
+        pos += wc;
+    }
+
+    // Find first label in each function (entry point)
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 54) { // OpFunction
+            // Scan to first OpLabel
+            var fp = pos + wc;
+            while (fp < words.len) {
+                const fh = words[fp];
+                const fw: u32 = fh >> 16;
+                const fo: u16 = @truncate(fh & 0xFFFF);
+                if (fw == 0) break;
+                if (fo == 248 and fw >= 2) { // OpLabel
+                    func_entries.set(words[fp + 1]);
+                    break;
+                }
+                if (fo == 56) break; // OpFunctionEnd with no body
+                fp += fw;
+            }
+        }
+        pos += wc;
+    }
+
+    // Build set of labels whose blocks contain structured control flow (LoopMerge/SelectionMerge)
+    // We can't merge the successor of these blocks
+    var structured_labels = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer structured_labels.deinit();
+    pos = 5;
+    current_label = 0;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 248 and wc >= 2) current_label = words[pos + 1];
+        if ((opcode == 246 or opcode == 247) and current_label < bound) { // OpLoopMerge or OpSelectionMerge
+            structured_labels.set(current_label);
+        }
+        pos += wc;
+    }
+
+    // Build set of mergeable labels
+    var mergeable = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer mergeable.deinit();
+
+    var bt_iter = branch_target.iterator();
+    while (bt_iter.next()) |kv| {
+        const from_label = kv.key_ptr.*;
+        const to_label = kv.value_ptr.*;
+        if (from_label == to_label) continue; // self-loop
+        if (to_label >= bound) continue;
+        if (func_entries.isSet(to_label)) continue; // function entry
+        if (loop_targets.isSet(to_label)) continue; // loop merge/continue target
+        if (structured_labels.isSet(from_label)) continue; // predecessor has structured control flow
+        if (structured_labels.isSet(to_label)) continue; // target has structured control flow
+        const preds = predecessors.get(to_label) orelse 0;
+        if (preds == 1) {
+            // Additional safety: only merge if the target block is "empty" (just label + branch)
+            // Check that the target block has exactly 2 instructions: OpLabel and OpBranch
+            const tpos = label_pos.get(to_label) orelse continue;
+            // OpLabel at tpos, next instruction at tpos + (words[tpos] >> 16)
+            const label_wc = words[tpos] >> 16;
+            const next_pos = tpos + label_wc;
+            if (next_pos >= words.len) continue;
+            const next_hdr = words[next_pos];
+            const next_wc: u32 = next_hdr >> 16;
+            const next_opcode: u16 = @truncate(next_hdr & 0xFFFF);
+            // Must be OpBranch (opcode 249)
+            if (next_opcode != 249) continue;
+            // After OpBranch, must be another OpLabel (next block) or OpFunctionEnd
+            const after_pos = next_pos + next_wc;
+            if (after_pos >= words.len) continue;
+            const after_opcode: u16 = @truncate(words[after_pos] & 0xFFFF);
+            if (after_opcode != 248 and after_opcode != 56) continue; // OpLabel or OpFunctionEnd
+            mergeable.set(to_label);
+        }
+    }
+
+    if (mergeable.count() == 0) return words;
+
+    // Pass 3: Build new binary, merging blocks
+    // When we see OpBranch %B where B is mergeable, skip the branch and
+    // also skip B's OpLabel when we reach it (merging B's body into A)
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    // Track which labels to skip (they've been merged into their predecessor)
+    // and collect the instruction ranges to append after each branch
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        // Check if this is a label that was merged into a predecessor
+        if (opcode == 248 and wc >= 2) {
+            const lbl = words[pos + 1];
+            if (mergeable.isSet(lbl)) {
+                // Skip this label — it was merged into predecessor
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Check if this is OpBranch to a mergeable block
+        if (opcode == 249 and wc >= 2) { // OpBranch
+            const target = words[pos + 1];
+            if (mergeable.isSet(target)) {
+                // Don't emit the branch — the target block's body will follow
+                // directly (its label was skipped above)
+                pos = ie;
+                continue;
+            }
+        }
+
+        result.appendSlice(alloc, words[pos..ie]) catch return words;
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
+
+    // Re-run DCE to clean up dead labels/branches
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dce = deadCodeElim(alloc, nw) catch return nw;
+    if (dce.ptr != nw.ptr) alloc.free(nw);
+    return dce;
+}
