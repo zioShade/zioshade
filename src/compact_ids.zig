@@ -3165,3 +3165,340 @@ pub fn moveVarToEntry(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     }
     return result.toOwnedSlice(alloc) catch return words;
 }
+
+/// Eliminate uninitialized variables: function-local vars that are loaded but never stored.
+/// Replaces OpLoad from such vars with OpUndef (same type, same result ID),
+/// then removes the OpVariable definition. Subsequent DCE will clean up cascading dead code.
+pub fn elimUninitVars(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find function-local variables that are loaded but NEVER stored to
+    var func_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer func_vars.deinit();
+    var loaded_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer loaded_vars.deinit();
+    var stored_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer stored_vars.deinit();
+
+    // Track load result -> var_id mapping (for replacing loads with undef)
+    var load_to_var = std.AutoHashMapUnmanaged(u32, u32){};
+    defer load_to_var.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        switch (opcode) {
+            59 => { // OpVariable
+                if (wc >= 4) {
+                    const storage_class = words[pos + 3];
+                    if (storage_class == 7) { // Function
+                        const var_id = words[pos + 2];
+                        if (var_id >= 1 and var_id < bound) {
+                            func_vars.set(var_id);
+                        }
+                    }
+                }
+            },
+            61 => { // OpLoad
+                if (wc >= 4) {
+                    const ptr = words[pos + 3];
+                    const result = words[pos + 2];
+                    if (ptr < bound and func_vars.isSet(ptr)) {
+                        loaded_vars.set(ptr);
+                        try load_to_var.put(alloc, result, ptr);
+                    }
+                }
+            },
+            62 => { // OpStore
+                if (wc >= 3) {
+                    const ptr = words[pos + 1];
+                    if (ptr < bound and func_vars.isSet(ptr)) {
+                        stored_vars.set(ptr);
+                    }
+                }
+            },
+            65 => { // OpAccessChain — conservatively mark as both loaded+stored
+                if (wc >= 5) {
+                    const base = words[pos + 3];
+                    if (base < bound and func_vars.isSet(base)) {
+                        loaded_vars.set(base);
+                        stored_vars.set(base);
+                    }
+                }
+            },
+            else => {},
+        }
+        pos = ie;
+    }
+
+    // Find uninit vars: loaded but never stored
+    var uninit_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer uninit_vars.deinit();
+    var vi: usize = 0;
+    while (vi < bound) : (vi += 1) {
+        if (func_vars.isSet(vi) and loaded_vars.isSet(vi) and !stored_vars.isSet(vi)) {
+            uninit_vars.set(vi);
+        }
+    }
+
+    if (uninit_vars.count() == 0) return words;
+
+    // Phase 2: Build result instruction map for loads (need their type)
+    // We already have load_to_var. Also need load_result -> type_id.
+    var load_type = std.AutoHashMapUnmanaged(u32, u32){};
+    defer load_type.deinit(alloc);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 61 and wc >= 4) { // OpLoad
+            const ptr = words[pos + 3];
+            if (ptr < bound and uninit_vars.isSet(ptr)) {
+                const result_id = words[pos + 2];
+                const type_id = words[pos + 1];
+                try load_type.put(alloc, result_id, type_id);
+            }
+        }
+        pos = ie;
+    }
+
+    // Phase 3: Rewrite — replace OpLoad from uninit vars with OpUndef, remove OpVariable
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Remove OpVariable for uninit vars
+        if (opcode == 59 and wc >= 3) {
+            const var_id = words[pos + 2];
+            if (var_id < bound and uninit_vars.isSet(var_id)) {
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Replace OpLoad from uninit var with OpUndef
+        if (opcode == 61 and wc >= 4) { // OpLoad
+            const ptr = words[pos + 3];
+            if (ptr < bound and uninit_vars.isSet(ptr)) {
+                const type_id = words[pos + 1];
+                const result_id = words[pos + 2];
+                // OpUndef: %result_id = OpUndef %type_id
+                // Header word: (3 << 16) | 1  (wordcount=3, opcode=1)
+                result.appendSliceAssumeCapacity(&.{ (3 << 16) | 1, type_id, result_id });
+                pos = ie;
+                continue;
+            }
+        }
+
+        result.appendSliceAssumeCapacity(words[pos..ie]);
+        pos = ie;
+    }
+
+    return result.toOwnedSlice(alloc) catch return words;
+}
+
+/// Redundant load elimination for read-only variables.
+/// Input, UniformConstant, and Uniform storage class variables are never stored to
+/// within a shader, so multiple loads of the same variable produce the same value.
+/// This pass replaces redundant loads with the first load's result, allowing DCE
+/// to eliminate the dead loads and any cascading dead instructions.
+pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Identify read-only variable IDs (Input=1, UniformConstant=2, Uniform=5)
+    // Also verify they are never stored to (conservative)
+    var readonly_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer readonly_vars.deinit();
+    var stored_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer stored_vars.deinit();
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 59 and wc >= 4) { // OpVariable
+            const var_id = words[pos + 2];
+            const storage_class = words[pos + 3];
+            if ((storage_class == 1 or storage_class == 2 or storage_class == 5) and var_id < bound) {
+                readonly_vars.set(var_id);
+            }
+        }
+        if (opcode == 62 and wc >= 3) { // OpStore
+            const ptr = words[pos + 1];
+            if (ptr < bound) stored_vars.set(ptr);
+        }
+        pos = ie;
+    }
+
+    // Remove any readonly vars that are stored to
+    var vi: usize = 0;
+    while (vi < bound) : (vi += 1) {
+        if (stored_vars.isSet(vi)) readonly_vars.unset(vi);
+    }
+
+    if (readonly_vars.count() == 0) return words;
+
+    // Phase 2: Build substitution map for redundant loads
+    // Track first load result per read-only var, per function
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32){}; // redundant_load_result -> first_load_result
+    defer sub_map.deinit(alloc);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // On OpFunction, scan the function body for redundant loads
+        if (opcode == 54) { // OpFunction
+            var first_loads = std.AutoHashMapUnmanaged(u32, u32){}; // var_id -> first_load_result
+            defer first_loads.deinit(alloc);
+
+            var fp = ie;
+            while (fp < words.len) {
+                const fh = words[fp];
+                const fwc: u32 = fh >> 16;
+                const fop: u16 = @truncate(fh & 0xFFFF);
+                if (fwc == 0) break;
+                const fie = fp + fwc;
+                if (fie > words.len) break;
+
+                if (fop == 56) break; // OpFunctionEnd
+
+                if (fop == 61 and fwc >= 4) { // OpLoad
+                    const result_id = words[fp + 2];
+                    const ptr = words[fp + 3];
+                    if (ptr < bound and readonly_vars.isSet(ptr)) {
+                        if (first_loads.get(ptr)) |first_result| {
+                            try sub_map.put(alloc, result_id, first_result);
+                        } else {
+                            try first_loads.put(alloc, ptr, result_id);
+                        }
+                    }
+                }
+                fp = fie;
+            }
+        }
+        pos = ie;
+    }
+
+    if (sub_map.count() == 0) return words;
+
+    // Phase 3: Apply substitution and remove redundant loads
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Skip redundant loads entirely
+        if (opcode == 61 and wc >= 4) { // OpLoad
+            const result_id = words[pos + 2];
+            if (sub_map.contains(result_id)) {
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Apply substitution to all ID operands
+        const info = getOpInfo(opcode) orelse {
+            result.append(alloc, hdr) catch return words;
+            var wi: u32 = pos + 1;
+            while (wi < ie) : (wi += 1) {
+                result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+            }
+            pos = ie;
+            continue;
+        };
+
+        result.append(alloc, hdr) catch return words;
+        var wi: u32 = pos + 1;
+
+        switch (info.fixed) {
+            0 => {},
+            1 => {
+                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+            },
+            2 => {
+                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+            },
+            3 => {
+                if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+            },
+            else => {},
+        }
+
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
+                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                'I' => { while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; },
+                'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
+                'M' => {
+                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                'W' => {
+                    while (wi + 1 < ie) {
+                        wi += 1; result.append(alloc, words[wi]) catch return words;
+                        wi += 1; result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    }
+                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                },
+                'E' => {
+                    var in_str = true;
+                    while (wi < ie and in_str) : (wi += 1) {
+                        const w = words[wi]; result.append(alloc, w) catch return words;
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) in_str = false;
+                    }
+                    while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+            }
+        }
+        while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+        pos = ie;
+    }
+
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dce = deadCodeElim(alloc, nw) catch return nw;
+    if (dce.ptr != nw.ptr) alloc.free(nw);
+    return dce;
+}
