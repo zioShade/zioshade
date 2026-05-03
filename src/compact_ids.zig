@@ -3690,3 +3690,150 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
     if (dce2.ptr != nw2.ptr) alloc.free(nw2);
     return dce2;
 }
+
+/// CSE (Common Subexpression Elimination) for OpAccessChain within each function.
+/// If two OpAccessChain instructions in the same function have the same
+/// (result_type, base, indices...), the second is replaced with the first's result.
+pub fn cseAccessChains(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Build substitution map per-function for duplicate AccessChains
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32){};
+    defer sub_map.deinit(alloc);
+
+    // Phase 1b: For each AccessChain, store its signature words so we can dedup
+    // Per-block: track signatures and their first result IDs (must be same block for dominance)
+    const SigEntry = struct { result_id: u32, sig_start: u32, sig_len: u32 };
+    var block_sigs = std.ArrayListUnmanaged(SigEntry){}; // entries for current block
+    defer block_sigs.deinit(alloc);
+    var all_sig_words = std.ArrayListUnmanaged(u32){}; // packed signature words
+    defer all_sig_words.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Reset per-block state on OpLabel (start of new basic block)
+        if (opcode == 248) { // OpLabel
+            block_sigs.clearRetainingCapacity();
+        }
+
+        if (opcode == 65 and wc >= 4) { // OpAccessChain
+            const result_id = words[pos + 2]; // result
+            const sig_type = words[pos + 1]; // result type
+            const sig_base_and_indices = words[pos + 3 .. ie]; // base + indices
+            const sig_len: u32 = 1 + @as(u32, @intCast(sig_base_and_indices.len));
+
+            // Check for duplicate in current block
+            var found_dup = false;
+            for (block_sigs.items) |entry| {
+                if (entry.sig_len == sig_len) {
+                    const existing_sig = all_sig_words.items[entry.sig_start .. entry.sig_start + sig_len];
+                    if (existing_sig[0] == sig_type and std.mem.eql(u32, existing_sig[1..], sig_base_and_indices)) {
+                        try sub_map.put(alloc, result_id, entry.result_id);
+                        found_dup = true;
+                        break;
+                    }
+                }
+            }
+            if (!found_dup) {
+                const sig_start: u32 = @intCast(all_sig_words.items.len);
+                try all_sig_words.append(alloc, sig_type);
+                try all_sig_words.appendSlice(alloc, sig_base_and_indices);
+                try block_sigs.append(alloc, .{ .result_id = result_id, .sig_start = sig_start, .sig_len = sig_len });
+            }
+        }
+        pos = ie;
+    }
+
+    if (sub_map.count() == 0) return words;
+
+    // Phase 2: Apply substitution and remove duplicate AccessChains
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Skip duplicate AccessChains
+        if (opcode == 65 and wc >= 4) {
+            const result_id = words[pos + 2];
+            if (sub_map.contains(result_id)) {
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Apply substitution to ID operands
+        const info = getOpInfo(opcode) orelse {
+            result.append(alloc, hdr) catch return words;
+            var wi: u32 = pos + 1;
+            while (wi < ie) : (wi += 1) {
+                result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+            }
+            pos = ie;
+            continue;
+        };
+
+        result.append(alloc, hdr) catch return words;
+        var wi: u32 = pos + 1;
+        switch (info.fixed) {
+            0 => {},
+            1 => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
+            2 => {
+                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+            },
+            3 => { if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
+                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                'I' => { while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; },
+                'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
+                'M' => {
+                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                'W' => {
+                    while (wi + 1 < ie) {
+                        wi += 1; result.append(alloc, words[wi]) catch return words;
+                        wi += 1; result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    }
+                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                },
+                'E' => {
+                    var in_str = true;
+                    while (wi < ie and in_str) : (wi += 1) {
+                        const w = words[wi]; result.append(alloc, w) catch return words;
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) in_str = false;
+                    }
+                    while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+            }
+        }
+        while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+        pos = ie;
+    }
+
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dce = deadCodeElim(alloc, nw) catch return nw;
+    if (dce.ptr != nw.ptr) alloc.free(nw);
+    return dce;
+}
