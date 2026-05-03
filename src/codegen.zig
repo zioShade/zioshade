@@ -111,8 +111,24 @@ pub fn generate(
     if (dce.ptr != merged.ptr) alloc.free(merged);
     const loop_elim = compact_ids.deadLoopElim(alloc, dce) catch return dce;
     if (loop_elim.ptr != dce.ptr) alloc.free(dce);
-    const inlined = compact_ids.inlineTrivialFuncs(alloc, loop_elim) catch return loop_elim;
+    // Iterative inlining: inline, DCE+compact, repeat until inline has no changes
+    var inlined = compact_ids.inlineTrivialFuncs(alloc, loop_elim) catch return loop_elim;
     if (inlined.ptr != loop_elim.ptr) alloc.free(loop_elim);
+    var iter: u32 = 0;
+    while (iter < 5) : (iter += 1) {
+        // DCE + compact after inlining
+        const dce2 = compact_ids.deadCodeElim(alloc, inlined) catch break;
+        const compact2 = if (dce2.ptr != inlined.ptr) blk: {
+            alloc.free(inlined);
+            break :blk compact_ids.compactIds(alloc, dce2) catch { inlined = dce2; break; };
+        } else inlined;
+        if (compact2.ptr != dce2.ptr) alloc.free(dce2);
+        // Try next round of inlining
+        const next = compact_ids.inlineTrivialFuncs(alloc, compact2) catch { inlined = compact2; break; };
+        if (next.ptr == compact2.ptr) { inlined = next; break; } // no more inlining possible
+        alloc.free(compact2);
+        inlined = next;
+    }
     const rse = compact_ids.redundantStoreElim(alloc, inlined) catch return inlined;
     if (rse.ptr != inlined.ptr) alloc.free(inlined);
     const blk_merged = compact_ids.mergeBlocks(alloc, rse) catch return rse;
