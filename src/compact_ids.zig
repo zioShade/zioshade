@@ -2724,3 +2724,186 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
 }
+
+/// Inline trivial void functions with no parameters.
+/// A function is "trivially inlineable" if:
+/// - Returns void
+/// - Has no parameters
+/// - Has a single basic block (no control flow)
+/// - Body contains no OpVariable, OpLabel (besides entry), OpBranch
+/// Inlining replaces OpFunctionCall with the body instructions.
+pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find all function definitions and classify them
+    const FuncInfo = struct {
+        func_id: u32,
+        type_id: u32,
+        start_pos: u32,
+        end_pos: u32,
+        body_start: u32, // position after OpLabel
+        body_end: u32, // position of OpReturn/OpBranch
+        is_trivial: bool,
+    };
+    var funcs = std.ArrayListUnmanaged(FuncInfo){};
+    defer funcs.deinit(alloc);
+
+    // Build void type set
+    var void_types = std.AutoHashMapUnmanaged(u32, void){};
+    defer void_types.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 19 and wc >= 2) { // OpTypeVoid
+            try void_types.put(alloc, words[pos + 1], {});
+        }
+        pos += wc;
+    }
+
+    // Scan functions
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+
+        if (opcode == 54 and wc >= 5) { // OpFunction: type, result, control, func_type
+            const func_type = words[pos + 1]; // return type
+            const func_id = words[pos + 2];
+            const func_start = pos;
+            var func_end = pos + wc;
+            var body_start: u32 = 0;
+            var body_end: u32 = 0;
+            var has_params = false;
+            var block_count: u32 = 0;
+            var has_var_or_branch = false;
+
+            // Scan function body
+            var fp = pos + wc;
+            while (fp < words.len) {
+                const fh = words[fp]; const fwc: u32 = fh >> 16; const fop: u16 = @truncate(fh & 0xFFFF);
+                if (fwc == 0) break;
+                const fie = fp + fwc;
+
+                if (fop == 56) { func_end = fie; break; } // OpFunctionEnd
+                if (fop == 55) has_params = true; // OpFunctionParameter
+                if (fop == 248) { // OpLabel
+                    block_count += 1;
+                    if (block_count == 1) body_start = fie; // body starts after first label
+                }
+                if (fop == 59) has_var_or_branch = true; // OpVariable
+                if (fop == 57) has_var_or_branch = true; // OpFunctionCall — function calls make it non-trivial
+                if (fop == 249 or fop == 250 or fop == 251) { // OpBranch, OpBranchConditional, OpSwitch
+                    if (block_count <= 1) has_var_or_branch = true; // branch in entry block = control flow
+                }
+                if (fop == 246 or fop == 247) has_var_or_branch = true; // LoopMerge, SelectionMerge
+                if (fop == 253 or fop == 254) { // OpReturn, OpReturnValue
+                    body_end = fp;
+                }
+                fp = fie;
+            }
+
+            const is_void = void_types.contains(func_type);
+            const is_trivial = is_void and !has_params and block_count == 1 and !has_var_or_branch and body_start > 0 and body_end > body_start;
+
+            try funcs.append(alloc, .{
+                .func_id = func_id,
+                .type_id = func_type,
+                .start_pos = func_start,
+                .end_pos = func_end,
+                .body_start = body_start,
+                .body_end = body_end,
+                .is_trivial = is_trivial,
+            });
+
+            pos = func_end;
+            continue;
+        }
+        pos += wc;
+    }
+
+    // Build set of trivially inlineable function IDs
+    var trivial_funcs = std.AutoHashMapUnmanaged(u32, *const FuncInfo){}; // func_id -> info
+    defer trivial_funcs.deinit(alloc);
+
+    for (funcs.items) |*fi| {
+        if (fi.is_trivial) {
+            try trivial_funcs.put(alloc, fi.func_id, fi);
+        }
+    }
+
+    if (trivial_funcs.count() == 0) return words;
+
+    // Phase 2: Check if any OpFunctionCall targets a trivial function
+    var has_calls = false;
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 57 and wc >= 4) { // OpFunctionCall
+            const called_func = words[pos + 3]; // func_id operand
+            if (trivial_funcs.contains(called_func)) {
+                has_calls = true;
+                break;
+            }
+        }
+        pos += wc;
+    }
+
+    if (!has_calls) return words;
+
+    // Phase 3: Rewrite — inline calls and remove dead function definitions
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        // Skip OpName for removed functions
+        if (opcode == 5 and wc >= 3) { // OpName: target_id, string...
+            const target_id = words[pos + 1];
+            if (trivial_funcs.contains(target_id)) {
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Check if this is an OpFunction definition for a trivial function — skip entire function
+        if (opcode == 54 and wc >= 5) {
+            const func_id = words[pos + 2];
+            if (trivial_funcs.contains(func_id)) {
+                // Skip this function definition
+                const fi = trivial_funcs.get(func_id).?;
+                pos = fi.end_pos;
+                continue;
+            }
+        }
+
+        // Check if this is an OpFunctionCall to a trivial function — inline
+        if (opcode == 57 and wc >= 4) {
+            const called_func = words[pos + 3];
+            if (trivial_funcs.contains(called_func)) {
+                const fi = trivial_funcs.get(called_func).?;
+                // Copy body instructions (between body_start and body_end)
+                result.appendSlice(alloc, words[fi.body_start..fi.body_end]) catch return words;
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Copy instruction as-is
+        result.appendSlice(alloc, words[pos..ie]) catch return words;
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dce = deadCodeElim(alloc, nw) catch return nw;
+    if (dce.ptr != nw.ptr) alloc.free(nw);
+    return dce;
+}
