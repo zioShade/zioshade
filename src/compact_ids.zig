@@ -125,13 +125,20 @@ fn getOpInfo(opcode: u16) ?OpInfo {
         166...168 => rt(2, "ii"),  // OpLogicalOr, OpLogicalAnd, OpLogicalNot (168 is unary)
         169 => rt(2, "iii"),       // OpSelect
         170...171 => rt(2, "ii"),  // OpIEqual, OpINotEqual
+        172 => rt(2, "ii"),        // OpUGreaterThan
         173 => rt(2, "ii"),        // OpSGreaterThan
+        174 => rt(2, "ii"),        // OpUGreaterThanEqual
+        175 => rt(2, "ii"),        // OpSGreaterThanEqual
+        176 => rt(2, "ii"),        // OpULessThan
         177 => rt(2, "ii"),        // OpSLessThan
+        178 => rt(2, "ii"),        // OpULessThanEqual
+        179 => rt(2, "ii"),        // OpSLessThanEqual
         180 => rt(2, "ii"),        // OpFOrdEqual
         182 => rt(2, "ii"),        // OpFOrdNotEqual
         184 => rt(2, "ii"),        // OpFOrdLessThan
         186 => rt(2, "ii"),        // OpFOrdGreaterThan
         188 => rt(2, "ii"),        // OpFOrdLessThanEqual
+        190 => rt(2, "ii"),        // OpFOrdGreaterThanEqual
         // --- Bit ---
         194 => rt(2, "ii"),        // OpShiftRightLogical
         196 => rt(2, "ii"),        // OpShiftLeftLogical
@@ -498,8 +505,8 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 154...157 => true, // All/Any/IsNan/IsInf
                 166...168, 170, 171 => true, // LogicalOr/And/Not/Equal/NotEqual
                 169 => true, // Select
-                173, 177 => true, // Comparisons
-                180, 182, 184, 186, 188 => true, // FOrd comparisons + FOrdLessThanEqual
+                172, 173, 174, 175, 176, 177, 178, 179 => true, // Integer comparisons
+                180, 182, 184, 186, 188, 190 => true, // FOrd comparisons
                 194, 196, 198, 199, 200 => true, // Shift + Bit ops
                 207...215 => true, // Derivatives
                 12 => true, // ExtInst
@@ -604,6 +611,156 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         }
         // Use new_words as input for next iteration
         current_words = new_words;
+    }
+
+    // Dead store elimination: remove function-local variables that are only stored to, never loaded.
+    // Phase 1: Identify all function-local variables
+    // Phase 2: Track which are ever read from (OpLoad, OpAccessChain, OpCopyMemory, etc.)
+    // Phase 3: Remove dead variables + their stores, then re-run DCE
+    {
+        const current_bound = current_words[3];
+        if (current_bound > 1) {
+            // Collect function-local variable IDs
+            var func_vars = try std.DynamicBitSet.initEmpty(alloc, current_bound);
+            defer func_vars.deinit();
+
+            pos = 5;
+            while (pos < current_words.len) {
+                const hdr = current_words[pos];
+                const wc: u32 = hdr >> 16;
+                const opcode: u16 = @truncate(hdr & 0xFFFF);
+                if (wc == 0) break;
+                if (opcode == 59 and wc >= 4) { // OpVariable
+                    // Layout: result_type, result_id, storage_class
+                    const storage_class = current_words[pos + 3];
+                    if (storage_class == 7) { // Function storage class
+                        const var_id = current_words[pos + 2];
+                        if (var_id >= 1 and var_id < current_bound) {
+                            func_vars.set(var_id);
+                        }
+                    }
+                }
+                pos += wc;
+            }
+
+            if (func_vars.count() > 0) {
+                // Track which function vars are ever READ from
+                var loaded_vars = try std.DynamicBitSet.initEmpty(alloc, current_bound);
+                defer loaded_vars.deinit();
+                // Track which function vars are WRITTEN to
+                var stored_vars = try std.DynamicBitSet.initEmpty(alloc, current_bound);
+                defer stored_vars.deinit();
+
+                pos = 5;
+                while (pos < current_words.len) {
+                    const hdr = current_words[pos];
+                    const wc: u32 = hdr >> 16;
+                    const opcode: u16 = @truncate(hdr & 0xFFFF);
+                    if (wc == 0) break;
+                    const inst_end = pos + wc;
+                    if (inst_end > current_words.len) break;
+
+                    switch (opcode) {
+                        61 => { // OpLoad: ptr is operand 2 (after result_type, result_id)
+                            if (wc >= 4) {
+                                const ptr = current_words[pos + 3];
+                                if (ptr < current_bound and func_vars.isSet(ptr)) {
+                                    loaded_vars.set(ptr);
+                                }
+                            }
+                        },
+                        62 => { // OpStore: ptr is operand 1 (no result)
+                            if (wc >= 3) {
+                                const ptr = current_words[pos + 1];
+                                if (ptr < current_bound and func_vars.isSet(ptr)) {
+                                    stored_vars.set(ptr);
+                                }
+                            }
+                        },
+                        65 => { // OpAccessChain: base is operand 3
+                            if (wc >= 5) {
+                                const base = current_words[pos + 3];
+                                if (base < current_bound and func_vars.isSet(base)) {
+                                    loaded_vars.set(base);
+                                }
+                            }
+                        },
+                        37 => { // OpCopyMemory: dst=op1, src=op2
+                            if (wc >= 3) {
+                                const dst = current_words[pos + 1];
+                                const src = current_words[pos + 2];
+                                if (dst < current_bound and func_vars.isSet(dst)) stored_vars.set(dst);
+                                if (src < current_bound and func_vars.isSet(src)) loaded_vars.set(src);
+                            }
+                        },
+                        12 => { // OpExtInst: may implicitly write to pointer args (Modf, Frexp, etc.)
+                            // Mark all ID operands as loaded to be safe (conservative)
+                            // Layout: result_type(1), result_id(1), set(1), literal(1), then IDs...
+                            if (wc >= 6) {
+                                var ei: u32 = pos + 5; // skip header, result_type, result_id, set, instruction literal
+                                while (ei < inst_end) : (ei += 1) {
+                                    const op = current_words[ei];
+                                    if (op < current_bound and func_vars.isSet(op)) {
+                                        loaded_vars.set(op);
+                                        stored_vars.set(op); // also treated as store (Modf writes to ptr)
+                                    }
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                    pos = inst_end;
+                }
+
+                // Identify dead vars: stored to but never loaded
+                var dead_vars = try std.DynamicBitSet.initEmpty(alloc, current_bound);
+                defer dead_vars.deinit();
+                var dvi: usize = 0;
+                while (dvi < current_bound) : (dvi += 1) {
+                    if (func_vars.isSet(dvi) and stored_vars.isSet(dvi) and !loaded_vars.isSet(dvi)) {
+                        dead_vars.set(dvi);
+                    }
+                }
+
+                if (dead_vars.count() > 0) {
+                    // Remove dead variable definitions and their stores
+                    var dse_result = std.ArrayList(u32).initCapacity(alloc, current_words.len) catch return current_words;
+                    dse_result.appendSliceAssumeCapacity(current_words[0..5]);
+
+                    pos = 5;
+                    while (pos < current_words.len) {
+                        const hdr = current_words[pos];
+                        const wc: u32 = hdr >> 16;
+                        const opcode: u16 = @truncate(hdr & 0xFFFF);
+                        if (wc == 0) break;
+                        const inst_end = pos + wc;
+                        if (inst_end > current_words.len) break;
+
+                        var skip = false;
+                        if (opcode == 59 and wc >= 3) { // OpVariable
+                            const var_id = current_words[pos + 2];
+                            if (var_id < current_bound and dead_vars.isSet(var_id)) skip = true;
+                        }
+                        if (opcode == 62 and wc >= 2) { // OpStore
+                            const ptr = current_words[pos + 1];
+                            if (ptr < current_bound and dead_vars.isSet(ptr)) skip = true;
+                        }
+
+                        if (!skip) {
+                            dse_result.appendSliceAssumeCapacity(current_words[pos..inst_end]);
+                        }
+                        pos = inst_end;
+                    }
+
+                    const dse_words = dse_result.toOwnedSlice(alloc) catch return current_words;
+                    // Re-run DCE to clean up cascading dead code (e.g., values only used in eliminated stores)
+                    const re_dce = deadCodeElim(alloc, dse_words) catch return dse_words;
+                    if (re_dce.ptr != dse_words.ptr) alloc.free(dse_words);
+                    if (current_words.ptr != words.ptr) alloc.free(current_words);
+                    return re_dce;
+                }
+            }
+        }
     }
 
     return current_words;
