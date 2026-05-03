@@ -3502,3 +3502,164 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
 }
+
+/// Fold OpCompositeExtract from OpCompositeConstruct: extract(construct(a,b,...), N) = Nth component.
+pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Build map of OpCompositeConstruct: result_id -> []component_ids
+    var construct_map = std.AutoHashMapUnmanaged(u32, std.ArrayListUnmanaged(u32)){};
+    defer {
+        var it = construct_map.iterator();
+        while (it.next()) |entry| entry.value_ptr.deinit(alloc);
+        construct_map.deinit(alloc);
+    }
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 80 and wc >= 3) { // OpCompositeConstruct
+            const result_id = words[pos + 2];
+            var components = std.ArrayListUnmanaged(u32){};
+            var ci: u32 = pos + 3;
+            while (ci < ie) : (ci += 1) {
+                components.append(alloc, words[ci]) catch return words;
+            }
+            construct_map.put(alloc, result_id, components) catch return words;
+        }
+        pos = ie;
+    }
+
+    if (construct_map.count() == 0) return words;
+
+    // Phase 2: Find OpCompositeExtract that can be folded
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32){};
+    defer sub_map.deinit(alloc);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 81 and wc >= 5) { // OpCompositeExtract
+            const result_id = words[pos + 2];
+            const composite_id = words[pos + 3];
+            const index = words[ie - 1]; // last word is the index
+            if (construct_map.get(composite_id)) |components| {
+                if (index < components.items.len) {
+                    try sub_map.put(alloc, result_id, components.items[index]);
+                }
+            }
+        }
+        pos = ie;
+    }
+
+    if (sub_map.count() == 0) return words;
+
+    // Resolve transitive substitutions
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var it = sub_map.iterator();
+        while (it.next()) |entry| {
+            if (sub_map.get(entry.value_ptr.*)) |resolved| {
+                entry.value_ptr.* = resolved;
+                changed = true;
+            }
+        }
+    }
+
+    // Phase 3: Apply substitution and remove folded extracts
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Skip folded extracts
+        if (opcode == 81 and wc >= 5) {
+            const result_id = words[pos + 2];
+            if (sub_map.contains(result_id)) {
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Apply substitution
+        const info = getOpInfo(opcode) orelse {
+            result.append(alloc, hdr) catch return words;
+            var wi: u32 = pos + 1;
+            while (wi < ie) : (wi += 1) {
+                result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+            }
+            pos = ie;
+            continue;
+        };
+
+        result.append(alloc, hdr) catch return words;
+        var wi: u32 = pos + 1;
+        switch (info.fixed) {
+            0 => {},
+            1 => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
+            2 => {
+                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+            },
+            3 => { if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
+                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                'I' => { while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; },
+                'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
+                'M' => {
+                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                'W' => {
+                    while (wi + 1 < ie) {
+                        wi += 1; result.append(alloc, words[wi]) catch return words;
+                        wi += 1; result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    }
+                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                },
+                'E' => {
+                    var in_str = true;
+                    while (wi < ie and in_str) : (wi += 1) {
+                        const w = words[wi]; result.append(alloc, w) catch return words;
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) in_str = false;
+                    }
+                    while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+            }
+        }
+        while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+        pos = ie;
+    }
+
+    const nw2 = result.toOwnedSlice(alloc) catch return words;
+    const dce2 = deadCodeElim(alloc, nw2) catch return nw2;
+    if (dce2.ptr != nw2.ptr) alloc.free(nw2);
+    return dce2;
+}
