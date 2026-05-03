@@ -112,8 +112,11 @@ pub fn generate(
     if (dce.ptr != merged.ptr) alloc.free(merged);
     const loop_elim = compact_ids.deadLoopElim(alloc, dce) catch return dce;
     if (loop_elim.ptr != dce.ptr) alloc.free(dce);
+    // Eliminate calls to functions with only OpUnreachable body
+    const no_unreachable = compact_ids.elimUnreachableCalls(alloc, loop_elim) catch loop_elim;
+    if (no_unreachable.ptr != loop_elim.ptr) alloc.free(loop_elim);
     // Iterative inlining: inline, moveVar+elimUninit+DCE+compact, repeat until inline has no changes
-    var inlined = compact_ids.inlineTrivialFuncs(alloc, loop_elim) catch return loop_elim;
+    var inlined = compact_ids.inlineTrivialFuncs(alloc, no_unreachable) catch return no_unreachable;
     if (inlined.ptr != loop_elim.ptr) alloc.free(loop_elim);
     var iter: u32 = 0;
     while (iter < 5) : (iter += 1) {
