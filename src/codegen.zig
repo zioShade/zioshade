@@ -175,8 +175,11 @@ pub fn generate(
     // Forward constant stores to function-local vars
     const const_fwd = compact_ids.constStoreForward(alloc, no_uninit) catch return no_uninit;
     if (const_fwd.ptr != no_uninit.ptr) alloc.free(no_uninit);
-    const final_dce = compact_ids.deadCodeElim(alloc, const_fwd) catch return const_fwd;
-    if (final_dce.ptr != const_fwd.ptr) alloc.free(const_fwd);
+    // Scatter-store to CompositeConstruct
+    const scattered = compact_ids.scatterStoreToComposite(alloc, const_fwd) catch return const_fwd;
+    if (scattered.ptr != const_fwd.ptr) alloc.free(const_fwd);
+    const final_dce = compact_ids.deadCodeElim(alloc, scattered) catch return scattered;
+    if (final_dce.ptr != scattered.ptr) alloc.free(scattered);
     const final_retarget = compact_ids.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
     if (final_retarget.ptr != final_dce.ptr) alloc.free(final_dce);
     const final_compact = compact_ids.compactIds(alloc, final_retarget) catch return final_retarget;
