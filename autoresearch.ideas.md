@@ -3,6 +3,25 @@
 ## STATUS: 211/211 spirv-val, 0 mismatches, 0 failures
 ## Current: 7419 total_bound across 211 shaders (session 10)
 ## We BEAT spirv-opt -O on ALL shaders (total: 7419 vs 7751 = -332 IDs, -4.3%)
+## We BEAT glslang on ALL comparable shaders (-42%)
+
+## SESSION 10 CHANGES:
+- Constant folding (binary ops on scalar constants): -7 IDs (7426->7419)
+- Explored unary constant folding: +1 ID regression (reverted)
+- Explored type dedup extension (OpTypeArray/OpTypePointer): 0 IDs (reverted)
+- Explored extra DCE after retargetEmptyBlocks: 0 IDs (reverted)
+- All easy wins exhausted. Pipeline fully converged.
+
+## EXHAUSTED APPROACHES (0 IDs saved):
+- Unary constant folding: +1 regression (creates new max IDs)
+- Type dedup extension (Array/Pointer): 0 (dups not near bound)
+- Dead function elimination: 0 (all functions are entry points)
+- Identity VectorShuffle: 0 (already eliminated)
+- Cross-block CSE: 0 (no duplicates across blocks)
+- Extra DCE after retarget: 0 (pipeline converged)
+- FMul(x, 0): 0, FMul(x, -1): 0
+- Duplicate constants: 0 (already handled)
+- Dead constants: 0 (DCE handles)
 ## We BEAT glslang on ALL shaders (total: ~6748 vs ~11662 where glslang succeeds = -42%)
 
 ## SESSION 10 FINDINGS:
