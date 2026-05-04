@@ -4866,6 +4866,8 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
 
     var vec_sizes = std.AutoHashMapUnmanaged(u32, u32){};
     defer vec_sizes.deinit(alloc);
+    var array_sizes = std.AutoHashMapUnmanaged(u32, u32){}; // array_type_id -> element_count
+    defer array_sizes.deinit(alloc);
     var ptr_pointee = std.AutoHashMapUnmanaged(u32, u32){};
     defer ptr_pointee.deinit(alloc);
 
@@ -4877,12 +4879,12 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
-        if (opcode == 23 and wc >= 4) try vec_sizes.put(alloc, words[pos + 1], words[pos + 3]);
-        if (opcode == 32 and wc >= 4) try ptr_pointee.put(alloc, words[pos + 1], words[pos + 3]);
+        if (opcode == 23 and wc >= 4) try vec_sizes.put(alloc, words[pos + 1], words[pos + 3]); // OpTypeVector
+        if (opcode == 32 and wc >= 4) try ptr_pointee.put(alloc, words[pos + 1], words[pos + 3]); // OpTypePointer
         pos = ie;
     }
 
-    // Build constant map: constant_id -> literal_value (for resolving AC indices)
+    // Build constant map
     var const_vals = std.AutoHashMapUnmanaged(u32, u32){};
     defer const_vals.deinit(alloc);
     pos = 5;
@@ -4895,6 +4897,13 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
         if (ie > words.len) break;
         if (opcode == 43 and wc >= 4) { // OpConstant
             try const_vals.put(alloc, words[pos + 2], words[pos + 3]);
+        }
+        if (opcode == 28 and wc >= 4) { // OpTypeArray: result_id, elem_type, length_id
+            const arr_tid = words[pos + 1];
+            const len_id = words[pos + 3];
+            if (const_vals.get(len_id)) |len| {
+                try array_sizes.put(alloc, arr_tid, len);
+            }
         }
         pos = ie;
     }
@@ -4916,7 +4925,7 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
                 pos = ie;
                 continue;
             };
-            const cnt = vec_sizes.get(ptid) orelse {
+            const cnt = vec_sizes.get(ptid) orelse array_sizes.get(ptid) orelse {
                 pos = ie;
                 continue;
             };
