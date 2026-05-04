@@ -1,9 +1,9 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 211/211 spirv-val, 0 mismatches, 0 failures
-## Current: 7426 total_bound across 211 shaders (baseline)
-## We BEAT spirv-opt -O on ALL shaders (total: 7426 vs 7751 = -299 IDs, -3.9%)
-## We BEAT glslang on ALL shaders (total: 6748 vs 11662 where glslang succeeds = -42%)
+## Current: 7419 total_bound across 211 shaders (session 10)
+## We BEAT spirv-opt -O on ALL shaders (total: 7419 vs 7751 = -332 IDs, -4.3%)
+## We BEAT glslang on ALL shaders (total: ~6748 vs ~11662 where glslang succeeds = -42%)
 
 ## SESSION 10 FINDINGS:
 - Dead function elimination: 0 dead functions in output (all are entry points)
