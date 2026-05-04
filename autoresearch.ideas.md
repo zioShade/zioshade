@@ -15,6 +15,13 @@
 - OpCompositeExtract(OpVectorShuffle) folding: correct, 0 instances in benchmark
 - Identity VectorShuffle elimination: correct, all Shuffle(v,v,0,1) are swizzles (different dimensions)
 
+## VERIFICATION FINDINGS:
+- CSE correctly handles all arithmetic opcodes (verified with debug prints)
+- Our spirv.zig uses different opcode numbers than Python's assumed SPIR-V spec mapping
+- All "duplicate conversions" found by Python were actually FAdd operations (correct opcode mapping)
+- 99 shaders have TypePointer as max ID, 68 have Label, 101 have AccessChain
+- All max-ID instructions are genuinely needed (0 dead max-ID ACs, 0 unused types)
+
 ## EXHAUSTED OPTIMIZATIONS (all 0 IDs):
 - Type dedup (all types): 298 duplicates at low IDs
 - Identity arithmetic (x+0, x*1): 0 instances
@@ -36,6 +43,12 @@
 - Unused interface variables: 639 found but all required by SPIR-V entry point interface
 - Extract(Shuffle) folding: 0 instances
 - Identity VectorShuffle: 0 true identity (all are swizzles)
+- No-op conversion chains (SToF→FToS): 0
+- Duplicate arithmetic ops (correct opcodes): 0
+- Dead max-ID AccessChains: 0
+- Unused types: 0
+- Mergeable max-ID blocks: 0
+- Chained AccessChains: 0
 
 ## REMAINING OPPORTUNITIES (all VERY HIGH effort):
 
