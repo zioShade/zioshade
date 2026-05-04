@@ -110,8 +110,11 @@ pub fn generate(
     if (merged.ptr != raw.ptr) alloc.free(raw);
     const dce = compact_ids.deadCodeElim(alloc, merged) catch return merged;
     if (dce.ptr != merged.ptr) alloc.free(merged);
-    const loop_elim = compact_ids.deadLoopElim(alloc, dce) catch return dce;
-    if (loop_elim.ptr != dce.ptr) alloc.free(dce);
+    // Eliminate trivial entry point wrappers (main() { callee(); })
+    const no_wrapper = compact_ids.elimTrivialEntryPoint(alloc, dce) catch return dce;
+    if (no_wrapper.ptr != dce.ptr) alloc.free(dce);
+    const loop_elim = compact_ids.deadLoopElim(alloc, no_wrapper) catch return no_wrapper;
+    if (loop_elim.ptr != no_wrapper.ptr) alloc.free(no_wrapper);
     // Eliminate calls to functions with only OpUnreachable body
     const no_unreachable = compact_ids.elimUnreachableCalls(alloc, loop_elim) catch loop_elim;
     if (no_unreachable.ptr != loop_elim.ptr) alloc.free(loop_elim);
