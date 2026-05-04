@@ -4646,3 +4646,213 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
     };
     return result_owned;
 }
+
+/// Constant folding: replace binary arithmetic ops where all operands are constants
+/// with the computed constant value. Reuses the result ID.
+/// Supports: IAdd, ISub, IMul, FAdd, FSub, FMul, FDiv on scalar constants.
+pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Build constant value map: result_id -> (type_id, value)
+    var const_types = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> type_id
+    defer const_types.deinit(alloc);
+    var const_vals = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> literal_value
+    defer const_vals.deinit(alloc);
+    // Track float vs int types
+    var float_types = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer float_types.deinit();
+    var int_signed = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer int_signed.deinit();
+    var int_unsigned = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer int_unsigned.deinit();
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 22 and wc >= 3) { // OpTypeFloat
+            const tid = words[pos + 1];
+            if (tid >= 1 and tid < bound) float_types.set(tid);
+        }
+        if (opcode == 21 and wc >= 4) { // OpTypeInt
+            const tid = words[pos + 1];
+            const signed: u32 = words[pos + 3];
+            if (tid >= 1 and tid < bound) {
+                if (signed != 0) int_signed.set(tid) else int_unsigned.set(tid);
+            }
+        }
+        if (opcode == 43 and wc >= 4) { // OpConstant (scalar)
+            const rtype = words[pos + 1];
+            const rid = words[pos + 2];
+            const val = words[pos + 3];
+            if (rid >= 1 and rid < bound) {
+                try const_types.put(alloc, rid, rtype);
+                try const_vals.put(alloc, rid, val);
+            }
+        }
+        pos += wc;
+    }
+
+    // Phase 2: Find foldable ops and compute replacement values
+    var fold_map = std.AutoHashMapUnmanaged(u32, struct { rtype: u32, val: u32 }){};
+    defer fold_map.deinit(alloc);
+    var to_skip = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer to_skip.deinit();
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) { pos = ie; continue; }
+
+        // Binary arithmetic: result_type, result_id, operand_a, operand_b
+        if (wc >= 5) {
+            const rtype = words[pos + 1];
+            const rid = words[pos + 2];
+            const a = words[pos + 3];
+            const b = words[pos + 4];
+
+            if (rid >= 1 and rid < bound) {
+                const a_val = const_vals.get(a);
+                const b_val = const_vals.get(b);
+                const a_type = const_types.get(a);
+                const b_type = const_types.get(b);
+
+                if (a_val != null and b_val != null and a_type != null and b_type != null) {
+                    // Both operands are scalar constants — fold!
+                    const av = a_val.?;
+                    const bv = b_val.?;
+                    const result_type = rtype;
+                    var result_val: ?u32 = null;
+
+                    if (float_types.isSet(result_type)) {
+                        // Float operations
+                        const af: f32 = @bitCast(av);
+                        const bf: f32 = @bitCast(bv);
+                        var cf: f32 = undefined;
+                        switch (opcode) {
+                            129 => { cf = af + bf; result_val = @bitCast(cf); }, // FAdd
+                            131 => { cf = af - bf; result_val = @bitCast(cf); }, // FSub
+                            133 => { cf = af * bf; result_val = @bitCast(cf); }, // FMul
+                            136 => { if (bf != 0.0) { cf = af / bf; result_val = @bitCast(cf); } }, // FDiv
+                            else => {},
+                        }
+                    } else if (int_unsigned.isSet(result_type)) {
+                        // Unsigned int operations (32-bit)
+                        switch (opcode) {
+                            128 => { result_val = av +% bv; }, // IAdd
+                            130 => { result_val = av -% bv; }, // ISub
+                            132 => { result_val = av *% bv; }, // IMul
+                            else => {},
+                        }
+                    } else if (int_signed.isSet(result_type)) {
+                        // Signed int operations (32-bit, using wrapping for safety)
+                        switch (opcode) {
+                            128 => { result_val = av +% bv; }, // IAdd
+                            130 => { result_val = av -% bv; }, // ISub
+                            132 => { result_val = av *% bv; }, // IMul
+                            else => {},
+                        }
+                    }
+
+                    if (result_val) |rv| {
+                        try fold_map.put(alloc, rid, .{ .rtype = result_type, .val = rv });
+                        to_skip.set(rid);
+                    }
+                }
+            }
+        }
+        pos = ie;
+    }
+
+    if (fold_map.count() == 0) return words;
+
+    // Phase 3: Find the insertion point for new OpConstants
+    // In SPIR-V, constants come after types and before global variables.
+    // Find the position after the last type or constant instruction.
+    var insert_point: u32 = 5;
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        // Types: 19-31, Constants: 32,33,43,44
+        if (opcode >= 19 and opcode <= 33) {
+            insert_point = ie;
+        }
+        if (opcode == 43 or opcode == 44) { // OpConstant, OpConstantComposite
+            insert_point = ie;
+        }
+        // Stop at first variable/function definition (section boundary)
+        if (opcode == 59 or opcode == 54) break; // OpVariable, OpFunction
+        pos = ie;
+    }
+
+    // Phase 4: Rewrite — skip foldable ops, insert new OpConstants in the right place
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len + fold_map.count() * 4) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]); // header
+
+    var inserted_constants = false;
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) { pos = ie; continue; }
+
+        // Skip foldable arithmetic ops (they become constants)
+        // Only skip if this instruction DEFINES a result ID that's being folded.
+        // Use getOpInfo to check if word[2] is a result ID.
+        const is_result_producing = blk: {
+            const info = getOpInfo(opcode);
+            if (info) |inf| {
+                break :blk inf.fixed >= 2; // fixed=2 means result_type + result_id
+            }
+            break :blk false;
+        };
+        if (is_result_producing and wc >= 3 and words[pos + 2] < bound and to_skip.isSet(words[pos + 2])) {
+            pos = ie;
+            continue;
+        }
+
+        // Insert new OpConstants at the right position
+        if (!inserted_constants and pos >= insert_point) {
+            // Emit all folded constants here
+            var it = fold_map.iterator();
+            while (it.next()) |entry| {
+                const rid = entry.key_ptr.*;
+                const fold = entry.value_ptr.*;
+                result.append(alloc, (4 << 16) | 43) catch return words; // OpConstant, wc=4
+                result.append(alloc, fold.rtype) catch return words;
+                result.append(alloc, rid) catch return words; // reuse result_id
+                result.append(alloc, fold.val) catch return words;
+            }
+            inserted_constants = true;
+        }
+
+        result.appendSlice(alloc, words[pos..ie]) catch return words;
+        pos = ie;
+    }
+
+    // If we never reached insert_point (shouldn't happen), insert at end
+    if (!inserted_constants) {
+        var it = fold_map.iterator();
+        while (it.next()) |entry| {
+            const rid = entry.key_ptr.*;
+            const fold = entry.value_ptr.*;
+            result.append(alloc, (4 << 16) | 43) catch return words;
+            result.append(alloc, fold.rtype) catch return words;
+            result.append(alloc, rid) catch return words;
+            result.append(alloc, fold.val) catch return words;
+        }
+    }
+
+    const result_owned = result.toOwnedSlice(alloc) catch {
+        result.deinit(alloc);
+        return words;
+    };
+    return result_owned;
+}
