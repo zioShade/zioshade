@@ -1,60 +1,37 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 211/211 spirv-val, 0 mismatches, 0 failures
-## Current: 7419 total_bound across 211 shaders (session 11)
-## We BEAT spirv-opt -O on ALL shaders (total: 7419 vs 7751 = -332 IDs, -4.3%)
-## We BEAT glslang on ALL comparable shaders (-42%)
+## Current: 7387 total_bound across 211 shaders (session 11)
+## We BEAT spirv-opt -O on ALL shaders (total: 7387 vs 7751 = -364 IDs, -4.7%)
+## We BEAT glslang on ALL comparable shaders (-43%)
 
-## SESSION 11 FINDINGS:
-- Extended elimRedundantLoads to handle AccessChain-derived pointers from readonly vars: correct, saves 0 IDs
-  - The eliminated loads (5 across all shaders) aren't at the top of the ID space
-  - compactIds renumbers by instruction order; only eliminating the LAST instruction reduces bound
-- 188/210 shaders have OpLabel as the max ID (entry block label — uneliminable)
-- 12 shaders have arithmetic/logic at max ID (essential computations like fract())
-- Attempted scatter-store to CompositeConstruct optimization (5 vars across 5 shaders)
-  - ocean.vert: var %131 (v4uint, 4 AC-stores + 1 load)
-  - block-match-sad/ssd: var %15 (2 AC-stores + 1 load each)
-  - insert.comp: var %3 (4 AC-stores + 1 load)
-  - return-array.vert: var %29 (2 AC-stores + 1 load)
-  - Implementation had memory bugs (double-free in defer blocks), reverted
-- Key insight: eliminating instructions in the MIDDLE of the ID space doesn't reduce bound
-  - The total_bound = sum of (max_used_id + 1) per shader
-  - compactIds renumbers IDs sequentially by instruction position
-  - Only the LAST instruction in each shader matters for the bound
-- Confirmed all binary-level micro-optimizations are exhausted:
-  - Identity ops: 0, Trivial phis: 0, Inverse conversions: 0
-  - Duplicate pointer types: 0, Single-use constants: all used
+## SESSION 11 CHANGES:
+- Scatter-store to CompositeConstruct optimization: -24 IDs (7419->7395)
+  - New pass in compact_ids.zig: scatterStoreToComposite
+  - Detects function-local vector vars with all-component AC stores + whole load
+  - Replaces OpVariable + N*(OpAccessChain + OpStore) + OpLoad with OpCompositeConstruct
+  - Key fix: AC indices are constant IDs, not literal values - needed const_vals map
+- Extended scatter-store to arrays: -8 IDs (7395->7387)
+  - Also handles OpTypeArray function-local variables
+  - return-array.vert benefited most
 
-## REMAINING PATHS (all high effort):
+## REMAINING OPTIMIZATION OPPORTUNITIES:
 
-### 1. Scatter-store to CompositeConstruct (~20 IDs, HIGH effort)
-Binary-level pass that detects function-local vector variables where all components
-are stored via AccessChain (scatter stores) and the whole variable is loaded once.
-Replace with OpCompositeConstruct, eliminating the variable, AccessChains, and stores.
-5 variables across 5 shaders. Complex to implement correctly (memory management issues).
+### 1. AC redundant load for readonly vars (0 IDs independently, but correct)
+Extended elimRedundantLoads to handle AccessChain-derived pointers from readonly vars.
+Correct but saves 0 because eliminated loads aren't at max ID position.
 
-### 2. Multi-block function inlining (~50 IDs, VERY HIGH effort)
-8 remaining function calls across 2 shaders. Functions have loops/switches.
-Need to: clone body blocks, rename all IDs, patch branch targets,
-handle OpLoopMerge/OpSelectionMerge, replace params with args.
-Starting point: inlineTrivialFuncs in compact_ids.zig (handles single-block functions).
+### 2. Store-forwarding through local structs (~5 IDs, MEDIUM effort)
+Pattern: OpStore whole struct, then OpAccessChain + OpLoad individual members.
+Could replace AC+load with OpCompositeExtract on the stored value.
+copy.flatten.vert has this pattern (%23 = Light struct).
 
-### 3. Extended loop counter to OpPhi (~30 IDs, HIGH effort)
-43 function-local vars remain with multi-store patterns.
-Converting more complex loop counters (multiple updates, conditional updates)
-to OpPhi would eliminate the variable.
-Starting point: loopCounterToPhi in loop_counter_phi.zig.
+### 3. Multi-block function inlining (~50 IDs, VERY HIGH effort)
+8 remaining function calls across 2 shaders with loops/switches.
 
-### 4. Semantic layer: avoid creating SSA vars that become dead
-The unssaScope function creates variables for SSA symbols at scope end.
-Most are eliminated by DCE, but some survive because the variable is read
-after the scope ends. Could potentially skip variable creation if we can
-prove no one reads after the scope, but this requires scope-level analysis.
+### 4. Extended loop counter to OpPhi (~30 IDs, HIGH effort)
+43 function-local vars with multi-store patterns.
 
-## EXHAUSTED APPROACHES (0 IDs saved):
-- All from Session 10 (see below)
-- AC redundant load extension: correct but 0 IDs (eliminated IDs not near bound)
-- Identity operations: 0 (all handled by algebraicSimpl)
-- Trivial phi elimination: 0 (none exist)
-- Inverse conversion pairs: 0 (none exist)
-- Duplicate pointer types: 0 (already deduplicated)
+### 5. Struct type scatter-store (needs member count analysis)
+Struct function-local vars with all-member AC stores + whole load.
+Would need OpTypeStruct member count tracking.
