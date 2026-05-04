@@ -172,9 +172,12 @@ pub fn generate(
     // Fold CompositeExtract from CompositeConstruct
     const folded_ce = compact_ids.foldCompositeExtract(alloc, no_dup_ac) catch return no_dup_ac;
     if (folded_ce.ptr != no_dup_ac.ptr) alloc.free(no_dup_ac);
+    // Eliminate identity vector shuffles (shuffle(v, v, 0, 1, ...))
+    const no_id_shuffle = compact_ids.elimIdentityShuffle(alloc, folded_ce) catch return folded_ce;
+    if (no_id_shuffle.ptr != folded_ce.ptr) alloc.free(folded_ce);
     // Eliminate uninit vars (loaded but never stored)
-    const no_uninit = compact_ids.elimUninitVars(alloc, folded_ce) catch return folded_ce;
-    if (no_uninit.ptr != folded_ce.ptr) alloc.free(folded_ce);
+    const no_uninit = compact_ids.elimUninitVars(alloc, no_id_shuffle) catch return no_id_shuffle;
+    if (no_uninit.ptr != no_id_shuffle.ptr) alloc.free(no_id_shuffle);
     // Forward constant stores to function-local vars
     const const_fwd = compact_ids.constStoreForward(alloc, no_uninit) catch return no_uninit;
     if (const_fwd.ptr != no_uninit.ptr) alloc.free(no_uninit);
