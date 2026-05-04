@@ -191,8 +191,13 @@ pub fn generate(
     if (final_dce.ptr != forwarded.ptr) alloc.free(forwarded);
     const final_retarget = compact_ids.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
     if (final_retarget.ptr != final_dce.ptr) alloc.free(final_dce);
-    const final_compact = compact_ids.compactIds(alloc, final_retarget) catch return final_retarget;
-    if (final_compact.ptr != final_retarget.ptr) alloc.free(final_retarget);
+    // Second CSE pass to catch duplicates introduced by store-forward-extract etc.
+    const final_cse = compact_ids.cseWithinBlocks(alloc, final_retarget) catch return final_retarget;
+    if (final_cse.ptr != final_retarget.ptr) alloc.free(final_retarget);
+    const final_dce2 = compact_ids.deadCodeElim(alloc, final_cse) catch return final_cse;
+    if (final_dce2.ptr != final_cse.ptr) alloc.free(final_cse);
+    const final_compact = compact_ids.compactIds(alloc, final_dce2) catch return final_dce2;
+    if (final_compact.ptr != final_dce2.ptr) alloc.free(final_dce2);
     return final_compact;
 }
 
