@@ -2831,7 +2831,26 @@ pub fn elimUnreachableCalls(alloc: std.mem.Allocator, words: []const u32) error{
     const bound = words[3];
     if (bound <= 1) return words;
 
+    // Collect entry point function IDs (never remove these)
+    var entry_point_funcs = std.AutoHashMapUnmanaged(u32, void){};
+    defer entry_point_funcs.deinit(alloc);
+    {
+        var p: u32 = 5;
+        while (p < words.len) {
+            const h = words[p];
+            const w = h >> 16;
+            const op: u16 = @truncate(h & 0xFFFF);
+            if (w == 0) break;
+            if (op == 15 and w >= 4) { // OpEntryPoint
+                entry_point_funcs.put(alloc, words[p + 2], {}) catch {};
+            }
+            p += w;
+            if (p > words.len) break;
+        }
+    }
+
     // Phase 1: Find functions whose body (after OpLabel) is only OpUnreachable
+    // Skip entry point functions even if body is unreachable
     var unreachable_funcs = std.AutoHashMapUnmanaged(u32, void){};
     defer unreachable_funcs.deinit(alloc);
 
@@ -2857,7 +2876,9 @@ pub fn elimUnreachableCalls(alloc: std.mem.Allocator, words: []const u32) error{
                     if (op != 255) { all_unreachable = false; break; } // not OpUnreachable
                 }
                 if (all_unreachable and body_after_label.items.len > 0) {
-                    unreachable_funcs.put(alloc, cur_func, {}) catch return words;
+                    if (!entry_point_funcs.contains(cur_func)) {
+                        unreachable_funcs.put(alloc, cur_func, {}) catch return words;
+                    }
                 }
             }
             cur_func = words[pos + 2];
@@ -2875,7 +2896,9 @@ pub fn elimUnreachableCalls(alloc: std.mem.Allocator, words: []const u32) error{
                     if (op != 255) { all_unreachable = false; break; }
                 }
                 if (all_unreachable and body_after_label.items.len > 0) {
-                    unreachable_funcs.put(alloc, cur_func, {}) catch return words;
+                    if (!entry_point_funcs.contains(cur_func)) {
+                        unreachable_funcs.put(alloc, cur_func, {}) catch return words;
+                    }
                 }
             }
             cur_func = 0;
@@ -2910,10 +2933,18 @@ pub fn elimUnreachableCalls(alloc: std.mem.Allocator, words: []const u32) error{
                 skip_func = words[pos + 2];
             }
         }
-        if (opcode == 56) skip_func = null;
         if (skip_func != null) {
+            if (opcode == 56) skip_func = null; // clear AFTER skip
             pos = ie;
             continue;
+        }
+
+        // Skip OpName for removed functions (forward reference to deleted ID)
+        if (opcode == 5 and wc >= 3) { // OpName
+            if (unreachable_funcs.contains(words[pos + 1])) {
+                pos = ie;
+                continue;
+            }
         }
 
         // Replace OpFunctionCall to unreachable func
@@ -4114,320 +4145,4 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
     const dce = deadCodeElim(alloc, nw) catch return nw;
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
-}
-
-/// Retarget branches that point to empty passthrough blocks.
-/// An empty passthrough block contains only OpLabel + OpBranch (unconditional).
-/// Branches to such blocks are rewritten to target the ultimate destination.
-/// The empty blocks themselves are removed.
-pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
-    const bound = words[3];
-    if (bound <= 1) return words;
-
-    // Phase 1: Find all empty passthrough blocks and their targets
-    var empty_targets = std.AutoHashMapUnmanaged(u32, u32){};
-    defer empty_targets.deinit(alloc);
-
-    var pos: u32 = 5;
-    var cur_label: u32 = 0;
-    var block_inst_count: u32 = 0;
-    var block_branch_target: u32 = 0;
-    var block_has_merge: bool = false;
-    while (pos < words.len) {
-        const hdr = words[pos];
-        const wc: u32 = hdr >> 16;
-        const op: u16 = @truncate(hdr & 0xFFFF);
-        if (wc == 0) break;
-        const ie = pos + wc;
-
-        if (op == 248 and wc >= 2) { // OpLabel
-            if (cur_label != 0 and block_inst_count == 1 and block_branch_target != 0 and !block_has_merge) {
-                try empty_targets.put(alloc, cur_label, block_branch_target);
-            }
-            cur_label = words[pos + 1];
-            block_inst_count = 0;
-            block_branch_target = 0;
-            block_has_merge = false;
-        }
-        if (op == 54) { // OpFunction
-            if (cur_label != 0 and block_inst_count == 1 and block_branch_target != 0 and !block_has_merge) {
-                try empty_targets.put(alloc, cur_label, block_branch_target);
-            }
-            cur_label = 0;
-            block_inst_count = 0;
-            block_branch_target = 0;
-            block_has_merge = false;
-        }
-        if (op == 56) { // OpFunctionEnd
-            if (cur_label != 0 and block_inst_count == 1 and block_branch_target != 0 and !block_has_merge) {
-                try empty_targets.put(alloc, cur_label, block_branch_target);
-            }
-            cur_label = 0;
-        }
-        if (op == 246 or op == 247) block_has_merge = true;
-        if (cur_label != 0 and op != 248) block_inst_count += 1;
-        if (op == 249 and wc >= 2) block_branch_target = words[pos + 1];
-        pos = ie;
-    }
-    if (cur_label != 0 and block_inst_count == 1 and block_branch_target != 0 and !block_has_merge) {
-        try empty_targets.put(alloc, cur_label, block_branch_target);
-    }
-
-    if (empty_targets.count() == 0) return words;
-
-    // Resolve transitive chains: A->B->C becomes A->C
-    var changed = true;
-    while (changed) {
-        changed = false;
-        var it = empty_targets.iterator();
-        while (it.next()) |entry| {
-            if (empty_targets.get(entry.value_ptr.*)) |ultimate| {
-                entry.value_ptr.* = ultimate;
-                changed = true;
-            }
-        }
-    }
-
-    // Phase 2: Rewrite branch targets and remove empty blocks
-    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
-    result.appendSliceAssumeCapacity(words[0..5]);
-
-    pos = 5;
-    while (pos < words.len) {
-        const hdr = words[pos];
-        const wc: u32 = hdr >> 16;
-        const op: u16 = @truncate(hdr & 0xFFFF);
-        if (wc == 0) break;
-        const ie = pos + wc;
-
-        // Skip empty passthrough blocks (OpLabel + OpBranch)
-        if (op == 248 and wc >= 2) {
-            const label_id = words[pos + 1];
-            if (empty_targets.contains(label_id)) {
-                // Check next instruction is OpBranch
-                if (ie < words.len) {
-                    const next_hdr = words[ie];
-                    const next_wc: u32 = next_hdr >> 16;
-                    const next_op: u16 = @truncate(next_hdr & 0xFFFF);
-                    if (next_op == 249) {
-                        pos = ie + next_wc;
-                        continue;
-                    }
-                }
-            }
-        }
-
-        // Rewrite OpBranch targets
-        if (op == 249 and wc >= 2) {
-            const target = words[pos + 1];
-            const new_target = empty_targets.get(target) orelse target;
-            if (new_target != target) {
-                result.append(alloc, (wc << 16) | op) catch return words;
-                result.append(alloc, new_target) catch return words;
-                pos = ie;
-                continue;
-            }
-        }
-
-        // Rewrite OpBranchConditional targets
-        if (op == 250 and wc >= 4) {
-            const t = words[pos + 2];
-            const f = words[pos + 3];
-            const nt = empty_targets.get(t) orelse t;
-            const nf = empty_targets.get(f) orelse f;
-            if (nt != t or nf != f) {
-                result.append(alloc, hdr) catch return words;
-                result.append(alloc, words[pos + 1]) catch return words; // condition
-                result.append(alloc, nt) catch return words;
-                result.append(alloc, nf) catch return words;
-                for (words[pos + 4 .. ie]) |w| result.append(alloc, w) catch return words;
-                pos = ie;
-                continue;
-            }
-        }
-
-        // Rewrite OpLoopMerge target
-        if (op == 246 and wc >= 3) {
-            const merge = words[pos + 1];
-            const nm = empty_targets.get(merge) orelse merge;
-            if (nm != merge) {
-                result.append(alloc, hdr) catch return words;
-                result.append(alloc, nm) catch return words;
-                for (words[pos + 2 .. ie]) |w| result.append(alloc, w) catch return words;
-                pos = ie;
-                continue;
-            }
-        }
-
-        // Rewrite OpSelectionMerge target
-        if (op == 247 and wc >= 2) {
-            const merge = words[pos + 1];
-            const nm = empty_targets.get(merge) orelse merge;
-            if (nm != merge) {
-                result.append(alloc, hdr) catch return words;
-                result.append(alloc, nm) catch return words;
-                for (words[pos + 2 .. ie]) |w| result.append(alloc, w) catch return words;
-                pos = ie;
-                continue;
-            }
-        }
-
-        result.appendSliceAssumeCapacity(words[pos..ie]);
-        pos = ie;
-    }
-
-    const out = result.toOwnedSlice(alloc) catch return words;
-    return out;
-}
-
-/// Deduplicate ALL type instructions.
-pub fn dedupAllTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
-    const bound = words[3];
-    if (bound <= 1) return words;
-
-    // Type opcodes that define types (result at pos+1, no result_type prefix)
-    const type_op_set = [_]u16{ 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 32 };
-
-    // Collect type signatures
-    var sig_words = std.ArrayListUnmanaged(u32){};
-    defer sig_words.deinit(alloc);
-    var sig_entries = std.ArrayListUnmanaged(struct { hash: u64, result_id: u32, sig_start: u32, sig_len: u32 }){};
-    defer sig_entries.deinit(alloc);
-
-    var replacements = std.AutoHashMapUnmanaged(u32, u32){};
-    defer replacements.deinit(alloc);
-
-    var pos: u32 = 5;
-    while (pos < words.len) {
-        const hdr = words[pos];
-        const wc: u32 = hdr >> 16;
-        const opcode: u16 = @truncate(hdr & 0xFFFF);
-        if (wc == 0) break;
-        const ie = pos + wc;
-        if (ie > words.len) break;
-
-        var is_type = false;
-        for (&type_op_set) |top| {
-            if (opcode == top) { is_type = true; break; }
-        }
-
-        if (is_type and wc >= 2) {
-            const result_id = words[pos + 1];
-            const sig_start: u32 = @intCast(sig_words.items.len);
-            try sig_words.append(alloc, opcode);
-            try sig_words.appendSlice(alloc, words[pos + 2 .. ie]); // operands after result_id
-            const sig_len: u32 = @intCast(sig_words.items.len - sig_start);
-
-            var h: u64 = @intCast(sig_len);
-            for (sig_words.items[sig_start..]) |w| h = h *% 33 +% @as(u64, w);
-
-            var found_dup: ?u32 = null;
-            for (sig_entries.items) |entry| {
-                if (entry.hash == h and entry.sig_len == sig_len) {
-                    const esig = sig_words.items[entry.sig_start .. entry.sig_start + sig_len];
-                    if (std.mem.eql(u32, sig_words.items[sig_start..], esig)) {
-                        found_dup = entry.result_id;
-                        break;
-                    }
-                }
-            }
-
-            if (found_dup) |first_id| {
-                try replacements.put(alloc, result_id, first_id);
-            } else {
-                try sig_entries.append(alloc, .{ .hash = h, .result_id = result_id, .sig_start = sig_start, .sig_len = sig_len });
-            }
-        }
-        pos = ie;
-    }
-
-    if (replacements.count() == 0) return words;
-
-    // Phase 2: Apply replacement and remove duplicate type defs
-    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
-    result.appendSliceAssumeCapacity(words[0..5]);
-
-    pos = 5;
-    while (pos < words.len) {
-        const hdr = words[pos];
-        const wc: u32 = hdr >> 16;
-        const opcode: u16 = @truncate(hdr & 0xFFFF);
-        if (wc == 0) break;
-        const ie = pos + wc;
-        if (ie > words.len) break;
-
-        // Skip duplicate type definitions
-        var is_type = false;
-        for (&type_op_set) |top| {
-            if (opcode == top) { is_type = true; break; }
-        }
-        if (is_type and wc >= 2 and replacements.contains(words[pos + 1])) {
-            pos = ie;
-            continue;
-        }
-
-        // For non-type instructions, use getOpInfo to replace ID refs (skip result_ids)
-        const info = getOpInfo(opcode) orelse {
-            // Unknown opcode — replace all words that match
-            result.append(alloc, hdr) catch return words;
-            for (words[pos + 1 .. ie]) |w| {
-                result.append(alloc, replacements.get(w) orelse w) catch return words;
-            }
-            pos = ie;
-            continue;
-        };
-
-        result.append(alloc, hdr) catch return words;
-        var wi: u32 = pos + 1;
-        switch (info.fixed) {
-            1 => {
-                result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
-                wi += 1;
-            },
-            2 => {
-                result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
-                wi += 1;
-                result.append(alloc, words[wi]) catch return words; // result_id — no replace
-                wi += 1;
-            },
-            3 => {
-                result.append(alloc, words[wi]) catch return words;
-                wi += 1;
-            },
-            else => {},
-        }
-        for (info.ops) |ch| {
-            if (wi >= ie) break;
-            switch (ch) {
-                'i' => {
-                    result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
-                    wi += 1;
-                },
-                'l' => {
-                    result.append(alloc, words[wi]) catch return words;
-                    wi += 1;
-                },
-                'I', 'M' => {
-                    while (wi < ie) : (wi += 1) {
-                        result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
-                    }
-                },
-                else => {
-                    result.append(alloc, words[wi]) catch return words;
-                    wi += 1;
-                },
-            }
-        }
-        while (wi < ie) : (wi += 1) {
-            result.append(alloc, words[wi]) catch return words;
-        }
-        pos = ie;
-    }
-
-    const out = result.toOwnedSlice(alloc) catch return words;
-    const dce = deadCodeElim(alloc, out) catch return out;
-    if (dce.ptr != out.ptr) alloc.free(out);
-    const compact = compactIds(alloc, dce) catch return dce;
-    if (compact.ptr != dce.ptr) alloc.free(dce);
-    return compact;
 }
