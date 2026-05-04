@@ -4856,3 +4856,252 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
     };
     return result_owned;
 }
+
+/// Scatter-store to CompositeConstruct: For function-local vector variables
+/// where all components are individually stored via AccessChain and the whole
+/// vector is loaded once, replace with OpCompositeConstruct.
+pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    var vec_sizes = std.AutoHashMapUnmanaged(u32, u32){};
+    defer vec_sizes.deinit(alloc);
+    var ptr_pointee = std.AutoHashMapUnmanaged(u32, u32){};
+    defer ptr_pointee.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 23 and wc >= 4) try vec_sizes.put(alloc, words[pos + 1], words[pos + 3]);
+        if (opcode == 32 and wc >= 4) try ptr_pointee.put(alloc, words[pos + 1], words[pos + 3]);
+        pos = ie;
+    }
+
+    // Build constant map: constant_id -> literal_value (for resolving AC indices)
+    var const_vals = std.AutoHashMapUnmanaged(u32, u32){};
+    defer const_vals.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 43 and wc >= 4) { // OpConstant
+            try const_vals.put(alloc, words[pos + 2], words[pos + 3]);
+        }
+        pos = ie;
+    }
+
+    const VarInfo = struct { var_id: u32, comp_count: u32, vec_type: u32 };
+    var var_infos = std.ArrayListUnmanaged(VarInfo){};
+    defer var_infos.deinit(alloc);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 59 and wc >= 4 and words[pos + 3] == 7) {
+            const ptid = ptr_pointee.get(words[pos + 1]) orelse {
+                pos = ie;
+                continue;
+            };
+            const cnt = vec_sizes.get(ptid) orelse {
+                pos = ie;
+                continue;
+            };
+            try var_infos.append(alloc, .{ .var_id = words[pos + 2], .comp_count = cnt, .vec_type = ptid });
+        }
+        pos = ie;
+    }
+    if (var_infos.items.len == 0) return words;
+
+    const Replacement = struct {
+        var_id: u32,
+        vec_type: u32,
+        comp_count: u32,
+        load_pos: u32,
+        load_result: u32,
+        ac_positions: std.ArrayListUnmanaged(u32),
+        store_positions: std.ArrayListUnmanaged(u32),
+    };
+    var replacements = std.ArrayListUnmanaged(Replacement){};
+    defer {
+        for (replacements.items) |*r| {
+            r.ac_positions.deinit(alloc);
+            r.store_positions.deinit(alloc);
+        }
+        replacements.deinit(alloc);
+    }
+
+    for (var_infos.items) |vi| {
+        var ac_results = std.AutoHashMapUnmanaged(u32, void){};
+        defer ac_results.deinit(alloc);
+        var ac_positions = std.ArrayListUnmanaged(u32){};
+        defer ac_positions.deinit(alloc);
+        var store_positions = std.ArrayListUnmanaged(u32){};
+        defer store_positions.deinit(alloc);
+        var load_pos: u32 = 0;
+        var load_result: u32 = 0;
+        var direct_stores: u32 = 0;
+        var multi_loads: bool = false;
+
+        pos = 5;
+        while (pos < words.len) {
+            const hdr = words[pos];
+            const wc: u32 = hdr >> 16;
+            const opcode: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break;
+            const ie = pos + wc;
+            if (ie > words.len) break;
+            if (opcode == 65 and wc >= 5 and words[pos + 3] == vi.var_id) {
+                try ac_results.put(alloc, words[pos + 2], {});
+                try ac_positions.append(alloc, pos);
+            }
+            if (opcode == 62 and wc >= 3) {
+                const tgt = words[pos + 1];
+                if (ac_results.contains(tgt)) {
+                    try store_positions.append(alloc, pos);
+                } else if (tgt == vi.var_id) {
+                    direct_stores += 1;
+                }
+            }
+            if (opcode == 61 and wc >= 4 and words[pos + 3] == vi.var_id) {
+                if (load_result == 0) {
+                    load_result = words[pos + 2];
+                    load_pos = pos;
+                } else {
+                    multi_loads = true;
+                }
+            }
+            pos = ie;
+        }
+
+        if (direct_stores > 0 or multi_loads or load_result == 0) continue;
+        if (ac_results.count() != vi.comp_count) continue;
+        if (@as(u32, @intCast(store_positions.items.len)) != vi.comp_count) continue;
+
+        var my_ac = std.ArrayListUnmanaged(u32){};
+        var my_st = std.ArrayListUnmanaged(u32){};
+        try my_ac.appendSlice(alloc, ac_positions.items);
+        try my_st.appendSlice(alloc, store_positions.items);
+        try replacements.append(alloc, .{
+            .var_id = vi.var_id,
+            .vec_type = vi.vec_type,
+            .comp_count = vi.comp_count,
+            .load_pos = load_pos,
+            .load_result = load_result,
+            .ac_positions = my_ac,
+            .store_positions = my_st,
+        });
+    }
+    if (replacements.items.len == 0) return words;
+
+    var remove_set = std.DynamicBitSet.initEmpty(alloc, words.len) catch return words;
+    defer remove_set.deinit();
+
+    const CompRep = struct { load_pos: u32, vec_type: u32, load_result: u32, comp_vals: []u32 };
+    var comp_reps = std.ArrayListUnmanaged(CompRep){};
+    defer {
+        for (comp_reps.items) |cr| alloc.free(cr.comp_vals);
+        comp_reps.deinit(alloc);
+    }
+
+for (replacements.items, 0..) |rep, rep_idx| {
+        _ = rep_idx;
+        outer: {
+        pos = 5;
+        while (pos < words.len) {
+            const hdr = words[pos];
+            const wc: u32 = hdr >> 16;
+            if (wc == 0) break;
+            const ie = pos + wc;
+            if (ie > words.len) break;
+            const op: u16 = @truncate(hdr & 0xFFFF);
+            if (op == 59 and wc >= 4 and words[pos + 2] == rep.var_id) {
+                remove_set.set(pos);
+            }
+            pos = ie;
+        }
+        for (rep.ac_positions.items) |p| remove_set.set(p);
+        for (rep.store_positions.items) |p| remove_set.set(p);
+
+        var comp_vals = try alloc.alloc(u32, rep.comp_count);
+        @memset(comp_vals, 0);
+        for (rep.ac_positions.items) |ac_pos| {
+            const ac_res = words[ac_pos + 2];
+            const ac_idx_id = words[ac_pos + 4];
+            const ac_idx = const_vals.get(ac_idx_id) orelse {
+                // Non-constant index — skip this variable
+                break :outer;
+            };
+            for (rep.store_positions.items) |sp| {
+                if (words[sp + 1] == ac_res and ac_idx < rep.comp_count) {
+                    comp_vals[ac_idx] = words[sp + 2];
+                    break;
+                }
+            }
+        }
+        try comp_reps.append(alloc, .{
+            .load_pos = rep.load_pos,
+            .vec_type = rep.vec_type,
+            .load_result = rep.load_result,
+            .comp_vals = comp_vals,
+        });
+        }
+    }
+
+    var load_map = std.AutoHashMapUnmanaged(u32, u32){};
+    defer load_map.deinit(alloc);
+    for (comp_reps.items, 0..) |cr, i| {
+        try load_map.put(alloc, cr.load_pos, @intCast(i));
+    }
+
+    var out = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    out.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (remove_set.isSet(pos)) {
+            pos = ie;
+            continue;
+        }
+
+        if (load_map.get(pos)) |cr_idx| {
+            const cr = comp_reps.items[cr_idx];
+            const new_wc: u32 = @intCast(3 + cr.comp_vals.len);
+            out.append(alloc, (new_wc << 16) | 80) catch return words;
+            out.append(alloc, cr.vec_type) catch return words;
+            out.append(alloc, cr.load_result) catch return words;
+            for (cr.comp_vals) |v| out.append(alloc, v) catch return words;
+            pos = ie;
+            continue;
+        }
+
+        out.appendSlice(alloc, words[pos..ie]) catch return words;
+        pos = ie;
+    }
+
+    const nw = out.toOwnedSlice(alloc) catch return words;
+    const dced = deadCodeElim(alloc, nw) catch return nw;
+    if (dced.ptr != nw.ptr) alloc.free(nw);
+    const compacted = compactIds(alloc, dced) catch return dced;
+    if (compacted.ptr != dced.ptr) alloc.free(dced);
+    return compacted;
+}
