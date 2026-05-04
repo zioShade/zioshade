@@ -4144,6 +4144,7 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
     var all_sig_words = std.ArrayListUnmanaged(u32){}; // packed signature words
     defer all_sig_words.deinit(alloc);
     var is_entry_block = true; // track if we're in the function entry block
+    var seen_first_label = false;
 
     var pos: u32 = 5;
     while (pos < words.len) {
@@ -4158,15 +4159,17 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
         if (opcode == 54) { // OpFunction — reset
             entry_block_sigs.clearRetainingCapacity();
             is_entry_block = true;
+            seen_first_label = false;
         }
         if (opcode == 248) { // OpLabel — new block
-            if (!is_entry_block) {
+            if (seen_first_label and !is_entry_block) {
                 block_sigs.clearRetainingCapacity();
             }
-        }
-        // Any non-Label instruction after first OpLabel ends entry block status
-        if (opcode != 248 and opcode != 54 and opcode != 55 and opcode != 56) {
-            is_entry_block = false;
+            if (!seen_first_label) {
+                seen_first_label = true;
+            } else {
+                is_entry_block = false; // second label = not entry block
+            }
         }
 
         if (opcode == 65 and wc >= 4) { // OpAccessChain
