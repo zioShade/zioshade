@@ -36,7 +36,7 @@ def build():
                        "--dep", "glslpp", "-Mroot=tests/runner.zig", "-Mglslpp=src/root.zig",
                        "--cache-dir", ".zig-cache",
                        "-femit-bin=" + RUNNER],
-                      capture_output=True, timeout=120, creationflags=SUBPROCESS_FLAGS)
+                      capture_output=True, timeout=300, creationflags=SUBPROCESS_FLAGS)
     if not os.path.exists(RUNNER):
         print("ERROR: build failed", file=sys.stderr)
         return False
