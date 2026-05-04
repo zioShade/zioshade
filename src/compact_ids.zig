@@ -5417,3 +5417,196 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
     if (compacted.ptr != dced.ptr) alloc.free(dced);
     return compacted;
 }
+
+/// Eliminate trivial entry point wrappers: when the entry point function
+/// just calls another function (and returns its result or returns void),
+/// redirect the entry point to the callee and remove the wrapper.
+pub fn elimTrivialEntryPoint(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Find OpEntryPoint to get the entry function ID
+    var entry_func_id: u32 = 0;
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 15 and wc >= 3) { // OpEntryPoint
+            entry_func_id = words[pos + 2];
+            break;
+        }
+        pos = ie;
+    }
+    if (entry_func_id == 0) return words;
+
+    // Find the entry point function body
+    // Scan for: OpFunction(entry), OpLabel, [optional], OpFunctionCall, OpReturn/OpReturnValue, OpFunctionEnd
+    var func_start: u32 = 0;
+    var func_end: u32 = 0;
+    var callee_id: u32 = 0;
+    var call_has_result: bool = false; // true if the call produces a result used in ReturnValue
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 54 and wc >= 4 and words[pos + 2] == entry_func_id) {
+            func_start = pos;
+            // Scan function body
+            var inner: u32 = ie;
+            var instr_count: u32 = 0;
+            var has_call: bool = false;
+            var has_store: bool = false;
+            var has_branch: bool = false;
+            var local_callee: u32 = 0;
+            var local_call_result: u32 = 0;
+            var local_call_has_result: bool = false;
+            var return_pos: u32 = 0;
+
+            while (inner < words.len) {
+                const ihdr = words[inner]; const iwc: u32 = ihdr >> 16; const iop: u16 = @truncate(ihdr & 0xFFFF);
+                if (iwc == 0) break;
+                const iie = inner + iwc;
+                if (iie > words.len) break;
+                if (iop == 56) { // OpFunctionEnd
+                    func_end = iie;
+                    break;
+                }
+                instr_count += 1;
+                if (iop == 57) { // OpFunctionCall
+                    has_call = true;
+                    local_callee = words[inner + 3]; // func arg is at pos+3 for fixed=2 layout: type, result, func
+                    if (iwc >= 4 and words[inner + 2] != 0) {
+                        local_call_has_result = true;
+                        local_call_result = words[inner + 2];
+                    }
+                }
+                if (iop == 62) has_store = true; // OpStore
+                if (iop == 249 or iop == 250) has_branch = true; // OpBranch/OpBranchConditional
+                if (iop == 253) { // OpReturn
+                    return_pos = inner;
+                }
+                if (iop == 254) { // OpReturnValue
+                    return_pos = inner;
+                    // Check if return value is the call result
+                    if (local_call_has_result and iwc >= 2 and words[inner + 1] == local_call_result) {
+                        // Good - returning the call's result directly
+                    } else {
+                        // Returning something else - can't inline trivially
+                        has_store = true; // treat as non-trivial
+                    }
+                }
+                inner = iie;
+            }
+
+            // Qualify: must be simple (label + call + return, no stores, no branches)
+            // Allow: Label, FunctionCall, Return (void or returning call result)
+            // instr_count includes Label, FunctionCall, Return/ReturnValue = 3
+            if (has_call and !has_store and !has_branch and instr_count <= 4) {
+                callee_id = local_callee;
+                call_has_result = local_call_has_result;
+            }
+            break;
+        }
+        pos = ie;
+    }
+
+    if (callee_id == 0 or func_start == 0 or func_end == 0) return words;
+    if (callee_id == entry_func_id) return words; // no recursion
+
+    // Verify callee return type matches entry return type
+    var entry_return_type: u32 = 0;
+    var callee_return_type: u32 = 0;
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 54 and wc >= 4) {
+            if (words[pos + 2] == entry_func_id) entry_return_type = words[pos + 1];
+            if (words[pos + 2] == callee_id) callee_return_type = words[pos + 1];
+        }
+        pos = ie;
+    }
+    if (entry_return_type != callee_return_type) return words;
+
+    // Verify function call has no arguments beyond the callee
+    // Find the call instruction in the entry function
+    pos = func_start;
+    while (pos < func_end) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > func_end) break;
+        if (opcode == 57) { // OpFunctionCall
+            // fixed=2: result_type(1), result(2), func(3), args(4..)
+            if (wc > 4) return words; // has arguments
+        }
+        pos = ie;
+    }
+
+    // Rewrite: replace entry_func_id with callee_id everywhere, remove wrapper function
+    var out = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    out.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Skip the wrapper function entirely
+        if (pos >= func_start and pos < func_end) {
+            pos = ie;
+            continue;
+        }
+
+        // Replace entry_func_id -> callee_id in OpEntryPoint
+        if (opcode == 15 and wc >= 3 and words[pos + 2] == entry_func_id) {
+            try out.appendSlice(alloc, words[pos .. pos + 2]);
+            try out.append(alloc, callee_id);
+            try out.appendSlice(alloc, words[pos + 3 .. ie]);
+            pos = ie;
+            continue;
+        }
+
+        // Replace in OpExecutionMode / OpExecutionModeId
+        if ((opcode == 16 or opcode == 531) and wc >= 3 and words[pos + 1] == entry_func_id) {
+            try out.append(alloc, hdr);
+            try out.append(alloc, callee_id);
+            try out.appendSlice(alloc, words[pos + 2 .. ie]);
+            pos = ie;
+            continue;
+        }
+
+        // Skip OpName for entry function (to avoid name conflict)
+        if (opcode == 5 and wc >= 3 and words[pos + 1] == entry_func_id) {
+            pos = ie;
+            continue;
+        }
+
+        // Skip OpTypeFunction for the entry function's type if it becomes dead
+        // (DCE will handle this)
+
+        try out.appendSlice(alloc, words[pos..ie]);
+        pos = ie;
+    }
+
+    if (out.items.len == words.len) {
+        out.deinit(alloc);
+        return words;
+    }
+    const nw = out.toOwnedSlice(alloc) catch return words;
+    const dced = deadCodeElim(alloc, nw) catch return nw;
+    if (dced.ptr != nw.ptr) alloc.free(nw);
+    const compacted = compactIds(alloc, dced) catch return dced;
+    if (compacted.ptr != dced.ptr) alloc.free(dced);
+    return compacted;
+}
