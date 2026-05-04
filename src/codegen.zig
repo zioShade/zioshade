@@ -154,8 +154,10 @@ pub fn generate(
     if (negated.ptr != deduped.ptr) alloc.free(deduped);
     const algebrad = compact_ids.algebraicSimpl(alloc, negated) catch return negated;
     if (algebrad.ptr != negated.ptr) alloc.free(negated);
-    const folded = compact_ids.foldSelect(alloc, algebrad) catch return algebrad;
-    if (folded.ptr != algebrad.ptr) alloc.free(algebrad);
+    const cf = compact_ids.constFold(alloc, algebrad) catch return algebrad;
+    if (cf.ptr != algebrad.ptr) alloc.free(algebrad);
+    const folded = compact_ids.foldSelect(alloc, cf) catch return cf;
+    if (folded.ptr != cf.ptr) alloc.free(cf);
     const compacted = compact_ids.compactIds(alloc, folded) catch return folded;
     if (compacted.ptr != folded.ptr) alloc.free(folded);
     // Eliminate redundant loads of read-only variables
