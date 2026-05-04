@@ -4268,6 +4268,7 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
         // Track function and block boundaries
         if (opcode == 54) { // OpFunction — reset
             entry_block_sigs.clearRetainingCapacity();
+            block_sigs.clearRetainingCapacity();
             is_entry_block = true;
             seen_first_label = false;
         }
@@ -4369,6 +4370,7 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
         // Only include operations that are truly pure (no memory interaction)
         const is_cse_eligible = switch (opcode) {
             80, // OpCompositeConstruct
+            81, // OpCompositeExtract
             84, // OpTranspose
             126, 127, // FNegate, SNegate
             128, 129, 130, 131, 132, 133, // FAdd, FSub, FMul, FDiv, FMod, ...
@@ -4441,7 +4443,7 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
 
         // Skip duplicate AccessChains and SampledImages
         const is_cse_eligible_2 = switch (opcode) {
-            80, 84, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 143, 144, 145, 146, 147, 148,
+            80, 81, 84, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 143, 144, 145, 146, 147, 148,
             109, 110, 111, 112, 154, 155, 156, 157, 166, 167, 168, 170, 171, 169,
             177, 178, 179, 180, 182, 184, 186, 188, 190
             => true,
