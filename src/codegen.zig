@@ -144,8 +144,10 @@ pub fn generate(
     if (phi.ptr != inlined.ptr) alloc.free(inlined);
     const rse = compact_ids.redundantStoreElim(alloc, phi) catch return phi;
     if (rse.ptr != phi.ptr) alloc.free(phi);
-    const blk_merged = compact_ids.mergeBlocks(alloc, rse) catch return rse;
-    if (blk_merged.ptr != rse.ptr) alloc.free(rse);
+    const retargeted = rse;
+    if (retargeted.ptr != rse.ptr) alloc.free(rse);
+    const blk_merged = compact_ids.mergeBlocks(alloc, retargeted) catch return retargeted;
+    if (blk_merged.ptr != retargeted.ptr) alloc.free(retargeted);
     const deduped = compact_ids.dedupStructTypes(alloc, blk_merged) catch return blk_merged;
     if (deduped.ptr != blk_merged.ptr) alloc.free(blk_merged);
     const negated = compact_ids.eliminateDoubleNegate(alloc, deduped) catch return deduped;
@@ -170,8 +172,10 @@ pub fn generate(
     if (no_uninit.ptr != folded_ce.ptr) alloc.free(folded_ce);
     const final_dce = compact_ids.deadCodeElim(alloc, no_uninit) catch return no_uninit;
     if (final_dce.ptr != no_uninit.ptr) alloc.free(no_uninit);
-    const final_compact = compact_ids.compactIds(alloc, final_dce) catch return final_dce;
-    if (final_compact.ptr != final_dce.ptr) alloc.free(final_dce);
+    const final_retarget = compact_ids.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
+    if (final_retarget.ptr != final_dce.ptr) alloc.free(final_dce);
+    const final_compact = compact_ids.compactIds(alloc, final_retarget) catch return final_retarget;
+    if (final_compact.ptr != final_retarget.ptr) alloc.free(final_retarget);
     return final_compact;
 }
 
