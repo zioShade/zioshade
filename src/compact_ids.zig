@@ -4028,6 +4028,16 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
             }
             construct_map.put(alloc, result_id, components) catch return words;
         }
+        // Also handle OpConstantComposite (44): same format, constituents are constants
+        if (opcode == 44 and wc >= 4) { // OpConstantComposite
+            const result_id = words[pos + 2];
+            var components = std.ArrayListUnmanaged(u32){};
+            var ci: u32 = pos + 3;
+            while (ci < ie) : (ci += 1) {
+                components.append(alloc, words[ci]) catch return words;
+            }
+            construct_map.put(alloc, result_id, components) catch return words;
+        }
         pos = ie;
     }
 
