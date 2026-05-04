@@ -2655,7 +2655,7 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
         if (opcode == 59 and wc >= 4) { // OpVariable: result_type, result_id, storage_class
             const result_id = words[pos + 2];
             const storage_class = words[pos + 3];
-            if ((storage_class == 7 or storage_class == 3 or storage_class == 6) and result_id < bound) {
+            if ((storage_class == 7 or storage_class == 3 or storage_class == 6 or storage_class == 12) and result_id < bound) {
                 trackable.set(result_id);
             }
         }
@@ -2740,6 +2740,18 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 // Remove tracking for this pointer (store is needed)
                 _ = last_store_pos.remove(ptr);
             }
+            pos += wc;
+            continue;
+        }
+
+        // Reset tracking on operations that may observe stores (barriers, atomics, function calls)
+        if (opcode == 57 or // OpFunctionCall
+            opcode == 46 or // OpCopyMemory
+            opcode == 224 or // OpControlBarrier
+            opcode == 225 or // OpMemoryBarrier
+            (opcode >= 207 and opcode <= 230)) // Atomic operations
+        {
+            last_store_pos.clearRetainingCapacity();
             pos += wc;
             continue;
         }
