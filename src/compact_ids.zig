@@ -4021,6 +4021,37 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
 
     if (construct_map.count() == 0) return words;
 
+    // Phase 1b: Also build map of OpVectorShuffle: result_id -> (vec1_id, vec2_id, []shuffle_indices)
+    var shuffle_map = std.AutoHashMapUnmanaged(u32, struct { vec1: u32, vec2: u32, indices: std.ArrayListUnmanaged(u32) }){};
+    defer {
+        var sit = shuffle_map.iterator();
+        while (sit.next()) |entry| entry.value_ptr.indices.deinit(alloc);
+        shuffle_map.deinit(alloc);
+    }
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 79 and wc >= 6) { // OpVectorShuffle: type, result, vec1, vec2, indices...
+            const result_id = words[pos + 2];
+            const vec1_id = words[pos + 3];
+            const vec2_id = words[pos + 4];
+            var indices = std.ArrayListUnmanaged(u32){};
+            var si: u32 = pos + 5;
+            while (si < ie) : (si += 1) {
+                indices.append(alloc, words[si]) catch return words;
+            }
+            shuffle_map.put(alloc, result_id, .{ .vec1 = vec1_id, .vec2 = vec2_id, .indices = indices }) catch return words;
+        }
+        pos = ie;
+    }
+
     // Phase 2: Find OpCompositeExtract that can be folded
     var sub_map = std.AutoHashMapUnmanaged(u32, u32){};
     defer sub_map.deinit(alloc);
@@ -4062,6 +4093,38 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
         }
     }
 
+    // Phase 2b: Build shuffle-extract rewrite map
+    var shuffle_extract_map = std.AutoHashMapUnmanaged(u32, struct { composite: u32, index: u32 }){}; // extract_result_id -> (new_composite, new_index)
+    defer shuffle_extract_map.deinit(alloc);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 81 and wc >= 5) { // OpCompositeExtract
+            const result_id = words[pos + 2];
+            const composite_id = words[pos + 3];
+            const index = words[ie - 1];
+            if (shuffle_map.get(composite_id)) |shuffle| {
+                if (index < shuffle.indices.items.len) {
+                    const shuffle_idx = shuffle.indices.items[index];
+                    const vec1_len: u32 = @intCast(shuffle.indices.items.len);
+                    if (shuffle_idx < vec1_len) {
+                        try shuffle_extract_map.put(alloc, result_id, .{ .composite = shuffle.vec1, .index = shuffle_idx });
+                    } else {
+                        try shuffle_extract_map.put(alloc, result_id, .{ .composite = shuffle.vec2, .index = shuffle_idx - vec1_len });
+                    }
+                }
+            }
+        }
+        pos = ie;
+    }
+
     // Phase 3: Apply substitution and remove folded extracts
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
     result.appendSliceAssumeCapacity(words[0..5]);
@@ -4075,10 +4138,21 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
         const ie = pos + wc;
         if (ie > words.len) break;
 
-        // Skip folded extracts
+        // Skip folded extracts (Extract(Construct) -> just use the component)
         if (opcode == 81 and wc >= 5) {
             const result_id = words[pos + 2];
             if (sub_map.contains(result_id)) {
+                pos = ie;
+                continue;
+            }
+            // Rewrite Extract(Shuffle) -> Extract(vec, shuffle_idx)
+            if (shuffle_extract_map.get(result_id)) |rewr| {
+                // OpCompositeExtract: header, result_type, result_id, composite, index
+                result.append(alloc, hdr) catch return words;
+                result.append(alloc, words[pos + 1]) catch return words; // result_type
+                result.append(alloc, result_id) catch return words; // result_id
+                result.append(alloc, rewr.composite) catch return words; // new composite (vec1 or vec2)
+                result.append(alloc, rewr.index) catch return words; // new index
                 pos = ie;
                 continue;
             }
