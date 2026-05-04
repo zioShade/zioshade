@@ -850,6 +850,23 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                         if (opcode == 62 and wc >= 2) { // OpStore
                             const ptr = current_words[pos + 1];
                             if (ptr < current_bound and dead_vars.isSet(ptr)) skip = true;
+                            // Also check if ptr is an AC result from a dead var
+                            if (!skip) {
+                                if (ac_to_root.get(ptr)) |root| {
+                                    if (root < current_bound and dead_vars.isSet(root)) skip = true;
+                                }
+                            }
+                        }
+                        if (opcode == 65 and wc >= 5) { // OpAccessChain
+                            const base = current_words[pos + 3];
+                            // Remove if base is a dead var
+                            if (base < current_bound and dead_vars.isSet(base)) skip = true;
+                            // Also remove if base is an AC result from a dead var
+                            if (!skip) {
+                                if (ac_to_root.get(base)) |root| {
+                                    if (root < current_bound and dead_vars.isSet(root)) skip = true;
+                                }
+                            }
                         }
 
                         if (!skip) {
