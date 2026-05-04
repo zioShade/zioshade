@@ -4252,8 +4252,24 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
                 }
             }
         }
-        // Also CSE OpCompositeConstruct (opcode 80): same (type, constituents) = same result
-        if (opcode == 80 and wc >= 4) { // OpCompositeConstruct
+        // Also CSE OpCompositeConstruct (opcode 80) and pure value operations
+        // Only include operations that are truly pure (no memory interaction)
+        const is_cse_eligible = switch (opcode) {
+            80, // OpCompositeConstruct
+            84, // OpTranspose
+            126, 127, // FNegate, SNegate
+            128, 129, 130, 131, 132, 133, // FAdd, FSub, FMul, FDiv, FMod, ...
+            136, // FDiv
+            142, 143, 144, 145, 146, 147, 148, // Vector/Matrix ops
+            109, 110, 111, 112, // Conversions
+            154, 155, 156, 157, // Derivatives
+            166, 167, 168, 170, 171, // Logical ops
+            169, // Select
+            177, 178, 179, 180, 182, 184, 186, 188, 190, // Comparisons
+            => true,
+            else => false,
+        };
+        if (is_cse_eligible and wc >= 4) {
             const result_id = words[pos + 2]; // result
             const sig_type = words[pos + 1]; // result type
             const sig_operands = words[pos + 3 .. ie]; // constituents
@@ -4311,7 +4327,14 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
         if (ie > words.len) break;
 
         // Skip duplicate AccessChains and SampledImages
-        if ((opcode == 65 and wc >= 4) or (opcode == 86 and wc >= 5) or (opcode == 80 and wc >= 4)) {
+        const is_cse_eligible_2 = switch (opcode) {
+            80, 84, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 143, 144, 145, 146, 147, 148,
+            109, 110, 111, 112, 154, 155, 156, 157, 166, 167, 168, 170, 171, 169,
+            177, 178, 179, 180, 182, 184, 186, 188, 190
+            => true,
+            else => false,
+        };
+        if ((opcode == 65 and wc >= 4) or (opcode == 86 and wc >= 5) or (is_cse_eligible_2 and wc >= 4)) {
             const result_id = words[pos + 2];
             if (sub_map.contains(result_id)) {
                 pos = ie;
