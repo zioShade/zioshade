@@ -5684,3 +5684,164 @@ pub fn elimTrivialEntryPoint(alloc: std.mem.Allocator, words: []const u32) error
     if (compacted.ptr != dced.ptr) alloc.free(dced);
     return compacted;
 }
+
+/// Eliminate identity vector shuffles: OpVectorShuffle(v, v, 0, 1, ..., N-1)
+/// These produce the same vector, so all uses of the result can be replaced with v.
+pub fn elimIdentityShuffle(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 0: Build type map for verifying identity shuffles
+    // Map: result_id -> result_type_id for vector ops
+    var type_map = std.AutoHashMapUnmanaged(u32, u32){}; // id -> type_id
+    defer type_map.deinit(alloc);
+    var tpos: u32 = 5;
+    while (tpos < words.len) {
+        const thdr = words[tpos];
+        const twc: u32 = thdr >> 16;
+        const top: u16 = @truncate(thdr & 0xFFFF);
+        if (twc == 0) break;
+        const tie = tpos + twc;
+        if (tie > words.len) break;
+        if (twc >= 4) {
+            const tinfo = getOpInfo(top) orelse {
+                tpos = tie;
+                continue;
+            };
+            if (tinfo.fixed == 2) {
+                type_map.put(alloc, words[tpos + 2], words[tpos + 1]) catch return words;
+            }
+        }
+        tpos = tie;
+    }
+
+    // Phase 1: Find identity shuffles (same vec twice, indices = 0,1,...,N-1, same type)
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32){}; // shuffle_result -> source_vec
+    defer sub_map.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 79 and wc >= 6) { // OpVectorShuffle
+            const shuffle_type = words[pos + 1];
+            const result_id = words[pos + 2];
+            const vec1 = words[pos + 3];
+            const vec2 = words[pos + 4];
+            if (vec1 == vec2) {
+                // Check if indices are 0, 1, ..., N-1
+                const num_indices = wc - 5;
+                var is_identity = true;
+                var i: u32 = 0;
+                while (i < num_indices) : (i += 1) {
+                    if (words[pos + 5 + i] != i) {
+                        is_identity = false;
+                        break;
+                    }
+                }
+                // Verify shuffle result type matches source vector type
+                if (is_identity) {
+                    const src_type = type_map.get(vec1) orelse 0;
+                    if (src_type != shuffle_type) is_identity = false;
+                }
+                if (is_identity) {
+                    try sub_map.put(alloc, result_id, vec1);
+                }
+            }
+        }
+        pos = ie;
+    }
+
+    if (sub_map.count() == 0) return words;
+
+    // Resolve transitive substitutions
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var it = sub_map.iterator();
+        while (it.next()) |entry| {
+            if (sub_map.get(entry.value_ptr.*)) |resolved| {
+                entry.value_ptr.* = resolved;
+                changed = true;
+            }
+        }
+    }
+
+    // Phase 2: Rewrite - replace all uses and remove identity shuffles
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Skip identity shuffle instructions
+        if (opcode == 79 and wc >= 6) {
+            const result_id = words[pos + 2];
+            if (sub_map.contains(result_id)) {
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Apply substitution to all operands
+        const info = getOpInfo(opcode) orelse {
+            result.append(alloc, hdr) catch return words;
+            var wi: u32 = pos + 1;
+            while (wi < ie) : (wi += 1) {
+                result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+            }
+            pos = ie;
+            continue;
+        };
+
+        result.append(alloc, hdr) catch return words;
+        var wi: u32 = pos + 1;
+        switch (info.fixed) {
+            0 => {},
+            1 => { if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
+            2 => {
+                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+            },
+            3 => { if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
+                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                'I' => { while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; },
+                'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
+                'M' => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; },
+                'W' => { while (wi + 1 < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
+                'E' => { while (wi < ie) { const w = words[wi]; wi += 1; result.append(alloc, w) catch return words; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; },
+                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+            }
+        }
+        while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dced = deadCodeElim(alloc, nw) catch return nw;
+    if (dced.ptr != nw.ptr) alloc.free(nw);
+    const compacted = compactIds(alloc, dced) catch return dced;
+    if (compacted.ptr != dced.ptr) alloc.free(dced);
+    return compacted;
+}
