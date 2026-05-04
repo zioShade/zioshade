@@ -5138,3 +5138,282 @@ for (replacements.items, 0..) |rep, rep_idx| {
     if (compacted.ptr != dced.ptr) alloc.free(dced);
     return compacted;
 }
+
+/// Store-forward extract: when a function-local variable is stored once (whole value)
+/// and then only read via AccessChain + Load (member reads, no whole-variable loads),
+/// replace each AC+Load with OpCompositeExtract from the stored value directly.
+/// This eliminates the OpVariable, OpStore, and all AccessChains.
+pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Build constant map for resolving AC index IDs
+    var const_vals = std.AutoHashMapUnmanaged(u32, u32){};
+    defer const_vals.deinit(alloc);
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 43 and wc >= 4) { // OpConstant
+            try const_vals.put(alloc, words[pos + 2], words[pos + 3]);
+        }
+        pos = ie;
+    }
+
+    // Find function-local variables (any type)
+    var func_var_set = std.AutoHashMapUnmanaged(u32, void){};
+    defer func_var_set.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 59 and wc >= 4 and words[pos + 3] == 7) { // OpVariable Function SC
+            const var_id = words[pos + 2];
+            if (var_id < bound) try func_var_set.put(alloc, var_id, {});
+        }
+        pos = ie;
+    }
+    if (func_var_set.count() == 0) return words;
+
+    // Analyze each variable's usage
+    const MemberRead = struct { ac_id: u32, ac_idx: u32, load_result: u32, load_type: u32 };
+    const VarAnalysis = struct {
+        var_id: u32,
+        stored_val: u32,
+        member_reads: std.ArrayListUnmanaged(MemberRead),
+        ac_positions: std.ArrayListUnmanaged(u32),
+        store_pos: u32,
+        var_pos: u32,
+    };
+    var analyses = std.ArrayListUnmanaged(VarAnalysis){};
+    defer {
+        for (analyses.items) |*a| {
+            a.member_reads.deinit(alloc);
+            a.ac_positions.deinit(alloc);
+        }
+        analyses.deinit(alloc);
+    }
+
+    var fit = func_var_set.iterator();
+    while (fit.next()) |entry| {
+        const var_id = entry.key_ptr.*;
+        var direct_stores: u32 = 0;
+        var stored_val: u32 = 0;
+        var store_pos: u32 = 0;
+        var var_pos: u32 = 0;
+        var whole_loads: u32 = 0;
+
+        // Track AC results into this var
+        var ac_to_var = std.AutoHashMapUnmanaged(u32, void){};
+        defer ac_to_var.deinit(alloc);
+        var ac_positions = std.ArrayListUnmanaged(u32){};
+        defer ac_positions.deinit(alloc);
+
+        // Track loads from AC results: load_result -> (ac_result, ac_index, load_type)
+        var member_reads = std.ArrayListUnmanaged(MemberRead){};
+        defer member_reads.deinit(alloc);
+
+        // Also track if any AC result is used in something other than a load (e.g., store target)
+        var ac_non_load_use: bool = false;
+
+        pos = 5;
+        while (pos < words.len) {
+            const hdr = words[pos];
+            const wc: u32 = hdr >> 16;
+            const opcode: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break;
+            const ie = pos + wc;
+            if (ie > words.len) break;
+
+            if (opcode == 59 and wc >= 4 and words[pos + 2] == var_id) {
+                var_pos = pos;
+            }
+
+            // Direct store to var
+            if (opcode == 62 and wc >= 3 and words[pos + 1] == var_id) {
+                direct_stores += 1;
+                stored_val = words[pos + 2];
+                store_pos = pos;
+            }
+
+            // Whole load of var
+            if (opcode == 61 and wc >= 4 and words[pos + 3] == var_id) {
+                whole_loads += 1;
+            }
+
+            // AccessChain into var (only single-index ACs: result_type, result_id, base, 1_index = 5 words)
+            if (opcode == 65 and wc == 5 and words[pos + 3] == var_id) {
+                try ac_to_var.put(alloc, words[pos + 2], {});
+                try ac_positions.append(alloc, pos);
+            }
+
+            // Store to an AC result of this var (disqualify)
+            if (opcode == 62 and wc >= 3 and ac_to_var.contains(words[pos + 1])) {
+                ac_non_load_use = true;
+            }
+
+            // Load from AC result
+            if (opcode == 61 and wc >= 4 and ac_to_var.contains(words[pos + 3])) {
+                const load_result = words[pos + 2];
+                const load_type = words[pos + 1];
+                const ac_id = words[pos + 3];
+                // Find the AC instruction to get the index
+                const ac_idx = blk: {
+                    var p: u32 = 5;
+                    while (p < words.len) {
+                        const h = words[p];
+                        const w = h >> 16;
+                        const op: u16 = @truncate(h & 0xFFFF);
+                        if (w == 0) break;
+                        const e = p + w;
+                        if (e > words.len) break;
+                        if (op == 65 and w >= 5 and words[p + 2] == ac_id) {
+                            const idx_id = words[p + 4];
+                            break :blk const_vals.get(idx_id) orelse 0xFFFF_FFFF;
+                        }
+                        p = e;
+                    }
+                    break :blk 0xFFFF_FFFF;
+                };
+                if (ac_idx != 0xFFFF_FFFF) {
+                    try member_reads.append(alloc, .{ .ac_id = ac_id, .ac_idx = ac_idx, .load_result = load_result, .load_type = load_type });
+                }
+            }
+
+            pos = ie;
+        }
+
+        // Qualify: exactly 1 direct store, 0 whole loads, all AC results are only loaded, no non-load AC use
+        if (direct_stores == 1 and whole_loads == 0 and !ac_non_load_use and member_reads.items.len > 0) {
+            // Verify: every AC result is accounted for (loaded with known index)
+            var all_ac_loaded = true;
+            var aci = ac_to_var.iterator();
+            while (aci.next()) |ae| {
+                const ac_res = ae.key_ptr.*;
+                var found = false;
+                for (member_reads.items) |mr| {
+                    if (mr.ac_id == ac_res) { found = true; break; }
+                }
+                if (!found) { all_ac_loaded = false; break; }
+            }
+            if (!all_ac_loaded) continue;
+
+            // Copy positions and member reads
+            var my_ac_pos = std.ArrayListUnmanaged(u32){};
+            try my_ac_pos.appendSlice(alloc, ac_positions.items);
+            var my_reads = std.ArrayListUnmanaged(MemberRead){};
+            try my_reads.appendSlice(alloc, member_reads.items);
+
+            try analyses.append(alloc, .{
+                .var_id = var_id,
+                .stored_val = stored_val,
+                .member_reads = my_reads,
+                .ac_positions = my_ac_pos,
+                .store_pos = store_pos,
+                .var_pos = var_pos,
+            });
+        }
+    }
+    if (analyses.items.len == 0) return words;
+
+    // Build removal set and replacement map
+    var remove_set = std.DynamicBitSet.initEmpty(alloc, words.len) catch return words;
+    defer remove_set.deinit();
+
+    const Extract = struct { load_result: u32, load_type: u32, stored_val: u32, ac_idx: u32 };
+    var extracts = std.ArrayListUnmanaged(Extract){};
+    defer extracts.deinit(alloc);
+
+    // Map: load_result -> extracts index
+    var load_result_map = std.AutoHashMapUnmanaged(u32, u32){};
+    defer load_result_map.deinit(alloc);
+
+    for (analyses.items) |a| {
+        remove_set.set(a.var_pos);
+        remove_set.set(a.store_pos);
+        for (a.ac_positions.items) |p| remove_set.set(p);
+        for (a.member_reads.items) |mr| {
+            try extracts.append(alloc, .{
+                .load_result = mr.load_result,
+                .load_type = mr.load_type,
+                .stored_val = a.stored_val,
+                .ac_idx = mr.ac_idx,
+            });
+            try load_result_map.put(alloc, mr.load_result, @intCast(extracts.items.len - 1));
+        }
+    }
+
+    // Build set of load positions to remove (we'll replace the load with extract)
+    // We need to find the load instruction position for each member read
+    var load_positions = std.AutoHashMapUnmanaged(u32, u32){}; // load_result -> load_pos
+    defer load_positions.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 61 and wc >= 4) { // OpLoad
+            const result_id = words[pos + 2];
+            if (load_result_map.contains(result_id)) {
+                try load_positions.put(alloc, result_id, pos);
+            }
+        }
+        pos = ie;
+    }
+
+    // Rewrite
+    var out = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    out.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (remove_set.isSet(pos)) {
+            pos = ie;
+            continue;
+        }
+
+        // Check if this is an OpLoad we should replace with OpCompositeExtract
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (opcode == 61 and wc >= 4) { // OpLoad
+            const result_id = words[pos + 2];
+            if (load_result_map.get(result_id)) |ext_idx| {
+                const ext = extracts.items[ext_idx];
+                // OpCompositeExtract: type, result, composite, index
+                out.append(alloc, (5 << 16) | 81) catch return words; // opcode 81 = OpCompositeExtract
+                out.append(alloc, ext.load_type) catch return words;
+                out.append(alloc, ext.load_result) catch return words;
+                out.append(alloc, ext.stored_val) catch return words;
+                out.append(alloc, ext.ac_idx) catch return words;
+                pos = ie;
+                continue;
+            }
+        }
+
+        out.appendSlice(alloc, words[pos..ie]) catch return words;
+        pos = ie;
+    }
+
+    const nw = out.toOwnedSlice(alloc) catch return words;
+    const dced = deadCodeElim(alloc, nw) catch return nw;
+    if (dced.ptr != nw.ptr) alloc.free(nw);
+    const compacted = compactIds(alloc, dced) catch return dced;
+    if (compacted.ptr != dced.ptr) alloc.free(dced);
+    return compacted;
+}
