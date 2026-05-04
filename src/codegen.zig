@@ -178,8 +178,11 @@ pub fn generate(
     // Scatter-store to CompositeConstruct
     const scattered = compact_ids.scatterStoreToComposite(alloc, const_fwd) catch return const_fwd;
     if (scattered.ptr != const_fwd.ptr) alloc.free(const_fwd);
-    const final_dce = compact_ids.deadCodeElim(alloc, scattered) catch return scattered;
-    if (final_dce.ptr != scattered.ptr) alloc.free(scattered);
+    // Store-forward extract: replace store+AC+load with CompositeExtract
+    const forwarded = compact_ids.storeForwardExtract(alloc, scattered) catch return scattered;
+    if (forwarded.ptr != scattered.ptr) alloc.free(scattered);
+    const final_dce = compact_ids.deadCodeElim(alloc, forwarded) catch return forwarded;
+    if (final_dce.ptr != forwarded.ptr) alloc.free(forwarded);
     const final_retarget = compact_ids.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
     if (final_retarget.ptr != final_dce.ptr) alloc.free(final_dce);
     const final_compact = compact_ids.compactIds(alloc, final_retarget) catch return final_retarget;
