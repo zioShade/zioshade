@@ -1,30 +1,29 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 211/211 spirv-val, 0 mismatches, 0 failures
-## Current: 7456 total_bound across 211 shaders
-## Previous: 198 shaders / 6827 bound
+## Current: 7452 total_bound across 211 shaders
 
-## SESSION 8 FIXES:
-- constStoreForward: forward constant stores to func-local vars across blocks (-7 IDs)
-- Fixed 'W' (OpSwitch) operand handling: post-increment not pre-increment
-- Fixed entry-block CSE detection: include full entry block (not just up to first non-Label)
-- Expanded test set from 198 to 211 shaders (13 more pass spirv-val)
-- Regenerated ref_classification.txt (cache was accidentally deleted)
+## SESSION 9 CHANGES:
+- Extended store forwarding to non-constant 1-store-1-load vars (-4 IDs)
+- Fixed memory leak in constStoreForward
+- Analyzed remaining 43 function-local vars — all multi-store or AC-used
 
 ## EXHAUSTED APPROACHES (0 IDs saved):
 - OpVectorShuffle CSE: 0 (all dups in different non-entry blocks)
-- Extra pipeline iteration: 0
-- Duplicate types/consts: 0 (compactIds handles)
+- Duplicate types: 0 (compactIds handles)
 - Extract(Construct) fold: 0 (already fully folded)
+- Dead OpUndef: 0 (all used, DCE handles)
+- Redundant stores: 0 (all eliminated)
+- Duplicate types: 0 (compactIds handles)
 
 ## REMAINING OPPORTUNITIES (HIGH EFFORT):
 1. Multi-block function inlining (~50 IDs, VERY HIGH effort)
-   - Only a few shaders affected
-   - Requires: clone body, rewrite branch targets, handle merge/loop
+   - 8 remaining function calls in 2 shaders
+   - Functions have loops/switches (multi-block control flow)
    
 2. SSA conversion for remaining loop variables (~30 IDs, HIGH effort)
-   - 45 function-local vars remain, most are loop counters
-   - Some loop counters already converted to OpPhi
+   - 43 function-local vars remain, all multi-store
+   - Many are loop counters with store-load patterns
    
 3. Better codegen: emit fewer temporaries
    - Emit values directly instead of store+load patterns
@@ -34,6 +33,9 @@
    - VectorShuffle dups in generate_height.comp
    - Requires dominance analysis between sibling blocks
 
-## MEMORY LEAKS:
-- constStoreForward leaks memory (small leak per shader)
-- Need to fix ArrayList cleanup in error paths
+## ANALYSIS NOTES:
+- 0 same-block 1-store-1-load vars remaining
+- 0 entry-store-only multi-load vars remaining
+- 0 dead decorations (OpDecorate on undefined IDs) affect bound
+- Top shaders by bound: ocean.vert(183), ground.vert(163), generate_height.comp(111)
+- Remaining 43 func-local vars: all require complex analysis
