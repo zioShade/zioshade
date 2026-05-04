@@ -4608,5 +4608,9 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
         pos = ie;
     }
 
-    return result.toOwnedSlice(alloc) catch return words;
+    const result_owned = result.toOwnedSlice(alloc) catch {
+        result.deinit(alloc);
+        return words;
+    };
+    return result_owned;
 }
