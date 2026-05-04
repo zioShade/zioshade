@@ -3822,8 +3822,31 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
     if (readonly_vars.count() == 0) return words;
 
+    // Phase 1b: Also identify AccessChain results from read-only variables.
+    var readonly_ac = std.AutoHashMapUnmanaged(u32, void){};
+    defer readonly_ac.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 65 and wc >= 5) { // OpAccessChain
+            const ac_result = words[pos + 2];
+            const base_ptr = words[pos + 3];
+            if (base_ptr < bound and readonly_vars.isSet(base_ptr)) {
+                if (ac_result < bound) try readonly_ac.put(alloc, ac_result, {});
+            } else if (readonly_ac.contains(base_ptr)) {
+                if (ac_result < bound) try readonly_ac.put(alloc, ac_result, {});
+            }
+        }
+        pos = ie;
+    }
+
     // Phase 2: Build substitution map for redundant loads
-    // Track first load result per read-only var, per function
+    // Track first load result per read-only var/AC, per function
     var sub_map = std.AutoHashMapUnmanaged(u32, u32){}; // redundant_load_result -> first_load_result
     defer sub_map.deinit(alloc);
 
@@ -3855,7 +3878,8 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 if (fop == 61 and fwc >= 4) { // OpLoad
                     const result_id = words[fp + 2];
                     const ptr = words[fp + 3];
-                    if (ptr < bound and readonly_vars.isSet(ptr)) {
+                    const is_readonly = (ptr < bound and readonly_vars.isSet(ptr)) or readonly_ac.contains(ptr);
+                    if (is_readonly) {
                         if (first_loads.get(ptr)) |first_result| {
                             try sub_map.put(alloc, result_id, first_result);
                         } else {
