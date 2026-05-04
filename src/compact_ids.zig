@@ -4433,13 +4433,18 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
         }
     }
 
-    // Phase 2: Find qualifying function-local vars (1 store of constant, no unsafe uses)
+    // Phase 2: Find qualifying function-local vars
     var func_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
     defer func_vars.deinit();
     var store_count = std.AutoHashMapUnmanaged(u32, u32){};
     defer store_count.deinit(alloc);
+    var load_count = std.AutoHashMapUnmanaged(u32, u32){};
+    defer load_count.deinit(alloc);
     var const_store_val = std.AutoHashMapUnmanaged(u32, u32){};
     defer const_store_val.deinit(alloc);
+    // Also track non-constant 1-store vars for 1-load forwarding
+    var single_store_val = std.AutoHashMapUnmanaged(u32, u32){}; // var_id -> store_value (for 1-store vars)
+    defer single_store_val.deinit(alloc);
     var unsafe_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
     defer unsafe_vars.deinit();
 
@@ -4467,6 +4472,18 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
                     } else {
                         _ = const_store_val.remove(ptr);
                     }
+                    if (entry.value_ptr.* == 1 and val >= 1 and val < bound) {
+                        try single_store_val.put(alloc, ptr, val);
+                    } else {
+                        _ = single_store_val.remove(ptr);
+                    }
+                }
+            }
+            if (opcode == 61 and wc >= 4) {
+                const ptr = words[pos + 3];
+                if (ptr >= 1 and ptr < bound and func_vars.isSet(ptr)) {
+                    const entry = try load_count.getOrPutValue(alloc, ptr, 0);
+                    entry.value_ptr.* += 1;
                 }
             }
             if (opcode == 65 and wc >= 5 and words[pos + 3] < bound and func_vars.isSet(words[pos + 3])) {
@@ -4492,7 +4509,7 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
         pos = ie;
     }
 
-    // Filter qualifying vars
+    // Filter qualifying vars: constant-store or 1-store-1-load non-constant
     {
         var it = const_store_val.keyIterator();
         var to_remove = std.ArrayList(u32).initCapacity(alloc, 16) catch return words;
@@ -4506,6 +4523,21 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
         }
         for (to_remove.items) |vid| {
             _ = const_store_val.remove(vid);
+            _ = single_store_val.remove(vid);
+        }
+    }
+    // Also add 1-store-1-load non-constant vars (not already in const_store_val)
+    {
+        var it = single_store_val.iterator();
+        while (it.next()) |entry| {
+            const vid = entry.key_ptr.*;
+            const val = entry.value_ptr.*;
+            const sc = store_count.get(vid) orelse 0;
+            const lc = load_count.get(vid) orelse 0;
+            // Only add if: 1 store, exactly 1 load, no unsafe uses, not already in const_store_val
+            if (sc == 1 and lc == 1 and !unsafe_vars.isSet(vid) and !const_store_val.contains(vid)) {
+                const_store_val.put(alloc, vid, val) catch {};
+            }
         }
     }
 
