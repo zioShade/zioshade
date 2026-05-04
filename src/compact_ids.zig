@@ -1749,6 +1749,183 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
 
 /// Block merging: when block A ends with OpBranch %B and B has exactly one predecessor (A),
 /// merge B into A by appending B's instructions (minus the label) to A.
+pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Build set of protected labels (referenced by OpPhi, LoopMerge, SelectionMerge, OpName)
+    var protected = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer protected.deinit();
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        switch (opcode) {
+            245 => { // OpPhi: type, result, (value, parent)+
+                var pi: u32 = pos + 3;
+                while (pi + 1 < ie) : (pi += 2) {
+                    const p = words[pi + 1];
+                    if (p >= 1 and p < bound) protected.set(p);
+                }
+            },
+            246 => { // OpLoopMerge: merge, continue, control
+                if (words[pos + 1] >= 1 and words[pos + 1] < bound) protected.set(words[pos + 1]);
+                if (wc >= 4 and words[pos + 2] >= 1 and words[pos + 2] < bound) protected.set(words[pos + 2]);
+            },
+            247 => { // OpSelectionMerge: merge, control
+                if (words[pos + 1] >= 1 and words[pos + 1] < bound) protected.set(words[pos + 1]);
+            },
+            5 => { // OpName: target may be a label
+                if (words[pos + 1] >= 1 and words[pos + 1] < bound) protected.set(words[pos + 1]);
+            },
+            else => {},
+        }
+        pos = ie;
+    }
+
+    // Phase 2: Find empty passthrough blocks (OpLabel + OpBranch only, not protected)
+    var empty_targets = std.AutoHashMapUnmanaged(u32, u32){}; // label -> branch target
+    defer empty_targets.deinit(alloc);
+
+    pos = 5;
+    var cur_label: u32 = 0;
+    var inst_count: u32 = 0;
+    var has_branch: bool = false;
+    var branch_target: u32 = 0;
+
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 248 and wc >= 2) { // OpLabel
+            if (cur_label != 0 and inst_count == 2 and has_branch) {
+                if (!protected.isSet(cur_label)) {
+                    empty_targets.put(alloc, cur_label, branch_target) catch {};
+                }
+            }
+            cur_label = words[pos + 1];
+            inst_count = 1;
+            has_branch = false;
+            branch_target = 0;
+        } else if (opcode == 56) { // OpFunctionEnd
+            if (cur_label != 0 and inst_count == 2 and has_branch) {
+                if (!protected.isSet(cur_label)) {
+                    empty_targets.put(alloc, cur_label, branch_target) catch {};
+                }
+            }
+            cur_label = 0;
+        } else if (cur_label != 0) {
+            inst_count += 1;
+            if (opcode == 249 and wc >= 2) {
+                has_branch = true;
+                branch_target = words[pos + 1];
+            }
+            if (opcode == 253 or opcode == 254 or opcode == 255) {
+                has_branch = false;
+            }
+        }
+        pos = ie;
+    }
+    if (cur_label != 0 and inst_count == 2 and has_branch) {
+        if (!protected.isSet(cur_label)) {
+            empty_targets.put(alloc, cur_label, branch_target) catch {};
+        }
+    }
+
+    // Resolve chains
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var it = empty_targets.iterator();
+        while (it.next()) |entry| {
+            if (empty_targets.get(entry.value_ptr.*)) |ult| {
+                if (entry.value_ptr.* != ult) {
+                    entry.value_ptr.* = ult;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if (empty_targets.count() == 0) return words;
+
+    // Phase 3: Rewrite — retarget branches, skip empty blocks
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    var to_remove = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer to_remove.deinit();
+    var ki = empty_targets.keyIterator();
+    while (ki.next()) |k| to_remove.set(k.*);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 248 and wc >= 2) { // OpLabel
+            const lid = words[pos + 1];
+            if (to_remove.isSet(lid)) {
+                // Skip label + following OpBranch
+                pos = ie;
+                if (pos < words.len) {
+                    const h2 = words[pos]; const w2 = h2 >> 16; const o2: u16 = @truncate(h2 & 0xFFFF);
+                    if (o2 == 249) pos += w2;
+                }
+                continue;
+            }
+        }
+
+        // Retarget OpBranch
+        if (opcode == 249 and wc >= 2) {
+            const t = empty_targets.get(words[pos + 1]) orelse words[pos + 1];
+            result.append(alloc, hdr) catch return words;
+            result.append(alloc, t) catch return words;
+            pos = ie;
+            continue;
+        }
+        // Retarget OpBranchConditional
+        if (opcode == 250 and wc >= 4) {
+            result.appendSlice(alloc, words[pos..pos+2]) catch return words; // header + condition
+            result.append(alloc, empty_targets.get(words[pos+2]) orelse words[pos+2]) catch return words;
+            result.append(alloc, empty_targets.get(words[pos+3]) orelse words[pos+3]) catch return words;
+            if (wc > 4) result.appendSlice(alloc, words[pos+4..ie]) catch return words;
+            pos = ie;
+            continue;
+        }
+        // Retarget OpSwitch (opcode 251)
+        if (opcode == 251 and wc >= 3) {
+            result.appendSlice(alloc, words[pos..pos+2]) catch return words; // header + selector
+            result.append(alloc, empty_targets.get(words[pos+2]) orelse words[pos+2]) catch return words; // default
+            var si: u32 = pos + 3;
+            while (si + 1 < ie) : (si += 2) {
+                result.append(alloc, words[si]) catch return words; // literal
+                result.append(alloc, empty_targets.get(words[si+1]) orelse words[si+1]) catch return words;
+            }
+            pos = ie;
+            continue;
+        }
+
+        result.appendSlice(alloc, words[pos..ie]) catch return words;
+        pos = ie;
+    }
+
+    return result.toOwnedSlice(alloc) catch return words;
+}
+
+
 pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
     const bound = words[3];
     if (bound <= 1) return words;
