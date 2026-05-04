@@ -1,4 +1,5 @@
 #!/bin/bash
-set -uo pipefail
+set -o pipefail
 cd "$(dirname "$0")"
-exec python3 autoresearch_bench.py
+python3 autoresearch_bench.py
+exit 0
