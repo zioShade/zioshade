@@ -14,6 +14,14 @@
 - OpLine: 0
 - NoContraction: 0
 - Pipeline fully converged: second round of passes saves 0 IDs
+- Constant folding: 5 foldable ops but none save IDs (product constants don't exist)
+- Cross-block SampledImage dups: 0
+- Cross-block pure op dups: 0
+- Store-then-load pairs: 0
+- FAdd(x,x): 2 but no savings (same instruction count)
+- Beat spirv-opt -O on ALL 211 shaders (total: 7426 vs 7751)
+- Beat glslang on ALL comparable shaders
+- 1 expected compile failure (line-directive.line.asm.frag - assembly directives)
 
 ## EXHAUSTED APPROACHES (0 IDs saved):
 - Dead function elimination: 0 (all functions are entry points or called)
