@@ -4403,3 +4403,207 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
 }
+
+/// Forward constant stores to function-local variables.
+/// If a func-local var is stored exactly once with a constant value,
+/// and has no unsafe uses, replace all loads with the constant and
+/// remove the var + store. Does NOT run DCE — caller should do that.
+pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Collect constant result IDs (OpConstantTrue/False/Constant/ConstantComposite)
+    var const_ids = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer const_ids.deinit();
+    {
+        var p: u32 = 5;
+        while (p < words.len) {
+            const hdr = words[p]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break;
+            const ie = p + wc;
+            if (ie > words.len) break;
+            if ((opcode == 41 or opcode == 42 or opcode == 43 or opcode == 44) and wc >= 3) {
+                const rid = words[p + 2];
+                if (rid >= 1 and rid < bound) const_ids.set(rid);
+            }
+            p = ie;
+        }
+    }
+
+    // Phase 2: Find qualifying function-local vars (1 store of constant, no unsafe uses)
+    var func_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer func_vars.deinit();
+    var store_count = std.AutoHashMapUnmanaged(u32, u32){};
+    defer store_count.deinit(alloc);
+    var const_store_val = std.AutoHashMapUnmanaged(u32, u32){};
+    defer const_store_val.deinit(alloc);
+    var unsafe_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer unsafe_vars.deinit();
+
+    var in_func = false;
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 54) in_func = true;
+        if (opcode == 56) in_func = false;
+        if (in_func) {
+            if (opcode == 59 and wc >= 4 and words[pos + 3] == 7) {
+                const vid = words[pos + 2];
+                if (vid >= 1 and vid < bound) func_vars.set(vid);
+            }
+            if (opcode == 62 and wc >= 3) {
+                const ptr = words[pos + 1]; const val = words[pos + 2];
+                if (ptr >= 1 and ptr < bound and func_vars.isSet(ptr)) {
+                    const entry = try store_count.getOrPutValue(alloc, ptr, 0);
+                    entry.value_ptr.* += 1;
+                    if (entry.value_ptr.* == 1 and val >= 1 and val < bound and const_ids.isSet(val)) {
+                        try const_store_val.put(alloc, ptr, val);
+                    } else {
+                        _ = const_store_val.remove(ptr);
+                    }
+                }
+            }
+            if (opcode == 65 and wc >= 5 and words[pos + 3] < bound and func_vars.isSet(words[pos + 3])) {
+                unsafe_vars.set(words[pos + 3]);
+            }
+            if (opcode == 37 and wc >= 3) {
+                if (words[pos + 1] < bound and func_vars.isSet(words[pos + 1])) unsafe_vars.set(words[pos + 1]);
+                if (words[pos + 2] < bound and func_vars.isSet(words[pos + 2])) unsafe_vars.set(words[pos + 2]);
+            }
+            if (opcode == 12 and wc >= 6) {
+                var ei: u32 = pos + 5;
+                while (ei < ie) : (ei += 1) {
+                    if (words[ei] < bound and func_vars.isSet(words[ei])) unsafe_vars.set(words[ei]);
+                }
+            }
+            if (opcode == 57 and wc >= 5) {
+                var ai: u32 = pos + 4;
+                while (ai < ie) : (ai += 1) {
+                    if (words[ai] < bound and func_vars.isSet(words[ai])) unsafe_vars.set(words[ai]);
+                }
+            }
+        }
+        pos = ie;
+    }
+
+    // Filter qualifying vars
+    {
+        var it = const_store_val.keyIterator();
+        var to_remove = std.ArrayList(u32).initCapacity(alloc, 16) catch return words;
+        defer to_remove.deinit(alloc);
+        while (it.next()) |kp| {
+            const vid = kp.*;
+            const sc = store_count.get(vid) orelse 0;
+            if (sc != 1 or unsafe_vars.isSet(vid)) {
+                to_remove.append(alloc, vid) catch {};
+            }
+        }
+        for (to_remove.items) |vid| {
+            _ = const_store_val.remove(vid);
+        }
+    }
+
+    if (const_store_val.count() == 0) return words;
+
+    // Phase 3: Build load result -> const value substitution map
+    var load_fwd = std.AutoHashMapUnmanaged(u32, u32){};
+    defer load_fwd.deinit(alloc);
+    var vars_to_remove = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer vars_to_remove.deinit();
+    {
+        var kit = const_store_val.keyIterator();
+        while (kit.next()) |k| vars_to_remove.set(k.*);
+    }
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 61 and wc >= 4) {
+            const ptr = words[pos + 3];
+            if (ptr < bound and vars_to_remove.isSet(ptr)) {
+                try load_fwd.put(alloc, words[pos + 2], const_store_val.get(ptr).?);
+            }
+        }
+        pos = ie;
+    }
+
+    if (load_fwd.count() == 0) return words;
+
+    // Phase 4: Rewrite — skip var/store/load for qualifying vars, substitute load results
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Skip OpVariable/OpStore/OpLoad for qualifying vars
+        if (opcode == 59 and wc >= 3 and words[pos + 2] < bound and vars_to_remove.isSet(words[pos + 2])) { pos = ie; continue; }
+        if (opcode == 62 and wc >= 3 and words[pos + 1] < bound and vars_to_remove.isSet(words[pos + 1])) { pos = ie; continue; }
+        if (opcode == 61 and wc >= 4 and words[pos + 3] < bound and vars_to_remove.isSet(words[pos + 3])) { pos = ie; continue; }
+
+        // Apply substitution using getOpInfo
+        const info = getOpInfo(opcode);
+        if (info) |inf| {
+            result.append(alloc, hdr) catch return words;
+            var wi: u32 = pos + 1;
+            const fixed = inf.fixed;
+            switch (fixed) {
+                1 => { if (wi < ie) { result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
+                2 => {
+                    if (wi < ie) { result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+                    if (wi < ie) { result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+                },
+                else => { var fi: u32 = 0; while (fi < fixed and wi < ie) : ({fi += 1; wi += 1;}) result.append(alloc, words[wi]) catch return words; },
+            }
+            const ops = inf.ops;
+            var ci: usize = 0;
+            while (ci < ops.len and wi < ie) : (ci += 1) {
+                const ch = ops[ci];
+                switch (ch) {
+                    'i' => { result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
+                    'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                    'I' => { while (wi < ie) : (wi += 1) result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words; },
+                    'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
+                    'M' => {
+                        if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                        while (wi < ie) : (wi += 1) result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words;
+                    },
+                    'W' => {
+                        while (wi + 1 < ie) {
+                            result.append(alloc, words[wi]) catch return words; wi += 1;
+                            result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words; wi += 1;
+                        }
+                        if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    },
+                    'E' => {
+                        while (wi < ie) {
+                            const w = words[wi]; wi += 1;
+                            result.append(alloc, w) catch return words;
+                            if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                        }
+                        while (wi < ie) : (wi += 1) result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words;
+                    },
+                    else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                }
+            }
+            // Remaining words (shouldn't happen for well-formed instructions)
+            while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+        } else {
+            // Unknown opcode — pass through unchanged
+            result.appendSlice(alloc, words[pos..ie]) catch return words;
+        }
+        pos = ie;
+    }
+
+    return result.toOwnedSlice(alloc) catch return words;
+}

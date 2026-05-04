@@ -170,8 +170,11 @@ pub fn generate(
     // Eliminate uninit vars (loaded but never stored)
     const no_uninit = compact_ids.elimUninitVars(alloc, folded_ce) catch return folded_ce;
     if (no_uninit.ptr != folded_ce.ptr) alloc.free(folded_ce);
-    const final_dce = compact_ids.deadCodeElim(alloc, no_uninit) catch return no_uninit;
-    if (final_dce.ptr != no_uninit.ptr) alloc.free(no_uninit);
+    // Forward constant stores to function-local vars
+    const const_fwd = compact_ids.constStoreForward(alloc, no_uninit) catch return no_uninit;
+    if (const_fwd.ptr != no_uninit.ptr) alloc.free(no_uninit);
+    const final_dce = compact_ids.deadCodeElim(alloc, const_fwd) catch return const_fwd;
+    if (final_dce.ptr != const_fwd.ptr) alloc.free(const_fwd);
     const final_retarget = compact_ids.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
     if (final_retarget.ptr != final_dce.ptr) alloc.free(final_dce);
     const final_compact = compact_ids.compactIds(alloc, final_retarget) catch return final_retarget;
