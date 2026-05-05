@@ -67,7 +67,9 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         55 => rt(2, ""),           // OpFunctionParameter
         56 => rt(0, ""),           // OpFunctionEnd
         57 => rt(2, "iI"),         // OpFunctionCall: func, args...
-        // --- Memory ---
+        // 37 = OpCopyMemory: NO result. Target <id>, Source <id> [Memory Operands]
+        37 => rt(0, "iiL"),        // OpCopyMemory: target, source, optional-mem-access
+        38 => rt(0, "iiiL"),       // OpCopyMemorySized: target, source, size, optional-mem-access
         59 => rt(2, "li"),         // OpVariable: sc, optional-init-id
         60 => rt(2, "iiI"),        // OpImageTexelPointer
         61 => rt(2, "iL"),          // OpLoad: ptr, optional-mem-access-literals
@@ -6156,4 +6158,125 @@ pub fn elimDeadVarStores(alloc: std.mem.Allocator, words: []const u32) error{Out
         pos = ie;
     }
     return result2.toOwnedSlice(alloc) catch return words;
+}
+
+/// Replace OpLoad + OpStore (where load result is used only in the store) with OpCopyMemory.
+/// This saves 1 ID per copy (the load result ID is eliminated).
+pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find OpLoad instructions whose result is used exactly once in an OpStore
+    var load_info = std.AutoHashMapUnmanaged(u32, struct { pos: u32, src_ptr: u32, store_pos: u32, dst_ptr: u32 }){};
+    defer load_info.deinit(alloc);
+
+    // First pass: collect load result IDs and their usage count
+    var load_positions = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> pos
+    defer load_positions.deinit(alloc);
+    var use_count = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> count
+    defer use_count.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 61 and wc >= 4) { // OpLoad
+            const rid = words[pos + 2];
+            if (rid > 0 and rid < bound) {
+                try load_positions.put(alloc, rid, pos);
+                try use_count.put(alloc, rid, 0);
+            }
+        }
+        pos = ie;
+    }
+
+    if (load_positions.count() == 0) return words;
+
+    // Count uses of each load result (excluding the OpLoad instruction itself)
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        // Skip OpLoad instructions (we don't count the definition as a use)
+        if (opcode != 61) {
+            var wi: u32 = pos + 1;
+            while (wi < ie) : (wi += 1) {
+                if (words[wi] > 0 and words[wi] < bound) {
+                    if (use_count.getPtr(words[wi])) |cnt| {
+                        cnt.* += 1;
+                    }
+                }
+            }
+        }
+        pos = ie;
+    }
+
+    // Phase 2: Find loads used exactly once, and that use is in an OpStore
+    // Build a map: store_pos -> (load_pos, src_ptr, dst_ptr)
+    var replacements = std.AutoHashMapUnmanaged(u32, struct { load_pos: u32, src_ptr: u32 }){}; // store_pos -> load_info
+    defer replacements.deinit(alloc);
+    var dead_loads = std.AutoHashMapUnmanaged(u32, void){}; // load pos to skip
+    defer dead_loads.deinit(alloc);
+
+    // For each load with exactly 1 use, find the OpStore that uses it
+    var li = load_positions.iterator();
+    while (li.next()) |entry| {
+        const rid = entry.key_ptr.*;
+        const lpos = entry.value_ptr.*;
+        const cnt = use_count.get(rid) orelse 0;
+        if (cnt != 1) continue;
+
+        const src_ptr = words[lpos + 3]; // OpLoad: type, result, ptr
+
+        // Find the OpStore that uses this value
+        pos = 5;
+        while (pos < words.len) {
+            const wc2: u32 = words[pos] >> 16;
+            const opcode2: u16 = @truncate(words[pos] & 0xFFFF);
+            if (wc2 == 0) break;
+            const ie2 = pos + wc2;
+            if (ie2 > words.len) break;
+            if (opcode2 == 62 and wc2 >= 3) { // OpStore
+                const dst_ptr = words[pos + 1];
+                const stored_val = words[pos + 2];
+                if (stored_val == rid) {
+                    // Don't replace self-copies (Load(X) -> Store(X))
+                    if (dst_ptr == src_ptr) break;
+                    try replacements.put(alloc, pos, .{ .load_pos = lpos, .src_ptr = src_ptr });
+                    try dead_loads.put(alloc, lpos, {});
+                    break;
+                }
+            }
+            pos = ie2;
+        }
+    }
+
+    if (replacements.count() == 0) return words;
+
+    // Phase 3: Rewrite - remove dead loads, keep stores unchanged
+    var result3 = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result3.appendSliceAssumeCapacity(words[0..5]);
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Skip dead loads
+        if (dead_loads.contains(pos)) {
+            pos = ie;
+            continue;
+        }
+
+        result3.appendSliceAssumeCapacity(words[pos..ie]);
+        pos = ie;
+    }
+    return result3.toOwnedSlice(alloc) catch return words;
 }
