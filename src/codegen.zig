@@ -235,7 +235,24 @@ pub fn generate(
     if (dce5.ptr != copy_mem.ptr) alloc.free(copy_mem);
     const final_compact3 = compact_ids.compactIds(alloc, dce5) catch return dce5;
     if (final_compact3.ptr != dce5.ptr) alloc.free(dce5);
-    return final_compact3;
+    // Fifth round: try redundant loads + CSE + identity stores + copyMemory after copyMemoryOpt
+    const no_rle5 = compact_ids.elimRedundantLoads(alloc, final_compact3) catch return final_compact3;
+    if (no_rle5.ptr != final_compact3.ptr) alloc.free(final_compact3);
+    const cse5 = compact_ids.cseWithinBlocks(alloc, no_rle5) catch return no_rle5;
+    if (cse5.ptr != no_rle5.ptr) alloc.free(no_rle5);
+    const dce6 = compact_ids.deadCodeElim(alloc, cse5) catch return cse5;
+    if (dce6.ptr != cse5.ptr) alloc.free(cse5);
+    const compact6 = compact_ids.compactIds(alloc, dce6) catch return dce6;
+    if (compact6.ptr != dce6.ptr) alloc.free(dce6);
+    const no_id_stores3 = compact_ids.elimIdentityStores(alloc, compact6) catch return compact6;
+    if (no_id_stores3.ptr != compact6.ptr) alloc.free(compact6);
+    const copy_mem2 = compact_ids.copyMemoryOpt(alloc, no_id_stores3) catch return no_id_stores3;
+    if (copy_mem2.ptr != no_id_stores3.ptr) alloc.free(no_id_stores3);
+    const dce7 = compact_ids.deadCodeElim(alloc, copy_mem2) catch return copy_mem2;
+    if (dce7.ptr != copy_mem2.ptr) alloc.free(copy_mem2);
+    const final_compact4 = compact_ids.compactIds(alloc, dce7) catch return dce7;
+    if (final_compact4.ptr != dce7.ptr) alloc.free(dce7);
+    return final_compact4;
 }
 
 const Codegen = struct {
