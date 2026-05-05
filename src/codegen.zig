@@ -187,10 +187,9 @@ pub fn generate(
     // Store-forward extract: replace store+AC+load with CompositeExtract
     const forwarded = compact_ids.storeForwardExtract(alloc, scattered) catch return scattered;
     if (forwarded.ptr != scattered.ptr) alloc.free(scattered);
-    // Second round of constFold after store forwarding may expose new constants
+    // Second round: constFold + foldCE after store forwarding exposes new patterns
     const cf2 = compact_ids.constFold(alloc, forwarded) catch forwarded;
     if (cf2.ptr != forwarded.ptr) alloc.free(forwarded);
-    // Second foldCompositeExtract after forwarding may expose new extract patterns
     const folded_ce2 = compact_ids.foldCompositeExtract(alloc, cf2) catch cf2;
     if (folded_ce2.ptr != cf2.ptr) alloc.free(cf2);
     const final_dce = compact_ids.deadCodeElim(alloc, folded_ce2) catch return folded_ce2;
