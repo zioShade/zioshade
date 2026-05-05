@@ -98,20 +98,34 @@ def get_output_stores(dis):
     buf_count = 0
     for l in dis.split('\n'):
         l = l.strip()
-        if 'OpStore' not in l:
-            continue
-        m = re.search(r'OpStore\s+%(\w+)', l)
-        if m:
-            vid = m.group(1)
-            if vid in out_vars:
-                out_count += 1
-            elif vid in buf_vars:
-                buf_count += 1
-            elif vid in ac_targets:
-                if ac_targets[vid] == 'out':
+        # Count OpStore
+        if 'OpStore' in l:
+            m = re.search(r'OpStore\s+%(\w+)', l)
+            if m:
+                vid = m.group(1)
+                if vid in out_vars:
                     out_count += 1
-                else:
+                elif vid in buf_vars:
                     buf_count += 1
+                elif vid in ac_targets:
+                    if ac_targets[vid] == 'out':
+                        out_count += 1
+                    else:
+                        buf_count += 1
+        # Count OpCopyMemory as equivalent to OpStore for the target
+        if 'OpCopyMemory' in l:
+            m = re.search(r'OpCopyMemory\s+%(\w+)', l)
+            if m:
+                vid = m.group(1)
+                if vid in out_vars:
+                    out_count += 1
+                elif vid in buf_vars:
+                    buf_count += 1
+                elif vid in ac_targets:
+                    if ac_targets[vid] == 'out':
+                        out_count += 1
+                    else:
+                        buf_count += 1
     
     return out_count, buf_count
 
