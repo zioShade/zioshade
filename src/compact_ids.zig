@@ -7033,3 +7033,304 @@ pub fn elimDeadFunctions(alloc: std.mem.Allocator, words: []const u32) error{Out
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
 }
+
+/// Hoist invariant AccessChain instructions from branch targets to the header block.
+/// When an OpSelectionMerge + OpBranchConditional creates sibling blocks,
+/// and two or more targets contain ACs with identical (result_type, base, indices),
+/// hoist one AC to the header block (before OpSelectionMerge) and replace
+/// all duplicates with the hoisted result. Saves (N-1) IDs per pattern.
+pub fn hoistInvariantACs(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Find all OpSelectionMerge + OpBranchConditional pairs
+    // and check if their targets have matching ACs
+    const HoistTarget = struct {
+        merge_pos: u32,      // position of OpSelectionMerge
+        branch_pos: u32,     // position of OpBranchConditional
+        header_end: u32,     // end of header block (position of SelectionMerge)
+        ac_result: u32,      // result ID of the hoisted AC (reuse one from a target)
+        ac_result_type: u32, // result type
+        ac_base: u32,        // base operand
+        ac_indices_start: u32, // start index in indices_buf
+        ac_indices_len: u32,   // number of indices
+        dup_results: []u32,    // AC result IDs to replace with ac_result
+    };
+
+    var targets = std.ArrayListUnmanaged(HoistTarget){};
+    defer targets.deinit(alloc);
+    var indices_buf = std.ArrayListUnmanaged(u32){};
+    defer indices_buf.deinit(alloc);
+    var dup_buf = std.ArrayListUnmanaged(u32){};
+    defer dup_buf.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Look for OpSelectionMerge (opcode 247)
+        if (opcode == 247 and wc >= 3) {
+            // Next instruction should be OpBranchConditional (opcode 250)
+            const next_pos = ie;
+            if (next_pos < words.len) {
+                const next_hdr = words[next_pos];
+                const next_wc: u32 = next_hdr >> 16;
+                const next_op: u16 = @truncate(next_hdr & 0xFFFF);
+                const next_ie = next_pos + next_wc;
+                if (next_op == 250 and next_wc >= 4 and next_ie <= words.len) {
+                    // OpBranchConditional: cond, true_label, false_label [,weights]
+                    const true_label = words[next_pos + 2];
+                    const false_label = words[next_pos + 3];
+
+                    // Find ACs in the true and false blocks
+                    // True block starts at the OpLabel with true_label
+                    // False block starts at the OpLabel with false_label
+                    const TrueFalseACs = struct { result: u32, result_type: u32, base: u32, idx_start: u32, idx_len: u32 };
+                    var true_acs = std.ArrayListUnmanaged(TrueFalseACs){};
+                    defer true_acs.deinit(alloc);
+                    var false_acs = std.ArrayListUnmanaged(TrueFalseACs){};
+                    defer false_acs.deinit(alloc);
+
+                    // Scan for blocks after the branch
+                    var bp: u32 = next_ie;
+                    while (bp < words.len) {
+                        const bh = words[bp];
+                        const bwc: u32 = bh >> 16;
+                        const bop: u16 = @truncate(bh & 0xFFFF);
+                        if (bwc == 0) break;
+                        const bie = bp + bwc;
+                        if (bie > words.len) break;
+                        if (bop == 56) break; // OpFunctionEnd
+
+                        if (bop == 248 and bwc >= 2) { // OpLabel
+                            const block_id = words[bp + 1];
+                            const is_true = (block_id == true_label);
+                            const is_false = (block_id == false_label);
+                            if (is_true or is_false) {
+                                // Scan instructions in this block until next OpLabel or OpFunctionEnd
+                                var ip: u32 = bie;
+                                while (ip < words.len) {
+                                    const ih = words[ip];
+                                    const iwc: u32 = ih >> 16;
+                                    const iop: u16 = @truncate(ih & 0xFFFF);
+                                    if (iwc == 0) break;
+                                    const iie = ip + iwc;
+                                    if (iie > words.len) break;
+                                    if (iop == 248 or iop == 56) break; // next block or function end
+                                    if (iop == 65 and iwc >= 5) { // OpAccessChain
+                                        const ac = TrueFalseACs{
+                                            .result = words[ip + 2],
+                                            .result_type = words[ip + 1],
+                                            .base = words[ip + 3],
+                                            .idx_start = @intCast(indices_buf.items.len),
+                                            .idx_len = @intCast(iwc - 4),
+                                        };
+                                        var j: u32 = 4;
+                                        while (j < iwc) : (j += 1) {
+                                            indices_buf.append(alloc, words[ip + j]) catch return words;
+                                        }
+                                        if (is_true) {
+                                            true_acs.append(alloc, ac) catch return words;
+                                        } else {
+                                            false_acs.append(alloc, ac) catch return words;
+                                        }
+                                    }
+                                    ip = iie;
+                                }
+                            }
+                        }
+                        bp = bie;
+                    }
+
+                    // Find matching ACs between true and false blocks
+                    for (true_acs.items, 0..) |tac, ti| {
+                        for (false_acs.items, 0..) |fac, fi| {
+                            if (tac.result_type == fac.result_type and tac.base == fac.base and tac.idx_len == fac.idx_len) {
+                                const t_indices = indices_buf.items[tac.idx_start..tac.idx_start + tac.idx_len];
+                                const f_indices = indices_buf.items[fac.idx_start..fac.idx_start + fac.idx_len];
+                                if (std.mem.eql(u32, t_indices, f_indices)) {
+                                    // Match found! Hoist to header block.
+                                    // Reuse the true branch's AC result.
+                                    const dups_start = dup_buf.items.len;
+                                    dup_buf.append(alloc, fac.result) catch return words;
+
+                                    targets.append(alloc, .{
+                                        .merge_pos = pos,
+                                        .branch_pos = next_pos,
+                                        .header_end = pos, // insert AC just before OpSelectionMerge
+                                        .ac_result = tac.result,
+                                        .ac_result_type = tac.result_type,
+                                        .ac_base = tac.base,
+                                        .ac_indices_start = tac.idx_start,
+                                        .ac_indices_len = tac.idx_len,
+                                        .dup_results = dup_buf.items[dups_start .. dup_buf.items.len],
+                                    }) catch return words;
+
+                                    // Mark these as used so we don't match them again
+                                    _ = ti;
+                                    _ = fi;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pos = ie;
+    }
+
+    if (targets.items.len == 0) return words;
+
+    // Build substitution map
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32){};
+    defer sub_map.deinit(alloc);
+    // Set of positions to skip (duplicate AC definitions)
+    var skip_set = std.AutoHashMapUnmanaged(u32, void){};
+    defer skip_set.deinit(alloc);
+
+    for (targets.items) |t| {
+        for (t.dup_results) |dup_id| {
+            try sub_map.put(alloc, dup_id, t.ac_result);
+        }
+    }
+
+    // Now we need to:
+    // 1. Find the duplicate AC instructions (by their result IDs) and skip them
+    // 2. Apply substitution to all uses of dup_result → ac_result
+    // 3. Don't insert into the header — the AC from the true branch stays in the true block
+    //    but its result is now also used in the false block (via substitution)
+
+    // Wait, this approach is wrong. If the AC is in the true block, its result can't be
+    // used in the false block (sibling blocks don't dominate each other).
+    // We need to actually MOVE the AC to the header block (before OpSelectionMerge).
+
+    // Better approach: insert the AC just before OpSelectionMerge in the header block,
+    // remove all duplicate ACs, and substitute all uses.
+
+    // Find positions of ACs to skip: both hoisted originals and duplicates
+    var hoisted_results = std.AutoHashMapUnmanaged(u32, void){};
+    defer hoisted_results.deinit(alloc);
+    for (targets.items) |t| {
+        try hoisted_results.put(alloc, t.ac_result, {});
+    }
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 65 and wc >= 5) { // OpAccessChain
+            const result_id = words[pos + 2];
+            if (sub_map.contains(result_id) or hoisted_results.contains(result_id)) {
+                try skip_set.put(alloc, pos, {});
+            }
+        }
+        pos = ie;
+    }
+
+    // Build output: insert hoisted ACs before each OpSelectionMerge, skip dups
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len + targets.items.len * 10) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Check if we need to insert a hoisted AC before this position
+        for (targets.items) |t| {
+            if (pos == t.merge_pos) {
+                // Insert the hoisted AC just before OpSelectionMerge
+                const indices = indices_buf.items[t.ac_indices_start..t.ac_indices_start + t.ac_indices_len];
+                const ac_wc: u16 = @intCast(4 + t.ac_indices_len);
+                result.append(alloc, (@as(u32, ac_wc) << 16) | 65) catch return words;
+                result.append(alloc, t.ac_result_type) catch return words;
+                result.append(alloc, t.ac_result) catch return words;
+                result.append(alloc, t.ac_base) catch return words;
+                for (indices) |idx| {
+                    result.append(alloc, idx) catch return words;
+                }
+            }
+        }
+
+        // Skip duplicate ACs
+        if (skip_set.contains(pos)) {
+            pos = ie;
+            continue;
+        }
+
+        // Apply substitution using getOpInfo
+        const info = getOpInfo(opcode) orelse {
+            var wi: u32 = 0;
+            while (wi < wc) : (wi += 1) {
+                const w = words[pos + wi];
+                result.append(alloc, sub_map.get(w) orelse w) catch return words;
+            }
+            pos = ie;
+            continue;
+        };
+
+        result.append(alloc, hdr) catch return words;
+        var wi: u32 = pos + 1;
+        switch (info.fixed) {
+            0 => {},
+            1 => {
+                if (wi < ie) { const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; wi += 1; }
+            },
+            2 => {
+                if (wi < ie) { const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; wi += 1; }
+                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } // result ID, don't sub
+            },
+            3 => {
+                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } // result ID, don't sub
+            },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => { const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; wi += 1; },
+                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                'I' => { while (wi < ie) : (wi += 1) { const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; } },
+                'L', 's' => { while (wi < ie) : (wi += 1) { result.append(alloc, words[wi]) catch return words; } },
+                'M' => {
+                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    while (wi < ie) : (wi += 1) { const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; }
+                },
+                'W' => {
+                    while (wi + 1 < ie) {
+                        wi += 1; result.append(alloc, words[wi]) catch return words;
+                        wi += 1; const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words;
+                    }
+                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                },
+                'E' => {
+                    var in_str = true;
+                    while (wi < ie and in_str) : (wi += 1) {
+                        const w = words[wi]; result.append(alloc, w) catch return words;
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) in_str = false;
+                    }
+                    while (wi < ie) : (wi += 1) { const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; }
+                },
+                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+            }
+        }
+        while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+        pos = ie;
+    }
+
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    return nw;
+}
