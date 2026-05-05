@@ -67,9 +67,9 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         55 => rt(2, ""),           // OpFunctionParameter
         56 => rt(0, ""),           // OpFunctionEnd
         57 => rt(2, "iI"),         // OpFunctionCall: func, args...
-        // 37 = OpCopyMemory: NO result. Target <id>, Source <id> [Memory Operands]
-        37 => rt(0, "iiL"),        // OpCopyMemory: target, source, optional-mem-access
-        38 => rt(0, "iiiL"),       // OpCopyMemorySized: target, source, size, optional-mem-access
+        // 46 = OpCopyMemory: NO result. Target <id>, Source <id> [Memory Operands]
+        63 => rt(0, "iiL"),        // OpCopyMemory: target, source, optional-mem-access
+        64 => rt(0, "iiiL"),       // OpCopyMemorySized: target, source, size, optional-mem-access
         59 => rt(2, "li"),         // OpVariable: sc, optional-init-id
         60 => rt(2, "iiI"),        // OpImageTexelPointer
         61 => rt(2, "iL"),          // OpLoad: ptr, optional-mem-access-literals
@@ -688,7 +688,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                             // Don't mark as loaded/stored yet — track AC results separately
                             // AC just computes a pointer; actual read/write is at use site
                         },
-                        37 => { // OpCopyMemory: dst=op1, src=op2
+                        46 => { // OpCopyMemory: dst=op1, src=op2
                             if (wc >= 3) {
                                 const dst = current_words[pos + 1];
                                 const src = current_words[pos + 2];
@@ -1163,7 +1163,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                             if (base < xb_bound and xb_func_vars.isSet(base)) xb_unsafe_vars.set(base);
                         }
                         // CopyMemory
-                        if (opcode == 37 and wc >= 3) {
+                        if (opcode == 63 and wc >= 3) {
                             const dst = current_words[pos + 1];
                             const src = current_words[pos + 2];
                             if (dst < xb_bound and xb_func_vars.isSet(dst)) xb_unsafe_vars.set(dst);
@@ -1593,7 +1593,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             if (in_loop and !has_side_effects) {
                 if (opcode == 62 and wc >= 3) { // OpStore
                     if (!safe_ptrs.isSet(words[pos + 1])) has_side_effects = true;
-                } else if (opcode == 37 or opcode == 234 or opcode == 235 or
+                } else if (opcode == 63 or opcode == 234 or opcode == 235 or
                            (opcode >= 57 and opcode <= 60) or
                            (opcode >= 68 and opcode <= 76) or opcode == 99) {
                     has_side_effects = true;
@@ -2748,7 +2748,7 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
         // Reset tracking on operations that may observe stores (barriers, atomics, function calls)
         if (opcode == 57 or // OpFunctionCall
-            opcode == 46 or // OpCopyMemory
+            opcode == 63 or // OpCopyMemory
             opcode == 224 or // OpControlBarrier
             opcode == 225 or // OpMemoryBarrier
             (opcode >= 207 and opcode <= 230)) // Atomic operations
@@ -4614,7 +4614,7 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
             if (opcode == 65 and wc >= 5 and words[pos + 3] < bound and func_vars.isSet(words[pos + 3])) {
                 unsafe_vars.set(words[pos + 3]);
             }
-            if (opcode == 37 and wc >= 3) {
+            if (opcode == 63 and wc >= 3) {
                 if (words[pos + 1] < bound and func_vars.isSet(words[pos + 1])) unsafe_vars.set(words[pos + 1]);
                 if (words[pos + 2] < bound and func_vars.isSet(words[pos + 2])) unsafe_vars.set(words[pos + 2]);
             }
@@ -6248,6 +6248,28 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
                 if (stored_val == rid) {
                     // Don't replace self-copies (Load(X) -> Store(X))
                     if (dst_ptr == src_ptr) break;
+                    // Don't replace copies to non-Function variables - they may be Output/Uniform/etc.
+                    // Only replace copies to Function-local variables
+                    var skip = false;
+                    var vp: u32 = 5;
+                    while (vp < words.len) {
+                        const vwc: u32 = words[vp] >> 16;
+                        const vop: u16 = @truncate(words[vp] & 0xFFFF);
+                        if (vwc == 0) break;
+                        const vie = vp + vwc;
+                        if (vie > words.len) break;
+                        if (vop == 59 and vwc >= 4) { // OpVariable
+                            if (words[vp + 2] == dst_ptr) {
+                                const sc = words[vp + 3]; // storage class
+                                if (sc != 7) { // Not Function-local
+                                    skip = true;
+                                }
+                                break;
+                            }
+                        }
+                        vp = vie;
+                    }
+                    if (skip) break;
                     try replacements.put(alloc, pos, .{ .load_pos = lpos, .src_ptr = src_ptr });
                     try dead_loads.put(alloc, lpos, {});
                     break;
@@ -6279,7 +6301,7 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
         // Replace stores that are in the replacement map with OpCopyMemory
         if (replacements.get(pos)) |rep| {
             // OpCopyMemory: opcode 46, wc=3, operands=[target_ptr, source_ptr]
-            result3.appendAssumeCapacity((3 << 16) | 37);
+            result3.appendAssumeCapacity((3 << 16) | 63);
             result3.appendAssumeCapacity(words[pos + 1]); // dst_ptr
             result3.appendAssumeCapacity(rep.src_ptr); // src_ptr
         } else {
