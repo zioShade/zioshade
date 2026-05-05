@@ -145,9 +145,12 @@ pub fn generate(
     // Eliminate calls to pure void-returning functions
     const no_dead_calls = compact_ids.elimDeadVoidCalls(alloc, inlined) catch return inlined;
     if (no_dead_calls.ptr != inlined.ptr) alloc.free(inlined);
+    // Eliminate dead functions (bodies of functions whose calls were removed)
+    const no_dead_funcs = compact_ids.elimDeadFunctions(alloc, no_dead_calls) catch return no_dead_calls;
+    if (no_dead_funcs.ptr != no_dead_calls.ptr) alloc.free(no_dead_calls);
     // Convert loop counter variables to OpPhi
-    const phi = loop_phi.loopCounterToPhi(alloc, no_dead_calls) catch return no_dead_calls;
-    if (phi.ptr != no_dead_calls.ptr) alloc.free(no_dead_calls);
+    const phi = loop_phi.loopCounterToPhi(alloc, no_dead_funcs) catch return no_dead_funcs;
+    if (phi.ptr != no_dead_funcs.ptr) alloc.free(no_dead_funcs);
     const rse = compact_ids.redundantStoreElim(alloc, phi) catch return phi;
     if (rse.ptr != phi.ptr) alloc.free(phi);
     const retargeted = rse;
