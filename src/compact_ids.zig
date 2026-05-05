@@ -5981,3 +5981,126 @@ pub fn foldShuffleFromComposite(alloc: std.mem.Allocator, words: []const u32) er
     }
     return result.toOwnedSlice(alloc) catch return words;
 }
+
+pub fn elimDeadVoidCalls(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find void type IDs
+    var void_types = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer void_types.deinit();
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 19 and wc >= 2) {
+            const tid = words[pos + 1];
+            if (tid < bound) void_types.set(tid);
+        }
+        pos = ie;
+    }
+
+    // Phase 2: Find pure functions (no stores, no calls, no atomics/barriers)
+    var pure_funcs = std.AutoHashMapUnmanaged(u32, void){};
+    defer pure_funcs.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 54 and wc >= 5) { // OpFunction
+            const func_id = words[pos + 2];
+            var has_side_effect = false;
+            var fp = ie;
+            while (fp < words.len) {
+                const fh = words[fp]; const fwc: u32 = fh >> 16; const fop: u16 = @truncate(fh & 0xFFFF);
+                if (fwc == 0) break;
+                const fie = fp + fwc;
+                if (fie > words.len) break;
+                if (fop == 56) break;
+                if (fop == 62) has_side_effect = true; // OpStore
+                if (fop == 57) has_side_effect = true; // OpFunctionCall
+                if (fop == 236) has_side_effect = true; // OpControlBarrier
+                if (fop >= 237 and fop <= 244) has_side_effect = true; // OpAtomic*
+                if (fop >= 378 and fop <= 385) has_side_effect = true;
+                fp = fie;
+            }
+            if (!has_side_effect) try pure_funcs.put(alloc, func_id, {});
+        }
+        pos = ie;
+    }
+    if (pure_funcs.count() == 0) return words;
+
+    // Phase 2b: Find all entry point function IDs (protect from removal)
+    var entry_funcs = std.AutoHashMapUnmanaged(u32, void){};
+    defer entry_funcs.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 5 and wc >= 3) {
+            try entry_funcs.put(alloc, words[pos + 2], {});
+        }
+        pos = ie;
+    }
+
+    // Phase 3: Find void-returning calls to pure functions
+    // Only remove the call, not the function definition (callee might be an entry point)
+    var dead_calls = std.AutoHashMapUnmanaged(u32, void){}; // position -> void
+    defer dead_calls.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 57 and wc >= 5) { // OpFunctionCall
+            const result_type = words[pos + 1];
+            const called_func = words[pos + 3];
+            if (result_type < bound and void_types.isSet(result_type) and pure_funcs.contains(called_func)) {
+                try dead_calls.put(alloc, pos, {});
+            }
+        }
+        pos = ie;
+    }
+    if (dead_calls.count() == 0) return words;
+
+    // Phase 4: Find remaining callers to determine which functions become dead
+    var still_called = std.AutoHashMapUnmanaged(u32, void){};
+    defer still_called.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 57 and wc >= 5 and !dead_calls.contains(pos)) {
+            try still_called.put(alloc, words[pos + 3], {});
+        }
+        pos = ie;
+    }
+
+    // (entry_funcs already computed in Phase 2b)
+
+    // Phase 5: Rewrite - only remove dead calls
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (dead_calls.contains(pos)) { pos = ie; continue; }
+        result.appendSliceAssumeCapacity(words[pos..ie]);
+        pos = ie;
+    }
+    return result.toOwnedSlice(alloc) catch return words;
+}
