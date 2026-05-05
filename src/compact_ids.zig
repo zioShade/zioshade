@@ -6205,12 +6205,57 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
         if (ie > words.len) break;
         // Skip OpLoad instructions (we don't count the definition as a use)
         if (opcode != 61) {
-            var wi: u32 = pos + 1;
-            while (wi < ie) : (wi += 1) {
-                if (words[wi] > 0 and words[wi] < bound) {
-                    if (use_count.getPtr(words[wi])) |cnt| {
-                        cnt.* += 1;
+            const info = getOpInfo(opcode) orelse {
+                // Unknown opcode: conservatively count all operands
+                var wi2: u32 = pos + 1;
+                while (wi2 < ie) : (wi2 += 1) {
+                    if (words[wi2] > 0 and words[wi2] < bound) {
+                        if (use_count.getPtr(words[wi2])) |cnt| cnt.* += 1;
                     }
+                }
+                pos = ie;
+                continue;
+            };
+            var wi: u32 = pos + 1;
+            // Skip fixed operands
+            switch (info.fixed) {
+                1 => { wi += 1; },
+                2 => { wi += 2; },
+                3 => { wi += 1; },
+                else => {},
+            }
+            // Process variable operands using getOpInfo
+            for (info.ops) |ch| {
+                if (wi >= ie) break;
+                switch (ch) {
+                    'i' => {
+                        if (words[wi] > 0 and words[wi] < bound) {
+                            if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                        }
+                        wi += 1;
+                    },
+                    'I' => { while (wi < ie) : (wi += 1) {
+                        if (words[wi] > 0 and words[wi] < bound) {
+                            if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                        }
+                    }},
+                    'l' => { wi += 1; },
+                    'L' => { wi = ie; },
+                    's' => { wi = ie; },
+                    'M' => { if (wi < ie) { wi += 1; while (wi < ie) : (wi += 1) {
+                        if (words[wi] > 0 and words[wi] < bound) {
+                            if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                        }
+                    }}},
+                    'W' => { while (wi + 1 < ie) { wi += 1; if (words[wi] > 0 and words[wi] < bound) {
+                        if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                    } wi += 1; } if (wi < ie) wi += 1; },
+                    'E' => { while (wi < ie) { const ww = words[wi]; wi += 1; if ((ww & 0xFF) == 0 or ((ww >> 8) & 0xFF) == 0 or ((ww >> 16) & 0xFF) == 0 or ((ww >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) {
+                        if (words[wi] > 0 and words[wi] < bound) {
+                            if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                        }
+                    }},
+                    else => { wi += 1; },
                 }
             }
         }
