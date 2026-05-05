@@ -1988,11 +1988,11 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
             if (ef) |e| e.value_ptr.* += 1;
         }
 
-        if (opcode == 252 and wc >= 2) { // OpSwitch
-            const default = words[pos + 1];
+        if (opcode == 251 and wc >= 3) { // OpSwitch
+            const default = words[pos + 2];
             const ed = predecessors.getOrPutValue(alloc, default, 0) catch null;
             if (ed) |e| e.value_ptr.* += 1;
-            var si: u32 = 2;
+            var si: u32 = 3;
             while (si + 1 < wc) : (si += 2) {
                 const st = words[pos + si + 1];
                 const est = predecessors.getOrPutValue(alloc, st, 0) catch null;
@@ -2771,6 +2771,135 @@ pub fn dedupStructTypes(alloc: std.mem.Allocator, words: []const u32) error{OutO
             }
         }
         while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dce = deadCodeElim(alloc, nw) catch return nw;
+    if (dce.ptr != nw.ptr) alloc.free(nw);
+    return dce;
+}
+
+/// Deduplicate OpTypeArray declarations with the same (element_type, length).
+pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    var arrays = std.AutoHashMapUnmanaged(u64, u32){}; // hash -> first_id
+    defer arrays.deinit(alloc);
+    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // dup_id -> first_id
+    defer replacements.deinit(alloc);
+
+    // First pass: find duplicate array types
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 28 and wc >= 4) { // OpTypeArray
+            const result_id = words[pos + 1];
+            const element_type = words[pos + 2];
+            const length = words[pos + 3];
+            var h: u64 = 0xA110CA7E0000001;
+            h = h *% 33 +% @as(u64, element_type);
+            h = h *% 33 +% @as(u64, length);
+            if (arrays.get(h)) |first_id| {
+                if (first_id != result_id) {
+                    replacements.put(alloc, result_id, first_id) catch {};
+                }
+            } else {
+                arrays.put(alloc, h, result_id) catch {};
+            }
+        }
+        pos += wc;
+    }
+
+    if (replacements.count() == 0) return words;
+
+    // Track seen decorations to skip duplicates caused by dedup
+    var seen_decorations = std.AutoHashMapUnmanaged(u64, void){}; // hash -> {}
+    defer seen_decorations.deinit(alloc);
+
+    // Second pass: skip duplicate arrays and replace references
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        // Skip duplicate OpTypeArray
+        if (opcode == 28 and wc >= 4 and replacements.contains(words[pos + 1])) {
+            pos = ie;
+            continue;
+        }
+
+        // Deduplicate OpDecorate: skip if we've already seen this (target, decoration) pair
+        if (opcode == 71 and wc >= 3) { // OpDecorate
+            const target = replacements.get(words[pos + 1]) orelse words[pos + 1];
+            const dec = words[pos + 2]; // decoration enum
+            var dh: u64 = @as(u64, target) *% 33 +% @as(u64, dec);
+            // Include extra operands in hash
+            var di: u32 = 3;
+            while (di < wc) : (di += 1) {
+                dh = dh *% 33 +% @as(u64, words[pos + di]);
+            }
+            if (seen_decorations.contains(dh)) {
+                pos = ie;
+                continue;
+            }
+            seen_decorations.put(alloc, dh, {}) catch {};
+        }
+        // Also deduplicate OpMemberDecorate
+        if (opcode == 72 and wc >= 4) { // OpMemberDecorate
+            const target = replacements.get(words[pos + 1]) orelse words[pos + 1];
+            const member = words[pos + 2];
+            const dec = words[pos + 3];
+            var dh: u64 = @as(u64, target) *% 33 +% @as(u64, member);
+            dh = dh *% 33 +% @as(u64, dec);
+            var di: u32 = 4;
+            while (di < wc) : (di += 1) {
+                dh = dh *% 33 +% @as(u64, words[pos + di]);
+            }
+            if (seen_decorations.contains(dh)) {
+                pos = ie;
+                continue;
+            }
+            seen_decorations.put(alloc, dh, {}) catch {};
+        }
+
+        const info = getOpInfo(opcode) orelse {
+            result.appendSlice(alloc, words[pos..ie]) catch return words;
+            pos = ie; continue;
+        };
+
+        var wi: u32 = pos + 1;
+        result.append(alloc, hdr) catch return words;
+        switch (info.fixed) {
+            1 => { if (wi < ie) { result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
+            2 => {
+                if (wi < ie) { result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+            },
+            3 => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => { result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
+                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                'I' => { while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; },
+                'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
+                'M' => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; },
+                'W' => { while (wi + 1 < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
+                'E' => { while (wi < ie) { const w = words[wi]; wi += 1; result.append(alloc, w) catch return words; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; },
+                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+            }
+        }
+        while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
         pos = ie;
     }
 
