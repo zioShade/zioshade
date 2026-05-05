@@ -2326,6 +2326,249 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
     return dce_result;
 }
 
+/// Merge non-empty blocks: when block B has a single predecessor A that branches
+/// unconditionally to B, and B has no OpPhi, no structured control flow, and is
+/// not a merge/continue target, merge B into A. Saves 1 OpBranch + 1 OpLabel = 2 IDs.
+pub fn mergeNonEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Build label -> position map
+    var label_pos = std.AutoHashMapUnmanaged(u32, u32){};
+    defer label_pos.deinit(alloc);
+    var predecessors = std.AutoHashMapUnmanaged(u32, u32){}; // label -> predecessor count
+    defer predecessors.deinit(alloc);
+    var branch_from = std.AutoHashMapUnmanaged(u32, u32){}; // to_label -> from_label (only OpBranch)
+    defer branch_from.deinit(alloc);
+
+    // Track blocks with structured CF, OpPhi, and merge targets
+    var structured_blocks = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer structured_blocks.deinit();
+    var phi_blocks = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer phi_blocks.deinit();
+    var merge_targets = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer merge_targets.deinit();
+    var func_entries = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer func_entries.deinit();
+
+    var pos: u32 = 5;
+    var current_label: u32 = 0;
+    var in_function = false;
+    var first_label_in_func = true;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        if (opcode == 54) { // OpFunction
+            in_function = true;
+            first_label_in_func = true;
+            current_label = 0;
+        }
+        if (opcode == 56) { // OpFunctionEnd
+            in_function = false;
+            current_label = 0;
+        }
+
+        if (opcode == 248 and wc >= 2) { // OpLabel
+            current_label = words[pos + 1];
+            label_pos.put(alloc, current_label, pos) catch {};
+            if (in_function and first_label_in_func and current_label < bound) {
+                func_entries.set(current_label);
+                first_label_in_func = false;
+            }
+        }
+
+        if (opcode == 245 and current_label < bound) { // OpPhi
+            phi_blocks.set(current_label);
+        }
+        if ((opcode == 246 or opcode == 247) and current_label < bound) { // OpLoopMerge or OpSelectionMerge
+            structured_blocks.set(current_label);
+            // Track merge targets
+            if (opcode == 246 and wc >= 3) { // OpLoopMerge
+                if (words[pos + 1] < bound) merge_targets.set(words[pos + 1]);
+                if (words[pos + 2] < bound) merge_targets.set(words[pos + 2]);
+            }
+            if (opcode == 247 and wc >= 2) { // OpSelectionMerge
+                if (words[pos + 1] < bound) merge_targets.set(words[pos + 1]);
+            }
+        }
+
+        if (opcode == 249 and wc >= 2) { // OpBranch
+            const target = words[pos + 1];
+            if (current_label != 0) {
+                branch_from.put(alloc, target, current_label) catch {};
+            }
+            const entry = predecessors.getOrPutValue(alloc, target, 0) catch null;
+            if (entry) |e| e.value_ptr.* += 1;
+        }
+        if (opcode == 250 and wc >= 4) { // OpBranchConditional
+            const t = words[pos + 2];
+            const f = words[pos + 3];
+            const et = predecessors.getOrPutValue(alloc, t, 0) catch null;
+            if (et) |e| e.value_ptr.* += 1;
+            const ef = predecessors.getOrPutValue(alloc, f, 0) catch null;
+            if (ef) |e| e.value_ptr.* += 1;
+        }
+        if (opcode == 251 and wc >= 3) { // OpSwitch
+            const default = words[pos + 2];
+            const ed = predecessors.getOrPutValue(alloc, default, 0) catch null;
+            if (ed) |e| e.value_ptr.* += 1;
+            var si: u32 = 3;
+            while (si + 1 < wc) : (si += 2) {
+                const st = words[pos + si + 1];
+                const est = predecessors.getOrPutValue(alloc, st, 0) catch null;
+                if (est) |e| e.value_ptr.* += 1;
+            }
+        }
+
+        pos = ie;
+    }
+
+    // Find mergeable labels
+    var mergeable = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer mergeable.deinit();
+    // Map: merged_label -> predecessor_label
+    var merge_map = std.AutoHashMapUnmanaged(u32, u32){};
+    defer merge_map.deinit(alloc);
+
+    var bf_iter = branch_from.iterator();
+    while (bf_iter.next()) |kv| {
+        const to_label = kv.key_ptr.*;
+        const from_label = kv.value_ptr.*;
+        if (from_label == to_label) continue; // self-loop
+        if (to_label >= bound) continue;
+        if (func_entries.isSet(to_label)) continue;
+        if (merge_targets.isSet(to_label)) continue;
+        if (structured_blocks.isSet(from_label)) continue;
+        if (structured_blocks.isSet(to_label)) continue;
+        if (phi_blocks.isSet(to_label)) continue;
+        // Check single predecessor
+        const pred_count = predecessors.get(to_label) orelse 0;
+        if (pred_count != 1) continue;
+        // Verify the single predecessor is from_label
+        if (branch_from.get(to_label)) |from| {
+            if (from != from_label) continue;
+        } else continue;
+
+        mergeable.set(to_label);
+        merge_map.put(alloc, to_label, from_label) catch {};
+    }
+
+    if (mergeable.count() == 0) return words;
+
+    // Build new binary
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    current_label = 0;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        // Track current label for the skip-branch check
+        if (opcode == 248 and wc >= 2) {
+            current_label = words[pos + 1];
+        }
+
+        // Skip OpLabel of mergeable blocks
+        if (opcode == 248 and wc >= 2) {
+            const lbl = words[pos + 1];
+            if (mergeable.isSet(lbl)) {
+                pos = ie;
+                continue;
+            }
+        }
+
+        // Skip OpBranch to mergeable blocks (the specific branch from the predecessor)
+        if (opcode == 249 and wc >= 2) {
+            const target = words[pos + 1];
+            if (mergeable.isSet(target)) {
+                const expected_from = merge_map.get(target) orelse target;
+                if (current_label == expected_from) {
+                    pos = ie;
+                    continue;
+                }
+            }
+        }
+
+        // Replace merged labels in OpPhi (opcode 245)
+        if (opcode == 245 and wc >= 3) {
+            result.appendSlice(alloc, words[pos..(pos + 3)]) catch return words;
+            var opi: u32 = 3;
+            while (opi + 1 < wc) {
+                const value = words[pos + opi];
+                const parent = words[pos + opi + 1];
+                const replacement = merge_map.get(parent) orelse parent;
+                result.append(alloc, value) catch return words;
+                result.append(alloc, replacement) catch return words;
+                opi += 2;
+            }
+            pos = ie;
+            continue;
+        }
+
+        // Update OpBranch targets
+        if (opcode == 249 and wc >= 2) {
+            const target = merge_map.get(words[pos + 1]) orelse words[pos + 1];
+            result.append(alloc, words[pos]) catch return words;
+            result.append(alloc, target) catch return words;
+            pos = ie;
+            continue;
+        }
+
+        // Update OpBranchConditional targets
+        if (opcode == 250 and wc >= 4) {
+            const cond = words[pos + 1];
+            const t = merge_map.get(words[pos + 2]) orelse words[pos + 2];
+            const f = merge_map.get(words[pos + 3]) orelse words[pos + 3];
+            result.append(alloc, words[pos]) catch return words;
+            result.append(alloc, cond) catch return words;
+            result.append(alloc, t) catch return words;
+            result.append(alloc, f) catch return words;
+            if (wc > 4) result.appendSlice(alloc, words[(pos + 4)..ie]) catch return words;
+            pos = ie;
+            continue;
+        }
+
+        // Update OpSwitch targets
+        if (opcode == 251 and wc >= 3) {
+            result.append(alloc, words[pos]) catch return words;
+            result.append(alloc, words[pos + 1]) catch return words; // selector
+            const default = merge_map.get(words[pos + 2]) orelse words[pos + 2];
+            result.append(alloc, default) catch return words;
+            // Case literals are 32-bit (1 word each), followed by target (1 word)
+            var si: u32 = 3;
+            while (si + 1 < wc) : (si += 2) {
+                result.append(alloc, words[pos + si]) catch return words; // literal
+                const st = merge_map.get(words[pos + si + 1]) orelse words[pos + si + 1];
+                result.append(alloc, st) catch return words; // target
+            }
+            pos = ie;
+            continue;
+        }
+
+        result.appendSlice(alloc, words[pos..ie]) catch return words;
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
+
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dce_result = deadCodeElim(alloc, nw) catch return nw;
+    if (dce_result.ptr != nw.ptr) alloc.free(nw);
+    return dce_result;
+}
+
 /// Constant-fold OpSelect: when the condition is OpConstantTrue or OpConstantFalse,
 /// replace the select with the appropriate operand.
 pub fn foldSelect(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {

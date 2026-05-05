@@ -154,8 +154,10 @@ pub fn generate(
     if (retargeted.ptr != rse.ptr) alloc.free(rse);
     const blk_merged = compact_ids.mergeBlocks(alloc, retargeted) catch return retargeted;
     if (blk_merged.ptr != retargeted.ptr) alloc.free(retargeted);
-    const deduped = compact_ids.dedupStructTypes(alloc, blk_merged) catch return blk_merged;
-    if (deduped.ptr != blk_merged.ptr) alloc.free(blk_merged);
+    const blk_merged2 = compact_ids.mergeNonEmptyBlocks(alloc, blk_merged) catch return blk_merged;
+    if (blk_merged2.ptr != blk_merged.ptr) alloc.free(blk_merged);
+    const deduped = compact_ids.dedupStructTypes(alloc, blk_merged2) catch return blk_merged2;
+    if (deduped.ptr != blk_merged2.ptr) alloc.free(blk_merged2);
     const negated = compact_ids.eliminateDoubleNegate(alloc, deduped) catch return deduped;
     if (negated.ptr != deduped.ptr) alloc.free(deduped);
     const algebrad = compact_ids.algebraicSimpl(alloc, negated) catch return negated;
