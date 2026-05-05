@@ -150,7 +150,10 @@ pub fn generate(
     if (phi.ptr != no_dead_calls.ptr) alloc.free(no_dead_calls);
     const rse = compact_ids.redundantStoreElim(alloc, phi) catch return phi;
     if (rse.ptr != phi.ptr) alloc.free(phi);
-    const retargeted = rse;
+    // Remove identity stores: Load(P) -> Store(P, loaded_value) where load used only in store
+    const no_id_stores = compact_ids.elimIdentityStores(alloc, rse) catch return rse;
+    if (no_id_stores.ptr != rse.ptr) alloc.free(rse);
+    const retargeted = no_id_stores;
     if (retargeted.ptr != rse.ptr) alloc.free(rse);
     const blk_merged = compact_ids.mergeBlocks(alloc, retargeted) catch return retargeted;
     if (blk_merged.ptr != retargeted.ptr) alloc.free(retargeted);
