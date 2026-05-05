@@ -226,7 +226,14 @@ pub fn generate(
     if (dce4.ptr != cse3.ptr) alloc.free(cse3);
     const final_compact2 = compact_ids.compactIds(alloc, dce4) catch return dce4;
     if (final_compact2.ptr != dce4.ptr) alloc.free(dce4);
-    return final_compact2;
+    // Fourth round: try identity stores again after redundant load elimination
+    const no_id_stores2 = compact_ids.elimIdentityStores(alloc, final_compact2) catch return final_compact2;
+    if (no_id_stores2.ptr != final_compact2.ptr) alloc.free(final_compact2);
+    const dce5 = compact_ids.deadCodeElim(alloc, no_id_stores2) catch return no_id_stores2;
+    if (dce5.ptr != no_id_stores2.ptr) alloc.free(no_id_stores2);
+    const final_compact3 = compact_ids.compactIds(alloc, dce5) catch return dce5;
+    if (final_compact3.ptr != dce5.ptr) alloc.free(dce5);
+    return final_compact3;
 }
 
 const Codegen = struct {
