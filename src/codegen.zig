@@ -254,7 +254,13 @@ pub fn generate(
     if (dce7.ptr != copy_mem2.ptr) alloc.free(copy_mem2);
     const final_compact4 = compact_ids.compactIds(alloc, dce7) catch return dce7;
     if (final_compact4.ptr != dce7.ptr) alloc.free(dce7);
-    return final_compact4;
+    // Deduplicate array types after all optimizations
+    const deduped_arr = compact_ids.dedupArrayTypes(alloc, final_compact4) catch return final_compact4;
+    if (deduped_arr.ptr != final_compact4.ptr) alloc.free(final_compact4);
+    if (deduped_arr.ptr == final_compact4.ptr) return final_compact4;
+    const final_compact5 = compact_ids.compactIds(alloc, deduped_arr) catch return deduped_arr;
+    if (final_compact5.ptr != deduped_arr.ptr) alloc.free(deduped_arr);
+    return final_compact5;
 }
 
 const Codegen = struct {
