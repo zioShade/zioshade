@@ -198,7 +198,10 @@ pub fn generate(
     if (cf2.ptr != forwarded.ptr) alloc.free(forwarded);
     const folded_ce2 = compact_ids.foldCompositeExtract(alloc, cf2) catch cf2;
     if (folded_ce2.ptr != cf2.ptr) alloc.free(cf2);
-    const final_dce = compact_ids.deadCodeElim(alloc, folded_ce2) catch return folded_ce2;
+    // Remove dead stores to function-local vars (stores with no loads after forwarding)
+    const no_dead_stores = compact_ids.elimDeadVarStores(alloc, folded_ce2) catch folded_ce2;
+    if (no_dead_stores.ptr != folded_ce2.ptr) alloc.free(folded_ce2);
+    const final_dce = compact_ids.deadCodeElim(alloc, no_dead_stores) catch return no_dead_stores;
     if (final_dce.ptr != forwarded.ptr) alloc.free(forwarded);
     const final_retarget = compact_ids.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
     if (final_retarget.ptr != final_dce.ptr) alloc.free(final_dce);

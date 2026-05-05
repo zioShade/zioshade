@@ -6070,3 +6070,90 @@ pub fn elimDeadVoidCalls(alloc: std.mem.Allocator, words: []const u32) error{Out
     }
     return result.toOwnedSlice(alloc) catch return words;
 }
+
+/// Remove stores to function-local variables that have no loads.
+/// After store forwarding, some vars may have stores but no loads — those stores are dead.
+pub fn elimDeadVarStores(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find function-local variable IDs (storage class 7)
+    var func_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer func_vars.deinit();
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 59 and wc >= 4) { // OpVariable
+            const sc = words[pos + 3];
+            if (sc == 7) { // Function storage class
+                const rid = words[pos + 2];
+                if (rid < bound) func_vars.set(rid);
+            }
+        }
+        pos = ie;
+    }
+    if (func_vars.count() == 0) return words;
+
+    // Phase 2: Count loads and stores per function-local var
+    var has_load = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer has_load.deinit();
+    var has_store = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer has_store.deinit();
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 62 and wc >= 3) { // OpStore
+            const ptr = words[pos + 1];
+            if (ptr < bound and func_vars.isSet(ptr)) has_store.set(ptr);
+        }
+        if (opcode == 61 and wc >= 4) { // OpLoad
+            const ptr = words[pos + 3];
+            if (ptr < bound and func_vars.isSet(ptr)) has_load.set(ptr);
+        }
+        // Also check AccessChain bases (if var is used as AC base, it's accessed)
+        if (opcode == 65 and wc >= 4) { // OpAccessChain
+            const base = words[pos + 3];
+            if (base < bound and func_vars.isSet(base)) has_load.set(base);
+        }
+        pos = ie;
+    }
+
+    // Phase 3: Find vars with stores but no loads
+    var dead_store_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer dead_store_vars.deinit();
+    var it = func_vars.iterator(.{});
+    while (it.next()) |var_id| {
+        if (has_store.isSet(var_id) and !has_load.isSet(var_id)) {
+            dead_store_vars.set(var_id);
+        }
+    }
+    if (dead_store_vars.count() == 0) return words;
+
+    // Phase 4: Remove stores to dead vars
+    var result2 = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result2.appendSliceAssumeCapacity(words[0..5]);
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        // Skip OpStore to dead vars
+        if (opcode == 62 and wc >= 3) { // OpStore
+            const ptr = words[pos + 1];
+            if (ptr < bound and dead_store_vars.isSet(ptr)) { pos = ie; continue; }
+        }
+        result2.appendSliceAssumeCapacity(words[pos..ie]);
+        pos = ie;
+    }
+    return result2.toOwnedSlice(alloc) catch return words;
+}
