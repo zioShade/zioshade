@@ -6369,6 +6369,7 @@ pub fn elimIdentityStores(alloc: std.mem.Allocator, words: []const u32) error{Ou
     }
 
     if (remove_positions.count() == 0) return words;
+    std.debug.print("elimIdentityStores: {} removed\n", .{remove_positions.count()});
 
     // Phase 3: Rewrite
     var result4 = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
