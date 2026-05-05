@@ -6858,3 +6858,178 @@ pub fn elimIdentityStores(alloc: std.mem.Allocator, words: []const u32) error{Ou
     return result4.toOwnedSlice(alloc) catch return words;
 }
 
+
+/// Eliminate dead functions: functions that are never called and are not entry points.
+/// After elimDeadVoidCalls removes the calls, the function bodies become dead.
+pub fn elimDeadFunctions(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Collect entry point function IDs
+    var entry_funcs = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer entry_funcs.deinit();
+    // Collect all function result IDs
+    var func_ids = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer func_ids.deinit();
+    // Count OpFunctionCall references per function
+    var call_count = std.AutoHashMapUnmanaged(u32, u32){};
+    defer call_count.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 15 and wc >= 4) { // OpEntryPoint
+            const func_id = words[pos + 2];
+            if (func_id < bound) entry_funcs.set(func_id);
+        }
+        if (opcode == 54 and wc >= 3) { // OpFunction
+            const result_id = words[pos + 2];
+            if (result_id < bound) func_ids.set(result_id);
+        }
+        if (opcode == 57 and wc >= 4) { // OpFunctionCall
+            const called_func = words[pos + 3];
+            const entry = call_count.getOrPutValue(alloc, called_func, 0) catch null;
+            if (entry) |e| e.value_ptr.* += 1;
+        }
+        pos = ie;
+    }
+
+    // Find dead functions (not called, not entry point)
+    var dead_funcs = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer dead_funcs.deinit();
+    {
+        var fid: u32 = 0;
+        while (fid < bound) : (fid += 1) {
+            if (func_ids.isSet(fid) and !entry_funcs.isSet(fid)) {
+                const calls = call_count.get(fid) orelse 0;
+                if (calls == 0) {
+                    dead_funcs.set(fid);
+                }
+            }
+        }
+    }
+
+    if (dead_funcs.count() == 0) return words;
+
+    // Collect IDs defined within dead functions (for DCE to clean up)
+    // Build set of all IDs defined in dead function bodies
+    var dead_ids = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer dead_ids.deinit();
+
+    var in_dead_func = false;
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 54 and wc >= 3) { // OpFunction
+            const result_id = words[pos + 2];
+            if (dead_funcs.isSet(result_id)) {
+                in_dead_func = true;
+                dead_ids.set(result_id);
+            } else {
+                in_dead_func = false;
+            }
+        } else if (opcode == 56) { // OpFunctionEnd
+            if (in_dead_func) {
+                // OpFunctionEnd has no result ID, just end tracking
+            }
+            in_dead_func = false;
+        } else if (in_dead_func) {
+            // Mark result IDs as dead
+            const info = getOpInfo(opcode) orelse {
+                pos = ie;
+                continue;
+            };
+            switch (info.fixed) {
+                1, 2 => {
+                    if (wc >= 3 and words[pos + 2] < bound) {
+                        dead_ids.set(words[pos + 2]);
+                    }
+                },
+                3 => {
+                    if (wc >= 2 and words[pos + 1] < bound) {
+                        dead_ids.set(words[pos + 1]);
+                    }
+                },
+                else => {},
+            }
+            // Also mark type-only results (TypeVoid, TypeInt, etc.)
+            if (opcode >= 17 and opcode <= 39 and wc >= 2) {
+                if (words[pos + 1] < bound) dead_ids.set(words[pos + 1]);
+            }
+        }
+        pos = ie;
+    }
+
+    // Build new binary without dead functions and their references
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    in_dead_func = false;
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 54 and wc >= 3) { // OpFunction
+            const result_id = words[pos + 2];
+            if (dead_funcs.isSet(result_id)) {
+                in_dead_func = true;
+                pos = ie;
+                continue;
+            }
+            in_dead_func = false;
+        } else if (opcode == 56 and in_dead_func) { // OpFunctionEnd
+            in_dead_func = false;
+            pos = ie;
+            continue;
+        }
+
+        if (in_dead_func) {
+            pos = ie;
+            continue;
+        }
+
+        // Skip OpName/OpDecorate targeting dead function IDs
+        if (opcode == 5 and wc >= 2 and dead_funcs.isSet(words[pos + 1])) { // OpName
+            pos = ie;
+            continue;
+        }
+        if (opcode == 71 and wc >= 3 and dead_funcs.isSet(words[pos + 1])) { // OpDecorate
+            pos = ie;
+            continue;
+        }
+        if (opcode == 72 and wc >= 4 and dead_funcs.isSet(words[pos + 1])) { // OpMemberDecorate
+            pos = ie;
+            continue;
+        }
+
+        result.appendSlice(alloc, words[pos..ie]) catch return words;
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
+
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dce = deadCodeElim(alloc, nw) catch return nw;
+    if (dce.ptr != nw.ptr) alloc.free(nw);
+    return dce;
+}
