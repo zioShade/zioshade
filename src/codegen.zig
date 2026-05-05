@@ -150,10 +150,7 @@ pub fn generate(
     if (phi.ptr != no_dead_calls.ptr) alloc.free(no_dead_calls);
     const rse = compact_ids.redundantStoreElim(alloc, phi) catch return phi;
     if (rse.ptr != phi.ptr) alloc.free(phi);
-    // Remove identity stores: Load(P) -> Store(P, loaded_value) where load used only in store
-    const no_id_stores = compact_ids.elimIdentityStores(alloc, rse) catch return rse;
-    if (no_id_stores.ptr != rse.ptr) alloc.free(rse);
-    const retargeted = no_id_stores;
+    const retargeted = rse;
     if (retargeted.ptr != rse.ptr) alloc.free(rse);
     const blk_merged = compact_ids.mergeBlocks(alloc, retargeted) catch return retargeted;
     if (blk_merged.ptr != retargeted.ptr) alloc.free(retargeted);
@@ -213,8 +210,13 @@ pub fn generate(
     if (final_cse.ptr != final_retarget.ptr) alloc.free(final_retarget);
     const final_dce2 = compact_ids.deadCodeElim(alloc, final_cse) catch return final_cse;
     if (final_dce2.ptr != final_cse.ptr) alloc.free(final_cse);
-    const final_compact = compact_ids.compactIds(alloc, final_dce2) catch return final_dce2;
-    if (final_compact.ptr != final_dce2.ptr) alloc.free(final_dce2);
+    // Remove identity stores: Load(P) -> Store(P, loaded_value) where load used only in store
+    const no_id_stores = compact_ids.elimIdentityStores(alloc, final_dce2) catch final_dce2;
+    if (no_id_stores.ptr != final_dce2.ptr) alloc.free(final_dce2);
+    const final_dce3 = compact_ids.deadCodeElim(alloc, no_id_stores) catch no_id_stores;
+    if (final_dce3.ptr != no_id_stores.ptr) alloc.free(no_id_stores);
+    const final_compact = compact_ids.compactIds(alloc, final_dce3) catch return final_dce3;
+    if (final_compact.ptr != final_dce3.ptr) alloc.free(final_dce3);
     return final_compact;
 }
 
