@@ -6258,8 +6258,9 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
     }
 
     if (replacements.count() == 0) return words;
+    std.debug.print("copyMemoryOpt: {} copies\n", .{replacements.count()});
 
-    // Phase 3: Rewrite - remove dead loads, keep stores unchanged
+    // Phase 3: Rewrite - remove dead loads, replace stores with OpCopyMemory
     var result3 = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
     result3.appendSliceAssumeCapacity(words[0..5]);
     pos = 5;
@@ -6275,7 +6276,15 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
             continue;
         }
 
-        result3.appendSliceAssumeCapacity(words[pos..ie]);
+        // Replace stores that are in the replacement map with OpCopyMemory
+        if (replacements.get(pos)) |rep| {
+            // OpCopyMemory: opcode 46, wc=3, operands=[target_ptr, source_ptr]
+            result3.appendAssumeCapacity((3 << 16) | 37);
+            result3.appendAssumeCapacity(words[pos + 1]); // dst_ptr
+            result3.appendAssumeCapacity(rep.src_ptr); // src_ptr
+        } else {
+            result3.appendSliceAssumeCapacity(words[pos..ie]);
+        }
         pos = ie;
     }
     return result3.toOwnedSlice(alloc) catch return words;
@@ -6389,3 +6398,4 @@ pub fn elimIdentityStores(alloc: std.mem.Allocator, words: []const u32) error{Ou
     }
     return result4.toOwnedSlice(alloc) catch return words;
 }
+
