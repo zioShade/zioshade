@@ -172,9 +172,12 @@ pub fn generate(
     // Fold CompositeExtract from CompositeConstruct
     const folded_ce = compact_ids.foldCompositeExtract(alloc, no_dup_ac) catch return no_dup_ac;
     if (folded_ce.ptr != no_dup_ac.ptr) alloc.free(no_dup_ac);
+    // Fold VectorShuffle from CompositeConstruct into CompositeConstruct
+    const folded_sh = compact_ids.foldShuffleFromComposite(alloc, folded_ce) catch folded_ce;
+    if (folded_sh.ptr != folded_ce.ptr) alloc.free(folded_ce);
     // Eliminate identity vector shuffles (shuffle(v, v, 0, 1, ...))
-    const no_id_shuffle = compact_ids.elimIdentityShuffle(alloc, folded_ce) catch return folded_ce;
-    if (no_id_shuffle.ptr != folded_ce.ptr) alloc.free(folded_ce);
+    const no_id_shuffle = compact_ids.elimIdentityShuffle(alloc, folded_sh) catch return folded_sh;
+    if (no_id_shuffle.ptr != folded_sh.ptr) alloc.free(folded_sh);
     // Eliminate uninit vars (loaded but never stored)
     const no_uninit = compact_ids.elimUninitVars(alloc, no_id_shuffle) catch return no_id_shuffle;
     if (no_uninit.ptr != no_id_shuffle.ptr) alloc.free(no_id_shuffle);

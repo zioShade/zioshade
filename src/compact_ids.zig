@@ -5870,3 +5870,114 @@ pub fn elimIdentityShuffle(alloc: std.mem.Allocator, words: []const u32) error{O
     if (compacted.ptr != dced.ptr) alloc.free(dced);
     return compacted;
 }
+
+pub fn foldShuffleFromComposite(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Build map of CompositeConstruct (80) and ConstantComposite (44): result_id -> []constituent_ids
+    var cc_map = std.AutoHashMapUnmanaged(u32, []const u32){};
+    defer {
+        var it = cc_map.iterator();
+        while (it.next()) |entry| alloc.free(entry.value_ptr.*);
+        cc_map.deinit(alloc);
+    }
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if ((opcode == 80 or opcode == 44) and wc >= 4) {
+            const result_id = words[pos + 2];
+            const constituents = words[pos + 3 .. ie];
+            const copy = try alloc.dupe(u32, constituents);
+            try cc_map.put(alloc, result_id, copy);
+        }
+        pos = ie;
+    }
+
+    if (cc_map.count() == 0) return words;
+
+    // Phase 2: Find VectorShuffle where vec1 is a known composite and all indices select from vec1
+    var shuffle_fwd = std.AutoHashMapUnmanaged(u32, []const u32){};
+    defer {
+        var it2 = shuffle_fwd.iterator();
+        while (it2.next()) |entry| alloc.free(entry.value_ptr.*);
+        shuffle_fwd.deinit(alloc);
+    }
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 79 and wc >= 6) { // OpVectorShuffle
+            const result_id = words[pos + 2];
+            const vec1 = words[pos + 3];
+            const indices = words[pos + 5 .. ie];
+
+            const vec1_constituents = cc_map.get(vec1);
+            if (vec1_constituents) |cs| {
+                var all_from_vec1 = true;
+                for (indices) |idx| {
+                    if (idx >= cs.len) {
+                        all_from_vec1 = false;
+                        break;
+                    }
+                }
+
+                if (all_from_vec1 and indices.len > 0) {
+                    var new_constituents = std.ArrayListUnmanaged(u32){};
+                    for (indices) |idx| {
+                        try new_constituents.append(alloc, cs[idx]);
+                    }
+                    const cs_slice = try new_constituents.toOwnedSlice(alloc);
+                    try shuffle_fwd.put(alloc, result_id, cs_slice);
+                }
+            }
+        }
+        pos = ie;
+    }
+
+    if (shuffle_fwd.count() == 0) return words;
+
+    // Phase 3: Replace qualifying shuffles with CompositeConstruct
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 79 and wc >= 6) {
+            const result_id = words[pos + 2];
+            if (shuffle_fwd.get(result_id)) |new_cs| {
+                const result_type = words[pos + 1];
+                const cc_wc: u32 = 3 + @as(u32, @intCast(new_cs.len));
+                try result.append(alloc, (cc_wc << 16) | 80); // OpCompositeConstruct
+                try result.append(alloc, result_type);
+                try result.append(alloc, result_id);
+                for (new_cs) |c| try result.append(alloc, c);
+                pos = ie;
+                continue;
+            }
+        }
+
+        try result.appendSlice(alloc, words[pos..ie]);
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
+    return result.toOwnedSlice(alloc) catch return words;
+}
