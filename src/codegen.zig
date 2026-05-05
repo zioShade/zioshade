@@ -142,9 +142,12 @@ pub fn generate(
         alloc.free(compact2);
         inlined = next;
     }
+    // Eliminate calls to pure void-returning functions
+    const no_dead_calls = compact_ids.elimDeadVoidCalls(alloc, inlined) catch return inlined;
+    if (no_dead_calls.ptr != inlined.ptr) alloc.free(inlined);
     // Convert loop counter variables to OpPhi
-    const phi = loop_phi.loopCounterToPhi(alloc, inlined) catch return inlined;
-    if (phi.ptr != inlined.ptr) alloc.free(inlined);
+    const phi = loop_phi.loopCounterToPhi(alloc, no_dead_calls) catch return no_dead_calls;
+    if (phi.ptr != no_dead_calls.ptr) alloc.free(no_dead_calls);
     const rse = compact_ids.redundantStoreElim(alloc, phi) catch return phi;
     if (rse.ptr != phi.ptr) alloc.free(phi);
     const retargeted = rse;
