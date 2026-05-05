@@ -6280,3 +6280,111 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
     }
     return result3.toOwnedSlice(alloc) catch return words;
 }
+
+/// Remove identity stores: Load(P) -> Store(P, load_result) where load result is used only in the store.
+/// This is a no-op store that can be safely removed along with the load.
+pub fn elimIdentityStores(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find loads whose result is used exactly once, and that use is in an OpStore to the SAME pointer
+    var load_positions = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> pos
+    defer load_positions.deinit(alloc);
+    var use_count = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> count
+    defer use_count.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 61 and wc >= 4) { // OpLoad
+            const rid = words[pos + 2];
+            if (rid > 0 and rid < bound) {
+                try load_positions.put(alloc, rid, pos);
+                try use_count.put(alloc, rid, 0);
+            }
+        }
+        pos = ie;
+    }
+
+    if (load_positions.count() == 0) return words;
+
+    // Count uses of each load result (excluding the OpLoad instruction itself)
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode != 61) { // skip OpLoad
+            var wi: u32 = pos + 1;
+            while (wi < ie) : (wi += 1) {
+                if (words[wi] > 0 and words[wi] < bound) {
+                    if (use_count.getPtr(words[wi])) |cnt| {
+                        cnt.* += 1;
+                    }
+                }
+            }
+        }
+        pos = ie;
+    }
+
+    // Phase 2: Find identity stores (Load(P) -> Store(P, load_result)) with load used exactly once
+    var remove_positions = std.AutoHashMapUnmanaged(u32, void){}; // positions to skip
+    defer remove_positions.deinit(alloc);
+
+    var li = load_positions.iterator();
+    while (li.next()) |entry| {
+        const rid = entry.key_ptr.*;
+        const lpos = entry.value_ptr.*;
+        const cnt = use_count.get(rid) orelse 0;
+        if (cnt != 1) continue;
+
+        const src_ptr = words[lpos + 3]; // OpLoad: type, result, ptr
+
+        // Find the OpStore that uses this value
+        pos = 5;
+        while (pos < words.len) {
+            const wc2: u32 = words[pos] >> 16;
+            const opcode2: u16 = @truncate(words[pos] & 0xFFFF);
+            if (wc2 == 0) break;
+            const ie2 = pos + wc2;
+            if (ie2 > words.len) break;
+            if (opcode2 == 62 and wc2 >= 3) { // OpStore
+                const dst_ptr = words[pos + 1];
+                const stored_val = words[pos + 2];
+                if (stored_val == rid and dst_ptr == src_ptr) {
+                    // Identity store found! Remove both load and store.
+                    try remove_positions.put(alloc, lpos, {});
+                    try remove_positions.put(alloc, pos, {});
+                    break;
+                }
+            }
+            pos = ie2;
+        }
+    }
+
+    if (remove_positions.count() == 0) return words;
+
+    // Phase 3: Rewrite
+    var result4 = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result4.appendSliceAssumeCapacity(words[0..5]);
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (remove_positions.contains(pos)) {
+            pos = ie;
+            continue;
+        }
+        result4.appendSliceAssumeCapacity(words[pos..ie]);
+        pos = ie;
+    }
+    return result4.toOwnedSlice(alloc) catch return words;
+}
