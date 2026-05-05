@@ -6248,28 +6248,6 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
                 if (stored_val == rid) {
                     // Don't replace self-copies (Load(X) -> Store(X))
                     if (dst_ptr == src_ptr) break;
-                    // Don't replace copies to non-Function variables - they may be Output/Uniform/etc.
-                    // Only replace copies to Function-local variables
-                    var skip = false;
-                    var vp: u32 = 5;
-                    while (vp < words.len) {
-                        const vwc: u32 = words[vp] >> 16;
-                        const vop: u16 = @truncate(words[vp] & 0xFFFF);
-                        if (vwc == 0) break;
-                        const vie = vp + vwc;
-                        if (vie > words.len) break;
-                        if (vop == 59 and vwc >= 4) { // OpVariable
-                            if (words[vp + 2] == dst_ptr) {
-                                const sc = words[vp + 3]; // storage class
-                                if (sc != 7) { // Not Function-local
-                                    skip = true;
-                                }
-                                break;
-                            }
-                        }
-                        vp = vie;
-                    }
-                    if (skip) break;
                     try replacements.put(alloc, pos, .{ .load_pos = lpos, .src_ptr = src_ptr });
                     try dead_loads.put(alloc, lpos, {});
                     break;
