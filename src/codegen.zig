@@ -187,7 +187,10 @@ pub fn generate(
     // Store-forward extract: replace store+AC+load with CompositeExtract
     const forwarded = compact_ids.storeForwardExtract(alloc, scattered) catch return scattered;
     if (forwarded.ptr != scattered.ptr) alloc.free(scattered);
-    const final_dce = compact_ids.deadCodeElim(alloc, forwarded) catch return forwarded;
+    // Second round of constFold after store forwarding may expose new constants
+    const cf2 = compact_ids.constFold(alloc, forwarded) catch forwarded;
+    if (cf2.ptr != forwarded.ptr) alloc.free(forwarded);
+    const final_dce = compact_ids.deadCodeElim(alloc, cf2) catch return cf2;
     if (final_dce.ptr != forwarded.ptr) alloc.free(forwarded);
     const final_retarget = compact_ids.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
     if (final_retarget.ptr != final_dce.ptr) alloc.free(final_dce);
