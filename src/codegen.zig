@@ -159,8 +159,13 @@ pub fn generate(
     if (blk_merged.ptr != retargeted.ptr) alloc.free(retargeted);
     const blk_merged2 = compact_ids.mergeNonEmptyBlocks(alloc, blk_merged) catch return blk_merged;
     if (blk_merged2.ptr != blk_merged.ptr) alloc.free(blk_merged);
-    const deduped = compact_ids.dedupStructTypes(alloc, blk_merged2) catch return blk_merged2;
-    if (deduped.ptr != blk_merged2.ptr) alloc.free(blk_merged2);
+    // Hoist invariant ACs from branch targets to header blocks
+    const hoisted = compact_ids.hoistInvariantACs(alloc, blk_merged2) catch return blk_merged2;
+    if (hoisted.ptr != blk_merged2.ptr) alloc.free(blk_merged2);
+    const hoisted_dce = compact_ids.deadCodeElim(alloc, hoisted) catch return hoisted;
+    if (hoisted_dce.ptr != hoisted.ptr) alloc.free(hoisted);
+    const deduped = compact_ids.dedupStructTypes(alloc, hoisted_dce) catch return hoisted_dce;
+    if (deduped.ptr != hoisted_dce.ptr) alloc.free(hoisted_dce);
     const negated = compact_ids.eliminateDoubleNegate(alloc, deduped) catch return deduped;
     if (negated.ptr != deduped.ptr) alloc.free(deduped);
     const algebrad = compact_ids.algebraicSimpl(alloc, negated) catch return negated;
