@@ -1,0 +1,8 @@
+  PASS tests/spirv-cross/basic.frag
+
+=== SUMMARY ===
+PASS:           1
+FAIL (spirv):   0
+FAIL (compile): 0
+SKIP:           0
+TOTAL:          1
