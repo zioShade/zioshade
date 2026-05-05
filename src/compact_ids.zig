@@ -6034,22 +6034,6 @@ pub fn elimDeadVoidCalls(alloc: std.mem.Allocator, words: []const u32) error{Out
     }
     if (pure_funcs.count() == 0) return words;
 
-    // Phase 2b: Find all entry point function IDs (protect from removal)
-    var entry_funcs = std.AutoHashMapUnmanaged(u32, void){};
-    defer entry_funcs.deinit(alloc);
-    pos = 5;
-    while (pos < words.len) {
-        const wc: u32 = words[pos] >> 16;
-        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
-        if (wc == 0) break;
-        const ie = pos + wc;
-        if (ie > words.len) break;
-        if (opcode == 5 and wc >= 3) {
-            try entry_funcs.put(alloc, words[pos + 2], {});
-        }
-        pos = ie;
-    }
-
     // Phase 3: Find void-returning calls to pure functions
     // Only remove the call, not the function definition (callee might be an entry point)
     var dead_calls = std.AutoHashMapUnmanaged(u32, void){}; // position -> void
@@ -6070,24 +6054,6 @@ pub fn elimDeadVoidCalls(alloc: std.mem.Allocator, words: []const u32) error{Out
         pos = ie;
     }
     if (dead_calls.count() == 0) return words;
-
-    // Phase 4: Find remaining callers to determine which functions become dead
-    var still_called = std.AutoHashMapUnmanaged(u32, void){};
-    defer still_called.deinit(alloc);
-    pos = 5;
-    while (pos < words.len) {
-        const wc: u32 = words[pos] >> 16;
-        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
-        if (wc == 0) break;
-        const ie = pos + wc;
-        if (ie > words.len) break;
-        if (opcode == 57 and wc >= 5 and !dead_calls.contains(pos)) {
-            try still_called.put(alloc, words[pos + 3], {});
-        }
-        pos = ie;
-    }
-
-    // (entry_funcs already computed in Phase 2b)
 
     // Phase 5: Rewrite - only remove dead calls
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
