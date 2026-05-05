@@ -190,7 +190,10 @@ pub fn generate(
     // Second round of constFold after store forwarding may expose new constants
     const cf2 = compact_ids.constFold(alloc, forwarded) catch forwarded;
     if (cf2.ptr != forwarded.ptr) alloc.free(forwarded);
-    const final_dce = compact_ids.deadCodeElim(alloc, cf2) catch return cf2;
+    // Second foldCompositeExtract after forwarding may expose new extract patterns
+    const folded_ce2 = compact_ids.foldCompositeExtract(alloc, cf2) catch cf2;
+    if (folded_ce2.ptr != cf2.ptr) alloc.free(cf2);
+    const final_dce = compact_ids.deadCodeElim(alloc, folded_ce2) catch return folded_ce2;
     if (final_dce.ptr != forwarded.ptr) alloc.free(forwarded);
     const final_retarget = compact_ids.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
     if (final_retarget.ptr != final_dce.ptr) alloc.free(final_dce);
