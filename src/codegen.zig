@@ -217,15 +217,9 @@ pub fn generate(
     if (final_dce3.ptr != no_id_stores.ptr) alloc.free(no_id_stores);
     const final_compact = compact_ids.compactIds(alloc, final_dce3) catch return final_dce3;
     if (final_compact.ptr != final_dce3.ptr) alloc.free(final_dce3);
-    // Third round: re-run key passes that might find new opportunities after identity store elimination
-    const rse3 = compact_ids.redundantStoreElim(alloc, final_compact) catch return final_compact;
-    if (rse3.ptr != final_compact.ptr) alloc.free(final_compact);
-    const cf3 = compact_ids.constFold(alloc, rse3) catch return rse3;
-    if (cf3.ptr != rse3.ptr) alloc.free(rse3);
-    const folded_ce3 = compact_ids.foldCompositeExtract(alloc, cf3) catch return cf3;
-    if (folded_ce3.ptr != cf3.ptr) alloc.free(cf3);
-    const no_rle3 = compact_ids.elimRedundantLoads(alloc, folded_ce3) catch return folded_ce3;
-    if (no_rle3.ptr != folded_ce3.ptr) alloc.free(folded_ce3);
+    // Third round: elimRedundantLoads + CSE after identity store elimination
+    const no_rle3 = compact_ids.elimRedundantLoads(alloc, final_compact) catch return final_compact;
+    if (no_rle3.ptr != final_compact.ptr) alloc.free(final_compact);
     const cse3 = compact_ids.cseWithinBlocks(alloc, no_rle3) catch return no_rle3;
     if (cse3.ptr != no_rle3.ptr) alloc.free(no_rle3);
     const dce4 = compact_ids.deadCodeElim(alloc, cse3) catch return cse3;
