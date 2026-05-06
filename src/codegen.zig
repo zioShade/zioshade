@@ -7,6 +7,7 @@ const parser = @import("parser.zig");
 const semantic = @import("semantic.zig");
 const compact_ids = @import("compact_ids.zig");
 const loop_phi = @import("loop_counter_phi.zig");
+const fold_ec = @import("fold_extract_construct.zig");
 
 pub const Stage = enum { vertex, fragment, compute, geometry };
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
@@ -191,9 +192,12 @@ pub fn generate(
     // Fold VectorShuffle from CompositeConstruct into CompositeConstruct
     const folded_sh = compact_ids.foldShuffleFromComposite(alloc, folded_ce) catch folded_ce;
     if (folded_sh.ptr != folded_ce.ptr) alloc.free(folded_ce);
+    // Fold extract+const -> VectorShuffle: CompositeConstruct(extract, 0.0, extract) -> VectorShuffle
+    const folded_ecs = fold_ec.foldExtractConstructToShuffle(alloc, folded_sh) catch folded_sh;
+    if (folded_ecs.ptr != folded_sh.ptr) alloc.free(folded_sh);
     // Eliminate identity vector shuffles (shuffle(v, v, 0, 1, ...))
-    const no_id_shuffle = compact_ids.elimIdentityShuffle(alloc, folded_sh) catch return folded_sh;
-    if (no_id_shuffle.ptr != folded_sh.ptr) alloc.free(folded_sh);
+    const no_id_shuffle = compact_ids.elimIdentityShuffle(alloc, folded_ecs) catch return folded_ecs;
+    if (no_id_shuffle.ptr != folded_ecs.ptr) alloc.free(folded_ecs);
     // Eliminate uninit vars (loaded but never stored)
     const no_uninit = compact_ids.elimUninitVars(alloc, no_id_shuffle) catch return no_id_shuffle;
     if (no_uninit.ptr != no_id_shuffle.ptr) alloc.free(no_id_shuffle);
