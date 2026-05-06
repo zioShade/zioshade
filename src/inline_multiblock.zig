@@ -96,7 +96,7 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
     for (funcs.items) |*fi| {
         if ((ccounts.get(fi.id) orelse 0) == 1 and
             !eps.contains(fi.id) and
-            fi.n_ret == 1 and
+            (fi.n_ret == 1 or fi.n_ret == 0) and
             fi.n_blk >= 2 and fi.n_blk <= 8 and
             fi.body_after_entry < fi.body_end and
             !fi.has_fvars)
@@ -107,7 +107,7 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
     }
     if (tgt == null) return words;
     const fi = tgt.?;
-    const cpos = csites.get(fi.id).?;
+    const cpos = csites.get(fi.id) orelse return words;
 
     // Safety check: verify no ID defined in the callee body is referenced
     // by other functions (outside the callee). If so, we can't safely inline.
@@ -125,7 +125,7 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
     }
     // Also include the function ID and parameter IDs
     try callee_defs.put(alloc, fi.id, {});
-    for (fi.params.items) |pid| try callee_defs.put(alloc, pid, {});
+    for (fi.params) |pid| try callee_defs.put(alloc, pid, {});
 
     // Check if any callee-defined ID is used outside the callee
     var pos3: u32 = 5;
@@ -138,6 +138,10 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
         if (op2 == 54 and wc2 >= 5 and words[pos3 + 2] == fi.id) { in_callee_check = true; pos3 = ie2; continue; }
         if (in_callee_check and op2 == 56) { in_callee_check = false; pos3 = ie2; continue; }
         if (in_callee_check) { pos3 = ie2; continue; }
+        // Skip OpName/OpMemberName (debug info) — safe to remove later
+        if (op2 == 5 or op2 == 6) { pos3 = ie2; continue; }
+        // Skip the call site itself — it references callee's function ID which is expected
+        if (pos3 == cpos) { pos3 = ie2; continue; }
         // Check operands of non-callee instructions
         for (0..wc2) |i| {
             if (i == 0) continue; // skip header
@@ -182,6 +186,31 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
     for (fi.params, 0..) |pid, i| {
         const off: u32 = @as(u32, @intCast(i)) + 4;
         if (off < cwc) try idmap.put(alloc, pid, words[cpos + off]);
+    }
+    // Map callee's entry label to caller's current block label
+    {
+        var caller_lbl: u32 = 0;
+        var scan: u32 = 5;
+        while (scan < words.len) {
+            const sh = words[scan]; const swc: u32 = sh >> 16; const sop: u16 = @truncate(sh & 0xFFFF);
+            if (swc == 0) break;
+            const sie = scan + swc;
+            if (sie > words.len) break;
+            if (sop == 248 and swc >= 2) caller_lbl = words[scan + 1];
+            if (scan == cpos) break;
+            scan = sie;
+        }
+        var fp3: u32 = fi.start;
+        while (fp3 < fi.body_after_entry) {
+            const fh3 = words[fp3]; const fwc3: u32 = fh3 >> 16; const fop3: u16 = @truncate(fh3 & 0xFFFF);
+            if (fwc3 == 0) break;
+            const fie3 = fp3 + fwc3;
+            if (fop3 == 248 and fwc3 >= 2) {
+                try idmap.put(alloc, words[fp3 + 1], caller_lbl);
+                break;
+            }
+            fp3 = fie3;
+        }
     }
     // Continuation label
     bound += 1;
@@ -245,8 +274,8 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
             continue;
         }
 
-        // Skip OpName for callee
-        if (op == 5 and wc >= 3 and words[p + 1] == fi.id) { p = ie; continue; }
+        // Skip OpName/OpMemberName for callee and its internal IDs
+        if ((op == 5 or op == 6) and wc >= 3 and callee_defs.contains(words[p + 1])) { p = ie; continue; }
 
         try out.appendSlice(alloc, words[p..ie]);
         p = ie;
