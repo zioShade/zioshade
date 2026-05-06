@@ -265,16 +265,23 @@ pub fn generate(
     if (dce7.ptr != copy_mem2.ptr) alloc.free(copy_mem2);
     const final_compact4 = compact_ids.compactIds(alloc, dce7) catch return dce7;
     if (final_compact4.ptr != dce7.ptr) alloc.free(dce7);
+    // Remove unused OpExtInstImport instructions
+    const no_unused_imports = compact_ids.elimUnusedImports(alloc, final_compact4) catch return final_compact4;
+    if (no_unused_imports.ptr != final_compact4.ptr) alloc.free(final_compact4);
+    const no_imports_dce = compact_ids.deadCodeElim(alloc, no_unused_imports) catch return no_unused_imports;
+    if (no_imports_dce.ptr != no_unused_imports.ptr) alloc.free(no_unused_imports);
+    const final_compact4b = compact_ids.compactIds(alloc, no_imports_dce) catch return no_imports_dce;
+    if (final_compact4b.ptr != no_imports_dce.ptr) alloc.free(no_imports_dce);
     // Deduplicate array types after all optimizations
-    const deduped_arr = compact_ids.dedupArrayTypes(alloc, final_compact4) catch return final_compact4;
-    if (deduped_arr.ptr != final_compact4.ptr) alloc.free(final_compact4);
+    const deduped_arr = compact_ids.dedupArrayTypes(alloc, final_compact4b) catch return final_compact4b;
+    if (deduped_arr.ptr != final_compact4b.ptr) alloc.free(final_compact4b);
     // Second struct dedup: after all optimizations (including DCE which may unify member types)
     const deduped_struct2 = compact_ids.dedupStructTypes(alloc, deduped_arr) catch return deduped_arr;
     if (deduped_struct2.ptr != deduped_arr.ptr) alloc.free(deduped_arr);
     // Pointer type dedup: struct dedup may create duplicate pointer types
     const deduped_ptr = compact_ids.dedupPointerTypes(alloc, deduped_struct2) catch return deduped_struct2;
     if (deduped_ptr.ptr != deduped_struct2.ptr) alloc.free(deduped_struct2);
-    if (deduped_ptr.ptr == deduped_struct2.ptr and deduped_struct2.ptr == deduped_arr.ptr and deduped_arr.ptr == final_compact4.ptr) return final_compact4;
+    if (deduped_ptr.ptr == deduped_struct2.ptr and deduped_struct2.ptr == deduped_arr.ptr and deduped_arr.ptr == final_compact4b.ptr) return final_compact4b;
     const dce_tail = compact_ids.deadCodeElim(alloc, deduped_ptr) catch return deduped_ptr;
     if (dce_tail.ptr != deduped_ptr.ptr) alloc.free(deduped_ptr);
     const final_compact5 = compact_ids.compactIds(alloc, dce_tail) catch return dce_tail;
