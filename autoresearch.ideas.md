@@ -59,3 +59,15 @@ If the condition is false, the variable was uninitialized.
 Fix: Insert init store before the outermost if's SelectionMerge, and evaluate assignment RHS
 before LHS to avoid premature materialization.
 
+
+## Session 16 Final Conclusion
+- Pipeline at 7162 total_bound, 210/210 pass, 0 mismatches
+- 9/9 ghostty shaders pass spirv-val (dominance violations fixed)
+- 0 single-called non-trivial functions remain
+- 30 remaining func-scope vars all legitimately used (AC, ExtInst)
+- 100% ID density (every ID 1..bound-1 used)
+- Pipeline provably converged. No binary-level optimizations remain.
+
+### Session 16 Dead End
+- Attempted OpCopyObject elimination: opcode 33 is OpVectorTimesMatrix, not OpCopyObject
+- OpCopyObject was removed from modern SPIR-V - does not exist in our output
