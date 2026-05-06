@@ -97,7 +97,7 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
         if ((ccounts.get(fi.id) orelse 0) == 1 and
             !eps.contains(fi.id) and
             fi.n_ret == 1 and
-            fi.n_blk >= 2 and fi.n_blk <= 4 and
+            fi.n_blk >= 2 and fi.n_blk <= 8 and
             fi.body_after_entry < fi.body_end and
             !fi.has_fvars)
         {
@@ -108,6 +108,47 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
     if (tgt == null) return words;
     const fi = tgt.?;
     const cpos = csites.get(fi.id).?;
+
+    // Safety check: verify no ID defined in the callee body is referenced
+    // by other functions (outside the callee). If so, we can't safely inline.
+    var callee_defs = std.AutoHashMapUnmanaged(u32, void){};
+    defer callee_defs.deinit(alloc);
+    var bp2: u32 = fi.body_after_entry;
+    while (bp2 < fi.body_end) {
+        const bh = words[bp2]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
+        if (bwc == 0) break;
+        const bie = bp2 + bwc;
+        const info = compact_ids.getOpInfo(bop) orelse { bp2 = bie; continue; };
+        if (info.fixed == 2 and bwc >= 3) try callee_defs.put(alloc, words[bp2 + 2], {});
+        if (info.fixed == 3 and bwc >= 2) try callee_defs.put(alloc, words[bp2 + 1], {});
+        bp2 = bie;
+    }
+    // Also include the function ID and parameter IDs
+    try callee_defs.put(alloc, fi.id, {});
+    for (fi.params.items) |pid| try callee_defs.put(alloc, pid, {});
+
+    // Check if any callee-defined ID is used outside the callee
+    var pos3: u32 = 5;
+    var in_callee_check = false;
+    while (pos3 < words.len) {
+        const hdr2 = words[pos3]; const wc2: u32 = hdr2 >> 16; const op2: u16 = @truncate(hdr2 & 0xFFFF);
+        if (wc2 == 0) break;
+        const ie2 = pos3 + wc2;
+        if (ie2 > words.len) break;
+        if (op2 == 54 and wc2 >= 5 and words[pos3 + 2] == fi.id) { in_callee_check = true; pos3 = ie2; continue; }
+        if (in_callee_check and op2 == 56) { in_callee_check = false; pos3 = ie2; continue; }
+        if (in_callee_check) { pos3 = ie2; continue; }
+        // Check operands of non-callee instructions
+        for (0..wc2) |i| {
+            if (i == 0) continue; // skip header
+            const word = words[pos3 + i];
+            if (callee_defs.contains(word)) {
+                // Found a callee-defined ID used outside the callee - unsafe to inline
+                return words;
+            }
+        }
+        pos3 = ie2;
+    }
 
     // Phase 4: Build ID remap
     var idmap = std.AutoHashMapUnmanaged(u32, u32){};
