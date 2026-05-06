@@ -7635,5 +7635,6 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         spos = sie;
     }
 
-    return out;
+    // Trim to actual size (counting pass may overcount)
+    return out[0..opos];
 }
