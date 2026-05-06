@@ -7426,3 +7426,214 @@ pub fn hoistInvariantACs(alloc: std.mem.Allocator, words: []const u32) error{Out
     const nw = result.toOwnedSlice(alloc) catch return words;
     return nw;
 }
+
+/// Convert branch-merge variables to OpPhi.
+/// When a variable is stored in all predecessor blocks of a merge block and
+/// loaded in the merge block, replace with OpPhi to eliminate the variable, stores, and load.
+pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // ---- Phase 1: Build CFG ----
+    const BlockInfo = struct {
+        preds: std.ArrayListUnmanaged(u32),
+        succs: std.ArrayListUnmanaged(u32),
+        stores: std.AutoHashMapUnmanaged(u32, u32),
+        loads: std.AutoHashMapUnmanaged(u32, u32),
+    };
+    var block_map = std.AutoHashMapUnmanaged(u32, BlockInfo){};
+    defer {
+        var it = block_map.iterator();
+        while (it.next()) |e| {
+            e.value_ptr.preds.deinit(alloc);
+            e.value_ptr.succs.deinit(alloc);
+            e.value_ptr.stores.deinit(alloc);
+            e.value_ptr.loads.deinit(alloc);
+        }
+        block_map.deinit(alloc);
+    }
+
+    var cur_block: u32 = 0;
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (op == 248) {
+            cur_block = words[pos + 1];
+            const gop = try block_map.getOrPut(alloc, cur_block);
+            if (!gop.found_existing) gop.value_ptr.* = .{ .preds = .{}, .succs = .{}, .stores = .{}, .loads = .{} };
+        }
+        if (block_map.getPtr(cur_block)) |b| {
+            if (op == 62 and wc >= 3) try b.stores.put(alloc, words[pos + 1], words[pos + 2]);
+            if (op == 61 and wc >= 4) try b.loads.put(alloc, words[pos + 3], words[pos + 2]);
+            if (op == 249 and wc >= 2) try b.succs.append(alloc, words[pos + 1]);
+            if (op == 250 and wc >= 4) { try b.succs.append(alloc, words[pos + 2]); try b.succs.append(alloc, words[pos + 3]); }
+            if (op == 251 and wc >= 3) { var i: u32 = 2; while (i < wc) : (i += 1) try b.succs.append(alloc, words[pos + i]); }
+        }
+        pos = ie;
+    }
+    { var it = block_map.iterator(); while (it.next()) |e| { for (e.value_ptr.succs.items) |s| { if (block_map.getPtr(s)) |sb| try sb.preds.append(alloc, e.key_ptr.*); } } }
+
+    // ---- Phase 2: Find candidates ----
+    const Cand = struct { merge_block: u32, var_id: u32, load_result: u32, result_type: u32, pred_count: u32 };
+    var cands = std.ArrayListUnmanaged(Cand){};
+    defer cands.deinit(alloc);
+    {
+        var bit = block_map.iterator();
+        while (bit.next()) |entry| {
+            const bid = entry.key_ptr.*; const block = entry.value_ptr.*;
+            if (block.preds.items.len < 2) continue;
+            var lit = block.loads.iterator();
+            while (lit.next()) |le| {
+                const var_id = le.key_ptr.*; const load_result = le.value_ptr.*;
+                var ok = true;
+                for (block.preds.items) |pred| {
+                    if (block_map.get(pred)) |pb| { if (!pb.stores.contains(var_id)) { ok = false; break; } } else { ok = false; break; }
+                }
+                if (!ok) continue;
+                var bad = false;
+                var cit = block_map.iterator();
+                while (cit.next()) |ce| {
+                    if (ce.key_ptr.* == bid) continue;
+                    var is_pred = false;
+                    for (block.preds.items) |p| { if (ce.key_ptr.* == p) { is_pred = true; break; } }
+                    if (is_pred) continue;
+                    if (ce.value_ptr.loads.contains(var_id) or ce.value_ptr.stores.contains(var_id)) { bad = true; break; }
+                }
+                if (bad) continue;
+                var rtype: u32 = 0;
+                var p2: u32 = 5;
+                while (p2 < words.len) {
+                    const h = words[p2]; const w: u32 = h >> 16; const o: u16 = @truncate(h & 0xFFFF);
+                    if (w == 0) break; const e = p2 + w; if (e > words.len) break;
+                    if (o == 61 and w >= 4 and words[p2 + 2] == load_result) { rtype = words[p2 + 1]; break; }
+                    p2 = e;
+                }
+                if (rtype == 0) continue;
+                try cands.append(alloc, .{ .merge_block = bid, .var_id = var_id, .load_result = load_result, .result_type = rtype, .pred_count = @as(u32, @intCast(block.preds.items.len)) });
+            }
+        }
+    }
+    if (cands.items.len == 0) return words;
+
+    // ---- Phase 3: Build maps ----
+    var load_map = std.AutoHashMapUnmanaged(u32, u32){};
+    defer load_map.deinit(alloc);
+    var remove_vars = std.AutoHashMapUnmanaged(u32, void){};
+    defer remove_vars.deinit(alloc);
+    var remove_stores = std.AutoHashMapUnmanaged(u64, void){};
+    defer remove_stores.deinit(alloc);
+    var phi_blocks = std.AutoHashMapUnmanaged(u32, u32){}; // merge_block -> index in cands
+    defer phi_blocks.deinit(alloc);
+    var next_id: u32 = bound;
+    for (cands.items, 0..) |c, ci| {
+        try load_map.put(alloc, c.load_result, next_id);
+        try remove_vars.put(alloc, c.var_id, {});
+        var bit2 = block_map.iterator();
+        while (bit2.next()) |e| {
+            if (e.value_ptr.stores.contains(c.var_id)) {
+                try remove_stores.put(alloc, (@as(u64, e.key_ptr.*) << 32) | @as(u64, c.var_id), {});
+            }
+        }
+        try phi_blocks.put(alloc, c.merge_block, @as(u32, @intCast(ci)));
+        next_id += 1;
+    }
+
+    // ---- Phase 4: Emit output using fixed buffer ----
+    // First pass: count output words
+    var out_words: u32 = 5; // header
+    cur_block = 0;
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break; const ie = pos + wc; if (ie > words.len) break;
+        if (op == 248) cur_block = words[pos + 1];
+        if (op == 59 and wc >= 4 and remove_vars.contains(words[pos + 2])) { pos = ie; continue; }
+        if (op == 61 and wc >= 4 and load_map.contains(words[pos + 2])) { pos = ie; continue; }
+        if (op == 62 and wc >= 3) {
+            if (remove_stores.contains((@as(u64, cur_block) << 32) | @as(u64, words[pos + 1]))) { pos = ie; continue; }
+        }
+        out_words += wc;
+        if (op == 248 and phi_blocks.contains(cur_block)) {
+            const ci = phi_blocks.get(cur_block).?;
+            out_words += 3 + 2 * cands.items[ci].pred_count; // OpPhi
+        }
+        pos = ie;
+    }
+
+    // Allocate output buffer
+    var out = try alloc.alloc(u32, out_words);
+    var opos: u32 = 0;
+    // Copy header
+    @memcpy(out[0..5], words[0..5]);
+    out[3] = next_id;
+    opos = 5;
+
+    // Second pass: fill output
+    cur_block = 0;
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break; const ie = pos + wc; if (ie > words.len) break;
+        if (op == 248) cur_block = words[pos + 1];
+        if (op == 59 and wc >= 4 and remove_vars.contains(words[pos + 2])) { pos = ie; continue; }
+        if (op == 61 and wc >= 4 and load_map.contains(words[pos + 2])) { pos = ie; continue; }
+        if (op == 62 and wc >= 3) {
+            if (remove_stores.contains((@as(u64, cur_block) << 32) | @as(u64, words[pos + 1]))) { pos = ie; continue; }
+        }
+        // Copy instruction
+        @memcpy(out[opos..opos + wc], words[pos..ie]);
+        opos += wc;
+        // Insert OpPhi after OpLabel for merge blocks
+        if (op == 248) {
+            if (phi_blocks.get(cur_block)) |ci| {
+                const c = cands.items[ci];
+                const phi_wc: u32 = 3 + 2 * c.pred_count;
+                out[opos] = (phi_wc << 16) | 245; // OpPhi = 245
+                out[opos + 1] = c.result_type;
+                out[opos + 2] = load_map.get(c.load_result).?;
+                var pi: u32 = 0;
+                for (block_map.get(c.merge_block).?.preds.items) |pred| {
+                    const val = block_map.get(pred).?.stores.get(c.var_id).?;
+                    out[opos + 3 + pi * 2] = val;
+                    out[opos + 3 + pi * 2 + 1] = pred;
+                    pi += 1;
+                }
+                opos += phi_wc;
+            }
+        }
+        pos = ie;
+    }
+
+    // ---- Phase 5: ID substitution ----
+    var spos: u32 = 5;
+    while (spos < out.len) {
+        const shdr = out[spos]; const swc: u32 = shdr >> 16; const sop: u16 = @truncate(shdr & 0xFFFF);
+        if (swc == 0) break; const sie = spos + swc; if (sie > out.len) break;
+        const info = getOpInfo(sop) orelse { spos = sie; continue; };
+        var wi: u32 = spos + 1;
+        switch (info.fixed) {
+            1 => { if (wi < sie) wi += 1; },
+            2 => { if (wi + 1 < sie) wi += 2; },
+            3 => { if (wi < sie) wi += 1; },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= sie) break;
+            switch (ch) {
+                'i' => { if (load_map.get(out[wi])) |v| out[wi] = v; wi += 1; },
+                'l' => { wi += 1; },
+                'I' => { while (wi < sie) : (wi += 1) { if (load_map.get(out[wi])) |v| out[wi] = v; } },
+                'L', 's' => { while (wi < sie) : (wi += 1) {} },
+                'M' => { if (wi < sie) wi += 1; while (wi < sie) : (wi += 1) { if (load_map.get(out[wi])) |v| out[wi] = v; } },
+                'W' => { while (wi + 1 < sie) { wi += 1; if (load_map.get(out[wi])) |v| out[wi] = v; wi += 1; } },
+                else => { wi += 1; },
+            }
+        }
+        spos = sie;
+    }
+
+    return out;
+}
