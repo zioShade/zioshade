@@ -99,7 +99,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .uses_arm_tensors = analyzer.uses_arm_tensors,
     };
     // Dead function elimination: only keep functions reachable from main()
-    mod = eliminateDeadFunctions(alloc, mod);
+    mod = try eliminateDeadFunctions(alloc, mod);
 
     // Clear transferred fields before defer deinit runs
     analyzer.types = .{};
@@ -134,7 +134,7 @@ const OverloadEntry = struct {
 const Scope = std.StringHashMapUnmanaged(Symbol);
 
 /// Eliminate functions not reachable from main() via function_call instructions.
-fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) ir.Module {
+fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) !ir.Module {
     if (mod.functions.len <= 1) return mod;
 
     // Make a mutable copy of the functions slice
@@ -191,13 +191,30 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) ir.Module {
 
     // Collect constant instructions from eliminated functions.
     // These may be referenced by surviving functions due to const_cache reuse.
+    // Only rescue constants that aren't already defined in surviving functions.
+    var defined_ids = std.AutoHashMapUnmanaged(u32, void){};
+    defer defined_ids.deinit(alloc);
+    for (functions, 0..) |func, i| {
+        if (reachable.isSet(i)) {
+            for (func.body) |inst| {
+                if (inst.result_id) |rid| {
+                    try defined_ids.put(alloc, rid, {});
+                }
+            }
+        }
+    }
     var rescued_constants = std.ArrayListUnmanaged(ir.Instruction){};
     defer rescued_constants.deinit(alloc);
     for (functions, 0..) |func, i| {
         if (!reachable.isSet(i)) {
             for (func.body) |inst| {
                 if (inst.tag == .constant_int or inst.tag == .constant_float or inst.tag == .constant_bool or inst.tag == .constant_composite) {
-                    rescued_constants.append(alloc, inst) catch {};
+                    if (inst.result_id) |rid| {
+                        if (!defined_ids.contains(rid)) {
+                            try rescued_constants.append(alloc, inst);
+                            try defined_ids.put(alloc, rid, {});
+                        }
+                    }
                 }
             }
         }
@@ -239,7 +256,10 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) ir.Module {
     // Free old functions slice (but not individual items we kept)
     alloc.free(functions);
     var result = mod;
-    result.functions = kept.items;
+    // Use toOwnedSlice to transfer ownership from 'kept' to the result
+    // The kept ArrayList's defer deinint will be a no-op after toOwnedSlice
+    const kept_slice = kept.toOwnedSlice(alloc) catch return mod;
+    result.functions = kept_slice;
     return result;
 }
 
