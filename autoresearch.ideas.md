@@ -1,9 +1,15 @@
 # Autoresearch Ideas — glslpp
 
 ## STATUS: 210/210 spirv-val, 0 mismatches, 0 failures
-## Current: 7166 total_bound across 210 shaders (session 14)
-## We BEAT spirv-opt -O on ALL shaders (total: 7166 vs 7751 = -585 IDs, -7.5%)
+## Current: 7162 total_bound across 210 shaders (session 16)
+## We BEAT spirv-opt -O on ALL shaders (total: 7162 vs 7751 = -589 IDs, -7.6%)
 ## We BEAT glslang on ALL comparable shaders (-45%)
+
+## SESSION 16 CHANGES (ghostty dominance fix):
+1. Insert SSA init stores before outermost if's SelectionMerge (if_insert_points stack)
+2. Evaluate assign_op RHS before LHS to avoid premature materialization
+3. Fix codegen double-free (phi vs bphi_early comparison)
+4. Result: all 9/9 ghostty shaders pass spirv-val, 210/210 spirv-cross pass, total_bound=7162
 
 ## SESSION 14 CHANGES (-3 IDs from 7169):
 1. branchMergePhi pass: convert branch-merge variables to OpPhi (fixed-buffer approach)
@@ -31,36 +37,25 @@ No function-scope variables remain in any shader output.
 4. Loop-invariant code motion (LICM) - requires loop analysis
 5. Codegen-level int64/uint64 type support (would fix int64.desktop.comp degenerate types)
 
-## Ghostty Correctness Fixes (Session 15)
+## Ghostty Correctness Fixes (Session 15-16)
 
 ### Fixed
 - mergeBlocks: protect OpSelectionMerge targets from merging (fixes cell_bg.f)
 - inlineTrivialFuncs: fix duplicate result IDs when body has ONLY return value as body-defined ID (fixes cell_text.v)
+- SSA init store placement: insert before outermost if's SelectionMerge (fixes all ghostty dominance violations)
+- assign_op RHS-first evaluation: avoids premature SSA materialization
+- codegen double-free fix: phi vs bphi_early comparison
 
-### Remaining (dominance violations)
-- bg_image.f: tex_coord computed in header, reassigned inside if-then, used after merge
-- cell_text.f: similar pattern - value from conditional used after merge
+### Status: ALL 9/9 ghostty shaders pass spirv-val
 
-### Root cause
+### Root cause (now fixed)
 When a local variable is declared with `vec2 tex_coord = expr` and later reassigned
 inside a conditional `tex_coord = f(tex_coord)`, the semantic analyzer uses SSA (init_value
 used directly). When the reassignment materializes the SSA var inside the conditional,
-the OpVariable + initial store are emitted in the conditional block. After moveVarToEntry,
-the OpVariable moves to function entry, but the initial store stays in the conditional block.
-If the condition is false, the variable is uninitialized.
+the OpVariable + initial store were emitted in the conditional block. After moveVarToEntry,
+the OpVariable moves to function entry, but the initial store stayed in the conditional block.
+If the condition is false, the variable was uninitialized.
 
-### Attempted fixes
-1. **unssaAllScopes before if_stmt**: Materializes all SSA vars before the if. Works for
-   210/210 spirv-cross tests but causes double-free and missing OpVariables in ghostty shaders.
-   The optimization pipeline removes the OpVariable from the final output.
-2. **global_load_cache forwarding**: Cache init_value in global_load_cache so cross-block loads
-   get the init_value directly. Causes 3 regressions in spirv-cross tests (loop-related
-   dominance issues).
+Fix: Insert init store before the outermost if's SelectionMerge, and evaluate assignment RHS
+before LHS to avoid premature materialization.
 
-### Correct fix approach
-Need to either:
-1. Emit the initial store BEFORE the if statement (requires splitting materialization into
-   "declare variable at current point" and "store initial value at an earlier point")
-2. Use OpPhi at the merge block instead of OpVariable (requires phi support in codegen)
-3. Track SSA vars that are reassigned inside conditionals and eagerly materialize them
-   at the declaration point (before any conditional)
