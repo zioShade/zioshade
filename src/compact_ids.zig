@@ -7638,3 +7638,61 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     // Trim to actual size (counting pass may overcount)
     return out[0..opos];
 }
+
+/// Remove unused OpExtInstImport instructions.
+/// OpExtInstImport declares an external instruction set (e.g., GLSLstd450).
+/// If no OpExtInst references it, the import is unused and can be removed.
+pub fn elimUnusedImports(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Find all OpExtInstImport (opcode 11) result IDs
+    var imports = std.AutoHashMapUnmanaged(u32, void){};
+    defer imports.deinit(alloc);
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (op == 11 and wc >= 2) {
+            try imports.put(alloc, words[pos + 1], {});
+        }
+        pos = ie;
+    }
+    if (imports.count() == 0) return words;
+
+    // Mark imports that are referenced by OpExtInst (opcode 12)
+    // OpExtInst format: header | result_type | result_id | import_id | instruction | operands...
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (op == 12 and wc >= 4) {
+            _ = imports.remove(words[pos + 3]); // import_id (set) is at word 3 after header
+        }
+        pos = ie;
+    }
+    if (imports.count() == 0) return words; // all imports are used
+
+    // Remove unused imports
+    var result = try std.ArrayList(u32).initCapacity(alloc, words.len);
+    errdefer result.deinit(alloc);
+    result.appendSliceAssumeCapacity(words[0..5]);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (op == 11 and wc >= 2 and imports.contains(words[pos + 1])) {
+            pos = ie; // skip unused import
+            continue;
+        }
+        result.appendSliceAssumeCapacity(words[pos..ie]);
+        pos = ie;
+    }
+    return result.toOwnedSlice(alloc) catch return words;
+}
