@@ -2922,6 +2922,88 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
 
 /// Double negation elimination: FNegate(FNegate(x)) → x, SNegate(SNegate(x)) → x.
 /// Also handles LogicalNot(LogicalNot(x)) → x and BitwiseNot(BitwiseNot(x)) → x.
+pub fn dedupPointerTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    var pointers = std.AutoHashMapUnmanaged(u64, u32){}; // hash(sc, pointee) -> first_id
+    defer pointers.deinit(alloc);
+    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // dup_id -> first_id
+    defer replacements.deinit(alloc);
+
+    // First pass: find duplicate pointer types (OpTypePointer = opcode 32)
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 32 and wc >= 4) { // OpTypePointer: result, storage_class, pointee_type
+            const result_id = words[pos + 1];
+            const sc = words[pos + 2];
+            const pointee = words[pos + 3];
+            const h = @as(u64, sc) *% 33 +% @as(u64, pointee);
+            if (pointers.get(h)) |first_id| {
+                if (first_id != result_id) {
+                    try replacements.put(alloc, result_id, first_id);
+                }
+            } else {
+                try pointers.put(alloc, h, result_id);
+            }
+        }
+        pos += wc;
+    }
+
+    if (replacements.count() == 0) return words;
+
+    // Second pass: skip duplicate pointers, replace all references
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        // Skip duplicate OpTypePointer
+        if (opcode == 32 and wc >= 4 and replacements.contains(words[pos + 1])) {
+            pos = ie;
+            continue;
+        }
+
+        const info = getOpInfo(opcode) orelse {
+            result.appendSlice(alloc, words[pos..ie]) catch return words;
+            pos = ie; continue;
+        };
+
+        var wi: u32 = pos + 1;
+        try result.append(alloc, hdr);
+        switch (info.fixed) {
+            1 => { if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } },
+            2 => {
+                if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; }
+                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+            },
+            3 => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; },
+                'l' => { try result.append(alloc, words[wi]); wi += 1; },
+                'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
+                'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
+                else => { try result.append(alloc, words[wi]); wi += 1; },
+            }
+        }
+        // Copy any remaining words
+        while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+        pos = ie;
+    }
+
+    return result.toOwnedSlice(alloc) catch return words;
+}
+
 pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
     const bound = words[3];
     if (bound <= 1) return words;
