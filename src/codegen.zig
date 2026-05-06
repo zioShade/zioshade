@@ -268,16 +268,14 @@ pub fn generate(
     // Second struct dedup: after all optimizations (including DCE which may unify member types)
     const deduped_struct2 = compact_ids.dedupStructTypes(alloc, deduped_arr) catch return deduped_arr;
     if (deduped_struct2.ptr != deduped_arr.ptr) alloc.free(deduped_arr);
-    if (deduped_struct2.ptr == deduped_arr.ptr and deduped_arr.ptr == final_compact4.ptr) return final_compact4;
-    if (deduped_struct2.ptr != deduped_arr.ptr) {
-        const dce_s2 = compact_ids.deadCodeElim(alloc, deduped_struct2) catch return deduped_struct2;
-        if (dce_s2.ptr != deduped_struct2.ptr) alloc.free(deduped_struct2);
-        const final_compact5 = compact_ids.compactIds(alloc, dce_s2) catch return dce_s2;
-        if (final_compact5.ptr != dce_s2.ptr) alloc.free(dce_s2);
-        return final_compact5;
-    }
-    const final_compact5 = compact_ids.compactIds(alloc, deduped_arr) catch return deduped_arr;
-    if (final_compact5.ptr != deduped_arr.ptr) alloc.free(deduped_arr);
+    // Pointer type dedup: struct dedup may create duplicate pointer types
+    const deduped_ptr = compact_ids.dedupPointerTypes(alloc, deduped_struct2) catch return deduped_struct2;
+    if (deduped_ptr.ptr != deduped_struct2.ptr) alloc.free(deduped_struct2);
+    if (deduped_ptr.ptr == deduped_struct2.ptr and deduped_struct2.ptr == deduped_arr.ptr and deduped_arr.ptr == final_compact4.ptr) return final_compact4;
+    const dce_tail = compact_ids.deadCodeElim(alloc, deduped_ptr) catch return deduped_ptr;
+    if (dce_tail.ptr != deduped_ptr.ptr) alloc.free(deduped_ptr);
+    const final_compact5 = compact_ids.compactIds(alloc, dce_tail) catch return dce_tail;
+    if (final_compact5.ptr != dce_tail.ptr) alloc.free(dce_tail);
     return final_compact5;
 }
 
