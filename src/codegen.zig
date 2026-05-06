@@ -271,9 +271,28 @@ pub fn generate(
     // Pointer type dedup: struct dedup may create duplicate pointer types
     const deduped_ptr = compact_ids.dedupPointerTypes(alloc, deduped_struct2) catch return deduped_struct2;
     if (deduped_ptr.ptr != deduped_struct2.ptr) alloc.free(deduped_struct2);
-    if (deduped_ptr.ptr == deduped_struct2.ptr and deduped_struct2.ptr == deduped_arr.ptr and deduped_arr.ptr == final_compact4.ptr) return final_compact4;
+    if (deduped_ptr.ptr == deduped_struct2.ptr and deduped_struct2.ptr == deduped_arr.ptr and deduped_arr.ptr == final_compact4.ptr) {
+        // No dedup happened — try phi conversion
+        const bphi = compact_ids.branchMergePhi(alloc, final_compact4) catch return final_compact4;
+        if (bphi.ptr == final_compact4.ptr) return final_compact4;
+        alloc.free(final_compact4);
+        const bphi_dce = compact_ids.deadCodeElim(alloc, bphi) catch return bphi;
+        if (bphi_dce.ptr != bphi.ptr) alloc.free(bphi);
+        const bphi_ret = compact_ids.compactIds(alloc, bphi_dce) catch return bphi_dce;
+        if (bphi_ret.ptr != bphi_dce.ptr) alloc.free(bphi_dce);
+        return bphi_ret;
+    }
     const dce_tail = compact_ids.deadCodeElim(alloc, deduped_ptr) catch return deduped_ptr;
     if (dce_tail.ptr != deduped_ptr.ptr) alloc.free(deduped_ptr);
+    const phi2 = compact_ids.branchMergePhi(alloc, dce_tail) catch return dce_tail;
+    if (phi2.ptr != dce_tail.ptr) {
+        alloc.free(dce_tail);
+        const phi2_dce = compact_ids.deadCodeElim(alloc, phi2) catch return phi2;
+        if (phi2_dce.ptr != phi2.ptr) alloc.free(phi2);
+        const phi2_ret = compact_ids.compactIds(alloc, phi2_dce) catch return phi2_dce;
+        if (phi2_ret.ptr != phi2_dce.ptr) alloc.free(phi2_dce);
+        return phi2_ret;
+    }
     const final_compact5 = compact_ids.compactIds(alloc, dce_tail) catch return dce_tail;
     if (final_compact5.ptr != dce_tail.ptr) alloc.free(dce_tail);
     return final_compact5;
