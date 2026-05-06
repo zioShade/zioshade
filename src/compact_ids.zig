@@ -7498,22 +7498,66 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     { var it = block_map.iterator(); while (it.next()) |e| { for (e.value_ptr.succs.items) |s| { if (block_map.getPtr(s)) |sb| try sb.preds.append(alloc, e.key_ptr.*); } } }
 
     // ---- Phase 2: Find candidates ----
-    const Cand = struct { merge_block: u32, var_id: u32, load_result: u32, result_type: u32, pred_count: u32 };
+    // Look for merge blocks (2+ preds) where a variable is stored in ALL predecessors.
+    // The variable must be loaded somewhere (not necessarily in the merge block).
+    // No other block may store the variable.
+    const Cand = struct { merge_block: u32, var_id: u32, first_load_result: u32, result_type: u32, pred_count: u32, all_load_results: std.ArrayListUnmanaged(u32) };
     var cands = std.ArrayListUnmanaged(Cand){};
-    defer cands.deinit(alloc);
+    defer {
+        for (cands.items) |*c| c.all_load_results.deinit(alloc);
+        cands.deinit(alloc);
+    }
     {
+        // Collect all function-scope variable IDs
+        var func_var_ids = std.AutoHashMapUnmanaged(u32, void){};
+        defer func_var_ids.deinit(alloc);
+        pos = 5;
+        while (pos < words.len) {
+            const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break; const ie = pos + wc; if (ie > words.len) break;
+            if (op == 59 and wc >= 4 and words[pos + 3] == 7) { // OpVariable Function
+                try func_var_ids.put(alloc, words[pos + 2], {});
+            }
+            pos = ie;
+        }
+
         var bit = block_map.iterator();
         while (bit.next()) |entry| {
             const bid = entry.key_ptr.*; const block = entry.value_ptr.*;
             if (block.preds.items.len < 2) continue;
-            var lit = block.loads.iterator();
-            while (lit.next()) |le| {
-                const var_id = le.key_ptr.*; const load_result = le.value_ptr.*;
-                var ok = true;
-                for (block.preds.items) |pred| {
-                    if (block_map.get(pred)) |pb| { if (!pb.stores.contains(var_id)) { ok = false; break; } } else { ok = false; break; }
+
+            // For each predecessor, get the set of stored variables
+            var pred_stored = std.AutoHashMapUnmanaged(u32, void){};
+            defer pred_stored.deinit(alloc);
+            var first = true;
+            for (block.preds.items) |pred| {
+                if (block_map.get(pred)) |pb| {
+                    if (first) {
+                        var si = pb.stores.iterator();
+                        while (si.next()) |se| {
+                            if (func_var_ids.contains(se.key_ptr.*))
+                                try pred_stored.put(alloc, se.key_ptr.*, {});
+                        }
+                        first = false;
+                    } else {
+                        // Remove variables not stored in this pred
+                        var to_remove = std.ArrayListUnmanaged(u32){};
+                        defer to_remove.deinit(alloc);
+                        var psi = pred_stored.iterator();
+                        while (psi.next()) |pe| {
+                            if (!pb.stores.contains(pe.key_ptr.*)) try to_remove.append(alloc, pe.key_ptr.*);
+                        }
+                        for (to_remove.items) |rid| _ = pred_stored.remove(rid);
+                    }
                 }
-                if (!ok) continue;
+            }
+
+            // For each variable stored in ALL predecessors
+            var psi2 = pred_stored.iterator();
+            while (psi2.next()) |pe| {
+                const var_id = pe.key_ptr.*;
+
+                // Safety: no non-predecessor block may STORE this variable
                 var bad = false;
                 var cit = block_map.iterator();
                 while (cit.next()) |ce| {
@@ -7521,19 +7565,36 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                     var is_pred = false;
                     for (block.preds.items) |p| { if (ce.key_ptr.* == p) { is_pred = true; break; } }
                     if (is_pred) continue;
-                    if (ce.value_ptr.loads.contains(var_id) or ce.value_ptr.stores.contains(var_id)) { bad = true; break; }
+                    if (ce.value_ptr.stores.contains(var_id)) { bad = true; break; }
                 }
                 if (bad) continue;
+
+                // Find ALL loads of this variable across all blocks
+                var all_loads = std.ArrayListUnmanaged(u32){};
                 var rtype: u32 = 0;
-                var p2: u32 = 5;
-                while (p2 < words.len) {
-                    const h = words[p2]; const w: u32 = h >> 16; const o: u16 = @truncate(h & 0xFFFF);
-                    if (w == 0) break; const e = p2 + w; if (e > words.len) break;
-                    if (o == 61 and w >= 4 and words[p2 + 2] == load_result) { rtype = words[p2 + 1]; break; }
-                    p2 = e;
+                var ait = block_map.iterator();
+                while (ait.next()) |ae| {
+                    var ale = ae.value_ptr.loads.iterator();
+                    while (ale.next()) |al| {
+                        if (al.key_ptr.* == var_id) {
+                            try all_loads.append(alloc, al.value_ptr.*);
+                            // Get result type from the first load
+                            if (rtype == 0) {
+                                var p2: u32 = 5;
+                                while (p2 < words.len) {
+                                    const h = words[p2]; const ww: u32 = h >> 16; const o: u16 = @truncate(h & 0xFFFF);
+                                    if (ww == 0) break; const e = p2 + ww; if (e > words.len) break;
+                                    if (o == 61 and ww >= 4 and words[p2 + 2] == al.value_ptr.*) { rtype = words[p2 + 1]; break; }
+                                    p2 = e;
+                                }
+                            }
+                        }
+                    }
                 }
-                if (rtype == 0) continue;
-                try cands.append(alloc, .{ .merge_block = bid, .var_id = var_id, .load_result = load_result, .result_type = rtype, .pred_count = @as(u32, @intCast(block.preds.items.len)) });
+                if (all_loads.items.len == 0 or rtype == 0) { all_loads.deinit(alloc); continue; }
+
+                const first_load = all_loads.items[0];
+                try cands.append(alloc, .{ .merge_block = bid, .var_id = var_id, .first_load_result = first_load, .result_type = rtype, .pred_count = @as(u32, @intCast(block.preds.items.len)), .all_load_results = all_loads });
             }
         }
     }
@@ -7550,8 +7611,12 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     defer phi_blocks.deinit(alloc);
     var next_id: u32 = bound;
     for (cands.items, 0..) |c, ci| {
-        try load_map.put(alloc, c.load_result, next_id);
+        try load_map.put(alloc, c.first_load_result, next_id);
         try remove_vars.put(alloc, c.var_id, {});
+        // Map ALL loads (including those outside the merge block)
+        for (c.all_load_results.items) |lr| {
+            try load_map.put(alloc, lr, next_id);
+        }
         var bit2 = block_map.iterator();
         while (bit2.next()) |e| {
             if (e.value_ptr.stores.contains(c.var_id)) {
@@ -7614,7 +7679,7 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                 const phi_wc: u32 = 3 + 2 * c.pred_count;
                 out[opos] = (phi_wc << 16) | 245; // OpPhi = 245
                 out[opos + 1] = c.result_type;
-                out[opos + 2] = load_map.get(c.load_result).?;
+                out[opos + 2] = load_map.get(c.first_load_result).?;
                 var pi: u32 = 0;
                 for (block_map.get(c.merge_block).?.preds.items) |pred| {
                     const val = block_map.get(pred).?.stores.get(c.var_id).?;
