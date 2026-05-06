@@ -71,3 +71,13 @@ before LHS to avoid premature materialization.
 ### Session 16 Dead End
 - Attempted OpCopyObject elimination: opcode 33 is OpVectorTimesMatrix, not OpCopyObject
 - OpCopyObject was removed from modern SPIR-V - does not exist in our output
+
+## Session 17 Changes (-4 IDs from 7162)
+1. Multi-block function inlining: inline single-called functions with 1 return, 2-4 blocks, no func vars
+2. helper-invocation.frag inlined (-4 IDs): 4-block foo() with OpReturnValue inlined into main
+3. Result: 7158 total_bound, 210/210 pass
+
+## Remaining Inline Targets
+- shader-debug-info-line-directives.line.gV.frag: func2 (8 blocks, void, 4x OpReturn) - needs void function handling
+- Would need: handle multiple OpReturn -> OpBranch, handle void call result (no phi needed in continuation)
+- Estimated savings: ~10-20 IDs (function overhead + potential cascading optimization)
