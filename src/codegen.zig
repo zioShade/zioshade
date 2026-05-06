@@ -8,6 +8,7 @@ const semantic = @import("semantic.zig");
 const compact_ids = @import("compact_ids.zig");
 const loop_phi = @import("loop_counter_phi.zig");
 const fold_ec = @import("fold_extract_construct.zig");
+const inline_mb = @import("inline_multiblock.zig");
 
 pub const Stage = enum { vertex, fragment, compute, geometry };
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
@@ -143,6 +144,8 @@ pub fn generate(
         alloc.free(compact2);
         inlined = next;
     }
+    // Inline multi-block functions that are called once
+    // (deferred to after trivial inlining + DCE)
     // Eliminate calls to pure void-returning functions
     const no_dead_calls = compact_ids.elimDeadVoidCalls(alloc, inlined) catch return inlined;
     if (no_dead_calls.ptr != inlined.ptr) alloc.free(inlined);
@@ -168,8 +171,18 @@ pub fn generate(
     if (hoisted.ptr != blk_merged2.ptr) alloc.free(blk_merged2);
     const hoisted_dce = compact_ids.deadCodeElim(alloc, hoisted) catch return hoisted;
     if (hoisted_dce.ptr != hoisted.ptr) alloc.free(hoisted);
-    const deduped = compact_ids.dedupStructTypes(alloc, hoisted_dce) catch return hoisted_dce;
-    if (deduped.ptr != hoisted_dce.ptr) alloc.free(hoisted_dce);
+    // Inline multi-block functions that are called once (after phi conversion eliminates func vars)
+    const mb_inlined = inline_mb.inlineMultiBlock(alloc, hoisted_dce) catch return hoisted_dce;
+    if (mb_inlined.ptr != hoisted_dce.ptr) alloc.free(hoisted_dce);
+    // Merge blocks + DCE after inlining (inliner creates continuation blocks)
+    const mb_merged = compact_ids.mergeBlocks(alloc, mb_inlined) catch mb_inlined;
+    if (mb_merged.ptr != mb_inlined.ptr) alloc.free(mb_inlined);
+    const mb_merged2 = compact_ids.mergeNonEmptyBlocks(alloc, mb_merged) catch mb_merged;
+    if (mb_merged2.ptr != mb_merged.ptr) alloc.free(mb_merged);
+    const mb_dce = compact_ids.deadCodeElim(alloc, mb_merged2) catch mb_merged2;
+    if (mb_dce.ptr != mb_merged2.ptr) alloc.free(mb_merged2);
+    const deduped = compact_ids.dedupStructTypes(alloc, mb_dce) catch return mb_dce;
+    if (deduped.ptr != mb_dce.ptr) alloc.free(mb_dce);
     const negated = compact_ids.eliminateDoubleNegate(alloc, deduped) catch return deduped;
     if (negated.ptr != deduped.ptr) alloc.free(deduped);
     const algebrad = compact_ids.algebraicSimpl(alloc, negated) catch return negated;
