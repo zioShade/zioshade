@@ -281,6 +281,7 @@ const Analyzer = struct {
     overloads: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(OverloadEntry)),
     tolerate_errors: bool = false,
     has_returned: bool = false, // Dead code suppression after return
+    if_insert_points: std.ArrayListUnmanaged(usize) = .{}, // stack of instruction indices before each if's SelectionMerge
     next_id: u32 = 1,
     // Constant dedup: (type_tag << 32 | value_bits) -> ir_id
     const_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
@@ -1515,6 +1516,9 @@ const Analyzer = struct {
                 const else_label = if (has_else) self.allocId() else null;
                 const merge_label = self.allocId();
 
+                // Save instruction index BEFORE SelectionMerge — this is where init stores
+                // for SSA vars materialized inside this if should be inserted.
+                try self.if_insert_points.append(self.alloc, self.instructions.items.len);
                 try self.emitSelectionMerge(merge_label);
                 try self.emitBranchConditional(cond.id, then_label, if (has_else) else_label.? else merge_label);
 
@@ -1551,6 +1555,7 @@ const Analyzer = struct {
                             .ty = .void,
                         });
                         self.has_returned = true;
+                        _ = self.if_insert_points.pop();
                         return;
                     }
                     // Restore: only set has_returned if both branches returned
@@ -1573,6 +1578,7 @@ const Analyzer = struct {
                 // so caching loads here is safe (set after emitLabel which clears it)
                 try self.emitLabel(merge_label);
                 self.cache_globals = true;
+                _ = self.if_insert_points.pop();
             },
             .switch_stmt => {
                 if (node.data.children.len < 2) return;
@@ -1931,13 +1937,19 @@ const Analyzer = struct {
                     const store_ops = self.alloc.alloc(ir.Instruction.Operand, 2) catch return null;
                     store_ops[0] = .{ .id = var_id };
                     store_ops[1] = .{ .id = init_val };
-                    self.instructions.append(self.alloc, .{
+                    const store_inst = ir.Instruction{
                         .tag = .store,
                         .result_type = null,
                         .result_id = null,
                         .operands = store_ops,
                         .ty = .void,
-                    }) catch return null;
+                    };
+                    if (self.if_insert_points.items.len > 0) {
+                        const insert_idx = self.if_insert_points.items[0];
+                        self.instructions.insert(self.alloc, insert_idx, store_inst) catch return null;
+                    } else {
+                        self.instructions.append(self.alloc, store_inst) catch return null;
+                    }
                 }
                 sym.ir_id = var_id;
                 sym.is_ssa = false;
@@ -2005,13 +2017,21 @@ const Analyzer = struct {
                             store_ops[0] = .{ .id = var_id };
                             store_ops[1] = .{ .id = init_val };
                             _ = self.load_cache.remove(var_id);
-        try self.instructions.append(self.alloc, .{
+                            const store_inst = ir.Instruction{
                                 .tag = .store,
                                 .result_type = null,
                                 .result_id = null,
                                 .operands = store_ops,
                                 .ty = .void,
-                            });
+                            };
+                            if (self.if_insert_points.items.len > 0) {
+                                // Inside a conditional: insert init store before outermost
+                                // if's SelectionMerge to ensure it always executes.
+                                const insert_idx = self.if_insert_points.items[0];
+                                self.instructions.insert(self.alloc, insert_idx, store_inst) catch return error.OutOfMemory;
+                            } else {
+                                try self.instructions.append(self.alloc, store_inst);
+                            }
                         }
                         // Update symbol with new var_id and clear SSA flag
                         if (self.lookupMut(node.data.name)) |mut_sym| {
@@ -2560,8 +2580,11 @@ const Analyzer = struct {
                     }
                 }
 
-                const target = try self.analyzeLValue(node.data.children[0]);
+                // Evaluate RHS BEFORE LHS to avoid materializing SSA variable
+                // before the RHS expression uses it. If the RHS references the same
+                // variable being assigned to, it should use the SSA init_value directly.
                 var value = try self.analyzeExpression(node.data.children[1]);
+                const target = try self.analyzeLValue(node.data.children[0]);
                 // If value is a pointer, load it
                 if (value.is_ptr) {
                     const loaded_id = try self.emitLoadCached(value.id, value.ty);
