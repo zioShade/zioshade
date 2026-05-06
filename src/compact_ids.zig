@@ -2740,6 +2740,16 @@ pub fn dedupStructTypes(alloc: std.mem.Allocator, words: []const u32) error{OutO
             pos = ie;
             continue;
         }
+        // Substitute target ID in decorations (OpDecorate=71, OpMemberDecorate=72)
+        // Skip decorations on replaced IDs — the first ID already has identical decorations
+        if (opcode == 71 and wc >= 3 and replacements.contains(words[pos + 1])) { // OpDecorate
+            pos = ie;
+            continue;
+        }
+        if (opcode == 72 and wc >= 4 and replacements.contains(words[pos + 1])) { // OpMemberDecorate
+            pos = ie;
+            continue;
+        }
 
         const info = getOpInfo(opcode) orelse {
             result.appendSlice(alloc, words[pos..ie]) catch return words;
