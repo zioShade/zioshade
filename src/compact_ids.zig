@@ -2010,9 +2010,9 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
     // 3. B is not a function entry point
     // 4. B is not a loop merge target or continue target
 
-    // Collect loop merge and continue targets
-    var loop_targets = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
-    defer loop_targets.deinit();
+    // Collect loop merge/continue targets AND selection merge targets
+    var merge_targets = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer merge_targets.deinit();
     pos = 5;
     while (pos < words.len) {
         const hdr = words[pos];
@@ -2020,8 +2020,11 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
         const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (opcode == 246 and wc >= 3) { // OpLoopMerge
-            if (words[pos + 1] < bound) loop_targets.set(words[pos + 1]); // merge
-            if (words[pos + 2] < bound) loop_targets.set(words[pos + 2]); // continue
+            if (words[pos + 1] < bound) merge_targets.set(words[pos + 1]); // merge
+            if (words[pos + 2] < bound) merge_targets.set(words[pos + 2]); // continue
+        }
+        if (opcode == 247 and wc >= 2) { // OpSelectionMerge
+            if (words[pos + 1] < bound) merge_targets.set(words[pos + 1]); // merge
         }
         pos += wc;
     }
@@ -2079,7 +2082,7 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
         if (from_label == to_label) continue; // self-loop
         if (to_label >= bound) continue;
         if (func_entries.isSet(to_label)) continue; // function entry
-        if (loop_targets.isSet(to_label)) continue; // loop merge/continue target
+        if (merge_targets.isSet(to_label)) continue; // loop/selection merge target
         if (structured_labels.isSet(from_label)) continue; // predecessor has structured control flow
         if (structured_labels.isSet(to_label)) continue; // target has structured control flow
         const preds = predecessors.get(to_label) orelse 0;
@@ -3947,9 +3950,21 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 if (fi.return_value_id != 0) {
                     const call_result = words[pos + 2];
                     const resolved_ret = repl.get(fi.return_value_id) orelse fi.return_value_id;
-                    // If body is non-empty and return value is body-defined, map it to call_result
-                    // so the body instruction produces the call's result
-                    if (fi.body_start < fi.body_end and fresh_map.count() > 0) {
+                    // Check if return value is defined in the body (has an instruction producing it)
+                    var ret_defined_in_body = false;
+                    var bp: u32 = fi.body_start;
+                    while (bp < fi.body_end) {
+                        const bh = words[bp]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
+                        if (bwc == 0) break;
+                        const binfo = getOpInfo(bop) orelse { bp += bwc; continue; };
+                        if (binfo.fixed == 2 and bp + 2 < fi.body_end and words[bp + 2] == fi.return_value_id) {
+                            ret_defined_in_body = true;
+                        } else if (binfo.fixed == 3 and bp + 1 < fi.body_end and words[bp + 1] == fi.return_value_id) {
+                            ret_defined_in_body = true;
+                        }
+                        bp += bwc;
+                    }
+                    if (fi.body_start < fi.body_end and ret_defined_in_body) {
                         // Return value is defined in the body — map it to call_result
                         try repl.put(alloc, fi.return_value_id, call_result);
                     } else {
