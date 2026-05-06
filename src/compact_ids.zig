@@ -3390,6 +3390,12 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                         if (float_one_ids.isSet(b)) try replacements.put(alloc, result_id, a);
                         if (float_one_ids.isSet(a)) try replacements.put(alloc, result_id, b);
                     },
+                    142 => { // OpVectorTimesScalar: vec * 1.0 = vec
+                        if (float_one_ids.isSet(b)) try replacements.put(alloc, result_id, a);
+                    },
+                    143 => { // OpMatrixTimesScalar: mat * 1.0 = mat
+                        if (float_one_ids.isSet(b)) try replacements.put(alloc, result_id, a);
+                    },
                     else => {},
                 }
             }
