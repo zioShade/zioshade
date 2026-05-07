@@ -81,3 +81,4 @@ before LHS to avoid premature materialization.
 - shader-debug-info-line-directives.line.gV.frag: func2 (8 blocks, void, 4x OpReturn) - needs void function handling
 - Would need: handle multiple OpReturn -> OpBranch, handle void call result (no phi needed in continuation)
 - Estimated savings: ~10-20 IDs (function overhead + potential cascading optimization)
+Done with void function inlining: 7160->7157 (-3 IDs). All remaining inline targets are multi-call. Pipeline continues to converge.
