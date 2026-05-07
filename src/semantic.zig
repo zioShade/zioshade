@@ -5188,9 +5188,22 @@ const Analyzer = struct {
             },
             .ternary_op => {
                 if (node.data.children.len < 3) return error.SemanticFailed;
-                const cond_tid = try self.analyzeExpression(node.data.children[0]);
-                const then_tid = try self.analyzeExpression(node.data.children[1]);
-                const else_tid = try self.analyzeExpression(node.data.children[2]);
+                var cond_tid = try self.analyzeExpression(node.data.children[0]);
+                var then_tid = try self.analyzeExpression(node.data.children[1]);
+                var else_tid = try self.analyzeExpression(node.data.children[2]);
+                // Auto-load pointers
+                if (cond_tid.is_ptr) {
+                    const ld = try self.emitLoadCached(cond_tid.id, cond_tid.ty);
+                    cond_tid = .{ .ty = cond_tid.ty, .id = ld };
+                }
+                if (then_tid.is_ptr) {
+                    const ld = try self.emitLoadCached(then_tid.id, then_tid.ty);
+                    then_tid = .{ .ty = then_tid.ty, .id = ld };
+                }
+                if (else_tid.is_ptr) {
+                    const ld = try self.emitLoadCached(else_tid.id, else_tid.ty);
+                    else_tid = .{ .ty = else_tid.ty, .id = ld };
+                }
                 const result_ty = self.promoteTypes(then_tid.ty, else_tid.ty) orelse then_tid.ty;
                 const result_id = self.allocId();
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 3);
