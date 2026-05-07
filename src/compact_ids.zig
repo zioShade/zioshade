@@ -7856,7 +7856,8 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
                             }
                             wi += 1;
                         },
-                        'l', 'L', 's' => { wi += 1; }, // literal, skip
+                        'l' => { wi += 1; }, // single literal
+                        'L', 's' => { wi = ie; }, // consume rest as literals
                         'I' => { // ID variadic
                             while (wi < ie) : (wi += 1) {
                                 const word = words[wi];
