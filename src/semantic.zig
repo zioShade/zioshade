@@ -2436,7 +2436,7 @@ const Analyzer = struct {
                 operands[0] = .{ .id = left_id };
                 operands[1] = .{ .id = right_id };
 
-                // Comparison and logical operators return bool, not the operand type
+                // Comparison and logical operators return bool/bvec, not the operand type
                 const returns_bool = switch (op) {
                     .eq, .neq, .lt, .gt, .lte, .gte, .logical_and, .logical_or => true,
                     else => false,
@@ -2460,8 +2460,16 @@ const Analyzer = struct {
                     final_result_ty = left.ty.columnType();
                 }
 
-                // Check pure_op_cache for all binary ops (including comparisons)
-                const cacheable_ty = if (returns_bool) .bool else final_result_ty;
+                // For comparisons on vectors, result is bvec, not scalar bool
+                const cacheable_ty: ast.Type = if (returns_bool) blk: {
+                    if (result_ty.isVector()) {
+                        const nc = result_ty.numComponents();
+                        if (nc == 2) break :blk .bvec2;
+                        if (nc == 3) break :blk .bvec3;
+                        if (nc == 4) break :blk .bvec4;
+                    }
+                    break :blk .bool;
+                } else final_result_ty;
                 {
                     var cache_key: u64 = @intFromEnum(cacheable_ty) *% 37 +% @intFromEnum(tag);
                     cache_key = cache_key *% 31 +% @as(u64, left_id);
@@ -5349,7 +5357,22 @@ const Analyzer = struct {
                 // Load current value
                 const loaded_id = try self.emitLoadCached(lval.id, lval.ty);
                 // Create constant 1
-                const one_id: u32 = if (lval.ty == .int or lval.ty == .uint or lval.ty.isVector()) try self.getConstInt(1, if (lval.ty == .uint) .uint else .int) else try self.getConstFloat(1.0);
+                // Create constant 1 matching the operand type
+                const one_id: u32 = blk: {
+                    if (lval.ty == .float or lval.ty == .double) break :blk try self.getConstFloat(1.0);
+                    if (lval.ty == .int) break :blk try self.getConstInt(1, .int);
+                    if (lval.ty == .uint) break :blk try self.getConstInt(1, .uint);
+                    if (lval.ty.isVector()) {
+                        const elem = lval.ty.elementType();
+                        const elem_one = if (elem == .float or elem == .float16) try self.getConstFloat(1.0) else if (elem == .uint) try self.getConstInt(1, .uint) else try self.getConstInt(1, .int);
+                        // Splat: emit composite_construct with N copies
+                        const nc = lval.ty.numComponents();
+                        const splat_ops = try self.alloc.alloc(ir.Instruction.Operand, nc);
+                        for (0..nc) |i| splat_ops[i] = .{ .id = elem_one };
+                        break :blk try self.emitPureOp(.composite_construct, splat_ops, lval.ty);
+                    }
+                    break :blk try self.getConstInt(1, .int);
+                };
                 // Compute new value
                 const new_val_id = self.allocId();
                 const is_add = node.tag == .post_increment or node.tag == .pre_increment;
