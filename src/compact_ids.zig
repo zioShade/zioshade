@@ -8086,3 +8086,103 @@ pub fn stripDeadDebugInfo(alloc: std.mem.Allocator, words: []const u32) error{Ou
     if (removed == 0) { result.deinit(alloc); return words; }
     return result.toOwnedSlice(alloc) catch return words;
 }
+
+/// Deduplicate OpTypeFunction instructions with identical signatures.
+pub fn dedupFunctionTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Use a simple map: signature hash -> first result ID
+    // Since signatures can be variable length, hash the full tuple
+    var seen = std.AutoHashMapUnmanaged(u64, u32){}; // hash -> first_id
+    defer seen.deinit(alloc);
+    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // dup_id -> first_id
+    defer replacements.deinit(alloc);
+
+    // First pass: find duplicate function types (OpTypeFunction = opcode 33)
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 33 and wc >= 3) {
+            const result_id = words[pos + 1];
+            // Hash: return_type + all param types
+            var h: u64 = 0;
+            for (2..wc) |i| {
+                h = h *% 33 +% @as(u64, words[pos + i]);
+            }
+            if (seen.get(h)) |first_id| {
+                if (first_id != result_id) {
+                    try replacements.put(alloc, result_id, first_id);
+                }
+            } else {
+                try seen.put(alloc, h, result_id);
+            }
+        }
+        pos += wc;
+    }
+
+    if (replacements.count() == 0) return words;
+
+    // Second pass: skip duplicates, replace all references
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        // Skip duplicate OpTypeFunction
+        if (opcode == 33 and wc >= 3 and replacements.contains(words[pos + 1])) {
+            pos = ie;
+            continue;
+        }
+
+        // Replace references in all instructions
+        if (replacements.count() > 0) {
+            const info = getOpInfo(opcode) orelse {
+                result.appendSlice(alloc, words[pos..ie]) catch return words;
+                pos = ie; continue;
+            };
+            var wi: u32 = pos + 1;
+            try result.append(alloc, hdr);
+            switch (info.fixed) {
+                1 => { if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } },
+                2 => {
+                    if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; }
+                    if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+                },
+                3 => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+                else => {},
+            }
+            for (info.ops) |ch| {
+                if (wi >= ie) break;
+                switch (ch) {
+                    'i' => { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; },
+                    'l' => { try result.append(alloc, words[wi]); wi += 1; },
+                    'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
+                    'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
+                    'M' => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
+                    'W' => { while (wi + 1 < ie) { try result.append(alloc, words[wi]); wi += 1; try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+                    'E' => {
+                        while (wi < ie) : (wi += 1) {
+                            try result.append(alloc, words[wi]);
+                            const sw = words[wi];
+                            if ((sw & 0xFF) == 0 or ((sw >> 8) & 0xFF) == 0 or ((sw >> 16) & 0xFF) == 0 or ((sw >> 24) & 0xFF) == 0) break;
+                        }
+                        while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    },
+                    else => { try result.append(alloc, words[wi]); wi += 1; },
+                }
+            }
+            while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+        } else {
+            try result.appendSlice(alloc, words[pos..ie]);
+        }
+        pos = ie;
+    }
+
+    return result.toOwnedSlice(alloc) catch return words;
+}
