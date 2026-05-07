@@ -2461,8 +2461,14 @@ const Analyzer = struct {
                 }
 
                 // For comparisons on vectors, result is bvec, not scalar bool
+                // GLSL == and != on vectors return scalar bool (all/any), but SPIR-V op returns bvec
+                const is_vec_equality = returns_bool and result_ty.isVector() and (op == .eq or op == .neq);
                 const cacheable_ty: ast.Type = if (returns_bool) blk: {
-                    if (result_ty.isVector()) {
+                    if (is_vec_equality) {
+                        // == and != on vectors return scalar bool, not bvec
+                        break :blk .bool;
+                    } else if (result_ty.isVector()) {
+                        // < > <= >= on vectors return bvec
                         const nc = result_ty.numComponents();
                         if (nc == 2) break :blk .bvec2;
                         if (nc == 3) break :blk .bvec3;
@@ -2481,13 +2487,42 @@ const Analyzer = struct {
 
                 const result_id = self.allocId();
 
-                try self.instructions.append(self.alloc, .{
-                    .tag = tag,
-                    .result_type = null,
-                    .result_id = result_id,
-                    .operands = operands,
-                    .ty = cacheable_ty,
-                });
+                if (is_vec_equality) {
+                    // For == and != on vectors, emit comparison with bvec result, then reduce to bool
+                    const bvec_ty: ast.Type = switch (result_ty.numComponents()) {
+                        2 => .bvec2,
+                        3 => .bvec3,
+                        4 => .bvec4,
+                        else => .bool,
+                    };
+                    const bvec_id = self.allocId();
+                    try self.instructions.append(self.alloc, .{
+                        .tag = tag,
+                        .result_type = null,
+                        .result_id = bvec_id,
+                        .operands = operands,
+                        .ty = bvec_ty,
+                    });
+                    // Reduce: OpAll for ==, OpAny for !=
+                    const reduce_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    reduce_ops[0] = .{ .id = bvec_id };
+                    const reduce_tag: ir.Instruction.Tag = if (op == .eq) .all else .any;
+                    try self.instructions.append(self.alloc, .{
+                        .tag = reduce_tag,
+                        .result_type = null,
+                        .result_id = result_id,
+                        .operands = reduce_ops,
+                        .ty = .bool,
+                    });
+                } else {
+                    try self.instructions.append(self.alloc, .{
+                        .tag = tag,
+                        .result_type = null,
+                        .result_id = result_id,
+                        .operands = operands,
+                        .ty = cacheable_ty,
+                    });
+                }
                 // Cache for dedup (comparisons are pure too — same inputs = same output)
                 var cache_key: u64 = @intFromEnum(cacheable_ty) *% 37 +% @intFromEnum(tag);
                 cache_key = cache_key *% 31 +% @as(u64, left_id);

@@ -25,6 +25,9 @@ TMPSPV = os.path.join(os.getcwd(), ".zig-cache", "_feature_check.spv")
 GLSLANG_CACHE = ".zig-cache/glslang_pass_list.json"
 
 def build():
+    # Skip build if binary already exists (assume caller built it)
+    if os.path.exists(RUNNER):
+        return True
     print("Building...", file=sys.stderr)
     os.makedirs(".zig-cache/bin", exist_ok=True)
     r = subprocess.run([ZIG, "build-exe", "-OReleaseSafe",
