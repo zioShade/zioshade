@@ -1953,10 +1953,9 @@ const Codegen = struct {
                     if (is_block_struct) self.in_interface_block = true;
                 }
 
-                // For buffer_reference types, check for self-referential members
-                // If found, emit OpTypeForwardPointer upfront
                 var self_ptr_id: u32 = 0;
                 if (td.is_buffer_reference) {
+                    // Check for direct self-reference first
                     var has_self_ref = false;
                     for (td.members) |member| {
                         var resolved_ty = member.ty;
@@ -1964,6 +1963,28 @@ const Codegen = struct {
                         if (resolved_ty == .named and std.mem.eql(u8, resolved_ty.named, name)) {
                             has_self_ref = true;
                             break;
+                        }
+                    }
+                    // Check for indirect self-reference: any member whose struct type
+                    // transitively contains a buffer_reference to this type
+                    if (!has_self_ref) {
+                        for (td.members) |member| {
+                            var resolved_ty = member.ty;
+                            while (resolved_ty == .array) resolved_ty = resolved_ty.array.base.*;
+                            if (resolved_ty == .named) {
+                                const nested_td = self.module.types.get(resolved_ty.named);
+                                if (nested_td) |ntd| {
+                                    for (ntd.members) |nested_member| {
+                                        var nr = nested_member.ty;
+                                        while (nr == .array) nr = nr.array.base.*;
+                                        if (nr == .named and std.mem.eql(u8, nr.named, name)) {
+                                            has_self_ref = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if (has_self_ref) break;
                         }
                     }
                     if (has_self_ref) {
