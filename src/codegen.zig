@@ -523,7 +523,9 @@ const Codegen = struct {
         // Check global sampler types for type-specific capabilities
         var has_storage_image_ms = false;
         for (self.module.globals) |global| {
-            switch (global.ty) {
+            var check_ty = global.ty;
+            if (check_ty == .array) check_ty = check_ty.array.base.*;
+            switch (check_ty) {
                 .sampler1d, .isampler1d, .usampler1d, .image1d, .iimage1d, .uimage1d => has_sampler1d = true,
                 .sampler_buffer, .isampler_buffer, .usampler_buffer => has_sampler_buffer = true,
                 .sampler2d_ms_array, .isampler2d_ms_array, .usampler2d_ms_array, .image2d_ms_array => {
