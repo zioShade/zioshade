@@ -285,6 +285,23 @@ pub const Type = union(enum) {
         };
     }
 
+    /// For matrix types, returns the transposed type (rows ↔ columns)
+    /// matCxR → matRx
+    pub fn transposeType(self: Type) Type {
+        return switch (self) {
+            .mat2, .mat2x2 => .mat2x2,
+            .mat2x3 => .mat3x2,
+            .mat2x4 => .mat4x2,
+            .mat3x2 => .mat2x3,
+            .mat3, .mat3x3 => .mat3x3,
+            .mat3x4 => .mat4x3,
+            .mat4x2 => .mat2x4,
+            .mat4x3 => .mat3x4,
+            .mat4, .mat4x4 => .mat4x4,
+            else => .void,
+        };
+    }
+
     /// For matrix types, returns the number of columns
     /// In GLSL matCxR: C columns
     pub fn numColumns(self: Type) u32 {
