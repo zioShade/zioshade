@@ -290,16 +290,35 @@ pub fn generate(
     const final_compact4b = compact_ids.compactIds(alloc, no_imports_dce) catch return no_imports_dce;
     if (final_compact4b.ptr != no_imports_dce.ptr) alloc.free(no_imports_dce);
     // Eliminate unused global variables (uniforms/samplers/images never loaded/stored)
-    const no_unused_globals = compact_ids.elimUnusedGlobals(alloc, final_compact4b) catch return final_compact4b;
-    if (no_unused_globals.ptr != final_compact4b.ptr) alloc.free(final_compact4b);
-    const gu_dce = compact_ids.deadCodeElim(alloc, no_unused_globals) catch return no_unused_globals;
-    if (gu_dce.ptr != no_unused_globals.ptr) alloc.free(no_unused_globals);
-    const gu_strip = compact_ids.stripDeadDebugInfo(alloc, gu_dce) catch gu_dce;
-    if (gu_strip.ptr != gu_dce.ptr) alloc.free(gu_dce);
-    const gu_dce2 = compact_ids.deadCodeElim(alloc, gu_strip) catch gu_strip;
-    if (gu_dce2.ptr != gu_strip.ptr) alloc.free(gu_strip);
-    const gu_compact = compact_ids.compactIds(alloc, gu_dce2) catch return gu_dce2;
-    if (gu_compact.ptr != gu_dce2.ptr) alloc.free(gu_dce2);
+    // Run the cycle twice to cascade: remove vars -> DCE types -> strip debug -> DCE more -> repeat
+    const gu1 = compact_ids.elimUnusedGlobals(alloc, final_compact4b) catch return final_compact4b;
+    if (gu1.ptr != final_compact4b.ptr) alloc.free(final_compact4b);
+    const gu1_dce = compact_ids.deadCodeElim(alloc, gu1) catch gu1;
+    if (gu1_dce.ptr != gu1.ptr) alloc.free(gu1);
+    const gu1_strip = compact_ids.stripDeadDebugInfo(alloc, gu1_dce) catch gu1_dce;
+    if (gu1_strip.ptr != gu1_dce.ptr) alloc.free(gu1_dce);
+    const gu1_dce2 = compact_ids.deadCodeElim(alloc, gu1_strip) catch gu1_strip;
+    if (gu1_dce2.ptr != gu1_strip.ptr) alloc.free(gu1_strip);
+    // Second iteration: strip may have exposed more dead globals
+    const gu2 = compact_ids.elimUnusedGlobals(alloc, gu1_dce2) catch gu1_dce2;
+    if (gu2.ptr != gu1_dce2.ptr) alloc.free(gu1_dce2);
+    const gu2_dce = compact_ids.deadCodeElim(alloc, gu2) catch gu2;
+    if (gu2_dce.ptr != gu2.ptr) alloc.free(gu2);
+    const gu2_strip = compact_ids.stripDeadDebugInfo(alloc, gu2_dce) catch gu2_dce;
+    if (gu2_strip.ptr != gu2_dce.ptr) alloc.free(gu2_dce);
+    const gu2_dce2 = compact_ids.deadCodeElim(alloc, gu2_strip) catch gu2_strip;
+    if (gu2_dce2.ptr != gu2_strip.ptr) alloc.free(gu2_strip);
+    // Third iteration
+    const gu3 = compact_ids.elimUnusedGlobals(alloc, gu2_dce2) catch gu2_dce2;
+    if (gu3.ptr != gu2_dce2.ptr) alloc.free(gu2_dce2);
+    const gu3_dce = compact_ids.deadCodeElim(alloc, gu3) catch gu3;
+    if (gu3_dce.ptr != gu3.ptr) alloc.free(gu3);
+    const gu3_strip = compact_ids.stripDeadDebugInfo(alloc, gu3_dce) catch gu3_dce;
+    if (gu3_strip.ptr != gu3_dce.ptr) alloc.free(gu3_dce);
+    const gu3_dce2 = compact_ids.deadCodeElim(alloc, gu3_strip) catch gu3_strip;
+    if (gu3_dce2.ptr != gu3_strip.ptr) alloc.free(gu3_strip);
+    const gu_compact = compact_ids.compactIds(alloc, gu3_dce2) catch return gu3_dce2;
+    if (gu_compact.ptr != gu3_dce2.ptr) alloc.free(gu3_dce2);
     // Deduplicate array types after all optimizations
     const deduped_arr = compact_ids.dedupArrayTypes(alloc, gu_compact) catch return gu_compact;
     if (deduped_arr.ptr != gu_compact.ptr) alloc.free(gu_compact);
