@@ -294,8 +294,12 @@ pub fn generate(
     if (no_unused_globals.ptr != final_compact4b.ptr) alloc.free(final_compact4b);
     const gu_dce = compact_ids.deadCodeElim(alloc, no_unused_globals) catch return no_unused_globals;
     if (gu_dce.ptr != no_unused_globals.ptr) alloc.free(no_unused_globals);
-    const gu_compact = compact_ids.compactIds(alloc, gu_dce) catch return gu_dce;
-    if (gu_compact.ptr != gu_dce.ptr) alloc.free(gu_dce);
+    const gu_strip = compact_ids.stripDeadDebugInfo(alloc, gu_dce) catch gu_dce;
+    if (gu_strip.ptr != gu_dce.ptr) alloc.free(gu_dce);
+    const gu_dce2 = compact_ids.deadCodeElim(alloc, gu_strip) catch gu_strip;
+    if (gu_dce2.ptr != gu_strip.ptr) alloc.free(gu_strip);
+    const gu_compact = compact_ids.compactIds(alloc, gu_dce2) catch return gu_dce2;
+    if (gu_compact.ptr != gu_dce2.ptr) alloc.free(gu_dce2);
     // Deduplicate array types after all optimizations
     const deduped_arr = compact_ids.dedupArrayTypes(alloc, gu_compact) catch return gu_compact;
     if (deduped_arr.ptr != gu_compact.ptr) alloc.free(gu_compact);
