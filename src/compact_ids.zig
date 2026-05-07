@@ -3846,8 +3846,7 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
     // Rewrite with persistent substitution map for cross-instruction replacement
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
-    result.appendSliceAssumeCapacity(words[0..4]);
-    try result.append(alloc, bound);
+    result.appendSliceAssumeCapacity(words[0..5]); // header (magic, version, generator, bound, schema)
 
     // Persistent substitution map: for non-void inlines where return value is
     // not a body-defined ID (e.g., a constant), replace call_result with return
