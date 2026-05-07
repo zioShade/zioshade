@@ -538,7 +538,7 @@ const Analyzer = struct {
         // Cache in global cache:
         // - Always for global pointers (Input/Uniform/PushConstant/UniformConstant) since their values don't change
         // - From dominating blocks for other pointers (entry + loop headers)
-        if (self.global_ptr_ids.contains(ptr_id) or self.cache_globals) {
+        if (self.cache_globals) {
             self.global_load_cache.put(self.alloc, ptr_id, ld) catch {};
         }
         return ld;
@@ -2316,6 +2316,35 @@ const Analyzer = struct {
                     try self.instructions.append(self.alloc, .{ .tag = .convert_utof, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = .float });
                     right_conv_id = cvt_id;
                 }
+                // Convert int→uint or uint→int for mixed integer arithmetic
+                if (left.ty == .int and result_ty == .uint) {
+                    const cvt_id = self.allocId();
+                    const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    cvt_ops[0] = .{ .id = left.id };
+                    try self.instructions.append(self.alloc, .{ .tag = .convert_iti, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = .uint });
+                    left_conv_id = cvt_id;
+                }
+                if (right.ty == .int and result_ty == .uint) {
+                    const cvt_id = self.allocId();
+                    const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    cvt_ops[0] = .{ .id = right.id };
+                    try self.instructions.append(self.alloc, .{ .tag = .convert_iti, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = .uint });
+                    right_conv_id = cvt_id;
+                }
+                if (left.ty == .uint and result_ty == .int) {
+                    const cvt_id = self.allocId();
+                    const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    cvt_ops[0] = .{ .id = left.id };
+                    try self.instructions.append(self.alloc, .{ .tag = .convert_uti, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = .int });
+                    left_conv_id = cvt_id;
+                }
+                if (right.ty == .uint and result_ty == .int) {
+                    const cvt_id = self.allocId();
+                    const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    cvt_ops[0] = .{ .id = right.id };
+                    try self.instructions.append(self.alloc, .{ .tag = .convert_uti, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = .int });
+                    right_conv_id = cvt_id;
+                }
 
                 // Track if we splatted so we can use regular ops
                 var did_splat = false;
@@ -3034,6 +3063,9 @@ const Analyzer = struct {
                 // Unpack functions return vec2 (or vec4 for unpackSnorm4x8/unpackUnorm4x8)
                 else if (self.isUnpackBuiltin(node.data.name))
                     if (std.mem.endsWith(u8, node.data.name, "4x8")) .vec4 else .vec2
+                // transpose returns the transposed matrix type (rows ↔ columns)
+                else if (std.mem.eql(u8, node.data.name, "transpose") and arg_tids.items.len > 0 and arg_tids.items[0].ty.isMatrix())
+                    arg_tids.items[0].ty.transposeType()
                 else if (self.isGLSLBuiltin(node.data.name) and arg_tids.items.len > 0)
                     arg_tids.items[0].ty
                 else if (sym) |s| s.ty
