@@ -1345,7 +1345,7 @@ const Analyzer = struct {
         // Check if the last instruction is a return (covers all paths)
         const needs_implicit_return = if (self.instructions.items.len > 0) blk: {
             const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
-            break :blk last_tag != .return_void and last_tag != .return_val and last_tag != .unreachable_inst;
+            break :blk last_tag != .return_void and last_tag != .return_val and last_tag != .unreachable_inst and last_tag != .kill;
         } else true;
 
         // If last instruction is not a return, add an implicit return
@@ -1505,6 +1505,8 @@ const Analyzer = struct {
                 try self.pushScope();
                 for (node.data.children) |child| {
                     try self.analyzeStatement(child);
+                    // Stop emitting after a terminator (branch, return, kill, break, continue)
+                    if (self.lastInstructionIsBranch()) break;
                 }
                 self.popScope();
             },
@@ -1662,6 +1664,8 @@ const Analyzer = struct {
                     const body_stmts = if (case_node.data.children.len > 0) case_node.data.children[1..] else case_node.data.children[0..0];
                     for (body_stmts) |stmt| {
                         self.analyzeStatement(stmt) catch {};
+                        // Stop emitting after a terminator (break, continue, return, discard)
+                        if (self.lastInstructionIsBranch()) break;
                     }
                     // Fall through to next case (or merge if last)
                     // (break statements already branch to merge_label)
@@ -1736,7 +1740,7 @@ const Analyzer = struct {
                 if (children.len > 3) self.analyzeStatement(children[3]) catch {
                     // Body failed, continue to emit branch to continue label
                 };
-                if (!self.lastInstructionIsReturn()) {
+                if (!self.lastInstructionIsBranch()) {
                     try self.emitBranch(continue_label); // body -> continue
                 }
 
@@ -1785,7 +1789,7 @@ const Analyzer = struct {
                 // Body
                 try self.emitLabel(body_label);
                 if (node.data.children.len > 1) try self.analyzeStatement(node.data.children[1]);
-                if (!self.lastInstructionIsReturn()) {
+                if (!self.lastInstructionIsBranch()) {
                     try self.emitBranch(continue_label);
                 }
 
@@ -1824,7 +1828,7 @@ const Analyzer = struct {
                 };
 
                 // Branch from body to continue/condition label (if body doesn't already return)
-                if (!self.lastInstructionIsReturn()) {
+                if (!self.lastInstructionIsBranch()) {
                     try self.emitBranch(cond_label);
                 }
 
