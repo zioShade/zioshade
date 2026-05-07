@@ -7782,3 +7782,139 @@ pub fn elimUnusedImports(alloc: std.mem.Allocator, words: []const u32) error{Out
     }
     return result.toOwnedSlice(alloc) catch return words;
 }
+
+/// Eliminate unused global variables (OpVariable in global scope that are never
+/// used as pointer operands in OpLoad, OpStore, OpAccessChain, OpCopyMemory, etc.)
+/// Removes the variable from OpEntryPoint, its decorations, names, and the variable itself.
+/// Subsequent DCE will cascade to remove dead types.
+
+/// Eliminate unused global variables (OpVariable in global scope that are never
+/// used as pointer operands in OpLoad, OpStore, OpAccessChain, OpCopyMemory, etc.)
+/// Removes the variable from OpEntryPoint, its decorations, names, and the variable itself.
+/// Subsequent DCE will cascade to remove dead types.
+pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find global OpVariable IDs (outside functions)
+    var global_vars = std.AutoHashMapUnmanaged(u32, void){};
+    defer global_vars.deinit(alloc);
+    var in_func = false;
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (op == 54) in_func = true;
+        if (op == 56) in_func = false;
+        if (op == 59 and !in_func and wc >= 4) {
+            try global_vars.put(alloc, words[pos + 2], {});
+        }
+        pos = ie;
+    }
+    if (global_vars.count() == 0) return words;
+
+    // Phase 2: Count all real uses of each global variable
+    // Any instruction that uses the variable as an operand (except naming/decoration)
+    var use_count = std.AutoHashMapUnmanaged(u32, u32){};
+    defer use_count.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        // Skip: OpEntryPoint(15), OpName(5), OpMemberName(6), OpDecorate(71), OpMemberDecorate(72)
+        // Also skip OpVariable itself (59) — that's the definition
+        if (op != 15 and op != 5 and op != 6 and op != 71 and op != 72 and op != 59) {
+            for (1..wc) |i| {
+                const word = words[pos + i];
+                if (global_vars.contains(word)) {
+                    const g = try use_count.getOrPut(alloc, word);
+                    if (g.found_existing) g.value_ptr.* += 1 else g.value_ptr.* = 1;
+                }
+            }
+        }
+        pos = ie;
+    }
+
+    // Build unused set
+    var unused = std.AutoHashMapUnmanaged(u32, void){};
+    defer unused.deinit(alloc);
+    var it = global_vars.iterator();
+    while (it.next()) |entry| {
+        const vid = entry.key_ptr.*;
+        if ((use_count.get(vid) orelse 0) == 0) {
+            try unused.put(alloc, vid, {});
+        }
+    }
+    if (unused.count() == 0) return words;
+
+    // Phase 3: Rewrite
+    var result = try std.ArrayList(u32).initCapacity(alloc, words.len);
+    errdefer result.deinit(alloc);
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // OpEntryPoint: filter interface IDs
+        if (op == 15 and wc >= 4) {
+            // Find end of name string (null-terminated word)
+            var str_end: u32 = pos + 3;
+            var found_null = false;
+            while (str_end < ie) : (str_end += 1) {
+                const sw = words[str_end];
+                if ((sw & 0xFF) == 0 or ((sw >> 8) & 0xFF) == 0 or
+                    ((sw >> 16) & 0xFF) == 0 or ((sw >> 24) & 0xFF) == 0) {
+                    found_null = true;
+                    str_end += 1; // include this word
+                    break;
+                }
+            }
+            if (!found_null) str_end = ie;
+
+            // Collect filtered interface IDs
+            var filtered_ids = std.ArrayListUnmanaged(u32){};
+            defer filtered_ids.deinit(alloc);
+            var ip: u32 = str_end;
+            while (ip < ie) : (ip += 1) {
+                const iid = words[ip];
+                if (!unused.contains(iid)) {
+                    try filtered_ids.append(alloc, iid);
+                }
+            }
+
+            // Emit new OpEntryPoint with updated word count
+            const new_wc: u32 = @intCast(str_end - pos + filtered_ids.items.len);
+            try result.append(alloc, (new_wc << 16) | 15);
+            try result.append(alloc, words[pos + 1]); // execution model
+            try result.append(alloc, words[pos + 2]); // func id
+            // Copy name string
+            ip = pos + 3;
+            while (ip < str_end) : (ip += 1) {
+                try result.append(alloc, words[ip]);
+            }
+            // Copy filtered interface IDs
+            try result.appendSlice(alloc, filtered_ids.items);
+            pos = ie;
+            continue;
+        }
+
+        // Skip OpName for unused
+        if (op == 5 and wc >= 3 and unused.contains(words[pos + 1])) { pos = ie; continue; }
+        // Skip OpDecorate for unused
+        if (op == 71 and wc >= 3 and unused.contains(words[pos + 1])) { pos = ie; continue; }
+        // Skip OpVariable for unused
+        if (op == 59 and wc >= 4 and unused.contains(words[pos + 2])) { pos = ie; continue; }
+
+        try result.appendSlice(alloc, words[pos..ie]);
+        pos = ie;
+    }
+
+    return result.toOwnedSlice(alloc) catch return words;
+}
