@@ -1,50 +1,43 @@
 # Autoresearch Ideas — glslpp Feature Coverage
 
-## STATUS: 534/566 total pass (209/302 spirv-cross + 325/356 glslang)
-## 31 val_fail, 0 compile_fail, 1 crash (spv.floatFetch.frag)
+## STATUS: 535/566 total pass (209/302 spirv-cross + 326/356 glslang)
+## 30 val_fail, 0 compile_fail, 1 crash (spv.floatFetch.frag)
+## Session: 511→535 (+24 shaders, +4.7%)
 
-## Remaining Failure Categories (31):
+## Remaining Failures (30):
 
-### bool_in_interface (6 shaders) — HIGHEST IMPACT
-- SPIR-V requires bool in Block-decorated structs to use uint
-- At type registration: convert bool/bvecN members to uint/uvecN for UBO/SSBO structs
-- At load: load as uint, convert to bool via OpINotEqual(x, 0)
-- At store: convert bool to uint via OpSelect(cond, 1, 0), then store uint
+### bool_in_interface (6) — HIGHEST IMPACT
+- SPIR-V requires bool in Block structs to use uint
 - Affected: spv.boolInBlock.frag, spv.load.bool.array.interface.block.frag, 
   spv.1.4.load.bool.array.interface.block.frag, spv.multiStruct.comp,
   spv.shaderGroupVote.comp, spv.1.4.OpCopyLogicalBool.comp
+- Fix: convert bool→uint in UBO/SSBO struct emission, add load/store conversions
 
-### GLSL 460 features (3 shaders)
-- 460.vert, spv.460.comp: anyInvocation, allInvocations, allInvocationsEqual
-- web.operations.frag: GLSL 460 operations
-
-### GLSL extensions not parsed (5 shaders)
-- spv.intrinsicsDebugBreak.frag: spirv_instruction extension
-- spv.intrinsicsSpirvDecorate.frag: spirv_decorate extension
-- spv.intrinsicsSpirvInstruction.vert: spirv_instruction extension
-- spv.maximalReconvergence.vert, spv.subgroupUniformControlFlow.vert: GL_EXT extensions
+### GLSL extensions/parsing (5) — NOT FEASIBLE without parser work
+- spv.intrinsicsDebugBreak/SpirvDecorate/SpirvInstruction: spirv_intrinsics ext
+- spv.maximalReconvergence/subgroupUniformControlFlow: GL_EXT extensions
 - spv.nullInit.comp: GL_EXT_null_initializer
 
-### PhysicalStorageBuffer aligned (3 shaders)
-- spv.bufferhandle5.frag, spv.bufferhandle24/25.frag: Missing Aligned memory operand
+### PhysicalStorageBuffer aligned (3)
+- spv.bufferhandle5/24/25.frag: Missing Aligned memory operand
 
-### 16-bit types (3 shaders)
+### 16-bit types (3) — NOT FEASIBLE without type system work
 - spv.16bitxfb.vert, spv.int16.amd.frag, spv.specConstant.int16/8.comp
 
-### OpSelect with struct pointers (1 shader)
-- spv.structCopy.comp: OpSelect with AccessChain pointers instead of loaded values
+### GLSL 460 features (2) — codegen issues
+- 460.vert, spv.460.comp: subgroup ballot ops (anyInvocation etc)
+- web.operations.frag: GLSL 460 ops
 
-### Other (7 shaders)
-- hoisted-temporary-use-continue-block-as-value.frag: Type Id is not a type (codegen bug)
-- spv.bufferhandle22.frag: forward ref (buffer_reference extension)
-- spv.nontemporalbuffer.frag: AtomicIAdd with Private storage
-- spv.imageAtomic64.frag: Wrong image type
-- spv.nonuniform4.frag: Wrong image type
-- spv.tpipTextureArrays.frag: Missing decoration
-- spv.debuginfo.glsl.comp: forward ref (debug info extension)
+### Optimization pipeline bugs (2)
+- spv.460.comp: forward reference from RSE + compactIds cascade
+- hoisted-temporary-use-continue-block-as-value.frag: Type Id not a type
 
-## NEXT TARGETS (by effort/impact):
-1. bool_in_interface (6 shaders, MEDIUM effort)
-2. GLSL 460 features (3 shaders, MEDIUM effort)
-3. OpSelect struct fix (1 shader, LOW effort)
-4. PhysicalStorageBuffer aligned (3 shaders, MEDIUM effort)
+### Other individual issues (9)
+- spv.bufferhandle22.frag: buffer_reference extension
+- spv.nontemporalbuffer.frag: AtomicIAdd with Private
+- spv.imageAtomic64.frag, spv.nonuniform4.frag: image type issues
+- spv.tpipTextureArrays.frag: QCOM extension
+- spv.debuginfo.glsl.comp: debug info extension
+- spv.descriptorHeap.AtomicImage.comp: image capability
+- spv.structCopy.comp: already fixed (ternary auto-load)
+- spv.1.4.OpCopyLogicalBool.comp: bool in interface (counted above)
