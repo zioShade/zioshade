@@ -39,6 +39,7 @@ pub fn generate(
         .emitted_array_stride = .{},
         .emitted_struct_layout = .{},
         .emitted_named_types = .{},
+        .emitted_interface_named_types = .{},
         .emitted_ptr_types = .{},
         .emitted_constants = .{},
         .constant_alias = .{},
@@ -65,6 +66,7 @@ pub fn generate(
         .sampled_image_cube_inner_id = 0,
         .glsl_std_450_id = 0,
         .access_chain_cache = .{},
+        .interface_bool_ptrs = .{},
         .codegen_pure_cache = .{},
     };
     defer cg.deinit();
@@ -364,6 +366,7 @@ const Codegen = struct {
     decoration_section: std.ArrayList(u32), // Struct layout decorations (Block, Offset, ArrayStride)
     name_section: std.ArrayList(u32), // OpName/OpMemberName for struct types
     in_functions: bool = false,
+    in_interface_block: bool = false, // true when emitting struct members for Block-decorated types
     next_id: u32,
     emitted_types: std.AutoHashMapUnmanaged(u32, u32), // @intFromEnum(ty) -> type_id
     emitted_array_types: std.AutoHashMapUnmanaged(u64, u32), // hash -> type_id
@@ -371,6 +374,7 @@ const Codegen = struct {
     emitted_array_stride: std.AutoHashMapUnmanaged(u32, void), // array type_ids with ArrayStride already emitted
     emitted_struct_layout: std.AutoHashMapUnmanaged(u32, void), // struct type_ids with layout decorations already emitted
     emitted_named_types: std.StringHashMapUnmanaged(u32), // struct name -> type_id
+    emitted_interface_named_types: std.StringHashMapUnmanaged(u32), // struct name -> interface type_id (bool->uint)
     emitted_ptr_types: std.AutoHashMapUnmanaged(u64, u32), // (type_key << 32 | sc) -> ptr_type_id
     emitted_constants: std.AutoHashMapUnmanaged(u64, u32), // (type_id << 32 | value) -> const_id
     constant_alias: std.AutoHashMapUnmanaged(u32, u32), // IR result_id -> actual constant_id (dedup)
@@ -397,6 +401,7 @@ const Codegen = struct {
     sampled_image_cube_inner_id: u32, // TypeImage (Dim=Cube, Sampled=1)
     glsl_std_450_id: u32,
     access_chain_cache: std.AutoHashMapUnmanaged(u64, u32), // (base_id << 32 | index_id) -> result_id, cleared per function
+    interface_bool_ptrs: std.AutoHashMapUnmanaged(u32, ast.Type), // ptr_id -> original AST type (bool/bvecN) for interface bool conversion
     codegen_pure_cache: std.AutoHashMapUnmanaged(u64, u32), // general pure op cache for codegen-level dedup
 
     fn deinit(self: *Codegen) void {
@@ -405,6 +410,7 @@ const Codegen = struct {
         self.emitted_array_stride.deinit(self.alloc);
         self.emitted_struct_layout.deinit(self.alloc);
         self.emitted_named_types.deinit(self.alloc);
+        self.emitted_interface_named_types.deinit(self.alloc);
         self.emitted_ptr_types.deinit(self.alloc);
         self.emitted_constants.deinit(self.alloc);
         self.constant_alias.deinit(self.alloc);
@@ -413,6 +419,7 @@ const Codegen = struct {
         self.layout_visited.deinit(self.alloc);
         self.ptr_storage_class.deinit(self.alloc);
         self.access_chain_cache.deinit(self.alloc);
+        self.interface_bool_ptrs.deinit(self.alloc);
         self.codegen_pure_cache.deinit(self.alloc);
         self.words.deinit(self.alloc);
         self.type_section.deinit(self.alloc);
@@ -1886,8 +1893,15 @@ const Codegen = struct {
             },
             .named => |name| {
                 // Check if this named type was already emitted
+                // In interface block context, prefer interface version (bool->uint)
+                if (self.in_interface_block) {
+                    if (self.emitted_interface_named_types.get(name)) |cached_id| {
+                        return cached_id;
+                    }
+                }
                 if (self.emitted_named_types.get(name)) |cached_id| {
-                    return cached_id;
+                    if (!self.in_interface_block) return cached_id;
+                    // In interface context but only normal version cached — fall through to create interface version
                 }
                 const td = self.module.types.get(name) orelse {
                     // Named type not found — emit empty struct as placeholder
@@ -1899,7 +1913,43 @@ const Codegen = struct {
                 };
                 // Forward-declare: cache the ID before processing members
                 // to break recursive type cycles (e.g., Node containing Node)
-                try self.emitted_named_types.put(self.alloc, name, id);
+                if (self.in_interface_block) {
+                    try self.emitted_interface_named_types.put(self.alloc, name, id);
+                } else {
+                    try self.emitted_named_types.put(self.alloc, name, id);
+                }
+
+                // Pre-check: is this struct (or its parent) used as Block (UBO/SSBO)?
+                // If so, set in_interface_block for bool->uint member conversion
+                const prev_interface = self.in_interface_block;
+                var is_block_struct = false;
+                if (!self.in_interface_block) {
+                    for (self.module.globals) |global| {
+                        if (global.storage_class != .uniform and global.storage_class != .storage_buffer) continue;
+                        if (global.ty != .named) continue;
+                        if (std.mem.eql(u8, global.ty.named, name)) {
+                            is_block_struct = true;
+                            break;
+                        }
+                    }
+                    // Also check if this type is a member of a Block-decorated struct (transitive)
+                    if (!is_block_struct) blk: {
+                        for (self.module.globals) |global| {
+                            if (global.storage_class != .uniform and global.storage_class != .storage_buffer) continue;
+                            if (global.ty != .named) continue;
+                            const gtd = self.module.types.get(global.ty.named) orelse continue;
+                            for (gtd.members) |gmember| {
+                                var resolved = gmember.ty;
+                                while (resolved == .array) resolved = resolved.array.base.*;
+                                if (resolved == .named and std.mem.eql(u8, resolved.named, name)) {
+                                    is_block_struct = true;
+                                    break :blk;
+                                }
+                            }
+                        }
+                    }
+                    if (is_block_struct) self.in_interface_block = true;
+                }
 
                 // For buffer_reference types, check for self-referential members
                 // If found, emit OpTypeForwardPointer upfront
@@ -1962,7 +2012,22 @@ const Codegen = struct {
                             // For arrays of buffer_reference types, fall through
                         }
                     }
-                    try member_ids.append(self.alloc, try self.ensureType(member.ty));
+                    // In interface block context, replace bool with uint for struct members
+                    // SPIR-V requires Block structs to use uint instead of bool
+                    var member_ty = member.ty;
+                    if (self.in_interface_block and member_ty == .bool) {
+                        member_ty = .uint;
+                    }
+                    // Also convert bvecN to uvecN for interface blocks
+                    if (self.in_interface_block) {
+                        member_ty = switch (member_ty) {
+                            .bvec2 => .uvec2,
+                            .bvec3 => .uvec3,
+                            .bvec4 => .uvec4,
+                            else => member_ty,
+                        };
+                    }
+                    try member_ids.append(self.alloc, try self.ensureType(member_ty));
                 }
                 // Check if a struct with the same member layout was already emitted
                 var layout_key: u64 = @as(u64, member_ids.items.len);
@@ -1971,7 +2036,11 @@ const Codegen = struct {
                 }
                 if (self.emitted_struct_layouts.get(layout_key)) |cached_id| {
                     // Reuse existing struct type — update name mapping too
-                    try self.emitted_named_types.put(self.alloc, name, cached_id);
+                    if (self.in_interface_block) {
+                        try self.emitted_interface_named_types.put(self.alloc, name, cached_id);
+                    } else {
+                        try self.emitted_named_types.put(self.alloc, name, cached_id);
+                    }
                     return cached_id;
                 }
 
@@ -2021,6 +2090,8 @@ const Codegen = struct {
                     try self.emitTypeWord(5349); // PhysicalStorageBuffer
                     try self.emitTypeWord(id); // The struct type
                 }
+                // Restore interface block context
+                self.in_interface_block = prev_interface;
             },
             .array => |arr| {
                 // Check if element type is a buffer_reference named type — use PhysicalStorageBuffer pointer
@@ -2682,14 +2753,16 @@ const Codegen = struct {
                 // Recurse into nested struct arrays: emit Offset for the element struct members
                 if (effective_ty == .named) {
                     const elem_td = self.module.types.get(effective_ty.named) orelse continue;
-                    const elem_type_id = self.emitted_named_types.get(effective_ty.named) orelse continue;
+                    const elem_type_id = self.emitted_interface_named_types.get(effective_ty.named) orelse
+                        self.emitted_named_types.get(effective_ty.named) orelse continue;
                     try self.emitNestedStructLayoutInner(elem_type_id, elem_td.members, is_std430, member_is_row_major);
                 }
             }
             // Recurse into direct nested struct members
             if (member.ty == .named) {
                 const nested_td = self.module.types.get(member.ty.named) orelse continue;
-                const nested_type_id = self.emitted_named_types.get(member.ty.named) orelse continue;
+                const nested_type_id = self.emitted_interface_named_types.get(member.ty.named) orelse
+                    self.emitted_named_types.get(member.ty.named) orelse continue;
                 try self.emitNestedStructLayoutInner(nested_type_id, nested_td.members, is_std430, member_is_row_major);
             }
         }
@@ -3167,7 +3240,8 @@ const Codegen = struct {
             .load => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
-                const ptr_id = self.operandId(resolved, 0);
+                const ptr_id_raw = self.operandId(resolved, 0);
+                const ptr_id = self.constant_alias.get(ptr_id_raw) orelse ptr_id_raw;
                 // PhysicalStorageBuffer loads require Aligned memory operand
                 if (self.ptr_storage_class.get(ptr_id)) |sc| {
                     if (sc == .physical_storage_buffer) {
@@ -3179,6 +3253,63 @@ const Codegen = struct {
                         try self.emitWord(16); // alignment
                         return;
                     }
+                    // Interface block bool/bvec member: load as uint/uvec, convert to bool/bvec
+                    if (self.interface_bool_ptrs.get(ptr_id)) |original_ty| {
+                        if (original_ty == .bool) {
+                            const uint_type_id = try self.ensureType(.uint);
+                            const bool_type_id = try self.ensureType(.bool);
+                            const uint_0 = try self.emitIntConstant(0);
+                            // Load as uint into temp
+                            const temp_uint_id = self.allocId();
+                            try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Load)));
+                            try self.emitWord(uint_type_id);
+                            try self.emitWord(temp_uint_id);
+                            try self.emitWord(ptr_id);
+                            // Convert uint -> bool: result_id = OpINotEqual(bool, temp_uint, uint_0)
+                            try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.INotEqual)));
+                            try self.emitWord(bool_type_id);
+                            try self.emitWord(result_id);
+                            try self.emitWord(temp_uint_id);
+                            try self.emitWord(uint_0);
+                            return;
+                        } else if (original_ty == .bvec2 or original_ty == .bvec3 or original_ty == .bvec4) {
+                            const n: u32 = switch (original_ty) {
+                                .bvec2 => 2,
+                                .bvec3 => 3,
+                                .bvec4 => 4,
+                                else => unreachable,
+                            };
+                            const uvec_type_id = try self.ensureType(switch (original_ty) { .bvec2 => ast.Type.uvec2, .bvec3 => ast.Type.uvec3, .bvec4 => ast.Type.uvec4, else => unreachable });
+                            const bvec_type_id = try self.ensureType(original_ty);
+                            const uint_0 = try self.emitIntConstant(0);
+                            // Load as uvec into temp
+                            const temp_uvec_id = self.allocId();
+                            try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Load)));
+                            try self.emitWord(uvec_type_id);
+                            try self.emitWord(temp_uvec_id);
+                            try self.emitWord(ptr_id);
+                            // Create uvec_0 constant
+                            const uvec_const_key = (@as(u64, uvec_type_id) << 32) | 0;
+                            const uvec_0_id = if (self.emitted_constants.get(uvec_const_key)) |cached| cached else blk: {
+                                const uid = self.allocId();
+                                try self.emitWord(spirv.encodeInstructionHeader(@as(u16, 2) + @as(u16, @intCast(n)), @intFromEnum(spirv.Op.ConstantComposite)));
+                                try self.emitWord(uvec_type_id);
+                                try self.emitWord(uid);
+                                for (0..n) |_| {
+                                    try self.emitWord(uint_0);
+                                }
+                                try self.emitted_constants.put(self.alloc, uvec_const_key, uid);
+                                break :blk uid;
+                            };
+                            // Convert uvec -> bvec: OpINotEqual(bvec, temp_uvec, uvec_0)
+                            try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.INotEqual)));
+                            try self.emitWord(bvec_type_id);
+                            try self.emitWord(result_id);
+                            try self.emitWord(temp_uvec_id);
+                            try self.emitWord(uvec_0_id);
+                            return;
+                        }
+                    }
                 }
                 try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Load)));
                 try self.emitWord(result_type_id);
@@ -3186,7 +3317,8 @@ const Codegen = struct {
                 try self.emitWord(ptr_id);
             },
             .store => {
-                const ptr_id = self.operandId(resolved, 0);
+                const ptr_id_raw = self.operandId(resolved, 0);
+                const ptr_id = self.constant_alias.get(ptr_id_raw) orelse ptr_id_raw;
                 const val_id = self.operandId(resolved, 1);
                 // PhysicalStorageBuffer stores require Aligned memory operand
                 if (self.ptr_storage_class.get(ptr_id)) |sc| {
@@ -3197,6 +3329,71 @@ const Codegen = struct {
                         try self.emitWord(2); // Aligned memory operand bit
                         try self.emitWord(16); // alignment
                         return;
+                    }
+                    // Interface block bool/bvec member: convert before store
+                    if (self.interface_bool_ptrs.get(ptr_id)) |original_ty| {
+                        if (original_ty == .bool) {
+                            const uint_type_id = try self.ensureType(.uint);
+                            const uint_0 = try self.emitIntConstant(0);
+                            const uint_1 = try self.emitIntConstant(1);
+                            // bool -> uint: OpSelect(uint, bool_val, uint_1, uint_0)
+                            const uint_val_id = self.allocId();
+                            try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.Select)));
+                            try self.emitWord(uint_type_id);
+                            try self.emitWord(uint_val_id);
+                            try self.emitWord(val_id);
+                            try self.emitWord(uint_1);
+                            try self.emitWord(uint_0);
+                            // Store the uint value
+                            try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.Store)));
+                            try self.emitWord(ptr_id);
+                            try self.emitWord(uint_val_id);
+                            return;
+                        } else if (original_ty == .bvec2 or original_ty == .bvec3 or original_ty == .bvec4) {
+                            const n: u32 = switch (original_ty) {
+                                .bvec2 => 2,
+                                .bvec3 => 3,
+                                .bvec4 => 4,
+                                else => unreachable,
+                            };
+                            const uvec_type_id = try self.ensureType(switch (original_ty) { .bvec2 => ast.Type.uvec2, .bvec3 => ast.Type.uvec3, .bvec4 => ast.Type.uvec4, else => unreachable });
+                            const uint_0 = try self.emitIntConstant(0);
+                            const uint_1 = try self.emitIntConstant(1);
+                            // Create uvec_0 and uvec_1 constants
+                            const uvec_0_key = (@as(u64, uvec_type_id) << 32) | 0;
+                            const uvec_0_id = if (self.emitted_constants.get(uvec_0_key)) |c| c else blk: {
+                                const uid = self.allocId();
+                                try self.emitWord(spirv.encodeInstructionHeader(@as(u16, 2) + @as(u16, @intCast(n)), @intFromEnum(spirv.Op.ConstantComposite)));
+                                try self.emitWord(uvec_type_id);
+                                try self.emitWord(uid);
+                                for (0..n) |_| try self.emitWord(uint_0);
+                                try self.emitted_constants.put(self.alloc, uvec_0_key, uid);
+                                break :blk uid;
+                            };
+                            const uvec_1_key = (@as(u64, uvec_type_id) << 32) | 1;
+                            const uvec_1_id = if (self.emitted_constants.get(uvec_1_key)) |c| c else blk: {
+                                const uid = self.allocId();
+                                try self.emitWord(spirv.encodeInstructionHeader(@as(u16, 2) + @as(u16, @intCast(n)), @intFromEnum(spirv.Op.ConstantComposite)));
+                                try self.emitWord(uvec_type_id);
+                                try self.emitWord(uid);
+                                for (0..n) |_| try self.emitWord(uint_1);
+                                try self.emitted_constants.put(self.alloc, uvec_1_key, uid);
+                                break :blk uid;
+                            };
+                            // bvec -> uvec: OpSelect(uvec, bvec_val, uvec_1, uvec_0)
+                            const uvec_val_id = self.allocId();
+                            try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.Select)));
+                            try self.emitWord(uvec_type_id);
+                            try self.emitWord(uvec_val_id);
+                            try self.emitWord(val_id);
+                            try self.emitWord(uvec_1_id);
+                            try self.emitWord(uvec_0_id);
+                            // Store the uvec value
+                            try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.Store)));
+                            try self.emitWord(ptr_id);
+                            try self.emitWord(uvec_val_id);
+                            return;
+                        }
                     }
                 }
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.Store)));
@@ -3413,13 +3610,29 @@ const Codegen = struct {
                         try self.access_chain_cache.put(self.alloc, buf_cache_key, loaded_id);
                     }
                 } else {
-                    const ptr_type_id = try self.ensurePointerType(inst.ty, sc);
+                    // For interface block members, convert bool/bvec to uint/uvec
+                    var access_ty = inst.ty;
+                    const is_interface_bool = (sc == .uniform or sc == .storage_buffer) and
+                        (inst.ty == .bool or inst.ty == .bvec2 or inst.ty == .bvec3 or inst.ty == .bvec4);
+                    if (sc == .uniform or sc == .storage_buffer) {
+                        access_ty = switch (access_ty) {
+                            .bool => .uint,
+                            .bvec2 => .uvec2,
+                            .bvec3 => .uvec3,
+                            .bvec4 => .uvec4,
+                            else => access_ty,
+                        };
+                    }
+                    const ptr_type_id = try self.ensurePointerType(access_ty, sc);
                     // Check if we've already computed this AccessChain
                     const cache_key = (@as(u64, base_id_val) << 32) | @as(u64, index_id);
                     if (self.access_chain_cache.get(cache_key)) |cached_result| {
                         // Reuse existing result, alias it
                         try self.constant_alias.put(self.alloc, result_id, cached_result);
                         try self.ptr_storage_class.put(self.alloc, cached_result, sc);
+                        if (is_interface_bool) {
+                            try self.interface_bool_ptrs.put(self.alloc, cached_result, inst.ty);
+                        }
                     } else {
                         try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.AccessChain)));
                         try self.emitWord(ptr_type_id);
@@ -3427,6 +3640,9 @@ const Codegen = struct {
                         try self.emitWord(base_id_val);
                         try self.emitWord(index_id);
                         try self.access_chain_cache.put(self.alloc, cache_key, result_id);
+                        if (is_interface_bool) {
+                            try self.interface_bool_ptrs.put(self.alloc, result_id, inst.ty);
+                        }
                     }
                 }
             },
