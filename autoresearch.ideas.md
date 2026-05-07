@@ -53,3 +53,22 @@
 - This caused literal values in OpExecutionMode (LocalSize 1,1,1) and OpSource to be
   incorrectly counted as references to global variables with small IDs
 - 39 shaders had dead global variables kept alive by this bug
+
+## Feature Coverage Ideas (Session 22+)
+
+### OpTypeBool in UBO/SSBO (6 failures — HIGH effort)
+- SPIR-V requires bool in Block-decorated structs to use uint
+- At type registration: convert bool/bvecN members to uint/uvecN for UBO/SSBO structs
+- At load: load as uint, convert to bool via OpINotEqual(x, 0)
+- At store: convert bool to uint via OpSelect(cond, 1, 0), then store uint
+- AccessChain pointers need uint element type for these members
+- Reference: glslang's approach (see disassembly above)
+- Affected shaders: spv.boolInBlock.frag, spv.load.bool.array.interface.block.frag, etc.
+
+### OpConstantComposite type mismatch (5 failures — MEDIUM effort)
+- Various cases: constant bool vector used where uint expected, spec constants, etc.
+- Need to investigate each individually
+
+### ID not defined / codegen ordering (3 failures — MEDIUM effort)
+- 460.vert, spv.460.comp, web.operations.frag
+- Likely missing GLSL 460 features or incorrect type emission
