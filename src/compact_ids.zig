@@ -3182,7 +3182,7 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
         const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
 
-        if (opcode == 248) { // OpLabel - new block, reset tracking
+        if (opcode == 1) { // OpLabel - new block, reset tracking
             last_store_pos.clearRetainingCapacity();
             pos += wc;
             continue;
@@ -4362,6 +4362,7 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
         if (opcode == 54) { // OpFunction
             var first_loads = std.AutoHashMapUnmanaged(u32, u32){}; // var_id -> first_load_result
             defer first_loads.deinit(alloc);
+            var in_entry_block = true; // entry block dominates all others
 
             var fp = ie;
             while (fp < words.len) {
@@ -4373,6 +4374,18 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 if (fie > words.len) break;
 
                 if (fop == 56) break; // OpFunctionEnd
+
+                // Clear first_loads when leaving the entry block
+                // (entry block loads dominate all blocks, other blocks don't)
+                if (fop == 1) { // OpLabel
+                    if (in_entry_block) {
+                        in_entry_block = false;
+                        // Keep first_loads from entry block — they dominate all blocks
+                    } else {
+                        // Non-entry block: clear first_loads to prevent cross-branch substitution
+                        first_loads.clearRetainingCapacity();
+                    }
+                }
 
                 if (fop == 61 and fwc >= 4) { // OpLoad
                     const result_id = words[fp + 2];

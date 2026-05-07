@@ -2288,28 +2288,28 @@ const Analyzer = struct {
                 // Convert int/uint to float if needed for mixed comparisons/arithmetic
                 var left_conv_id: ?u32 = null;
                 var right_conv_id: ?u32 = null;
-                if (left.ty == .int and (result_ty == .float or result_ty == .double)) {
+                if (left.ty == .int and (result_ty == .float or result_ty == .double or result_ty.isFloatVector())) {
                     const cvt_id = self.allocId();
                     const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                     cvt_ops[0] = .{ .id = left.id };
                     try self.instructions.append(self.alloc, .{ .tag = .convert_itof, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = .float });
                     left_conv_id = cvt_id;
                 }
-                if (right.ty == .int and (result_ty == .float or result_ty == .double)) {
+                if (right.ty == .int and (result_ty == .float or result_ty == .double or result_ty.isFloatVector())) {
                     const cvt_id = self.allocId();
                     const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                     cvt_ops[0] = .{ .id = right.id };
                     try self.instructions.append(self.alloc, .{ .tag = .convert_itof, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = .float });
                     right_conv_id = cvt_id;
                 }
-                if (left.ty == .uint and (result_ty == .float or result_ty == .double)) {
+                if (left.ty == .uint and (result_ty == .float or result_ty == .double or result_ty.isFloatVector())) {
                     const cvt_id = self.allocId();
                     const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                     cvt_ops[0] = .{ .id = left.id };
                     try self.instructions.append(self.alloc, .{ .tag = .convert_utof, .result_type = null, .result_id = cvt_id, .operands = cvt_ops, .ty = .float });
                     left_conv_id = cvt_id;
                 }
-                if (right.ty == .uint and (result_ty == .float or result_ty == .double)) {
+                if (right.ty == .uint and (result_ty == .float or result_ty == .double or result_ty.isFloatVector())) {
                     const cvt_id = self.allocId();
                     const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                     cvt_ops[0] = .{ .id = right.id };
