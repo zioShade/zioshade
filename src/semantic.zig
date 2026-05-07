@@ -4361,14 +4361,24 @@ const Analyzer = struct {
                         }
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                         // For array constructors, coerce each element to the array base type
+                        // For struct constructors, coerce each element to the corresponding member type
                         const arr_base_ty = if (result_ty == .array) result_ty.array.base.* else result_ty;
+                        const struct_members = if (result_ty == .named) blk: {
+                            if (self.types.get(result_ty.named)) |td| break :blk td.members;
+                            break :blk null;
+                        } else null;
                         for (arg_tids.items, 0..) |tid, i| {
-                            if (result_ty == .array and !std.meta.eql(tid.ty, arr_base_ty)) {
+                            // Determine target type for this argument
+                            const member_ty: ?ast.Type = if (result_ty == .array) arr_base_ty else if (struct_members != null and i < struct_members.?.len) struct_members.?[i].ty else null;
+                            if (member_ty != null and !std.meta.eql(tid.ty, member_ty.?)) {
+                                const target = member_ty.?;
                                 const conv_tag: ?ir.Instruction.Tag = blk: {
-                                    if (arr_base_ty == .uint and tid.ty == .int) break :blk .bitcast;
-                                    if (arr_base_ty == .int and tid.ty == .uint) break :blk .bitcast;
-                                    if (arr_base_ty == .float and tid.ty == .int) break :blk .convert_itof;
-                                    if (arr_base_ty == .float and tid.ty == .uint) break :blk .convert_utof;
+                                    if (target == .uint and tid.ty == .int) break :blk .bitcast;
+                                    if (target == .int and tid.ty == .uint) break :blk .bitcast;
+                                    if (target == .float and tid.ty == .int) break :blk .convert_itof;
+                                    if (target == .float and tid.ty == .uint) break :blk .convert_utof;
+                                    if (target == .int and tid.ty == .float) break :blk .convert_ftoi;
+                                    if (target == .uint and tid.ty == .float) break :blk .convert_ftou;
                                     break :blk null;
                                 };
                                 if (conv_tag) |tag| {
@@ -4380,7 +4390,7 @@ const Analyzer = struct {
                                         .result_type = null,
                                         .result_id = conv_id,
                                         .operands = conv_ops,
-                                        .ty = arr_base_ty,
+                                        .ty = target,
                                     });
                                     operands[i] = .{ .id = conv_id };
                                     continue;
