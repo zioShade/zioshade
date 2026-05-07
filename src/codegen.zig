@@ -330,11 +330,25 @@ pub fn generate(
     if (deduped_ptr.ptr != deduped_struct2.ptr) alloc.free(deduped_struct2);
     const deduped_func = compact_ids.dedupFunctionTypes(alloc, deduped_ptr) catch deduped_ptr;
     if (deduped_func.ptr != deduped_ptr.ptr) alloc.free(deduped_ptr);
-    if (deduped_func.ptr == deduped_ptr.ptr and deduped_ptr.ptr == deduped_struct2.ptr and deduped_struct2.ptr == deduped_arr.ptr and deduped_arr.ptr == gu_compact.ptr) return gu_compact;
     const dce_tail = compact_ids.deadCodeElim(alloc, deduped_func) catch return deduped_func;
     if (dce_tail.ptr != deduped_func.ptr) alloc.free(deduped_func);
-    const final_compact5 = compact_ids.compactIds(alloc, dce_tail) catch return dce_tail;
-    if (final_compact5.ptr != dce_tail.ptr) alloc.free(dce_tail);
+    // Final elimUnusedGlobals: optimization passes may have eliminated uses of global variables
+    // that were alive during earlier elimUnusedGlobals runs
+    const gu_final = compact_ids.elimUnusedGlobals(alloc, dce_tail) catch dce_tail;
+    if (gu_final.ptr != dce_tail.ptr) alloc.free(dce_tail);
+    // Deduplicate after final elimUnusedGlobals
+    const deduped_arr2 = compact_ids.dedupArrayTypes(alloc, gu_final) catch return gu_final;
+    if (deduped_arr2.ptr != gu_final.ptr) alloc.free(gu_final);
+    const deduped_struct3 = compact_ids.dedupStructTypes(alloc, deduped_arr2) catch return deduped_arr2;
+    if (deduped_struct3.ptr != deduped_arr2.ptr) alloc.free(deduped_arr2);
+    const deduped_ptr2 = compact_ids.dedupPointerTypes(alloc, deduped_struct3) catch return deduped_struct3;
+    if (deduped_ptr2.ptr != deduped_struct3.ptr) alloc.free(deduped_struct3);
+    const deduped_func2 = compact_ids.dedupFunctionTypes(alloc, deduped_ptr2) catch deduped_ptr2;
+    if (deduped_func2.ptr != deduped_ptr2.ptr) alloc.free(deduped_ptr2);
+    const tail_dce = compact_ids.deadCodeElim(alloc, deduped_func2) catch return deduped_func2;
+    if (tail_dce.ptr != deduped_func2.ptr) alloc.free(deduped_func2);
+    const final_compact5 = compact_ids.compactIds(alloc, tail_dce) catch return tail_dce;
+    if (final_compact5.ptr != tail_dce.ptr) alloc.free(tail_dce);
     return final_compact5;
 }
 

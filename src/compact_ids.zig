@@ -6588,7 +6588,7 @@ pub fn elimDeadVarStores(alloc: std.mem.Allocator, words: []const u32) error{Out
         if (ie > words.len) break;
         if (opcode == 59 and wc >= 4) { // OpVariable
             const sc = words[pos + 3];
-            if (sc == 7) { // Function storage class
+            if (sc == 7 or sc == 6 or sc == 3) { // Function, Private, or Output storage class
                 const rid = words[pos + 2];
                 if (rid < bound) func_vars.set(rid);
             }
@@ -7826,6 +7826,64 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
         pos = ie;
     }
     if (global_vars.count() == 0) return words;
+
+    // Phase 1.5: Find orphaned interface IDs (referenced in OpEntryPoint but no definition)
+    // These can occur when DCE removes a variable before elimUnusedGlobals runs
+    var defined_ids = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer defined_ids.deinit();
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        // Mark result IDs as defined
+        const info = getOpInfo(op) orelse {
+            pos = ie;
+            continue;
+        };
+        switch (info.fixed) {
+            1 => { if (wc >= 2) { const rid = words[pos + 1]; if (rid < bound) defined_ids.set(rid); } },
+            2 => { if (wc >= 3) { const rid = words[pos + 2]; if (rid < bound) defined_ids.set(rid); } },
+            3 => { if (wc >= 2) { const rid = words[pos + 1]; if (rid < bound) defined_ids.set(rid); } },
+            else => {},
+        }
+        // Also mark OpVariable result IDs
+        if (op == 59 and wc >= 3) {
+            const rid = words[pos + 2];
+            if (rid < bound) defined_ids.set(rid);
+        }
+        pos = ie;
+    }
+    // Find OpEntryPoint interface IDs that have no definition
+    var orphaned = std.AutoHashMapUnmanaged(u32, void){};
+    defer orphaned.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (op == 15 and wc >= 4) { // OpEntryPoint
+            var str_end: u32 = pos + 3;
+            while (str_end < ie) : (str_end += 1) {
+                const sw = words[str_end];
+                if ((sw & 0xFF) == 0 or ((sw >> 8) & 0xFF) == 0 or ((sw >> 16) & 0xFF) == 0 or ((sw >> 24) & 0xFF) == 0) {
+                    str_end += 1;
+                    break;
+                }
+            }
+            var ip: u32 = str_end;
+            while (ip < ie) : (ip += 1) {
+                const iid = words[ip];
+                if (iid >= 1 and iid < bound and !defined_ids.isSet(iid)) {
+                    try orphaned.put(alloc, iid, {});
+                    try global_vars.put(alloc, iid, {}); // treat as global for removal
+                }
+            }
+        }
+        pos = ie;
+    }
 
     // Phase 2: Count real uses — only count actual ID operand positions using getOpInfo
     var use_count = std.AutoHashMapUnmanaged(u32, u32){};
