@@ -47,7 +47,7 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         22 => rt(3, "ll"),         // OpTypeFloat
         23 => rt(3, "il"),         // OpTypeVector: element-type, count
         24 => rt(3, "il"),         // OpTypeMatrix
-        25 => rt(3, "illlllil"),   // OpTypeImage: type, dim, depth, arrayed, ms, sampled, fmt, access
+        25 => rt(3, "illllllll"),   // OpTypeImage: result, sampled_type(ID), dim, depth, arrayed, ms, sampled, fmt, access (all literals except sampled_type)
         26 => rt(3, ""),           // OpTypeSampler
         27 => rt(3, "i"),          // OpTypeSampledImage
         28 => rt(3, "ii"),         // OpTypeArray: element-type, length-id
