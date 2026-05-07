@@ -1,74 +1,67 @@
-# Autoresearch Ideas — glslpp
+# Autoresearch Ideas — glslpp Feature Coverage
 
-## STATUS: 210/210 spirv-val, 0 mismatches, 0 failures
-## Current: 6655 total_bound across 210 shaders (session 20)
-## We BEAT spirv-opt -O on ALL 188 comparable shaders (win 182, tie 6, lose 0)
+## STATUS: 524/566 total pass (209/302 spirv-cross + 315/356 glslang)
+## 41 val_fail, 0 compile_fail, 1 crash (spv.floatFetch.frag)
 
-## SESSION 20 CHANGES (-507 IDs from 7162):
-1. elimUnusedGlobals: remove global variables never used as pointer operands (-140 IDs)
-2. stripDeadDebugInfo: remove dead type names/decorations after variable removal
-3. getOpInfo-based ID operand detection: avoid literal false positives (-257 IDs)
-4. Fix 'L'/'s' handler bug: was `wi += 1` (skip 1 word) instead of `wi = ie` (skip all remaining words) (-87 IDs)
-5. Iterative cascade: run elimUnusedGlobals + DCE + stripDeadDebugInfo cycle 3 times (-18 IDs)
-6. getOpInfo OpTypeImage format field fix (0 impact - all formats are 0)
-7. dedupFunctionTypes pass (0 savings - 0 real duplicates)
-8. Second round of dedup+DCE after cascade (0 savings)
+## Remaining Failure Categories:
 
-## VERIFICATION (all 0):
-- Dead result IDs: 0 across all 210 shaders
-- Duplicate pointer types: 0
-- Duplicate struct types: 0
-- Duplicate array types: 0
-- Duplicate function types: 0
-- Duplicate decorations: 0
-- Dead OpExtInstImport: 0
-- Decorations on non-live IDs: 0
-- Unreferenced non-safe instructions: 0
-- Dead loads from globals: 0
-- Extract->construct reorder patterns: 0
-- Cross-block duplicate pure ops: 22 (all have intervening stores)
+### forward_ref / ID collisions (8 shaders)
+- Root cause: codegen uses variable IDs where type IDs should be (e.g., OpTypeFunction return type = variable ID)
+- Example: spv.1.4.OpEntryPoint.frag has `%31 = OpTypeFunction %3 %27` where %3 is `globalv` (Private var)
+- Fix: investigate codegen's ID assignment for function types vs variables
+- Affected: spv.1.4.OpEntryPoint.frag, spv.debuginfo.scalar_types.glsl.frag, spv.intrinsicsDebugBreak.frag, spv.intrinsicsSpirvDecorate.frag, spv.intrinsicsSpirvInstruction.vert, spv.tensorARM.size.comp, web.array.frag, spv.paramMemory.frag
 
-## PROVABLY CONVERGED AT BINARY LEVEL:
-- Every result ID (1..bound-1) is used
-- No dead types, constants, or variables
-- No duplicate types (struct, pointer, array, function all deduped)
-- No duplicate decorations
-- All debug info for dead IDs stripped
-- Beat spirv-opt -O on ALL 188 comparable shaders
-- All getOpInfo-using passes verified correct (no similar 'L'/'s' bugs)
-- 4th cascade iteration finds nothing
-
-## REMAINING OPPORTUNITIES (all VERY HIGH effort):
-1. Cross-block CSE for loads of immutable variables - requires dominance analysis
-2. Accumulator pattern detection - codegen-level OpPhi emission
-3. Multi-block function inlining - requires complex CFG merging
-4. SSA construction / value numbering - requires liveness analysis
-5. Partial redundancy elimination (PRE) for cross-block AC hoisting
-6. Loop-invariant code motion (LICM) - requires loop analysis
-7. Codegen-level int64/uint64 type support (int64.desktop.comp degenerate types)
-
-## KEY BUG FOUND AND FIXED:
-- elimUnusedGlobals had `'l', 'L', 's' => { wi += 1; }` which only skipped ONE word
-- 'L' (rest-literals) and 's' (string) should consume ALL remaining words: `{ wi = ie; }`
-- This caused literal values in OpExecutionMode (LocalSize 1,1,1) and OpSource to be
-  incorrectly counted as references to global variables with small IDs
-- 39 shaders had dead global variables kept alive by this bug
-
-## Feature Coverage Ideas (Session 22+)
-
-### OpTypeBool in UBO/SSBO (6 failures — HIGH effort)
+### bool_in_interface (6 shaders)
 - SPIR-V requires bool in Block-decorated structs to use uint
 - At type registration: convert bool/bvecN members to uint/uvecN for UBO/SSBO structs
 - At load: load as uint, convert to bool via OpINotEqual(x, 0)
 - At store: convert bool to uint via OpSelect(cond, 1, 0), then store uint
-- AccessChain pointers need uint element type for these members
-- Reference: glslang's approach (see disassembly above)
-- Affected shaders: spv.boolInBlock.frag, spv.load.bool.array.interface.block.frag, etc.
+- Affected: spv.boolInBlock.frag, spv.load.bool.array.interface.block.frag, etc.
 
-### OpConstantComposite type mismatch (5 failures — MEDIUM effort)
-- Various cases: constant bool vector used where uint expected, spec constants, etc.
-- Need to investigate each individually
+### missing GLSL 460 features (3 shaders)
+- 460.vert, spv.460.comp: anyInvocation, allInvocations, allInvocationsEqual (subgroup ballot)
+- web.operations.frag: GLSL 460 operations
+- spv.maximalReconvergence.vert, spv.subgroupUniformControlFlow.vert, spv.nullInit.comp: extensions not parsed
 
-### ID not defined / codegen ordering (3 failures — MEDIUM effort)
-- 460.vert, spv.460.comp, web.operations.frag
-- Likely missing GLSL 460 features or incorrect type emission
+### constant_type (5 shaders)
+- spv.1.4.OpSelect.frag: OpConstantComposite type mismatch
+- spv.int16.amd.frag, spv.specConstant.int16/8.comp: 16/8-bit types not supported
+- spv.structCopy.comp: OpSelect with struct from pointers (needs loads first)
+
+### PhysicalStorageBuffer aligned (3 shaders)
+- spv.bufferhandle5.frag, spv.bufferhandle24/25.frag: Missing Aligned memory operand
+- Need to add Aligned operand to OpLoad/OpStore for PhysicalStorageBuffer pointers
+
+### ConstOffset (3 shaders)
+- spv.ext.textureShadowLod.frag, spv.specTexture.frag, spv.textureoffset_non_const.vert
+- Image operand ConstOffset requires a constant object, we emit non-constant
+
+### Image type issues (2 shaders)
+- spv.nonuniform2/4.frag: Wrong image type in OpImageTexelPointer or similar
+
+### Other (11 shaders)
+- Various individual issues (debug info, decorations, extensions)
+
+## BUGS FIXED THIS SESSION:
+
+### RSE OpLabel opcode bug (248→1)
+- redundantStoreElim was checking opcode 248 for OpLabel instead of 1
+- This meant it never reset per-block tracking, treating stores in different branches as redundant
+- Combined with elimRedundantLoads removing loads across branches, created dominance violations
+- Fixed 3 shaders: spv.sampleId.frag, spv.samplePosition.frag, spv.shaderDrawParams.vert
+
+### elimRedundantLoads cross-block dominance
+- Only carry forward first_loads from entry block to subsequent blocks
+- Non-entry blocks: clear first_loads to prevent cross-branch substitution
+
+### inlineTrivialFuncs header bug
+- Was copying words[0..4] + appending bound, resulting in schema=bound instead of schema=0
+- Changed to words[0..5] to preserve schema
+
+### Struct member type coercion
+- When constructing a struct, convert each argument to match the member type (int→uint, etc.)
+- Fixed OpConstantComposite type mismatch in spv.structCopy.comp
+
+### final elimUnusedGlobals
+- Added at end of pipeline to catch globals made unused by later optimization passes
+- Didn't help the spv.1.4.OpEntryPoint.frag case (root cause is ID collision in codegen)
