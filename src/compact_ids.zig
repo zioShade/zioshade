@@ -7815,8 +7815,7 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
     }
     if (global_vars.count() == 0) return words;
 
-    // Phase 2: Count all real uses of each global variable
-    // Any instruction that uses the variable as an operand (except naming/decoration)
+    // Phase 2: Count real uses — only count actual ID operand positions using getOpInfo
     var use_count = std.AutoHashMapUnmanaged(u32, u32){};
     defer use_count.deinit(alloc);
     pos = 5;
@@ -7827,11 +7826,104 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
         // Skip: OpEntryPoint(15), OpName(5), OpMemberName(6), OpDecorate(71), OpMemberDecorate(72)
         // Also skip OpVariable itself (59) — that's the definition
         if (op != 15 and op != 5 and op != 6 and op != 71 and op != 72 and op != 59) {
-            for (1..wc) |i| {
-                const word = words[pos + i];
-                if (global_vars.contains(word)) {
-                    const g = try use_count.getOrPut(alloc, word);
-                    if (g.found_existing) g.value_ptr.* += 1 else g.value_ptr.* = 1;
+            const info = getOpInfo(op);
+            if (info) |inf| {
+                // Use getOpInfo to identify which words are ID operands
+                var wi: u32 = pos + 1;
+                switch (inf.fixed) {
+                    0 => {},
+                    1 => { if (wi < ie) wi += 1; }, // type only, skip
+                    2 => { if (wi < ie) wi += 1; if (wi < ie) wi += 1; }, // type + result, skip
+                    3 => { if (wi < ie) { // result_only: word[1] is result
+                        const rid = words[wi];
+                        if (global_vars.contains(rid)) {
+                            const g = try use_count.getOrPut(alloc, rid);
+                            if (g.found_existing) g.value_ptr.* += 1 else g.value_ptr.* = 1;
+                        }
+                        wi += 1;
+                    }},
+                    else => {},
+                }
+                // Process operand types
+                for (inf.ops) |ch| {
+                    if (wi >= ie) break;
+                    switch (ch) {
+                        'i' => { // ID operand
+                            const word = words[wi];
+                            if (global_vars.contains(word)) {
+                                const g = try use_count.getOrPut(alloc, word);
+                                if (g.found_existing) g.value_ptr.* += 1 else g.value_ptr.* = 1;
+                            }
+                            wi += 1;
+                        },
+                        'l', 'L', 's' => { wi += 1; }, // literal, skip
+                        'I' => { // ID variadic
+                            while (wi < ie) : (wi += 1) {
+                                const word = words[wi];
+                                if (global_vars.contains(word)) {
+                                    const g = try use_count.getOrPut(alloc, word);
+                                    if (g.found_existing) g.value_ptr.* += 1 else g.value_ptr.* = 1;
+                                }
+                            }
+                        },
+                        'M' => { // mixed: literal then IDs
+                            if (wi < ie) wi += 1; // skip literal
+                            while (wi < ie) : (wi += 1) {
+                                const word = words[wi];
+                                if (global_vars.contains(word)) {
+                                    const g = try use_count.getOrPut(alloc, word);
+                                    if (g.found_existing) g.value_ptr.* += 1 else g.value_ptr.* = 1;
+                                }
+                            }
+                        },
+                        'W' => { // literal-ID pairs
+                            while (wi + 1 < ie) {
+                                wi += 1; // skip literal
+                                const word = words[wi];
+                                if (global_vars.contains(word)) {
+                                    const g = try use_count.getOrPut(alloc, word);
+                                    if (g.found_existing) g.value_ptr.* += 1 else g.value_ptr.* = 1;
+                                }
+                                wi += 1;
+                            }
+                            if (wi < ie) wi += 1;
+                        },
+                        'E' => { // string then IDs
+                            var in_str = true;
+                            while (wi < ie and in_str) : (wi += 1) {
+                                const sw = words[wi];
+                                if ((sw & 0xFF) == 0 or ((sw >> 8) & 0xFF) == 0 or
+                                    ((sw >> 16) & 0xFF) == 0 or ((sw >> 24) & 0xFF) == 0) {
+                                    in_str = false;
+                                }
+                            }
+                            while (wi < ie) : (wi += 1) {
+                                const word = words[wi];
+                                if (global_vars.contains(word)) {
+                                    const g = try use_count.getOrPut(alloc, word);
+                                    if (g.found_existing) g.value_ptr.* += 1 else g.value_ptr.* = 1;
+                                }
+                            }
+                        },
+                        else => { wi += 1; },
+                    }
+                }
+                // Handle any remaining words (shouldn't happen but be safe)
+                while (wi < ie) : (wi += 1) {
+                    const word = words[wi];
+                    if (global_vars.contains(word)) {
+                        const g = try use_count.getOrPut(alloc, word);
+                        if (g.found_existing) g.value_ptr.* += 1 else g.value_ptr.* = 1;
+                    }
+                }
+            } else {
+                // No opInfo — count all words conservatively
+                for (1..wc) |i| {
+                    const word = words[pos + i];
+                    if (global_vars.contains(word)) {
+                        const g = try use_count.getOrPut(alloc, word);
+                        if (g.found_existing) g.value_ptr.* += 1 else g.value_ptr.* = 1;
+                    }
                 }
             }
         }
@@ -7916,5 +8008,81 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
         pos = ie;
     }
 
+    return result.toOwnedSlice(alloc) catch return words;
+}
+
+/// Remove OpName, OpMemberName, OpDecorate, OpMemberDecorate for IDs that are not
+/// referenced by any non-debug instruction. Cleans up dead type info after global variable removal.
+pub fn stripDeadDebugInfo(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find IDs referenced by non-debug instructions
+    var live = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer live.deinit();
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        // Skip debug/decoration
+        if (op == 5 or op == 6 or op == 71 or op == 72) { pos = ie; continue; }
+        const info = getOpInfo(op) orelse { pos = ie; continue; };
+        var wi: u32 = pos + 1;
+        switch (info.fixed) {
+            1 => { if (wi < ie and words[wi] < bound) live.set(words[wi]); wi += 1; },
+            2 => { if (wi < ie and words[wi] < bound) live.set(words[wi]); wi += 1; if (wi < ie) wi += 1; },
+            3 => { if (wi < ie) wi += 1; },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => { if (words[wi] < bound) live.set(words[wi]); wi += 1; },
+                'l' => { wi += 1; },
+                'I' => { while (wi < ie) : (wi += 1) { if (words[wi] < bound) live.set(words[wi]); } },
+                'L', 's' => { wi = ie; },
+                'M' => { if (wi < ie) wi += 1; while (wi < ie) : (wi += 1) { if (words[wi] < bound) live.set(words[wi]); } },
+                'W' => { while (wi + 1 < ie) { wi += 1; if (words[wi] < bound) live.set(words[wi]); wi += 1; } if (wi < ie) wi += 1; },
+                'E' => {
+                    while (wi < ie) : (wi += 1) {
+                        const sw = words[wi];
+                        if ((sw & 0xFF) == 0 or ((sw >> 8) & 0xFF) == 0 or
+                            ((sw >> 16) & 0xFF) == 0 or ((sw >> 24) & 0xFF) == 0) break;
+                    }
+                    while (wi < ie) : (wi += 1) { if (words[wi] < bound) live.set(words[wi]); }
+                },
+                else => { wi += 1; },
+            }
+        }
+        pos = ie;
+    }
+
+    // Phase 2: Remove debug/decoration for non-live IDs
+    var result = try std.ArrayList(u32).initCapacity(alloc, words.len);
+    errdefer result.deinit(alloc);
+    result.appendSliceAssumeCapacity(words[0..5]);
+    var removed: u32 = 0;
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        var skip = false;
+        if ((op == 5 or op == 71) and wc >= 3) {
+            const t = words[pos + 1];
+            if (t > 0 and t < bound and !live.isSet(t)) skip = true;
+        }
+        if ((op == 6 or op == 72) and wc >= 4) {
+            const t = words[pos + 1];
+            if (t > 0 and t < bound and !live.isSet(t)) skip = true;
+        }
+        if (skip) { removed += 1; pos = ie; continue; }
+        try result.appendSlice(alloc, words[pos..ie]);
+        pos = ie;
+    }
+    if (removed == 0) { result.deinit(alloc); return words; }
     return result.toOwnedSlice(alloc) catch return words;
 }
