@@ -714,7 +714,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                                 }
                             }
                         },
-                        54 => { // OpFunctionCall: args after func_id may be read/written
+                        57 => { // OpFunctionCall: args after func_id may be read/written
                             // Layout: result_type, result_id, func_id, arg1, arg2, ...
                             if (wc >= 5) {
                                 var ai: u32 = pos + 4; // skip header, result_type, result_id, func_id
@@ -787,7 +787,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                                 }
                             }
                         },
-                        54 => { // OpFunctionCall: args may be AC results -> conservatively load+store
+                        57 => { // OpFunctionCall: args may be AC results -> conservatively load+store
                             if (wc >= 5) {
                                 var ai: u32 = pos + 4;
                                 while (ai < inst_end) : (ai += 1) {
@@ -4232,7 +4232,7 @@ pub fn elimUninitVars(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                     }
                 }
             },
-            54 => { // OpFunctionCall: args may be read/written
+            57 => { // OpFunctionCall: args may be read/written
                 // Layout: result_type, result_id, func_id, arg1, arg2, ...
                 if (wc >= 5) {
                     var ai: u32 = pos + 4;
