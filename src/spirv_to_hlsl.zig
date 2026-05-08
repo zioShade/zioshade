@@ -25,6 +25,7 @@ const ParsedModule = struct {
     id_defs: std.AutoHashMapUnmanaged(u32, usize),
     entry_point_id: ?u32 = null,
     execution_model: spirv.ExecutionModel = .Fragment,
+    local_size: [3]u32 = [3]u32{ 1, 1, 1 },
 
     pub fn deinit(self: *ParsedModule, alloc: std.mem.Allocator) void {
         // instructions was allocated via ArrayList.initCapacity
@@ -79,12 +80,22 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         .id_defs = id_defs,
     };
 
-    // Extract entry point
+    // Extract entry point and execution mode
     for (module.instructions) |inst| {
         if (inst.op == .EntryPoint and inst.words.len > 2) {
             if (module.entry_point_id == null) {
                 module.execution_model = @enumFromInt(inst.words[1]);
                 module.entry_point_id = inst.words[2];
+            }
+        }
+        if (inst.op == .ExecutionMode and inst.words.len >= 3) {
+            const mode: spirv.ExecutionMode = @enumFromInt(inst.words[2]);
+            if (mode == .LocalSize and inst.words.len >= 6) {
+                module.local_size = .{
+                    inst.words[3],
+                    inst.words[4],
+                    inst.words[5],
+                };
             }
         }
     }
@@ -822,6 +833,14 @@ fn emitFunction(
     }
 
     // Emit signature
+    const is_compute = is_entry and module.execution_model == .GLCompute;
+    if (is_compute) {
+        try w.print("[numthreads({d}, {d}, {d})]\n", .{
+            module.local_size[0],
+            module.local_size[1],
+            module.local_size[2],
+        });
+    }
     if (is_fragment) {
         try w.writeAll("float4 main(");
     } else {
