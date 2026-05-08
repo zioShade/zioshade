@@ -533,6 +533,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
 
     // Iterative DCE
     var current_words = words;
+    var current_needs_free = false;
     for (0..15) |_| {
         // Find dead instructions
         var any_removed = false;
@@ -618,7 +619,9 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             pos = ie2;
         }
         // Use new_words as input for next iteration
+        if (current_needs_free) alloc.free(current_words);
         current_words = new_words;
+        current_needs_free = true;
     }
 
     // Dead store elimination: remove function-local variables that are only stored to, never loaded.
@@ -3049,7 +3052,10 @@ pub fn elimSelfRefArithmetic(alloc: std.mem.Allocator, words: []const u32) error
         pos = ie;
     }
 
-    if (!any_removed) return words;
+    if (!any_removed) {
+        result.deinit(alloc);
+        return words;
+    }
     return result.toOwnedSlice(alloc) catch return words;
 }
 
