@@ -4126,7 +4126,11 @@ const Codegen = struct {
                     try self.emitWord(sample_id);
                 } else if (resolved.tag == .image_fetch and resolved.operands.len >= 4) {
                     // texelFetchOffset: [image, coord, lod, offset]
-                    const lod_id = self.operandId(resolved, 2);
+                    const lod_id: u32 = switch (resolved.operands[2]) {
+                        .literal_int => |v| try self.emitIntConstant(v),
+                        .id => |id| self.constant_alias.get(id) orelse id,
+                        else => @panic("unexpected lod operand type"),
+                    };
                     const offset_id = self.operandId(resolved, 3);
                     try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageFetch)));
                     try self.emitWord(result_type_id);
