@@ -85,6 +85,7 @@ fn testShader(alloc: std.mem.Allocator, path: []const u8, save_spv: ?[]const u8)
 
     // Inline #include directives (simple single-level include)
     const final_source = inlineIncludes(alloc, path, source) catch source;
+    defer if (final_source.ptr != source.ptr) alloc.free(final_source);
     const source_z = try alloc.dupeZ(u8, final_source);
     defer alloc.free(source_z);
 
