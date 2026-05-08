@@ -1,5 +1,17 @@
 #!/bin/bash
 set -o pipefail
 cd "$(dirname "$0")"
-python3 autoresearch_full_bench.py
-exit 0
+ZIG="C:/Users/Alessandro/scoop/apps/zig/0.15.2/zig.exe"
+OUTPUT=$($ZIG build test-hlsl 2>&1)
+echo "$OUTPUT"
+# Extract pass/fail counts
+PASSED=$(echo "$OUTPUT" | grep -o '[0-9]\+/36 passed' | head -1 | grep -o '[0-9]\+' | head -1)
+if [ -z "$PASSED" ]; then
+    PASSED=$(echo "$OUTPUT" | grep -o '[0-9]\+ passed' | head -1 | grep -o '[0-9]\+')
+fi
+FAILED=$(echo "$OUTPUT" | grep -o '[0-9]\+ failed' | head -1 | grep -o '[0-9]\+')
+LEAKED=$(echo "$OUTPUT" | grep -o '[0-9]\+ leaked' | head -1 | grep -o '[0-9]\+')
+echo ""
+echo "METRIC tests_passed=${PASSED:-0}"
+echo "METRIC tests_failed=${FAILED:-0}"
+echo "METRIC tests_leaked=${LEAKED:-0}"
