@@ -215,11 +215,30 @@ This is the core work. The approach: parse SPIR-V binary, walk the IR, emit HLSL
 ## Suggested Execution Order
 
 ### Sprint 1 (now): License + HLSL backend foundation
-1. **L1** — License files (30 min)
-2. **B1 steps 1-3** — SPIR-V parser + type mapping + resource binding (3-4 days)
-3. **B1 steps 4-7** — Entry points + builtins + control flow + operations (2-3 days)
-4. **B2** — Top-level API (1 day)
+1. **L1** — License files ✅ DONE
+2. **B1 steps 1-3** — SPIR-V parser + type mapping + resource binding ✅ DONE
+3. **B1 steps 4-7** — Entry points + builtins + control flow + operations ✅ DONE (basic)
+4. **B2** — Top-level API ✅ DONE
 5. **PERF.1** — Performance comparison script (1 day)
+
+**Current HLSL backend status (commit 2d9907d):**
+- ✅ SPIR-V binary parsing (header, instructions, ID→def map)
+- ✅ Type mapping (vec→floatN, mat→floatNxM, int/uint/bool/float)
+- ✅ Resource binding (UBO→cbuffer with binding remap binding=1→b0)
+- ✅ Texture/sampler splitting (combined image-sampler → Texture2D + SamplerState)
+- ✅ Correct texture sampling: `tex.Sample(sampler, coord)`
+- ✅ Constant inlining (scalars as literal values, vectors as constructors)
+- ✅ User function emission (mainImage, curve, etc.)
+- ✅ FunctionCall with argument passing
+- ✅ GLSLstd450 → HLSL builtins (40+ functions mapped)
+- ✅ Arithmetic/comparison/bitwise/conversion/composite ops
+- ✅ Public API: spirvToHLSL(), compileShadertoyToHlsl()
+- ⚠️ Vector component writes use _m0 instead of .x (AccessChain issue)
+- ⚠️ Control flow: if/else skeleton present, needs full block reconstruction
+- ⚠️ Loops: not yet reconstructed
+- ❌ DXC compilation: not yet tested (needs fixes above first)
+
+**Test result:** CRT shadertoy shader → 212 lines of HLSL, 0 unhandled ops
 
 ### Sprint 2: Preprocessor + wintty test corpus
 1. **P1–P6** — Preprocessor gaps (5 days)
