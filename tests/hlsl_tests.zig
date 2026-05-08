@@ -884,7 +884,7 @@ test "T17.5: fract maps to frac" {
 // T18: More built-in functions and patterns
 // ---------------------------------------------------------------------------
 
-test "T18.1: mod maps to modulo" {
+test "T18.1: mod uses floor-based formula" {
     const source =
         \\#version 430
         \\layout(binding = 0, std140) uniform U { float x; } u;
@@ -895,10 +895,9 @@ test "T18.1: mod maps to modulo" {
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    // mod compiles to either fmod or % operator
-    const has_fmod = std.mem.indexOf(u8, hlsl, "fmod(") != null;
-    const has_mod = std.mem.indexOf(u8, hlsl, "%") != null;
-    try std.testing.expect(has_fmod or has_mod);
+    // GLSL mod uses floor division, not truncation
+    try assertContains(hlsl, "floor(");
+    try assertContains(hlsl, "discard");
 }
 
 test "T18.2: step maps to step" {
