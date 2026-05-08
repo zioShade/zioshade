@@ -3868,18 +3868,28 @@ const Analyzer = struct {
                             // texelFetch etc → image_fetch as fallback
                             // If first arg is a sampler, extract image first
                             const fetch_args = arg_tids.items;
+                            // For texelFetchOffset with only 3 args (rect sampler, no lod), insert lod=0
+                            const needs_dummy_lod = std.mem.eql(u8, node.data.name, "texelFetchOffset") and fetch_args.len == 3;
                             if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler3d or fetch_args[0].ty == .sampler2d_array or fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array or fetch_args[0].ty == .sampler_cube or fetch_args[0].ty == .sampler_buffer or fetch_args[0].ty == .sampler1d or fetch_args[0].ty == .isampler2d or fetch_args[0].ty == .usampler2d or fetch_args[0].ty == .isampler3d or fetch_args[0].ty == .usampler3d or fetch_args[0].ty == .isampler_cube or fetch_args[0].ty == .usampler_cube or fetch_args[0].ty == .isampler2d_array or fetch_args[0].ty == .usampler2d_array or fetch_args[0].ty == .isampler2d_ms or fetch_args[0].ty == .usampler2d_ms or fetch_args[0].ty == .isampler2d_ms_array or fetch_args[0].ty == .usampler2d_ms_array or fetch_args[0].ty == .isampler_buffer or fetch_args[0].ty == .usampler_buffer or fetch_args[0].ty == .isampler1d or fetch_args[0].ty == .usampler1d)) {
                                 const extract_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                                 extract_operands[0] = .{ .id = fetch_args[0].id };
                                 const extracted_id = try self.emitPureOp(.extract_image, extract_operands, fetch_args[0].ty);
                                 // Replace first arg with extracted image
-                                var new_args = try self.alloc.alloc(ir.Instruction.Operand, fetch_args.len);
+                                const op_count = if (needs_dummy_lod) fetch_args.len + 1 else fetch_args.len;
+                                var new_args = try self.alloc.alloc(ir.Instruction.Operand, op_count);
                                 new_args[0] = .{ .id = extracted_id };
-                                for (1..fetch_args.len) |i| {
-                                    new_args[i] = .{ .id = fetch_args[i].id };
+                                if (needs_dummy_lod) {
+                                    // rect sampler texelFetchOffset: [image, coord, 0, offset]
+                                    new_args[1] = .{ .id = fetch_args[1].id };
+                                    new_args[2] = .{ .literal_int = 0 };
+                                    new_args[3] = .{ .id = fetch_args[2].id };
+                                } else {
+                                    for (1..fetch_args.len) |i| {
+                                        new_args[i] = .{ .id = fetch_args[i].id };
+                                    }
                                 }
                                 const is_ms = fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array or fetch_args[0].ty == .isampler2d_ms or fetch_args[0].ty == .usampler2d_ms or fetch_args[0].ty == .isampler2d_ms_array or fetch_args[0].ty == .usampler2d_ms_array;
-                                const operands = try self.alloc.alloc(ir.Instruction.Operand, fetch_args.len);
+                                const operands = try self.alloc.alloc(ir.Instruction.Operand, op_count);
                                 for (operands, 0..) |*op, i| op.* = new_args[i];
                                 try self.instructions.append(self.alloc, .{
                                     .tag = if (is_ms) .image_fetch_ms else .image_fetch,

@@ -75,6 +75,11 @@ fn testShader(alloc: std.mem.Allocator, path: []const u8, save_spv: ?[]const u8)
     // Skip empty files
     if (source.len == 0) return .skip;
 
+    // Skip header/include files (no main function)
+    if (std.mem.indexOf(u8, source, "void main") == null and
+        std.mem.indexOf(u8, source, "void mainImage") == null)
+        return .skip;
+
     // Skip files that are error-validation tests (contain "// ERROR" markers)
     if (std.mem.indexOf(u8, source, "// ERROR") != null) return .skip;
 
