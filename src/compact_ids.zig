@@ -6845,6 +6845,100 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
     }
 
     if (replacements.count() == 0) return words;
+
+    // Build set of PhysicalStorageBuffer pointer IDs to add Aligned operand
+    var phys_sb_ids = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer phys_sb_ids.deinit();
+    // Find OpVariable with PhysicalStorageBuffer (sc=5349)
+    pos = 5;
+    while (pos < words.len) {
+        const wc2: u32 = words[pos] >> 16;
+        const op2: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc2 == 0) break;
+        const ie2 = pos + wc2;
+        if (ie2 > words.len) break;
+        if (op2 == 59 and wc2 >= 4) { // OpVariable
+            const result = words[pos + 2];
+            const sc = words[pos + 3];
+            if (sc == 5349 and result > 0 and result < bound) phys_sb_ids.set(result);
+        }
+        pos = ie2;
+    }
+    // Find PhysSB pointer types (OpTypePointer with sc=5349)
+    var phys_sb_ptr_types = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer phys_sb_ptr_types.deinit();
+    pos = 5;
+    while (pos < words.len) {
+        const wc2: u32 = words[pos] >> 16;
+        const op2: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc2 == 0) break;
+        const ie2 = pos + wc2;
+        if (ie2 > words.len) break;
+        if (op2 == 32 and wc2 == 4) { // OpTypePointer
+            const result = words[pos + 1];
+            if (pos + 2 < ie2) {
+                const sc = words[pos + 2];
+                if (sc == 5349 and result > 0 and result < bound) phys_sb_ptr_types.set(result);
+            }
+        }
+        pos = ie2;
+    }
+    // Propagate: OpLoad with PhysSB result type → result is PhysSB
+    pos = 5;
+    while (pos < words.len) {
+        const wc2: u32 = words[pos] >> 16;
+        const op2: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc2 == 0) break;
+        const ie2 = pos + wc2;
+        if (ie2 > words.len) break;
+        if (op2 == 61 and wc2 >= 4) { // OpLoad
+            const result_type_id = words[pos + 1];
+            const result = words[pos + 2];
+            if (result_type_id > 0 and result_type_id < bound and phys_sb_ptr_types.isSet(result_type_id) and result > 0 and result < bound) {
+                phys_sb_ids.set(result);
+            }
+        }
+        // AccessChain: propagate from base
+        if (op2 == 65 and wc2 >= 4) { // OpAccessChain
+            const base = words[pos + 3];
+            const result = words[pos + 2];
+            if (base > 0 and base < bound and phys_sb_ids.isSet(base) and result > 0 and result < bound) {
+                phys_sb_ids.set(result);
+            }
+        }
+        pos = ie2;
+    }
+    // Fixpoint propagation for AccessChain
+    var fp_changed = true;
+    while (fp_changed) {
+        fp_changed = false;
+        pos = 5;
+        while (pos < words.len) {
+            const wc2: u32 = words[pos] >> 16;
+            const op2: u16 = @truncate(words[pos] & 0xFFFF);
+            if (wc2 == 0) break;
+            const ie2 = pos + wc2;
+            if (ie2 > words.len) break;
+            if (op2 == 65 and wc2 >= 4) { // OpAccessChain
+                const base = words[pos + 3];
+                const result = words[pos + 2];
+                if (base > 0 and base < bound and phys_sb_ids.isSet(base) and result > 0 and result < bound and !phys_sb_ids.isSet(result)) {
+                    phys_sb_ids.set(result);
+                    fp_changed = true;
+                }
+            }
+            if (op2 == 61 and wc2 >= 4) { // OpLoad
+                const ptr = words[pos + 3];
+                const result = words[pos + 2];
+                if (ptr > 0 and ptr < bound and phys_sb_ids.isSet(ptr) and result > 0 and result < bound and !phys_sb_ids.isSet(result)) {
+                    phys_sb_ids.set(result);
+                    fp_changed = true;
+                }
+            }
+            pos = ie2;
+        }
+    }
+
     std.debug.print("copyMemoryOpt: {} copies\n", .{replacements.count()});
 
     // Phase 3: Rewrite - remove dead loads, replace stores with OpCopyMemory
@@ -6865,10 +6959,23 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
 
         // Replace stores that are in the replacement map with OpCopyMemory
         if (replacements.get(pos)) |rep| {
-            // OpCopyMemory: opcode 46, wc=3, operands=[target_ptr, source_ptr]
-            result3.appendAssumeCapacity((3 << 16) | 63);
-            result3.appendAssumeCapacity(words[pos + 1]); // dst_ptr
-            result3.appendAssumeCapacity(rep.src_ptr); // src_ptr
+            const dst_ptr = words[pos + 1];
+            const src_ptr = rep.src_ptr;
+            const dst_is_phys = dst_ptr > 0 and dst_ptr < bound and phys_sb_ids.isSet(dst_ptr);
+            const src_is_phys = src_ptr > 0 and src_ptr < bound and phys_sb_ids.isSet(src_ptr);
+            if (dst_is_phys or src_is_phys) {
+                // OpCopyMemory with Aligned for PhysSB
+                result3.appendAssumeCapacity((5 << 16) | 63); // wc=5, opcode=63
+                result3.appendAssumeCapacity(dst_ptr);
+                result3.appendAssumeCapacity(src_ptr);
+                result3.appendAssumeCapacity(2); // Aligned memory operand bit
+                result3.appendAssumeCapacity(16); // alignment
+            } else {
+                // OpCopyMemory without memory operands
+                result3.appendAssumeCapacity((3 << 16) | 63);
+                result3.appendAssumeCapacity(dst_ptr);
+                result3.appendAssumeCapacity(src_ptr);
+            }
         } else {
             result3.appendSliceAssumeCapacity(words[pos..ie]);
         }
