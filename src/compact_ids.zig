@@ -3007,6 +3007,51 @@ pub fn dedupPointerTypes(alloc: std.mem.Allocator, words: []const u32) error{Out
     return result.toOwnedSlice(alloc) catch return words;
 }
 
+pub fn elimSelfRefArithmetic(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    // Remove arithmetic instructions where result_id == any operand (always invalid SPIR-V)
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    var pos: u32 = 5;
+    var any_removed = false;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Check arithmetic ops (126-148) for self-reference
+        if (opcode >= 126 and opcode <= 148 and wc >= 5) {
+            const result_id = words[pos + 2];
+            var is_self_ref = false;
+            // Check operands starting at word 3
+            var wi: u32 = pos + 3;
+            while (wi < ie) : (wi += 1) {
+                if (words[wi] == result_id) {
+                    is_self_ref = true;
+                    break;
+                }
+            }
+            if (is_self_ref) {
+                any_removed = true;
+                pos = ie;
+                continue;
+            }
+        }
+
+        result.appendSliceAssumeCapacity(words[pos..ie]);
+        pos = ie;
+    }
+
+    if (!any_removed) return words;
+    return result.toOwnedSlice(alloc) catch return words;
+}
+
 pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
     const bound = words[3];
     if (bound <= 1) return words;
