@@ -879,3 +879,82 @@ test "T17.5: fract maps to frac" {
     try assertContains(hlsl, "frac(");
 }
 
+// ---------------------------------------------------------------------------
+// T18: More built-in functions and patterns
+// ---------------------------------------------------------------------------
+
+test "T18.1: mod maps to modulo" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float a = mod(u.x, 3.0);
+        \\    if (a > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // mod compiles to either fmod or % operator
+    const has_fmod = std.mem.indexOf(u8, hlsl, "fmod(") != null;
+    const has_mod = std.mem.indexOf(u8, hlsl, "%") != null;
+    try std.testing.expect(has_fmod or has_mod);
+}
+
+test "T18.2: step maps to step" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float a = step(0.5, u.x);
+        \\    if (a > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "step(");
+}
+
+test "T18.3: smoothstep maps to smoothstep" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float a = smoothstep(0.0, 1.0, u.x);
+        \\    if (a > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "smoothstep(");
+}
+
+test "T18.4: reflect maps to reflect" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 n; } u;
+        \\void main() {
+        \\    vec3 i = vec3(1.0, 0.0, 0.0);
+        \\    vec3 r = reflect(i, u.n);
+        \\    if (r.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "reflect(");
+}
+
+test "T18.5: int-to-float conversion" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int x; } u;
+        \\void main() {
+        \\    float a = float(u.x);
+        \\    if (a > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "cbuffer");
+    try assertContains(hlsl, "discard");
+}
+
