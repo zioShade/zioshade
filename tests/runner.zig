@@ -153,9 +153,11 @@ fn runDir(alloc: std.mem.Allocator, dir_path: []const u8, stats: *Stats) !void {
             !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl"))
             continue;
 
-        // Skip error-validation tests and multi-file link tests
+        // Skip error-validation tests, multi-file link tests, SPIR-V assembly files, and nocompat
         if (std.mem.indexOf(u8, entry.basename, ".error.") != null) continue;
         if (std.mem.startsWith(u8, entry.basename, "link.")) continue;
+        if (std.mem.indexOf(u8, entry.basename, ".asm.") != null) continue;
+        if (std.mem.indexOf(u8, entry.basename, ".nocompat.") != null) continue;
 
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
