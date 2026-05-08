@@ -254,9 +254,9 @@ const Parser = struct {
             qualifier = self.tryQualifier() orelse qualifier;
         }
 
-        // Uniform/buffer/in/out block: layout(...) uniform Name { ... };
+        // Uniform/buffer/in/out/shared block: layout(...) uniform Name { ... };
         // Check BEFORE tryType() to avoid consuming the block name as a type
-        if (qualifier != null and (qualifier.?.is_uniform or qualifier.?.is_buffer or qualifier.?.is_in or qualifier.?.is_out)) {
+        if (qualifier != null and (qualifier.?.is_uniform or qualifier.?.is_buffer or qualifier.?.is_in or qualifier.?.is_out or qualifier.?.is_shared)) {
             if (self.current().tag == .identifier) {
                 const block_name_tok = self.current();
                 const next_pos = self.pos + 1;
