@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Gap tests: cover every known structural/correctness gap between our SPIR-V output and glslang's.
 // Each test compiles a minimal GLSL snippet and inspects the IR or SPIR-V output for the expected
 // instruction pattern. Tests are organized by gap category.

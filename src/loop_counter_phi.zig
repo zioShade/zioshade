@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Convert simple loop counter variables (OpVariable + load/store) to OpPhi.
 //! Pattern: function-local var with 1 init-store, 1 load in loop header, 1 store in continue block.
 //! The load is replaced with OpPhi (opcode 245), stores and variable are removed.
