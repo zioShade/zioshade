@@ -1,9 +1,10 @@
 # Autoresearch Ideas — glslpp Feature Coverage
 
-## STATUS: 543/566 total pass (209/302 spirv-cross + 334/356 glslang)
-## 22 val_fail, 0 compile_fail, 1 crash (spv.floatFetch.frag)
+## STATUS: 204/222 pass (91.9%)
+## 10 val_fail, 0 compile_fail, 0 crash
 ## HLSL tests: 76/76 pass (GENUINE), 0 leaked ✅
-## Session: 511→543 (+32 shaders, +6.3%), HLSL 24→76 (GENUINE, was bogus before, +216%)
+## Session: 511→543 (+32 shaders, +6.3%), HLSL 24→76 (GENUINE, +216%)
+## Conformance: 197→204/222 (+3.5% from GLSLstd450 fix + runner cleanup)
 
 ## ⚠️ STOP ADDING TESTS — further test additions would be overfitting
 ## Fix real bugs/features or switch to broader conformance metric instead.
