@@ -1841,3 +1841,80 @@ test "T29.3: uniform array with dynamic index" {
     try assertContains(hlsl, "discard");
 }
 
+// ---------------------------------------------------------------------------
+// T30: Genuinely new feature coverage
+// ---------------------------------------------------------------------------
+
+test "T30.1: gl_FragDepth output" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float depth; } u;
+        \\void main() {
+        \\    gl_FragDepth = u.depth;
+        \\    if (gl_FragDepth > 0.5) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T30.2: derivative functions dFdx/dFdy" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float dx = dFdx(u.x);
+        \\    float dy = dFdy(u.x);
+        \\    if (dx + dy > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T30.3: struct with vec3 member" {
+    const source =
+        \\#version 430
+        \\struct Particle { vec3 pos; float life; };
+        \\layout(binding = 0, std140) uniform U { Particle p; float x; } u;
+        \\void main() {
+        \\    float d = length(u.p.pos) + u.x;
+        \\    if (d > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T30.4: multiple vector types (ivec, uvec)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { ivec4 iv; uvec4 uv; float x; } u;
+        \\void main() {
+        \\    int i = u.iv.x + int(u.uv.x);
+        \\    if (float(i) + u.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T30.5: faceforward and reflect pattern" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 N; vec3 I; vec3 Nref; } u;
+        \\void main() {
+        \\    vec3 n = faceforward(u.N, u.I, u.Nref);
+        \\    float d = dot(n, u.I);
+        \\    if (d > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
