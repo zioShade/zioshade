@@ -80,4 +80,19 @@ pub fn build(b: *std.Build) void {
     // "build-runner" step: just compile the runner, don't run it
     const build_runner_step = b.step("build-runner", "Build the conformance runner executable");
     build_runner_step.dependOn(&runner_exe.step);
+
+    // HLSL backend tests — run with: zig build test-hlsl
+    const hlsl_test_step = b.step("test-hlsl", "Run HLSL backend tests (GLSL → SPIR-V → HLSL pipeline)");
+    const hlsl_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/hlsl_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hlsl_test_mod.addImport("glslpp", glslpp_mod);
+    const run_hlsl_tests = b.addRunArtifact(b.addTest(.{
+        .name = "hlsl-tests",
+        .root_module = hlsl_test_mod,
+    }));
+    hlsl_test_step.dependOn(&run_hlsl_tests.step);
+    test_step.dependOn(&run_hlsl_tests.step);
 }
