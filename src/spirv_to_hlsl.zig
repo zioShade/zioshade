@@ -1650,13 +1650,43 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
         .Determinant => "determinant",
         .MatrixInverse => "inverse",
         else => blk: {
-            // Fallback for instruction IDs not in our enum
-            // (workaround for codegen emitting non-standard instruction numbers)
+            // Fallback for instruction IDs that don't match our enum values.
+            // Some codegen paths hardcode correct GLSLstd450 values while our enum has different values.
             const val = @intFromEnum(func);
             break :blk switch (val) {
-                5 => "sqrt", // FSign is 6, 5 is not assigned but sometimes used for Sqrt
-                13 => "pow", // Our codegen bug: emits 13 for pow
-                43 => "sin", // Our codegen bug: emits 43 for sin
+                // Correct GLSLstd450 instruction IDs (per SPIR-V spec)
+                1 => "round",
+                3 => "trunc",
+                4 => "abs",
+                5 => "abs",        // SAbs
+                6 => "sign",
+                10 => "fract",
+                11 => "radians",
+                12 => "degrees",
+                13 => "sin",
+                14 => "cos",
+                15 => "tan",
+                25 => "atan2",
+                26 => "pow",
+                27 => "exp",
+                28 => "log",
+                29 => "exp2",
+                30 => "log2",
+                31 => "sqrt",
+                32 => "rsqrt",     // InverseSqrt
+                37 => "min",       // FMin
+                38 => "min",       // UMin
+                39 => "min",       // SMin
+                40 => "max",       // FMax
+                41 => "max",       // UMax
+                42 => "max",       // SMax
+                43 => "clamp",     // FClamp
+                44 => "clamp",     // UClamp
+                45 => "clamp",     // SClamp
+                46 => "lerp",      // FMix / mix
+                48 => "step",
+                49 => "smoothstep",
+                51 => "modf",
                 else => null,
             };
         },
