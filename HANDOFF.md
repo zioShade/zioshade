@@ -98,16 +98,29 @@ $ZIG build-exe -ODebug --dep glslpp -Mroot=test_hlsl.zig -Mglslpp=src/root.zig \
 - `.deinit(alloc)`, `.toOwnedSlice(alloc)`, `.writer(alloc)` — all take alloc
 - AutoHashMap deinit doesn't take alloc
 
+## DXC Validation Status
+
+**CRT shadertoy shader compiles with DXC with 0 errors!**
+
+```
+dxc -T ps_6_0 -E main test_crt_full.glsl.hlsl
+# Result: 0 errors, 1 warning
+```
+
+Warning: "Declared output SV_Target0 not fully written" — because `out` params pass by value (codegen issue), `_fragColor` is never actually written. The shader compiles but produces no visible output. Fixing `out` param codegen will resolve this.
+
 ## Next Session Priorities (in order)
 
-### P0: Codegen fixes for proper HLSL output
-1. **Fix `out` parameter SPIR-V emission**: Make codegen emit `OpTypePointer(Function, float4)` for `out` params instead of plain `float4`. This enables HLSL `out` qualifier detection.
-2. **Fix ExtInst instruction IDs**: Debug why `pow` gets wrong GLSLstd450 ID in codegen.
+### P0: Fix `out` parameter codegen (correctness blocker)
+1. The semantic analyzer (`semantic.zig` ~line 1288) creates local variables for `out` params instead of using pointer types
+2. The codegen (`codegen.zig` ~line 3079) emits value types for param types instead of `OpTypePointer(Function, float4)`
+3. This causes `_fragColor` to be passed by value to `mainImage`, so stores inside `mainImage` don't propagate back
+4. Fix: emit pointer types for `out` params in both the function type signature and the function parameter
+5. This will make the HLSL `out` qualifier work correctly
 
-### P1: DXC validation
-1. Install DXC, run `dxc -T ps_6_0 -E main` on generated HLSL
-2. Fix DXC errors (undefined identifiers, type mismatches)
-3. The `out` param fix is critical for DXC — without it, `mainImage(_fragColor, v26)` passes by value, so `_fragColor` is never modified
+### P1: Fix remaining DXC warnings
+1. The "output not fully written" warning is the `out` param issue
+2. After fixing `out` params, verify DXC compiles with 0 warnings
 
 ### P2: Loop reconstruction
 - Pattern: `Branch → LoopHeader → LoopMerge(merge, continue) → BranchConditional → body → Branch(continue) → Branch(header)`
