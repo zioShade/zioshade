@@ -5205,19 +5205,20 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
         }
     }
     // Also add 1-store-1-load non-constant vars (not already in const_store_val)
-    {
-        var it = single_store_val.iterator();
-        while (it.next()) |entry| {
-            const vid = entry.key_ptr.*;
-            const val = entry.value_ptr.*;
-            const sc = store_count.get(vid) orelse 0;
-            const lc = load_count.get(vid) orelse 0;
-            // Only add if: 1 store, exactly 1 load, no unsafe uses, not already in const_store_val
-            if (sc == 1 and lc == 1 and !unsafe_vars.isSet(vid) and !const_store_val.contains(vid)) {
-                const_store_val.put(alloc, vid, val) catch {};
-            }
-        }
-    }
+    // DISABLED: forwarding non-constant values across blocks causes dominance violations.
+    // Only forward actual constants (already handled above).
+    // {
+    //     var it = single_store_val.iterator();
+    //     while (it.next()) |entry| {
+    //         const vid = entry.key_ptr.*;
+    //         const val = entry.value_ptr.*;
+    //         const sc = store_count.get(vid) orelse 0;
+    //         const lc = load_count.get(vid) orelse 0;
+    //         if (sc == 1 and lc == 1 and !unsafe_vars.isSet(vid) and !const_store_val.contains(vid)) {
+    //             const_store_val.put(alloc, vid, val) catch {};
+    //         }
+    //     }
+    // }
 
     if (const_store_val.count() == 0) return words;
 
@@ -5956,6 +5957,44 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
 
         // Qualify: exactly 1 direct store, 0 whole loads, all AC results are only loaded, no non-load AC use
         if (direct_stores == 1 and whole_loads == 0 and !ac_non_load_use and member_reads.items.len > 0) {
+            // Dominance check: store must dominate all loads.
+            // Build a map from position -> block label by scanning for OpLabel instructions.
+            // Then verify that store and load positions are in the same block.
+            const store_block_id = blk: {
+                var bp: u32 = 5;
+                var cur: u32 = 0;
+                while (bp < words.len) {
+                    if (bp == store_pos) break :blk cur;
+                    const bh = words[bp]; const bwc: u32 = bh >> 16;
+                    if (bwc == 0) break;
+                    const bop: u16 = @truncate(bh & 0xFFFF);
+                    if (bop == 248 and bwc >= 2) cur = words[bp + 1]; // OpLabel
+                    const bie = bp + bwc;
+                    if (bie > words.len) break;
+                    bp = bie;
+                }
+                break :blk cur;
+            };
+            var same_block = true;
+            for (member_reads.items) |mr| {
+                const load_block_id = blk: {
+                    var bp: u32 = 5;
+                    var cur: u32 = 0;
+                    while (bp < words.len) {
+                        const bh = words[bp]; const bwc: u32 = bh >> 16;
+                        if (bwc == 0) break;
+                        const bop: u16 = @truncate(bh & 0xFFFF);
+                        if (bop == 248 and bwc >= 2) cur = words[bp + 1]; // OpLabel
+                        if (bop == 61 and bwc >= 4 and words[bp + 2] == mr.load_result) break :blk cur;
+                        const bie = bp + bwc;
+                        if (bie > words.len) break;
+                        bp = bie;
+                    }
+                    break :blk cur;
+                };
+                if (load_block_id != store_block_id) { same_block = false; break; }
+            }
+            if (!same_block) continue;
             // Verify: every AC result is accounted for (loaded with known index)
             var all_ac_loaded = true;
             var aci = ac_to_var.iterator();
