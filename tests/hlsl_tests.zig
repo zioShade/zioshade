@@ -1484,16 +1484,20 @@ test "T25.1: texture sampling produces valid HLSL" {
     try assertContains(hlsl, "discard");
 }
 
-test "T25.2: compute shader with barrier" {
+test "T25.2: compute shader with shared memory" {
     const source =
         \\#version 430
         \\layout(local_size_x = 64) in;
+        \\shared float s_data[64];
         \\layout(binding = 0, std140) uniform U { float x; int n; } u;
         \\void main() {
         \\    uint idx = gl_LocalInvocationID.x;
-        \\    float val = u.x + float(idx);
+        \\    s_data[idx] = u.x;
         \\    barrier();
-        \\    if (val > 0.0) { float v = u.x; }
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < u.n; i++) {
+        \\        sum += s_data[i];
+        \\    }
         \\}
     ;
     const hlsl = try compileToHlslStage(source, .compute);
