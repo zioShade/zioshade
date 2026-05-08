@@ -1032,3 +1032,77 @@ test "T19.5: vec3 dot product" {
     try assertContains(hlsl, "dot(");
 }
 
+// ---------------------------------------------------------------------------
+// T20: Additional coverage — cross, normalize, length, mix, clamp
+// ---------------------------------------------------------------------------
+
+test "T20.1: cross product" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 a; vec3 b; } u;
+        \\void main() {
+        \\    vec3 r = cross(u.a, u.b);
+        \\    if (r.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "cross(");
+}
+
+test "T20.2: normalize" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 v; } u;
+        \\void main() {
+        \\    vec3 r = normalize(u.v);
+        \\    if (r.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "normalize(");
+}
+
+test "T20.3: length" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 v; } u;
+        \\void main() {
+        \\    float l = length(u.v);
+        \\    if (l > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "length(");
+}
+
+test "T20.4: mix with uniform" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; float t; } u;
+        \\void main() {
+        \\    float a = mix(u.x, u.y, u.t);
+        \\    if (a > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "lerp(");
+}
+
+test "T20.5: clamp with uniform" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float a = clamp(u.x, 0.0, 1.0);
+        \\    if (a > 0.5) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "clamp(");
+}
+
