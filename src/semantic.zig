@@ -1285,34 +1285,14 @@ const Analyzer = struct {
             const is_mutable = if (param.qualifier) |q| (q.is_inout or q.is_out) else false;
 
             if (is_mutable) {
-                // For inout/out params: create a local variable and copy param value into it
-                // This makes the param mutable inside the function body
-                const var_id = self.allocId();
-                const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                sc_operands[0] = .{ .literal_int = 7 }; // Function storage class
-                try self.instructions.append(self.alloc, .{
-                    .tag = .local_variable,
-                    .result_type = null,
-                    .result_id = var_id,
-                    .operands = sc_operands,
-                    .ty = param.ty,
-                });
-                // Copy parameter value into the local variable
-                const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                store_ops[0] = .{ .id = var_id };
-                store_ops[1] = .{ .id = pid };
-                _ = self.load_cache.remove(var_id);
-        try self.instructions.append(self.alloc, .{
-                    .tag = .store,
-                    .result_type = null,
-                    .result_id = null,
-                    .operands = store_ops,
-                    .ty = param.ty,
-                });
+                // For out/inout params: declare the param as a var_sym directly.
+                // The codegen will emit the FunctionParameter with a pointer type,
+                // so stores/loads through the param will work as expected.
+                // No local variable copy needed — the param IS the mutable variable.
                 try self.declare(param.name, .{
                     .kind = .var_sym,
                     .ty = param.ty,
-                    .ir_id = var_id,
+                    .ir_id = pid,
                 });
             } else {
                 try self.declare(param.name, .{
