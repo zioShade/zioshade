@@ -107,31 +107,17 @@ dxc -T ps_6_0 -E main test_crt_full.glsl.hlsl
 # Result: 0 errors, 1 warning
 ```
 
-Warning: "Declared output SV_Target0 not fully written" — because `out` params pass by value (codegen issue), `_fragColor` is never actually written. The shader compiles but produces no visible output. Fixing `out` param codegen will resolve this.
+Warning: "Declared output SV_Target0 not fully written in shader" — because `out` params pass by value (codegen issue), `_fragColor` is never actually written. The shader compiles but produces no visible output.
 
-## Next Session Priorities (in order)
+## `out` Parameter Status
 
-### P0: Fix `out` parameter codegen (correctness blocker)
-1. The semantic analyzer (`semantic.zig` ~line 1288) creates local variables for `out` params instead of using pointer types
-2. The codegen (`codegen.zig` ~line 3079) emits value types for param types instead of `OpTypePointer(Function, float4)`
-3. This causes `_fragColor` to be passed by value to `mainImage`, so stores inside `mainImage` don't propagate back
-4. Fix: emit pointer types for `out` params in both the function type signature and the function parameter
-5. This will make the HLSL `out` qualifier work correctly
+The HLSL backend has scaffolding to detect `out` parameters via the Variable+Store pattern, but it doesn't trigger because DCE removes the initial param-to-local copy for pure `out` params. The correct fix requires one of:
 
-### P1: Fix remaining DXC warnings
-1. The "output not fully written" warning is the `out` param issue
-2. After fixing `out` params, verify DXC compiles with 0 warnings
+1. **Codegen fix** (recommended): Emit `OpTypePointer(Function, float4)` for `out` param types in codegen.zig ~line 3079. This makes the param type detectable as a pointer.
+2. **DCE fix**: Don't DCE the initial copy for out params (too risky, might regress other optimizations).
+3. **Backend detection**: Scan function body for stores TO the parameter ID and check if the param name is used in AccessChain base within the function.
 
-### P2: Loop reconstruction
-- Pattern: `Branch → LoopHeader → LoopMerge(merge, continue) → BranchConditional → body → Branch(continue) → Branch(header)`
-- Emit as `for (init; cond; update) { body }`
-
-### P3: Fix failing tests
-- Update T2-T5 test shaders to use patterns that survive DCE
-- Fix T6.2 crash (out parameter double-free)
-
-### P4: Performance benchmark
-- glslpp vs glslang+spirv-cross on wintty shaders
+## Session 2 Commits
 
 ## Key Files to Read First
 1. `src/spirv_to_hlsl.zig` — the entire HLSL backend
