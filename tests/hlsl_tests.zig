@@ -1718,3 +1718,80 @@ test "T27.5: multiple function definitions" {
     try assertContains(hlsl, "discard");
 }
 
+// ---------------------------------------------------------------------------
+// T28: Image and advanced I/O patterns
+// ---------------------------------------------------------------------------
+
+test "T28.1: imageLoad produces valid HLSL" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, rgba32f) uniform image2D img;
+        \\void main() {
+        \\    vec4 c = imageLoad(img, ivec2(0, 0));
+        \\    if (c.r > 0.5) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T28.2: vertex shader with gl_Position" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 pos; float scale; } u;
+        \\void main() {
+        \\    gl_Position = vec4(u.pos * u.scale, 1.0);
+        \\    gl_PointSize = u.scale;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    // Just verify it compiles
+    try assertContains(hlsl, "void main");
+}
+
+test "T28.3: mat4 construction from columns" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 c0; vec4 c1; vec4 c2; vec4 c3; } u;
+        \\void main() {
+        \\    mat4 m = mat4(u.c0, u.c1, u.c2, u.c3);
+        \\    vec4 v = m * vec4(1.0, 0.0, 0.0, 1.0);
+        \\    if (v.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T28.4: vector relational (lessThan, greaterThan)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 a; vec4 b; } u;
+        \\void main() {
+        \\    bvec4 gt = greaterThan(u.a, u.b);
+        \\    if (any(gt)) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T28.5: clamp and saturate pattern" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float v = clamp(u.x, 0.0, 1.0);
+        \\    float s = clamp(v * 2.0, 0.0, 1.0);
+        \\    if (s > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
