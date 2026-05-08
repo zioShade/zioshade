@@ -1378,3 +1378,90 @@ test "T23.10: vec4 swizzle and assignment" {
     try assertContains(hlsl, "discard");
 }
 
+// ---------------------------------------------------------------------------
+// T24: Control flow and loop patterns
+// ---------------------------------------------------------------------------
+
+test "T24.1: for loop with break" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int n; float x; } u;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < u.n; i++) {
+        \\        sum += u.x;
+        \\        if (sum > 10.0) break;
+        \\    }
+        \\    if (sum > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Loop may be unrolled or use different syntax; just check it compiles and uses discard
+    try assertContains(hlsl, "discard");
+}
+
+test "T24.2: while loop" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float v = u.x;
+        \\    while (v > 1.0) {
+        \\        v *= 0.5;
+        \\    }
+        \\    if (v > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // While may become for or different syntax; just check it compiles
+    try assertContains(hlsl, "discard");
+}
+
+test "T24.3: nested if-else chain" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int mode; float x; } u;
+        \\void main() {
+        \\    float result;
+        \\    if (u.mode == 0) result = u.x;
+        \\    else if (u.mode == 1) result = u.x * 2.0;
+        \\    else result = u.x * 3.0;
+        \\    if (result > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T24.4: step and smoothstep" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float edge; float x; } u;
+        \\void main() {
+        \\    float s1 = step(u.edge, u.x);
+        \\    float s2 = smoothstep(0.0, 1.0, u.x);
+        \\    if (s1 + s2 > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T24.5: reflect" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 incident; vec3 normal; } u;
+        \\void main() {
+        \\    vec3 r = reflect(u.incident, u.normal);
+        \\    if (length(r) > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
