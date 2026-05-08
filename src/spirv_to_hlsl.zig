@@ -27,6 +27,14 @@ const ParsedModule = struct {
     execution_model: spirv.ExecutionModel = .Fragment,
 
     pub fn deinit(self: *ParsedModule, alloc: std.mem.Allocator) void {
+        // instructions was allocated via ArrayList.initCapacity
+        // The slice points into that allocation
+        if (self.instructions.len > 0) {
+            // Free the backing allocation (from ArrayList)
+            // We need to reconstruct the slice as the ArrayList allocated it
+            const bytes = @constCast(self.instructions.ptr);
+            alloc.free(bytes[0..self.instructions.len]);
+        }
         self.id_defs.deinit(alloc);
     }
 };
@@ -65,8 +73,9 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         i += word_count;
     }
 
+    const owned_instructions = instructions.toOwnedSlice(alloc) catch instructions.items;
     var module = ParsedModule{
-        .instructions = instructions.items,
+        .instructions = owned_instructions,
         .id_defs = id_defs,
     };
 
@@ -1155,6 +1164,7 @@ fn emitInstruction(
             } else {
                 const ptr_expr = try resolvePointer(module, names, ptr_id, alloc);
                 try w.print("    {s} {s} = {s};\n", .{ result_type, result_name, ptr_expr });
+                alloc.free(ptr_expr);
             }
         },
 
@@ -1163,6 +1173,7 @@ fn emitInstruction(
             const ptr_expr = try resolvePointer(module, names, inst.words[1], alloc);
             const obj_name = names.get(inst.words[2]) orelse "0";
             try w.print("    {s} = {s};\n", .{ ptr_expr, obj_name });
+            alloc.free(ptr_expr);
         },
 
         .AccessChain => {
