@@ -1,75 +1,63 @@
-# Handoff: glslpp HLSL Backend Session 2
+# Handoff: glslpp HLSL Backend Session 3
 
-## Session Date: 2026-05-08 (session 2)
+## Session Date: 2026-05-08 (session 3)
 
 ## What Was Done This Session
 
-### 1. Fixed Vector Component AccessChain (DXC blocker) ✅
-- `buildAccessExpr` now detects vector types and emits `.x/.y/.z/.w` instead of `._m0`
-- Added `resolvePointeeType()` to walk the type chain from base pointer through indices
-- Handles nested access (struct → vector component, array → element)
-- Before: `v31._m0 = v46; v31._m1 = v54;`
-- After: `v31.x = v46; v31.y = v54;`
+### 1. Fixed out-parameter handling across the entire pipeline ✅
 
-### 2. Fixed Fragment Output Variable Handling (DXC blocker) ✅
-- Entry function now declares Output variable as local `float4 _fragColor;`
-- Loads from Output variable are aliased (pass var name directly to functions)
-- Bare `Return` instructions suppressed in fragment entry (emit `return _fragColor;` at end instead)
-- Before: `return; return _fragColor;` (double return)
-- After: `float4 _fragColor; mainImage(_fragColor, v26); return _fragColor;`
+The core problem: `out` parameters in GLSL (like `out vec4 fragColor` in shadertoy's `mainImage`) were not being propagated correctly to HLSL. DCE removed the necessary instructions because the param was passed by value in SPIR-V.
 
-### 3. Fixed Void Function Calls ✅
-- `FunctionCall` now checks if return type is `TypeVoid`
-- Emits `mainImage(args)` instead of `void v27 = mainImage(args)`
-- DXC doesn't allow assigning void results to variables
+**Three-part fix:**
 
-### 4. Implemented if/else Control Flow Reconstruction ✅
-- Built label→index map and BranchConditional→merge-label map
-- `emitBody` now handles `SelectionMerge + BranchConditional` pattern
-- `emitBlock` recursively handles nested if/else within sub-blocks
-- Proper `if (cond) { ... } else { ... }` emission with closing braces
-- Before: `if (v176) { ... return; }` (unclosed, no else)
-- After: `if (v171) { v30 = v30 * 0.0; }` (properly closed)
+#### a. Semantic Analyzer (`src/semantic.zig` ~line 1285)
+- **Before**: For `out`/`inout` params, created a local variable + copy from param → local. This made the param "mutable" but DCE removed the initial copy for pure `out` params (value never read before being overwritten).
+- **After**: For `out`/`inout` params, declare the param ID directly as a `var_sym`. No local variable wrapper. The param IS the mutable variable.
 
-### 5. Added `out` Parameter Detection
-- Function parameter emission checks if type is `OpTypePointer`
-- Adds `out` qualifier for pointer-type parameters
-- Note: currently requires codegen to emit pointer types for out params (see known issues)
+#### b. Codegen (`src/codegen.zig` ~line 3078)
+- **Before**: Function parameter types were always value types (`vec4`, `float2`, etc.)
+- **After**: For `out`/`inout` params, emit `OpTypePointer(Function, value_type)` as the parameter type. This makes the param a pointer in SPIR-V, so stores through it are observable side effects that DCE cannot remove.
+
+#### c. HLSL Backend (`src/spirv_to_hlsl.zig`)
+- Added `detectOutParams()`: scans the entry function body for `OpFunctionCall` instructions. If an argument is an Output storage class variable (or a Load from one), marks the corresponding parameter of the called function as `out`.
+- Added phase-2 aliasing: for detected `out` params where the Variable+Store pattern was DCE'd, finds the first Function-scoped Variable with matching type and aliases it.
+- Uses both the pointer-type detection (from codegen) and call-site detection to add `out` qualifier in the HLSL function signature.
+
+### Results
+
+- **CRT shadertoy shader**: DXC compiles with **0 errors, 0 warnings** (was 0 errors, 1 warning about unwritten output)
+- **`mainImage` signature**: Now correctly emits `void mainImage(out float4 v29, float2 v30)` 
+- **Function body**: Correctly writes `float4(col, 1.0)` to the out param via `v29 = v190;`
+- **No SPIR-V regressions**: 75/76 codegen tests, 46/46 semantic tests pass (same as before)
 
 ## Test Results
 
-- **24/36 tests pass** (unchanged — no regressions)
-- T13.1 (if/else) continues to pass ✅
-- T13.2 (for loop) — still expected to fail (loop reconstruction not implemented)
-- T2-T5 failures are from DCE in the GLSL→SPIR-V codegen (not HLSL backend issue)
-- T6.2 crashes (out parameter + double-free in codegen)
-
-## CRT Shadertoy Shader Output
-- 211 lines of HLSL (was 212)
-- Correct cbuffer binding, texture sampling, function calls, constant inlining
-- Proper vector component access (`.x`, `.y`, `.z` instead of `._m0`)
-- Proper `if` blocks with closing braces
-- Proper `float4 main() : SV_Target` with `_fragColor` local and return
-- **0 unhandled operations**
+- **24/36 HLSL tests pass** (unchanged — no regressions)
+- T6.2 (out parameter test) still crashes — the simple test gets fully inlined/DCE'd before HLSL backend sees it
+- T2-T5 failures are DCE removing unused variables (not HLSL backend issue)
 
 ## Known Remaining Issues
 
-### Codegen Issues (not HLSL backend)
-1. **`out` parameters not emitted as pointer types**: The semantic analyzer handles `out` params by creating local variables, but the SPIR-V function signature uses value types. HLSL needs `out` qualifier but the type is `float4`, not `pointer(float4)`. Fix requires codegen changes in `semantic.zig` and `codegen.zig`.
-
-2. **ExtInst wrong instruction IDs**: Some GLSLstd450 calls have wrong instruction numbers. E.g., `pow(abs(x)/5.0, 2.0)` becomes `acos(x, 2.0)` in HLSL. This is a codegen bug in `semantic.zig` where the wrong GLSLstd450 enum value is assigned.
-
-3. **DCE removes minimal shader code**: T2-T5 tests use simple `float x = u.val;` which gets DCE'd because `x` is never used. Tests should use patterns that write to the output variable.
-
 ### HLSL Backend Issues
 1. **Loop reconstruction**: `for` loops not yet reconstructed from `LoopMerge + Branch` pattern. T13.2 test expects `for (`.
-2. **Indentation in nested blocks**: Instructions inside if/else blocks don't get extra indentation (they use `emitInstruction` which hardcodes `"    "` prefix).
+2. **Indentation in nested blocks**: Instructions inside if/else blocks don't get extra indentation.
+
+### Codegen Issues (not HLSL backend)
+1. **ExtInst wrong instruction IDs**: Some GLSLstd450 calls have wrong instruction numbers.
+2. **DCE removes minimal shader code**: T2-T5 tests use variables that are never used, so DCE removes them. Tests should write to output variable.
+
+### Memory Leak Issues (pre-existing)
+- Multiple memory leaks detected by GPA in tests (17 leaked in HLSL tests, 12 in codegen tests, 3 in semantic tests)
+- These are in the compilation pipeline (ArrayList not freed on error paths)
 
 ## Architecture
 
 ```
-src/root.zig                  — Public API: compileToSPIRV, spirvToHLSL, compileShadertoyToHlsl
-src/spirv_to_hlsl.zig         — SPIR-V parser + HLSL emitter (~1200 lines)
+src/semantic.zig             — Semantic analyzer (out param handling ~line 1285)
+src/codegen.zig              — SPIR-V codegen (pointer type emission ~line 3078)
+src/spirv_to_hlsl.zig        — SPIR-V parser + HLSL emitter (~1650 lines)
+  - detectOutParams()         — Call-site out-param detection
+  - emitFunction()            — Function emission with out qualifier
 tests/hlsl_tests.zig          — 36 end-to-end HLSL tests (24 pass)
 test_hlsl.zig                 — CLI tool for manual testing
 test_crt_full.glsl            — Test shader (shadertoy prefix + CRT effect)
@@ -88,9 +76,10 @@ $ZIG build test-hlsl
 $ZIG build-exe -ODebug --dep glslpp -Mroot=test_hlsl.zig -Mglslpp=src/root.zig \
     --cache-dir .zig-cache -femit-bin=.zig-cache/bin/test_hlsl.exe
 .zig-cache/bin/test_hlsl.exe test_crt_full.glsl --save
-```
 
-**Note**: System has Zig 0.16.0 as default. Must use 0.15.2 explicitly (`C:/Users/Alessandro/scoop/apps/zig/0.15.2/zig.exe`) as the codebase uses Zig 0.15 ArrayList API.
+# DXC validation
+dxc -T ps_6_0 -E main test_crt_full.glsl.hlsl
+```
 
 ## Zig 0.15 ArrayList API Notes
 - `ArrayList(T).init(alloc)` → use `initCapacity(alloc, n)` or `.empty`
@@ -100,31 +89,26 @@ $ZIG build-exe -ODebug --dep glslpp -Mroot=test_hlsl.zig -Mglslpp=src/root.zig \
 
 ## DXC Validation Status
 
-**CRT shadertoy shader compiles with DXC with 0 errors!**
+**CRT shadertoy shader compiles with DXC with 0 errors, 0 warnings!**
 
 ```
 dxc -T ps_6_0 -E main test_crt_full.glsl.hlsl
-# Result: 0 errors, 1 warning
+# Result: 0 errors, 0 warnings
 ```
 
-Warning: "Declared output SV_Target0 not fully written in shader" — because `out` params pass by value (codegen issue), `_fragColor` is never actually written. The shader compiles but produces no visible output.
+The out parameter `_fragColor` is now correctly written via the `out` qualifier.
 
-## `out` Parameter Status
+## Session 3 Commits
 
-The HLSL backend has scaffolding to detect `out` parameters via the Variable+Store pattern, but it doesn't trigger because DCE removes the initial param-to-local copy for pure `out` params. The correct fix requires one of:
-
-1. **Codegen fix** (recommended): Emit `OpTypePointer(Function, float4)` for `out` param types in codegen.zig ~line 3079. This makes the param type detectable as a pointer.
-2. **DCE fix**: Don't DCE the initial copy for out params (too risky, might regress other optimizations).
-3. **Backend detection**: Scan function body for stores TO the parameter ID and check if the param name is used in AccessChain base within the function.
-
-## Session 2 Commits
+- `4e42b7b` — Fix out-parameter handling: emit pointer types in codegen, direct param usage in semantic analyzer, call-site detection in HLSL backend
 
 ## Key Files to Read First
-1. `src/spirv_to_hlsl.zig` — the entire HLSL backend
-2. `tests/hlsl_tests.zig` — test suite
-3. `test_crt_full.glsl.hlsl` — actual output from CRT shadertoy shader
-4. `PLAN.md` — full task list with progress tracking
+1. `src/spirv_to_hlsl.zig` — the entire HLSL backend (look for `detectOutParams` and `emitFunction`)
+2. `src/semantic.zig` — out param handling in `analyzeFunction` (~line 1285)
+3. `src/codegen.zig` — pointer type emission in `emitFunctions` (~line 3078)
+4. `tests/hlsl_tests.zig` — test suite
+5. `test_crt_full.glsl.hlsl` — actual output from CRT shadertoy shader
 
 ## Git State
 - Branch: `main`
-- Latest commit: `e1b584a` — "Fix HLSL backend: vector AccessChain, void calls, fragment output, if/else control flow"
+- Latest commit: `4e42b7b` — "Fix out-parameter handling: emit pointer types in codegen, direct param usage in semantic analyzer, call-site detection in HLSL backend"
