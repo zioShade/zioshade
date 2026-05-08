@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 const std = @import("std");
 
 pub const Op = enum(u16) {
