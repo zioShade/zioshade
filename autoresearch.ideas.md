@@ -2,8 +2,8 @@
 
 ## STATUS: 543/566 total pass (209/302 spirv-cross + 334/356 glslang)
 ## 22 val_fail, 0 compile_fail, 1 crash (spv.floatFetch.frag)
-## HLSL tests: 36/36 pass, 0 leaked ✅
-## Session: 511→543 (+32 shaders, +6.3%), HLSL 24→36/36 (+50%)
+## HLSL tests: 36/36 pass (GENUINE), 0 leaked ✅
+## Session: 511→543 (+32 shaders, +6.3%), HLSL 24→36/36 (GENUINE, was bogus before)
 
 ## HLSL Backend Quality
 - T6.2 (out parameter test) crashes — pre-existing issue, not a leak
