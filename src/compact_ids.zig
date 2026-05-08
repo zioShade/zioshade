@@ -5495,15 +5495,12 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
 
         // Skip foldable arithmetic ops (they become constants)
         // Only skip if this instruction DEFINES a result ID that's being folded.
-        // Use getOpInfo to check if word[2] is a result ID.
-        const is_result_producing = blk: {
-            const info = getOpInfo(opcode);
-            if (info) |inf| {
-                break :blk inf.fixed >= 2; // fixed=2 means result_type + result_id
-            }
-            break :blk false;
-        };
-        if (is_result_producing and wc >= 3 and words[pos + 2] < bound and to_skip.isSet(words[pos + 2])) {
+        // Use getOpInfo to determine where the result ID is:
+        //   fixed=2: result_type at pos+1, result_id at pos+2 (arithmetic, constants, etc.)
+        //   fixed=3: result_id at pos+1 (type definitions — never folded, never skip)
+        const info = getOpInfo(opcode);
+        const is_arithmetic = info != null and info.?.fixed == 2;
+        if (is_arithmetic and wc >= 3 and words[pos + 2] < bound and to_skip.isSet(words[pos + 2])) {
             pos = ie;
             continue;
         }
