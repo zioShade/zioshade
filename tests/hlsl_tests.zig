@@ -603,3 +603,125 @@ test "T14.3: discard maps to discard" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "discard;");
 }
+
+// ---------------------------------------------------------------------------
+// T15: Additional HLSL backend coverage
+// ---------------------------------------------------------------------------
+
+test "T15.1: abs maps to abs" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float a = abs(u.x);
+        \\    if (a > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "abs(");
+}
+
+test "T15.2: sqrt maps to sqrt" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float a = sqrt(u.x);
+        \\    if (a > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "sqrt(");
+}
+
+test "T15.3: vector arithmetic" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 x; } u;
+        \\void main() {
+        \\    vec4 a = u.x + u.x;
+        \\    if (a.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T15.4: struct in uniform block" {
+    const source =
+        \\#version 430
+        \\struct Light { vec3 pos; float intensity; };
+        \\layout(binding = 0, std140) uniform U { Light l; } u;
+        \\void main() {
+        \\    if (u.l.intensity > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "cbuffer");
+    try assertContains(hlsl, "float");
+}
+
+test "T15.5: multiply-add expression" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; float z; } u;
+        \\void main() {
+        \\    float a = u.x * u.y + u.z;
+        \\    if (a > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "_m1");
+    try assertContains(hlsl, "_m2");
+}
+
+test "T15.6: mat4 multiplication" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { mat4 m; vec4 v; } u;
+        \\void main() {
+        \\    vec4 r = u.m * u.v;
+        \\    if (r.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "mul(");
+}
+
+test "T15.7: float2 vector type" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
+        \\void main() {
+        \\    vec2 v = vec2(u.x, u.y);
+        \\    if (v.x + v.y > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Both uniform components must be used
+    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "_m1");
+}
+
+test "T15.8: bool to float conversion in condition" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    bool b = u.x > 0.0;
+        \\    if (b) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
