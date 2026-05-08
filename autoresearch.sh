@@ -9,7 +9,13 @@ PASSED=$(echo "$OUTPUT" | grep -o '[0-9]\+/36 passed' | head -1 | grep -o '[0-9]
 if [ -z "$PASSED" ]; then
     PASSED=$(echo "$OUTPUT" | grep -o '[0-9]\+ passed' | head -1 | grep -o '[0-9]\+')
 fi
-FAILED=$(echo "$OUTPUT" | grep -o '[0-9]\+ failed' | head -1 | grep -o '[0-9]\+')
+FAILED=$(echo "$OUTPUT" | grep -o '[0-9]\+/36 passed' | head -1 | grep -o 'failed' | head -1 || echo "0")
+if [ "$FAILED" = "failed" ]; then
+    FAILED=$(echo "$OUTPUT" | grep '[0-9]\+ failed' | grep 'tests' | head -1 | grep -o '[0-9]\+' | head -1)
+fi
+if [ -z "$FAILED" ]; then
+    FAILED=0
+fi
 LEAKED=$(echo "$OUTPUT" | grep -o '[0-9]\+ leaked' | head -1 | grep -o '[0-9]\+')
 echo ""
 echo "METRIC tests_passed=${PASSED:-0}"
