@@ -5475,8 +5475,9 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
         if (opcode == 43 or opcode == 44) { // OpConstant, OpConstantComposite
             insert_point = ie;
         }
-        // Stop at first variable/function definition (section boundary)
-        if (opcode == 59 or opcode == 54) break; // OpVariable, OpFunction
+        // Stop only at OpFunction (section boundary between global and function)
+        // Don't stop at OpVariable — pipeline may place types after variables
+        if (opcode == 54) break; // OpFunction
         pos = ie;
     }
 
@@ -8430,4 +8431,77 @@ pub fn dedupFunctionTypes(alloc: std.mem.Allocator, words: []const u32) error{Ou
     }
 
     return result.toOwnedSlice(alloc) catch return words;
+}
+
+/// Ensure type definitions come before constants in the non-function section.
+/// The optimization pipeline may reorder instructions, placing OpVariable before types.
+/// This pass scans non-function instructions and reorders: preamble → types → constants → globals.
+pub fn fixTypeOrdering(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return alloc.dupe(u32, words);
+
+    var preamble = std.ArrayList(u32).initCapacity(alloc, words.len) catch return alloc.dupe(u32, words);
+    var debug_sec = std.ArrayList(u32).initCapacity(alloc, words.len) catch return alloc.dupe(u32, words);
+    var annot_sec = std.ArrayList(u32).initCapacity(alloc, words.len) catch return alloc.dupe(u32, words);
+    var type_sec = std.ArrayList(u32).initCapacity(alloc, words.len) catch return alloc.dupe(u32, words);
+    var const_sec = std.ArrayList(u32).initCapacity(alloc, words.len) catch return alloc.dupe(u32, words);
+    var global_sec = std.ArrayList(u32).initCapacity(alloc, words.len) catch return alloc.dupe(u32, words);
+    var func_sec = std.ArrayList(u32).initCapacity(alloc, words.len) catch return alloc.dupe(u32, words);
+    defer {
+        preamble.deinit(alloc); debug_sec.deinit(alloc); annot_sec.deinit(alloc);
+        type_sec.deinit(alloc); const_sec.deinit(alloc); global_sec.deinit(alloc); func_sec.deinit(alloc);
+    }
+
+    preamble.appendSliceAssumeCapacity(words[0..5]);
+
+    var pos: u32 = 5;
+    var in_func = false;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        const inst = words[pos..ie];
+
+        if (opcode == 54) in_func = true; // OpFunction
+        if (opcode == 56) { // OpFunctionEnd
+            func_sec.appendSliceAssumeCapacity(inst);
+            in_func = false;
+            pos = ie;
+            continue;
+        }
+        if (in_func) {
+            func_sec.appendSliceAssumeCapacity(inst);
+            pos = ie;
+            continue;
+        }
+
+        // Categorize non-function instructions
+        switch (opcode) {
+            17, 18, 11, 14, 15, 16 => preamble.appendSliceAssumeCapacity(inst),
+            3, 4, 5, 6, 7, 8 => debug_sec.appendSliceAssumeCapacity(inst),
+            71, 72, 73, 74, 75, 76 => annot_sec.appendSliceAssumeCapacity(inst),
+            41, 42, 50 => const_sec.appendSliceAssumeCapacity(inst), // OpConstantTrue/False/Null
+            43, 44 => const_sec.appendSliceAssumeCapacity(inst), // OpConstant/Composite
+            59 => global_sec.appendSliceAssumeCapacity(inst), // OpVariable (non-function — these are globals)
+            else => {
+                // Everything else that's not a constant or variable goes to types
+                // This includes OpType* (19-33), OpTypeForwardPointer (39), etc.
+                type_sec.appendSliceAssumeCapacity(inst);
+            },
+        }
+        pos = ie;
+    }
+
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return alloc.dupe(u32, words);
+    result.appendSliceAssumeCapacity(preamble.items);
+    result.appendSliceAssumeCapacity(debug_sec.items);
+    result.appendSliceAssumeCapacity(annot_sec.items);
+    result.appendSliceAssumeCapacity(type_sec.items);
+    result.appendSliceAssumeCapacity(const_sec.items);
+    result.appendSliceAssumeCapacity(global_sec.items);
+    result.appendSliceAssumeCapacity(func_sec.items);
+    return result.toOwnedSlice(alloc) catch return alloc.dupe(u32, words);
 }
