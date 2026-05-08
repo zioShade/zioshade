@@ -185,10 +185,12 @@ pub fn generate(
     if (mb_dce.ptr != mb_merged2.ptr) alloc.free(mb_merged2);
     const deduped = compact_ids.dedupStructTypes(alloc, mb_dce) catch return mb_dce;
     if (deduped.ptr != mb_dce.ptr) alloc.free(mb_dce);
-    const negated = compact_ids.eliminateDoubleNegate(alloc, deduped) catch return deduped;
+    const negated = compact_ids.elimSelfRefArithmetic(alloc, deduped) catch return deduped;
     if (negated.ptr != deduped.ptr) alloc.free(deduped);
-    const algebrad = compact_ids.algebraicSimpl(alloc, negated) catch return negated;
-    if (algebrad.ptr != negated.ptr) alloc.free(negated);
+    const negated2 = compact_ids.eliminateDoubleNegate(alloc, negated) catch return negated;
+    if (negated2.ptr != negated.ptr) alloc.free(negated);
+    const algebrad = compact_ids.algebraicSimpl(alloc, negated2) catch return negated2;
+    if (algebrad.ptr != negated2.ptr) alloc.free(negated2);
     const cf = compact_ids.constFold(alloc, algebrad) catch return algebrad;
     if (cf.ptr != algebrad.ptr) alloc.free(algebrad);
     const folded = compact_ids.foldSelect(alloc, cf) catch return cf;
