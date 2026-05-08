@@ -3541,9 +3541,9 @@ const Analyzer = struct {
                         // 3. Emit atomic op on the texel pointer
                         const image_ty = if (arg_tids.items.len > 0) arg_tids.items[0].ty else .uimage2d;
                         const ret_ty: ast.Type = switch (image_ty) {
-                            .uimage2d => .uint,
-                            .iimage2d => .int,
-                            .image2d => .float,
+                            .uimage2d, .uimage_buffer, .uimage1d, .uimage3d, .uimage_cube, .uimage2d_array, .uimage_cube_array => .uint,
+                            .iimage2d, .iimage_buffer, .iimage1d, .iimage3d, .iimage_cube, .iimage2d_array, .iimage_cube_array => .int,
+                            .image2d, .image_buffer, .image1d, .image3d, .image_cube, .image2d_array, .image_cube_array, .image2d_ms, .image2d_ms_array => .float,
                             else => .uint,
                         };
                         // Get image variable pointer via LValue
@@ -3584,9 +3584,25 @@ const Analyzer = struct {
                                     break :blk if (ret_ty == .int) .atomic_smax else .atomic_umax;
                                 } else
                                 .atomic_exchange;
+                            // Coerce value to match return type (int->uint or uint->int)
+                            var value_id = arg_tids.items[2].id;
+                            const value_ty = arg_tids.items[2].ty;
+                            if ((ret_ty == .uint and value_ty == .int) or (ret_ty == .int and value_ty == .uint)) {
+                                const conv_id = self.allocId();
+                                const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                conv_ops[0] = .{ .id = value_id };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .convert_iti,
+                                    .result_type = null,
+                                    .result_id = conv_id,
+                                    .operands = conv_ops,
+                                    .ty = ret_ty,
+                                });
+                                value_id = conv_id;
+                            }
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                             operands[0] = .{ .id = texel_ptr_id };
-                            operands[1] = .{ .id = arg_tids.items[2].id }; // value
+                            operands[1] = .{ .id = value_id };
                             try self.instructions.append(self.alloc, .{
                                 .tag = atomic_tag,
                                 .result_type = null,
@@ -3618,7 +3634,7 @@ const Analyzer = struct {
                         const size_ty: ast.Type = if (arg_tids.items.len > 0) switch (arg_tids.items[0].ty) {
                             .sampler1d, .sampler1d_shadow, .isampler1d, .usampler1d,
                             .sampler_buffer, .isampler_buffer, .usampler_buffer,
-                            .image_buffer => .int,
+                            .image_buffer, .iimage_buffer, .uimage_buffer => .int,
                             .sampler2d, .sampler2d_shadow, .sampler2d_ms,
                             .sampler_cube, .sampler_cube_shadow,
                             .isampler2d, .usampler2d, .isampler3d, .usampler3d,

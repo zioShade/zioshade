@@ -527,7 +527,7 @@ const Codegen = struct {
             if (check_ty == .array) check_ty = check_ty.array.base.*;
             switch (check_ty) {
                 .sampler1d, .isampler1d, .usampler1d, .image1d, .iimage1d, .uimage1d => has_sampler1d = true,
-                .sampler_buffer, .isampler_buffer, .usampler_buffer => has_sampler_buffer = true,
+                .sampler_buffer, .isampler_buffer, .usampler_buffer, .image_buffer, .iimage_buffer, .uimage_buffer => has_sampler_buffer = true,
                 .sampler2d_ms_array, .isampler2d_ms_array, .usampler2d_ms_array, .image2d_ms_array => {
                     has_sampler2d_ms_array = true;
                     has_storage_image_ms = true;
@@ -1328,6 +1328,30 @@ const Codegen = struct {
                 try self.emitTypeWord(0); // Not arrayed
                 try self.emitTypeWord(0); // Not multisampled
                 try self.emitTypeWord(2); // Sampled = 2 (no sampler needed)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
+            },
+            .iimage_buffer => {
+                const int_id = try self.ensureType(.int);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(int_id);
+                try self.emitTypeWord(5); // Dim = Buffer
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(2); // Sampled = 2
+                try self.emitTypeWord(0); // ImageFormat = Unknown
+            },
+            .uimage_buffer => {
+                const uint_id = try self.ensureType(.uint);
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(uint_id);
+                try self.emitTypeWord(5); // Dim = Buffer
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(0); // Not arrayed
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(2); // Sampled = 2
                 try self.emitTypeWord(0); // ImageFormat = Unknown
             },
             .image2d_ms => {
