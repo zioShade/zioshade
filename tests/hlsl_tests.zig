@@ -958,3 +958,77 @@ test "T18.5: int-to-float conversion" {
     try assertContains(hlsl, "discard");
 }
 
+// ---------------------------------------------------------------------------
+// T19: Type conversions and vector operations
+// ---------------------------------------------------------------------------
+
+test "T19.1: float-to-int conversion" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    int a = int(u.x);
+        \\    if (a > 0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T19.2: vec4 component access" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 v; } u;
+        \\void main() {
+        \\    float a = u.v.w;
+        \\    if (a > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T19.3: vec4 arithmetic" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 a; vec4 b; } u;
+        \\void main() {
+        \\    vec4 r = u.a + u.b;
+        \\    if (r.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T19.4: negate expression" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float a = -u.x;
+        \\    if (a > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T19.5: vec3 dot product" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 a; vec3 b; } u;
+        \\void main() {
+        \\    float d = dot(u.a, u.b);
+        \\    if (d > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "dot(");
+}
+
