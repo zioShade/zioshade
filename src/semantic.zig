@@ -4952,6 +4952,7 @@ const Analyzer = struct {
                     else => if (result_ty == .array) result_ty.array.base.* else result_ty, // mat types, arrays etc
                 };
                 const converted_ids = try self.alloc.alloc(u32, arg_tids.items.len);
+                defer self.alloc.free(converted_ids);
                 for (arg_tids.items, 0..) |tid, i| {
                     var arg_id = tid.id;
                     const arg_ty = tid.ty;
@@ -5167,7 +5168,7 @@ const Analyzer = struct {
                 for (converted_ids, 0..) |cid, i| {
                     operands[i] = .{ .id = cid };
                 }
-                self.alloc.free(converted_ids);
+                // converted_ids freed by defer above
 
                 // Check if all operands are constants — if so, check cache for dedup
                 var all_const = true;
