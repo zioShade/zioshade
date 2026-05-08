@@ -7060,8 +7060,6 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
         }
     }
 
-    std.debug.print("copyMemoryOpt: {} copies\n", .{replacements.count()});
-
     // Phase 3: Rewrite - remove dead loads, replace stores with OpCopyMemory
     var result3 = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
     result3.appendSliceAssumeCapacity(words[0..5]);
