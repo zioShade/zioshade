@@ -128,6 +128,7 @@ const LoopContext = struct {
 
 const OverloadEntry = struct {
     param_types: []const ast.Type,
+    param_is_mutable: []const bool, // true for out/inout params
     ir_id: u32,
     return_type: ast.Type = .void,
 };
@@ -348,6 +349,9 @@ const Analyzer = struct {
                 for (entry.value_ptr.items) |*overload| {
                     if (overload.param_types.len > 0) {
                         self.alloc.free(overload.param_types);
+                    }
+                    if (overload.param_is_mutable.len > 0) {
+                        self.alloc.free(overload.param_is_mutable);
                     }
                 }
                 entry.value_ptr.deinit(self.alloc);
@@ -1188,14 +1192,18 @@ const Analyzer = struct {
                         // Use the scope symbol's ir_id
                         try gop.value_ptr.append(self.alloc, .{
                             .param_types = &.{}, // placeholder — will be resolved at call site
+                            .param_is_mutable = &.{},
                             .ir_id = existing.?.ir_id,
                             .return_type = existing.?.ty,
                         });
                     }
                     const owned_pts = try self.alloc.dupe(ast.Type, param_types.items);
+                    var mutable_buf = try self.alloc.alloc(bool, node.data.params.len);
+                    for (node.data.params, 0..) |p, i| mutable_buf[i] = if (p.qualifier) |q| (q.is_inout or q.is_out) else false;
                     param_types.deinit(self.alloc);
                     try gop.value_ptr.append(self.alloc, .{
                         .param_types = owned_pts,
+                        .param_is_mutable = mutable_buf,
                         .ir_id = func_ir_id,
                         .return_type = node.data.ty orelse .void,
                     });
@@ -1213,9 +1221,12 @@ const Analyzer = struct {
                         gop.value_ptr.* = .{};
                     }
                     const owned_pts = try self.alloc.dupe(ast.Type, param_types.items);
+                    var mutable_buf2 = try self.alloc.alloc(bool, node.data.params.len);
+                    for (node.data.params, 0..) |p, i| mutable_buf2[i] = if (p.qualifier) |q| (q.is_inout or q.is_out) else false;
                     param_types.deinit(self.alloc);
                     try gop.value_ptr.append(self.alloc, .{
                         .param_types = owned_pts,
+                        .param_is_mutable = mutable_buf2,
                         .ir_id = func_ir_id,
                         .return_type = node.data.ty orelse .void,
                     });
@@ -3006,6 +3017,7 @@ const Analyzer = struct {
                 const sym_raw = self.lookup(node.data.name);
                 // Resolve function overloads
                 var resolved_sym = sym_raw;
+                var resolved_mutable_params: []const bool = &[_]bool{};
                 if (sym_raw != null and sym_raw.?.kind == .func) {
                     if (self.overloads.get(node.data.name)) |overload_list| {
                         // Try to match argument types against overload parameter types
@@ -3020,6 +3032,7 @@ const Analyzer = struct {
                             }
                             if (match) {
                                 resolved_sym = .{ .kind = .func, .ty = overload.return_type, .ir_id = overload.ir_id };
+                                resolved_mutable_params = overload.param_is_mutable;
                                 break;
                             }
                         }
@@ -4415,7 +4428,13 @@ const Analyzer = struct {
                     const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
                     operands[0] = .{ .id = s.ir_id };
                     for (arg_tids.items, 0..) |tid, i| {
-                        operands[i + 1] = .{ .id = tid.id };
+                        if (i < resolved_mutable_params.len and resolved_mutable_params[i]) {
+                            // out/inout param: pass pointer, not loaded value
+                            const ptr_tid = try self.analyzeLValue(node.data.children[i]);
+                            operands[i + 1] = .{ .id = ptr_tid.id };
+                        } else {
+                            operands[i + 1] = .{ .id = tid.id };
+                        }
                     }
                     try self.instructions.append(self.alloc, .{
                         .tag = .function_call,
