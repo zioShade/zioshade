@@ -539,12 +539,42 @@ fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
         .TypeFloat => return "float",
         .TypeVector => {
             const scalar = try hlslType(module, inst.words[2], names, alloc);
-            return std.fmt.allocPrint(alloc, "{s}{d}", .{ scalar, inst.words[3] });
+            const cols = inst.words[3];
+            // Fast path for common types (avoid allocation)
+            if (std.mem.eql(u8, scalar, "float")) {
+                const names_vec = [_][]const u8{ "", "float", "float2", "float3", "float4" };
+                if (cols >= 1 and cols <= 4) return names_vec[cols];
+            } else if (std.mem.eql(u8, scalar, "int")) {
+                const names_vec = [_][]const u8{ "", "int", "int2", "int3", "int4" };
+                if (cols >= 1 and cols <= 4) return names_vec[cols];
+            } else if (std.mem.eql(u8, scalar, "uint")) {
+                const names_vec = [_][]const u8{ "", "uint", "uint2", "uint3", "uint4" };
+                if (cols >= 1 and cols <= 4) return names_vec[cols];
+            } else if (std.mem.eql(u8, scalar, "bool")) {
+                const names_vec = [_][]const u8{ "", "bool", "bool2", "bool3", "bool4" };
+                if (cols >= 1 and cols <= 4) return names_vec[cols];
+            }
+            return std.fmt.allocPrint(alloc, "{s}{d}", .{ scalar, cols });
         },
         .TypeMatrix => {
-            const col_type = getDef(module, inst.words[2]);
             const cols = inst.words[3];
+            const col_type = getDef(module, inst.words[2]);
             const rows: u32 = if (col_type) |ct| ct.words[3] else cols;
+            // Fast path for common matrix types (avoid allocation)
+            const mat_names = [_]struct { c: u32, r: u32, n: []const u8 }{
+                .{ .c = 2, .r = 2, .n = "float2x2" },
+                .{ .c = 2, .r = 3, .n = "float2x3" },
+                .{ .c = 2, .r = 4, .n = "float2x4" },
+                .{ .c = 3, .r = 2, .n = "float3x2" },
+                .{ .c = 3, .r = 3, .n = "float3x3" },
+                .{ .c = 3, .r = 4, .n = "float3x4" },
+                .{ .c = 4, .r = 2, .n = "float4x2" },
+                .{ .c = 4, .r = 3, .n = "float4x3" },
+                .{ .c = 4, .r = 4, .n = "float4x4" },
+            };
+            for (mat_names) |mn| {
+                if (mn.c == cols and mn.r == rows) return mn.n;
+            }
             return std.fmt.allocPrint(alloc, "float{d}x{d}", .{ cols, rows });
         },
         .TypeArray => return try hlslType(module, inst.words[2], names, alloc),
