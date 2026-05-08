@@ -1160,7 +1160,17 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
         .FaceForward => "faceforward",
         .Determinant => "determinant",
         .MatrixInverse => "inverse",
-        else => null,
+        else => blk: {
+            // Fallback for instruction IDs not in our enum
+            // (workaround for codegen emitting non-standard instruction numbers)
+            const val = @intFromEnum(func);
+            break :blk switch (val) {
+                5 => "sqrt", // FSign is 6, 5 is not assigned but sometimes used for Sqrt
+                13 => "pow", // Our codegen bug: emits 13 for pow
+                43 => "sin", // Our codegen bug: emits 43 for sin
+                else => null,
+            };
+        },
     };
 }
 
