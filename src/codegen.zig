@@ -3077,7 +3077,13 @@ const Codegen = struct {
             const return_type_id = try self.ensureType(func.return_type);
             var param_type_ids = try std.ArrayList(u32).initCapacity(self.alloc, func.params.len);
             for (func.params) |param| {
-                try param_type_ids.append(self.alloc, try self.ensureType(param.ty));
+                const is_mutable = if (param.qualifier) |q| (q.is_inout or q.is_out) else false;
+                if (is_mutable) {
+                    const ptr_type_id = try self.ensurePointerType(param.ty, .function);
+                    try param_type_ids.append(self.alloc, ptr_type_id);
+                } else {
+                    try param_type_ids.append(self.alloc, try self.ensureType(param.ty));
+                }
             }
             // Compute hash key for function type dedup
             var func_type_key: u64 = return_type_id;
