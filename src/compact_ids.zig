@@ -5344,20 +5344,28 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
     defer int_signed.deinit();
     var int_unsigned = try std.DynamicBitSet.initEmpty(alloc, bound);
     defer int_unsigned.deinit();
+    // Track all defined type IDs for validation
+    var defined_types = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer defined_types.deinit();
 
     var pos: u32 = 5;
     while (pos < words.len) {
         const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
+        if (opcode >= 19 and opcode <= 33 and wc >= 2) {
+            const tid = words[pos + 1];
+            if (tid >= 1 and tid < bound) defined_types.set(tid);
+        }
         if (opcode == 22 and wc >= 3) { // OpTypeFloat
             const tid = words[pos + 1];
-            if (tid >= 1 and tid < bound) float_types.set(tid);
+            if (tid >= 1 and tid < bound) { float_types.set(tid); defined_types.set(tid); }
         }
         if (opcode == 21 and wc >= 4) { // OpTypeInt
             const tid = words[pos + 1];
             const signed: u32 = words[pos + 3];
             if (tid >= 1 and tid < bound) {
                 if (signed != 0) int_signed.set(tid) else int_unsigned.set(tid);
+                defined_types.set(tid);
             }
         }
         if (opcode == 43 and wc >= 4) { // OpConstant (scalar)
@@ -5436,8 +5444,11 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                     }
 
                     if (result_val) |rv| {
-                        try fold_map.put(alloc, rid, .{ .rtype = result_type, .val = rv });
-                        to_skip.set(rid);
+                        // Validate: result_type must be a defined type
+                        if (result_type < bound and defined_types.isSet(result_type)) {
+                            try fold_map.put(alloc, rid, .{ .rtype = result_type, .val = rv });
+                            to_skip.set(rid);
+                        }
                     }
                 }
             }
