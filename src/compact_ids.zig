@@ -2320,8 +2320,12 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
 
                 if (r2.items.len < dce_result.len) {
                     alloc.free(dce_result);
-                    const final_dce = deadCodeElim(alloc, r2.items) catch return r2.items;
-                    if (final_dce.ptr != r2.items.ptr) alloc.free(r2.items);
+                    const r2_owned = r2.toOwnedSlice(alloc) catch {
+                        r2.deinit(alloc);
+                        return words; // fallback: return original input (dce_result was a derived copy)
+                    };
+                    const final_dce = deadCodeElim(alloc, r2_owned) catch return r2_owned;
+                    if (final_dce.ptr != r2_owned.ptr) alloc.free(r2_owned);
                     return final_dce;
                 } else {
                     r2.deinit(alloc);

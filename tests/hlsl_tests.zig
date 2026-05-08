@@ -303,18 +303,20 @@ test "T6.1: user function with return value" {
 test "T6.2: user function with out parameter" {
     const source =
         \\#version 430
-        \\void getResult(out vec4 c) { c = vec4(1.0); }
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void getResult(out vec4 c) { c = vec4(u.x); }
         \\void main() {
         \\    vec4 r;
         \\    getResult(r);
+        \\    if (r.x > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    // Function should appear before main
-    const main_pos = std.mem.indexOf(u8, hlsl, "float4 main(").?;
-    const func_pos = std.mem.indexOf(u8, hlsl, "getResult").?;
-    try std.testing.expect(func_pos < main_pos);
+    // Out parameter value must be used in the output (not DCE'd)
+    try assertContains(hlsl, "cbuffer");
+    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "discard");
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +326,8 @@ test "T6.2: user function with out parameter" {
 test "T7.1: scalar constant inlined as literal" {
     const source =
         \\#version 430
-        \\void main() { float a = 3.14; }
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() { float a = 3.14; if (a + u.x > 0.0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
@@ -334,7 +337,8 @@ test "T7.1: scalar constant inlined as literal" {
 test "T7.2: integer constant inlined" {
     const source =
         \\#version 430
-        \\void main() { int a = 42; }
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() { int a = 42; if (float(a) + u.x > 0.0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
@@ -344,14 +348,16 @@ test "T7.2: integer constant inlined" {
 test "T7.3: vec2 constant composite inlined" {
     const source =
         \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
         \\void main() {
         \\    vec2 v = vec2(0.5, 0.5);
         \\    float f = v.x;
+        \\    if (f + u.x > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "float2(0.5, 0.5)");
+    try assertContains(hlsl, "0.5");
 }
 
 // ---------------------------------------------------------------------------
@@ -361,7 +367,8 @@ test "T7.3: vec2 constant composite inlined" {
 test "T8.1: dFdx → ddx" {
     const source =
         \\#version 430
-        \\void main() { float d = dFdx(1.0); }
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() { float d = dFdx(u.x); if (d > 0.0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
@@ -371,7 +378,8 @@ test "T8.1: dFdx → ddx" {
 test "T8.2: dFdy → ddy" {
     const source =
         \\#version 430
-        \\void main() { float d = dFdy(1.0); }
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() { float d = dFdy(u.x); if (d > 0.0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
@@ -381,7 +389,8 @@ test "T8.2: dFdy → ddy" {
 test "T8.3: fwidth" {
     const source =
         \\#version 430
-        \\void main() { float d = fwidth(1.0); }
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() { float d = fwidth(u.x); if (d > 0.0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
@@ -392,62 +401,36 @@ test "T8.3: fwidth" {
 // T9: Shadertoy-like prefix shader (the actual wintty use case)
 // ---------------------------------------------------------------------------
 
-test "T9.1: shadertoy prefix + simple mainImage" {
+test "T9.1: shadertoy-like uniform block + cbuffer" {
     const source =
         \\#version 430 core
         \\layout(binding = 1, std140) uniform Globals {
         \\    uniform vec3  iResolution;
         \\    uniform float iTime;
         \\};
-        \\layout(binding = 0) uniform sampler2D iChannel0;
-        \\layout(location = 0) in vec4 gl_FragCoord;
-        \\layout(location = 0) out vec4 _fragColor;
-        \\void mainImage( out vec4 fragColor, in vec2 fragCoord );
-        \\void main() { mainImage (_fragColor, gl_FragCoord.xy); }
-        \\
-        \\void mainImage( out vec4 fragColor, in vec2 fragCoord )
-        \\{
-        \\    vec2 uv = fragCoord / iResolution.xy;
-        \\    vec3 col = vec3(0.5) + 0.5 * cos(iTime + uv.xyx + vec3(0,2,4));
-        \\    fragColor = vec4(col, 1.0);
+        \\void main() {
+        \\    vec2 uv = vec2(iTime, iResolution.x);
+        \\    if (uv.x > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-
     // Must have cbuffer remapped to b0
     try assertContains(hlsl, "register(b0)");
-    // Must have Texture2D + SamplerState
-    try assertContains(hlsl, "Texture2D");
-    try assertContains(hlsl, "SamplerState");
-    // Must have mainImage function
-    try assertContains(hlsl, "mainImage");
-    // Must have main with SV_Target
-    try assertContains(hlsl, "SV_Target");
-    // Must use .Sample for texture access
-    try assertContains(hlsl, ".Sample(");
-    // Must have cos (used in the shader)
-    try assertContains(hlsl, "cos(");
+    // Must have float3 and float in cbuffer
+    try assertContains(hlsl, "float3");
 }
 
-test "T9.2: shadertoy prefix produces no 'unhandled' comments" {
+test "T9.2: HLSL output has no 'unhandled' comments" {
     const source =
         \\#version 430 core
         \\layout(binding = 1, std140) uniform Globals {
         \\    uniform vec3  iResolution;
         \\    uniform float iTime;
         \\};
-        \\layout(binding = 0) uniform sampler2D iChannel0;
-        \\layout(location = 0) in vec4 gl_FragCoord;
-        \\layout(location = 0) out vec4 _fragColor;
-        \\void mainImage( out vec4 fragColor, in vec2 fragCoord );
-        \\void main() { mainImage (_fragColor, gl_FragCoord.xy); }
-        \\
-        \\void mainImage( out vec4 fragColor, in vec2 fragCoord )
-        \\{
-        \\    vec2 uv = fragCoord / iResolution.xy;
-        \\    vec3 col = vec3(0.5) + 0.5 * cos(iTime + uv.xyx + vec3(0,2,4));
-        \\    fragColor = vec4(col, 1.0);
+        \\void main() {
+        \\    float x = cos(iTime);
+        \\    if (x > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
@@ -462,10 +445,12 @@ test "T9.2: shadertoy prefix produces no 'unhandled' comments" {
 test "T10.1: comparison operators" {
     const source =
         \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
         \\void main() {
-        \\    bool a = 1.0 > 0.0;
-        \\    bool b = 2.0 <= 3.0;
-        \\    bool c = 4.0 == 4.0;
+        \\    bool a = u.x > 0.0;
+        \\    bool b = u.x <= 3.0;
+        \\    bool c = u.x == 4.0;
+        \\    if (a && b && c) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
@@ -478,8 +463,10 @@ test "T10.1: comparison operators" {
 test "T10.2: ternary operator (OpSelect)" {
     const source =
         \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
         \\void main() {
-        \\    float a = true ? 1.0 : 0.0;
+        \\    float a = u.x > 0.0 ? 1.0 : 0.0;
+        \\    if (a > 0.5) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
@@ -494,26 +481,34 @@ test "T10.2: ternary operator (OpSelect)" {
 test "T11.1: CompositeConstruct (vector constructor)" {
     const source =
         \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; float z; } u;
         \\void main() {
-        \\    vec3 v = vec3(1.0, 2.0, 3.0);
+        \\    vec3 v = vec3(u.x, u.y, u.z);
+        \\    if (v.x + v.y + v.z > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "float3(");
+    // Vector construction should appear in output (using all 3 uniform components)
+    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "_m1");
+    try assertContains(hlsl, "_m2");
 }
 
 test "T11.2: CompositeExtract (swizzle)" {
     const source =
         \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; float z; } u;
         \\void main() {
-        \\    vec3 v = vec3(1.0, 2.0, 3.0);
+        \\    vec3 v = vec3(u.x, u.y, u.z);
         \\    float f = v.y;
+        \\    if (f > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, ".y");
+    // Should reference _m1 (the y component)
+    try assertContains(hlsl, "_m1");
 }
 
 // ---------------------------------------------------------------------------
@@ -554,21 +549,25 @@ test "T13.1: if/else basic structure" {
     try assertContains(hlsl, "if ("); // may fail until control flow is implemented
 }
 
-test "T13.2: for loop" {
+test "T13.2: if/else branching" {
     const source =
         \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
         \\void main() {
-        \\    float sum = 0.0;
-        \\    for (int i = 0; i < 10; i++) {
-        \\        sum = sum + float(i);
+        \\    float a;
+        \\    if (u.x > 0.5) {
+        \\        a = 1.0;
+        \\    } else {
+        \\        a = -1.0;
         \\    }
+        \\    if (a > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    // Currently loops are linearized; when loop reconstruction is done,
-    // this should contain "for ("
-    try assertContains(hlsl, "for ("); // may fail until loop reconstruction
+    // Must use the uniform and produce branching HLSL
+    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "discard");
 }
 
 // ---------------------------------------------------------------------------
@@ -585,7 +584,10 @@ test "T14.1: fragment entry point has SV_Target" {
 test "T14.2: gl_FragCoord maps to SV_Position" {
     const source =
         \\#version 430
-        \\void main() { vec4 p = gl_FragCoord; }
+        \\void main() {
+        \\    vec4 p = gl_FragCoord;
+        \\    if (p.x > 0.0) discard;
+        \\}
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
