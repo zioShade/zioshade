@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 /// foldExtractConstructToShuffle: Replace patterns like:
 ///   %a = OpCompositeExtract %float %src 0
 ///   %b = OpCompositeExtract %float %src 1

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // SPIR-V ID compaction pass.
 // Remaps IDs to eliminate gaps in the ID space, reducing the Bound header field.
 // Generated from SPIR-V 1.5 grammar with manual corrections for image operands.
