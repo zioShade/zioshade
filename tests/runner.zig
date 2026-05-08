@@ -72,6 +72,9 @@ fn testShader(alloc: std.mem.Allocator, path: []const u8, save_spv: ?[]const u8)
     const source = file.readToEndAllocOptions(alloc, 10 * 1024 * 1024, null, .of(u8), 0) catch return .skip;
     defer alloc.free(source);
 
+    // Skip empty files
+    if (source.len == 0) return .skip;
+
     // Skip files that are error-validation tests (contain "// ERROR" markers)
     if (std.mem.indexOf(u8, source, "// ERROR") != null) return .skip;
 
