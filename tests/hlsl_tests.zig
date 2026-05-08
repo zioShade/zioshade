@@ -1932,3 +1932,18 @@ test "T30.6: fwidth derivative" {
     try assertContains(hlsl, "discard");
 }
 
+test "T30.7: SSBO read" {
+    const source =
+        \\#version 430
+        \\layout(std430, binding = 0) buffer Data { vec4 values[]; };
+        \\layout(binding = 1, std140) uniform U { int idx; } u;
+        \\void main() {
+        \\    vec4 v = values[u.idx];
+        \\    if (v.r > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
