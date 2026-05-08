@@ -3646,11 +3646,24 @@ const Codegen = struct {
                         try self.emitWord(base_id_val);
                         try self.emitWord(index_id);
                         // Now load the PhysicalStorageBuffer pointer
+                        // If the AccessChain base was PhysSB, the result pointer is also PhysSB
+                        // and the load needs Aligned operand
+                        const need_aligned = (self.ptr_storage_class.get(result_id) != null and
+                            self.ptr_storage_class.get(result_id).? == .physical_storage_buffer);
                         const loaded_id = self.allocId();
-                        try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Load)));
-                        try self.emitWord(phys_ptr_id);
-                        try self.emitWord(loaded_id);
-                        try self.emitWord(result_id);
+                        if (need_aligned) {
+                            try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.Load)));
+                            try self.emitWord(phys_ptr_id);
+                            try self.emitWord(loaded_id);
+                            try self.emitWord(result_id);
+                            try self.emitWord(2); // Aligned memory operand bit
+                            try self.emitWord(16); // alignment
+                        } else {
+                            try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Load)));
+                            try self.emitWord(phys_ptr_id);
+                            try self.emitWord(loaded_id);
+                            try self.emitWord(result_id);
+                        }
                         // Alias the result_id to the loaded pointer for subsequent access chains
                         try self.constant_alias.put(self.alloc, result_id, loaded_id);
                         // Track the loaded pointer as PhysicalStorageBuffer
