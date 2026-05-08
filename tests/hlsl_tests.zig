@@ -725,3 +725,83 @@ test "T15.8: bool to float conversion in condition" {
     try assertContains(hlsl, "discard");
 }
 
+// ---------------------------------------------------------------------------
+// T16: More HLSL backend coverage — vertex/compute/complex patterns
+// ---------------------------------------------------------------------------
+
+test "T16.1: vertex shader with uniform and discard" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    if (u.x > 0.0) return;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "cbuffer");
+}
+
+test "T16.2: compute shader with uniform" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(local_size_x = 64) in;
+        \\void main() {
+        \\    if (u.x > 0.0) return;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "cbuffer");
+}
+
+test "T16.3: nested if/else" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
+        \\void main() {
+        \\    if (u.x > 0.0) {
+        \\        if (u.y > 0.0) {
+        \\            discard;
+        \\        }
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "_m1");
+}
+
+test "T16.4: multiple uniform members" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float a; float b; float c; float d; } u;
+        \\void main() {
+        \\    float sum = u.a + u.b + u.c + u.d;
+        \\    if (sum > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "cbuffer");
+}
+
+test "T16.5: variable reassignment" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
+        \\void main() {
+        \\    float a = u.x;
+        \\    a = a + u.y;
+        \\    if (a > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "_m1");
+}
+
