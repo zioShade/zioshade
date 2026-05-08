@@ -4144,13 +4144,13 @@ const Analyzer = struct {
                         // Determine min/max instruction based on argument type
                         const min_inst: u32 = switch (result_ty) {
                             .int, .ivec2, .ivec3, .ivec4 => 39, // SMin
-                            .uint, .uvec2, .uvec3, .uvec4 => 41, // UMin
+                            .uint, .uvec2, .uvec3, .uvec4 => 38, // UMin
                             else => 37, // FMin
                         };
                         const max_inst: u32 = switch (result_ty) {
-                            .int, .ivec2, .ivec3, .ivec4 => 40, // SMax
-                            .uint, .uvec2, .uvec3, .uvec4 => 42, // UMax
-                            else => 38, // FMax
+                            .int, .ivec2, .ivec3, .ivec4 => 42, // SMax
+                            .uint, .uvec2, .uvec3, .uvec4 => 41, // UMax
+                            else => 40, // FMax
                         };
                         const inner_inst: u32 = if (std.mem.eql(u8, node.data.name, "max3")) max_inst else min_inst;
                         if (arg_tids.items.len >= 3) {
@@ -4326,19 +4326,19 @@ const Analyzer = struct {
                         if (std.mem.eql(u8, node.data.name, "min")) {
                             glsl_id = switch (result_ty) {
                                 .int, .ivec2, .ivec3, .ivec4 => 39, // SMin
-                                .uint, .uvec2, .uvec3, .uvec4 => 41, // UMin
+                                .uint, .uvec2, .uvec3, .uvec4 => 38, // UMin
                                 else => 37, // FMin
                             };
                         } else if (std.mem.eql(u8, node.data.name, "max")) {
                             glsl_id = switch (result_ty) {
-                                .int, .ivec2, .ivec3, .ivec4 => 40, // SMax
-                                .uint, .uvec2, .uvec3, .uvec4 => 42, // UMax
-                                else => 38, // FMax
+                                .int, .ivec2, .ivec3, .ivec4 => 42, // SMax
+                                .uint, .uvec2, .uvec3, .uvec4 => 41, // UMax
+                                else => 40, // FMax
                             };
                         } else if (std.mem.eql(u8, node.data.name, "clamp")) {
                             glsl_id = switch (result_ty) {
-                                .int, .ivec2, .ivec3, .ivec4 => 44, // SClamp
-                                .uint, .uvec2, .uvec3, .uvec4 => 45, // UClamp
+                                .int, .ivec2, .ivec3, .ivec4 => 45, // SClamp
+                                .uint, .uvec2, .uvec3, .uvec4 => 44, // UClamp
                                 else => 43, // FClamp
                             };
                         } else if (std.mem.eql(u8, node.data.name, "abs")) {
@@ -5901,7 +5901,7 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "mod")) return 29;        // unused, mod has special handler
         if (std.mem.eql(u8, name, "modf")) return 36;       // ModfStruct
         if (std.mem.eql(u8, name, "min")) return 37;        // FMin
-        if (std.mem.eql(u8, name, "max")) return 38;        // FMax
+        if (std.mem.eql(u8, name, "max")) return 40;        // FMax
         if (std.mem.eql(u8, name, "clamp")) return 43;      // FClamp
         if (std.mem.eql(u8, name, "mix")) return 46;        // FMix
         if (std.mem.eql(u8, name, "step")) return 48;       // Step
@@ -5921,13 +5921,13 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "unpackSnorm4x8")) return 63;
         if (std.mem.eql(u8, name, "unpackUnorm4x8")) return 64;
         // Geometric (from SPIR-V spec)
-        if (std.mem.eql(u8, name, "length")) return 64;     // Length
-        if (std.mem.eql(u8, name, "distance")) return 65;   // Distance
-        if (std.mem.eql(u8, name, "cross")) return 66;      // Cross
-        if (std.mem.eql(u8, name, "normalize")) return 67;  // Normalize
-        if (std.mem.eql(u8, name, "faceforward")) return 68; // FaceForward
-        if (std.mem.eql(u8, name, "reflect")) return 69;    // Reflect
-        if (std.mem.eql(u8, name, "refract")) return 70;    // Refract
+        if (std.mem.eql(u8, name, "length")) return 66;     // Length
+        if (std.mem.eql(u8, name, "distance")) return 67;   // Distance
+        if (std.mem.eql(u8, name, "cross")) return 68;      // Cross
+        if (std.mem.eql(u8, name, "normalize")) return 69;  // Normalize
+        if (std.mem.eql(u8, name, "faceforward")) return 70; // FaceForward
+        if (std.mem.eql(u8, name, "reflect")) return 71;    // Reflect
+        if (std.mem.eql(u8, name, "refract")) return 72;    // Refract
         // NOT GLSL.std.450 — handled as core SPIR-V ops or specially
         if (std.mem.eql(u8, name, "transpose") or std.mem.eql(u8, name, "outerProduct"))
             return null;
