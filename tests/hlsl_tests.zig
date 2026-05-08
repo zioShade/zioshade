@@ -1633,3 +1633,88 @@ test "T26.5: nested function calls" {
     try assertContains(hlsl, "discard");
 }
 
+// ---------------------------------------------------------------------------
+// T27: Array types and advanced patterns (parser leak fix enables these)
+// ---------------------------------------------------------------------------
+
+test "T27.1: uniform array access" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float values[4]; int idx; } u;
+        \\void main() {
+        \\    float v = u.values[u.idx];
+        \\    if (v > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T27.2: local array variable" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float arr[4];
+        \\    arr[0] = u.x;
+        \\    arr[1] = u.x * 2.0;
+        \\    if (arr[0] + arr[1] > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T27.3: do-while loop" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float v = u.x;
+        \\    do {
+        \\        v *= 0.5;
+        \\    } while (v > 1.0);
+        \\    if (v > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T27.4: continue in loop" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int n; float x; } u;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < u.n; i++) {
+        \\        if (i == 2) continue;
+        \\        sum += u.x;
+        \\    }
+        \\    if (sum > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T27.5: multiple function definitions" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
+        \\float add(float a, float b) { return a + b; }
+        \\float mul(float a, float b) { return a * b; }
+        \\void main() {
+        \\    float r = add(u.x, mul(u.y, 2.0));
+        \\    if (r > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
