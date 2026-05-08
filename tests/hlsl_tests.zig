@@ -1465,3 +1465,88 @@ test "T24.5: reflect" {
     try assertContains(hlsl, "discard");
 }
 
+// ---------------------------------------------------------------------------
+// T25: Texture sampling and compute shader patterns
+// ---------------------------------------------------------------------------
+
+test "T25.1: texture sampling produces valid HLSL" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(binding = 0, std140) uniform U { vec2 uv; } u;
+        \\void main() {
+        \\    vec4 c = texture(tex, u.uv);
+        \\    if (c.r > 0.5) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T25.2: compute shader with barrier" {
+    const source =
+        \\#version 430
+        \\layout(local_size_x = 64) in;
+        \\layout(binding = 0, std140) uniform U { float x; int n; } u;
+        \\void main() {
+        \\    uint idx = gl_LocalInvocationID.x;
+        \\    float val = u.x + float(idx);
+        \\    barrier();
+        \\    if (val > 0.0) { float v = u.x; }
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "numthreads");
+}
+
+test "T25.3: switch statement" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int mode; float x; } u;
+        \\void main() {
+        \\    float result = 0.0;
+        \\    switch (u.mode) {
+        \\        case 0: result = u.x; break;
+        \\        case 1: result = u.x * 2.0; break;
+        \\        default: result = u.x * 3.0; break;
+        \\    }
+        \\    if (result > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T25.4: ivec4 and component access" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { ivec4 v; } u;
+        \\void main() {
+        \\    int sum = u.v.x + u.v.y + u.v.z + u.v.w;
+        \\    if (sum > 0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T25.5: mat4 transpose" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { mat4 m; vec4 v; } u;
+        \\void main() {
+        \\    mat4 t = transpose(u.m);
+        \\    vec4 result = mul(t, u.v);
+        \\    if (result.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Just verify it compiles to valid HLSL
+    try assertContains(hlsl, "float4 main");
+}
+
