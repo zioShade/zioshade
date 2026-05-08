@@ -625,26 +625,52 @@ fn emitFunction(
     for (param_ids.items, 0..) |pid, i| {
         if (i > 0) try w.writeAll(", ");
         const p_inst = getDef(module, pid).?;
-        const p_type = try hlslType(module, p_inst.words[1], names, alloc);
         const p_name = names.get(pid) orelse "p";
+
+        // Check if parameter is a pointer type (out/inout param)
+        const param_type_inst = getDef(module, p_inst.words[1]);
+        var is_out_param = false;
+        var inner_type_id = p_inst.words[1];
+        if (param_type_inst) |pti| {
+            if (pti.op == .TypePointer and pti.words.len > 3) {
+                is_out_param = true;
+                inner_type_id = pti.words[3]; // pointee type
+            }
+        }
+        const p_type = try hlslType(module, inner_type_id, names, alloc);
 
         const builtin = getDecorationValue(decorations, pid, .built_in);
         const loc = getDecorationValue(decorations, pid, .location);
 
         if (builtin) |b| {
             const semantic = builtInToSemantic(b);
+            if (is_out_param) try w.writeAll("out ");
             try w.print("{s} {s} : {s}", .{ p_type, p_name, semantic });
         } else if (loc) |l| {
-            if (l == 0 and i == 0)
-                try w.print("{s} {s} : SV_Position", .{ p_type, p_name })
-            else
+            if (l == 0 and i == 0) {
+                if (is_out_param) try w.writeAll("out ");
+                try w.print("{s} {s} : SV_Position", .{ p_type, p_name });
+            } else {
+                if (is_out_param) try w.writeAll("out ");
                 try w.print("{s} {s} : TEXCOORD{d}", .{ p_type, p_name, l });
+            }
         } else {
+            if (is_out_param) try w.writeAll("out ");
             try w.print("{s} {s}", .{ p_type, p_name });
         }
     }
 
     if (is_fragment) try w.writeAll(") : SV_Target\n{\n") else try w.writeAll(")\n{\n");
+
+    // Declare output variable as local in fragment entry
+    if (is_fragment and output_var_id != null) {
+        const out_var_inst = getDef(module, output_var_id.?);
+        if (out_var_inst) |ovi| {
+            const out_type = try hlslType(module, ovi.words[1], names, alloc);
+            const out_name = names.get(output_var_id.?) orelse "_fragColor";
+            try w.print("    {s} {s};\n", .{ out_type, out_name });
+        }
+    }
 
     // Emit body
     try emitBody(module, names, decorations, func_idx, w, alloc, is_fragment, output_var_id);
@@ -683,14 +709,150 @@ fn emitBody(
     is_fragment: bool,
     output_var_id: ?u32,
 ) !void {
+    // Build label → instruction index map
+    var label_map = std.AutoHashMap(u32, usize).init(alloc);
+    defer label_map.deinit();
     var idx = func_idx + 1;
     while (idx < module.instructions.len) : (idx += 1) {
         const inst = module.instructions[idx];
         if (inst.op == .FunctionEnd) break;
-        if (inst.op == .FunctionParameter or inst.op == .Label) continue;
+        if (inst.op == .Label and inst.words.len > 1) {
+            label_map.put(inst.words[1], idx) catch {};
+        }
+    }
+
+    // Build BranchConditional index → merge label map
+    // For each SelectionMerge, record its merge label. Then find the next BranchConditional.
+    var bc_merge_map = std.AutoHashMap(usize, u32).init(alloc);
+    defer bc_merge_map.deinit();
+    idx = func_idx + 1;
+    while (idx < module.instructions.len) : (idx += 1) {
+        const inst = module.instructions[idx];
+        if (inst.op == .FunctionEnd) break;
+        if (inst.op == .SelectionMerge and inst.words.len > 1) {
+            const merge_label = inst.words[1];
+            // Find the BranchConditional that follows (in the same basic block)
+            var j = idx + 1;
+            while (j < module.instructions.len) : (j += 1) {
+                const next = module.instructions[j];
+                if (next.op == .BranchConditional) {
+                    bc_merge_map.put(j, merge_label) catch {};
+                    break;
+                }
+                // Stop at any other instruction that indicates end of basic block
+                if (next.op == .Branch or next.op == .ReturnValue or next.op == .Return or next.op == .Kill) break;
+                if (next.op != .Label and next.op != .SelectionMerge and next.op != .LoopMerge) break;
+            }
+        }
+    }
+
+    // Structured emission
+    idx = func_idx + 1;
+    while (idx < module.instructions.len) : (idx += 1) {
+        const inst = module.instructions[idx];
+        if (inst.op == .FunctionEnd) break;
+        if (inst.op == .FunctionParameter or inst.op == .Label or
+            inst.op == .SelectionMerge or inst.op == .LoopMerge or
+            inst.op == .Branch) continue;
+
+        if (inst.op == .BranchConditional) {
+            if (inst.words.len < 4) continue;
+            const cond_id = inst.words[1];
+            const true_label = inst.words[2];
+            const false_label = if (inst.words.len > 3) inst.words[3] else null;
+            const merge_label = bc_merge_map.get(idx);
+
+            const cond_name = names.get(cond_id) orelse "c";
+
+            if (merge_label) |ml| {
+                const has_else = false_label != null and false_label.? != ml;
+                try w.print("    if ({s}) {{\n", .{cond_name});
+                // Emit true branch
+                idx = try emitBlock(module, names, decorations, true_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                if (has_else) {
+                    try w.writeAll("    } else {\n");
+                    idx = try emitBlock(module, names, decorations, false_label.?, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                }
+                try w.writeAll("    }\n");
+                // Advance to merge label
+                if (label_map.get(ml)) |merge_idx| {
+                    idx = merge_idx; // loop will increment
+                }
+            } else {
+                // No merge info — just emit the condition
+                try w.print("    if ({s}) {{ /* TODO: no merge info */ }}\n", .{cond_name});
+            }
+            continue;
+        }
 
         try emitInstruction(module, names, decorations, inst, w, alloc, is_fragment, output_var_id);
     }
+}
+
+/// Emit instructions from a block starting at `label` until we reach a Branch to `merge_label`.
+/// Handles nested if/else by recursion.
+/// Returns the index of the last instruction processed.
+fn emitBlock(
+    module: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
+    label: u32,
+    merge_label: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+    bc_merge_map: *const std.AutoHashMap(usize, u32),
+    w: anytype,
+    alloc: std.mem.Allocator,
+    is_fragment: bool,
+    output_var_id: ?u32,
+    indent: []const u8,
+) !usize {
+    const start_idx = label_map.get(label) orelse return error.InvalidSpirv;
+    var i: usize = start_idx + 1; // skip the Label
+    while (i < module.instructions.len) : (i += 1) {
+        const inst = module.instructions[i];
+        if (inst.op == .FunctionEnd) break;
+
+        // Branch to merge = end of this block
+        if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) break;
+
+        // Skip structural instructions
+        if (inst.op == .Label or inst.op == .SelectionMerge or inst.op == .LoopMerge) continue;
+        if (inst.op == .Branch) continue; // branch to somewhere else (e.g., loop back-edge)
+
+        // Handle nested BranchConditional
+        if (inst.op == .BranchConditional) {
+            if (inst.words.len < 4) continue;
+            const cond_id = inst.words[1];
+            const true_lbl = inst.words[2];
+            const false_lbl = if (inst.words.len > 3) inst.words[3] else null;
+            const nested_merge = bc_merge_map.get(i);
+            const cond_name = names.get(cond_id) orelse "c";
+
+            if (nested_merge) |nm| {
+                const has_else = false_lbl != null and false_lbl.? != nm;
+                try w.print("{s}    if ({s}) {{\n", .{ indent, cond_name });
+                i = try emitBlock(module, names, decorations, true_lbl, nm, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, indent);
+                if (has_else) {
+                    try w.print("{s}    }} else {{\n", .{indent});
+                    i = try emitBlock(module, names, decorations, false_lbl.?, nm, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, indent);
+                }
+                try w.print("{s}    }}\n", .{indent});
+                // Skip to nested merge label
+                if (label_map.get(nm)) |nm_idx| {
+                    i = nm_idx; // loop will increment
+                }
+            } else {
+                try w.print("{s}    if ({s}) {{ /* no merge */ }}\n", .{ indent, cond_name });
+            }
+            continue;
+        }
+
+        // Regular instruction — emit it
+        // Note: we can't easily change the indentation of emitInstruction
+        // since it always emits "    " prefix. For now, accept same indentation.
+        try emitInstruction(module, names, decorations, inst, w, alloc, is_fragment, output_var_id);
+    }
+    return i;
 }
 
 fn emitInstruction(
@@ -704,13 +866,18 @@ fn emitInstruction(
     output_var_id: ?u32,
 ) !void {
     _ = decorations;
-    _ = is_fragment;
-    _ = output_var_id;
 
     switch (inst.op) {
         .Variable => {
             if (inst.words.len < 4) return;
             const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            // Output variables in fragment entry: declare as local (will be returned)
+            if (sc == .Output and is_fragment) {
+                const result_id = inst.words[2];
+                const type_name = try hlslType(module, inst.words[1], names, alloc);
+                try w.print("    {s} {s};\n", .{ type_name, names.get(result_id) orelse "var" });
+                return;
+            }
             if (sc == .Input or sc == .Output or sc == .Uniform or sc == .UniformConstant) return;
             const result_id = inst.words[2];
             const type_name = try hlslType(module, inst.words[1], names, alloc);
@@ -726,6 +893,7 @@ fn emitInstruction(
             // Check if loading from a texture/sampler — in HLSL these are used directly
             const ptr_inst = getDef(module, ptr_id);
             var is_texture_or_sampler = false;
+            var is_output_load = false;
             if (ptr_inst) |pi| {
                 if (pi.op == .Variable and pi.words.len >= 4) {
                     const sc: spirv.StorageClass = @enumFromInt(pi.words[3]);
@@ -743,10 +911,18 @@ fn emitInstruction(
                             }
                         }
                     }
+                    // Skip loads from Output variable in fragment entry — they pass by reference
+                    if (sc == .Output and is_fragment) {
+                        is_output_load = true;
+                    }
                 }
             }
 
-            if (is_texture_or_sampler) {
+            if (is_output_load) {
+                // Alias the load result to the output variable name (for passing to functions)
+                const alias = try alloc.dupe(u8, ptr_name);
+                if (try names.fetchPut(inst.words[2], alias)) |old| alloc.free(old.value);
+            } else if (is_texture_or_sampler) {
                 // Check if it's a sampled image (combined texture+sampler)
                 const var_type_id = ptr_inst.?.words[1];
                 const ptr_type_inst2 = getDef(module, var_type_id);
@@ -961,9 +1137,19 @@ fn emitInstruction(
 
         // Control flow
         .Kill => try w.writeAll("    discard;\n"),
-        .Return => try w.writeAll("    return;\n"),
+        .Return => {
+            // Skip bare return in fragment entry — we emit the output return at function end
+            if (is_fragment and output_var_id != null) {} else {
+                try w.writeAll("    return;\n");
+            }
+        },
         .ReturnValue => {
-            try w.print("    return {s};\n", .{names.get(inst.words[1]) orelse "0"});
+            const val_id = inst.words[1];
+            // If returning the output variable in a fragment entry, skip it
+            // (we handle the return at function end)
+            if (is_fragment and output_var_id != null and val_id == output_var_id.?) {} else {
+                try w.print("    return {s};\n", .{names.get(val_id) orelse "0"});
+            }
         },
         // Control flow — reconstruct structured flow from SPIR-V branch-based IR
         .SelectionMerge => {}, // consumed by BranchConditional handler
@@ -976,35 +1162,28 @@ fn emitInstruction(
         },
 
         .BranchConditional => {
-            if (inst.words.len < 4) return;
-            const cond_id = inst.words[1];
-            const true_label = inst.words[2];
-            const false_label = inst.words[3];
-
-            // Find the merge block from a preceding SelectionMerge
-            // Scan backwards from this instruction to find SelectionMerge in same block
-            const cond_name = names.get(cond_id) orelse "c";
-
-            // Simple approach: emit if/else blocks
-            // The true block starts at the next instruction (after the label)
-            // The false block starts at false_label
-            // The merge point is where both paths rejoin
-            try w.print("    if ({s}) {{\n", .{cond_name});
-            // Emit true branch instructions until we hit a Branch/BranchConditional
-            _ = true_label;
-            _ = false_label;
-            // For now, we rely on the linear scan; the true branch instructions
-            // will be emitted naturally until the Branch to the merge point
-            // The false branch will be emitted after the Branch
-            // TODO: Full structured control flow reconstruction
+            // Handled by emitBody's structured control flow reconstruction
         },
 
         .FunctionCall => {
-            const rt = try hlslType(module, inst.words[1], names, alloc);
             const func_id_call = inst.words[3];
             const func_name_call = names.get(func_id_call) orelse "func";
             const result_name = names.get(inst.words[2]) orelse "v";
-            try w.print("    {s} {s} = {s}(", .{ rt, result_name, func_name_call });
+
+            // Check if return type is void
+            const return_type_id = inst.words[1];
+            const is_void_call = blk: {
+                const rt_inst = getDef(module, return_type_id);
+                break :blk rt_inst != null and rt_inst.?.op == .TypeVoid;
+            };
+
+            if (is_void_call) {
+                // Void function call — no assignment
+                try w.print("    {s}(", .{func_name_call});
+            } else {
+                const rt = try hlslType(module, inst.words[1], names, alloc);
+                try w.print("    {s} {s} = {s}(", .{ rt, result_name, func_name_call });
+            }
             for (inst.words[4..], 0..) |arg_id, i| {
                 if (i > 0) try w.writeAll(", ");
                 try w.writeAll(names.get(arg_id) orelse "0");
@@ -1071,13 +1250,45 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     defer buf.deinit(alloc);
     try buf.writer(alloc).writeAll(base_name);
 
+    // Walk the type chain starting from the base pointer's pointee type
+    var current_type_id: ?u32 = resolvePointeeType(module, base_id);
+
     for (indices) |index_id| {
         const idx_inst = getDef(module, index_id);
         if (idx_inst) |def| {
             if (def.op == .Constant and def.words.len > 3) {
                 const val = def.words[3];
-                // Check if base is a vector type (use swizzle) or struct (use _mN)
-                try buf.writer(alloc).print("._m{d}", .{val});
+                // Check if current type is a vector (use swizzle) or struct (use _mN)
+                const is_vector = if (current_type_id) |tid| blk: {
+                    const ti = getDef(module, tid);
+                    break :blk ti != null and ti.?.op == .TypeVector;
+                } else false;
+
+                if (is_vector) {
+                    try buf.writer(alloc).writeAll(switch (val) {
+                        0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
+                    });
+                } else {
+                    try buf.writer(alloc).print("._m{d}", .{val});
+                }
+
+                // Advance type: struct member type, or vector element type
+                if (current_type_id) |tid| {
+                    const ti = getDef(module, tid);
+                    if (ti) |tinst| {
+                        if (tinst.op == .TypeVector) {
+                            current_type_id = tinst.words[2]; // element type
+                        } else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) {
+                            current_type_id = tinst.words[val + 2]; // member type
+                        } else if (tinst.op == .TypeArray) {
+                            current_type_id = tinst.words[2]; // element type
+                        } else if (tinst.op == .TypeMatrix) {
+                            current_type_id = tinst.words[2]; // column type
+                        } else {
+                            current_type_id = null;
+                        }
+                    }
+                }
             } else {
                 try buf.writer(alloc).print("[{s}]", .{names.get(index_id) orelse "i"});
             }
@@ -1087,6 +1298,55 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     }
 
     return buf.toOwnedSlice(alloc);
+}
+
+/// Resolve the pointee type of a pointer value (variable or AccessChain result).
+/// Follows pointer types to get the inner type ID.
+fn resolvePointeeType(module: *const ParsedModule, id: u32) ?u32 {
+    const inst = getDef(module, id) orelse return null;
+    switch (inst.op) {
+        .Variable => {
+            // Variable type is a pointer; get its pointee
+            const ptr_type_inst = getDef(module, inst.words[1]) orelse return null;
+            if (ptr_type_inst.op == .TypePointer and ptr_type_inst.words.len > 3) {
+                return ptr_type_inst.words[3];
+            }
+            return null;
+        },
+        .AccessChain => {
+            // Walk the base + indices to find the result type
+            const base_type = resolvePointeeType(module, inst.words[3]);
+            var cur: ?u32 = base_type;
+            for (inst.words[4..]) |idx_id| {
+                const idx_def = getDef(module, idx_id);
+                if (cur) |tid| {
+                    const ti = getDef(module, tid);
+                    if (ti) |tinst| {
+                        if (tinst.op == .TypeVector) {
+                            cur = tinst.words[2];
+                        } else if (tinst.op == .TypeStruct) {
+                            if (idx_def) |idx_def_res| {
+                                if (idx_def_res.op == .Constant and idx_def_res.words.len > 3) {
+                                    const val = idx_def_res.words[3];
+                                    if (val + 2 < tinst.words.len) {
+                                        cur = tinst.words[val + 2];
+                                    } else cur = null;
+                                }
+                            }
+                        } else if (tinst.op == .TypeArray) {
+                            cur = tinst.words[2];
+                        } else if (tinst.op == .TypeMatrix) {
+                            cur = tinst.words[2];
+                        } else {
+                            cur = null;
+                        }
+                    }
+                }
+            }
+            return cur;
+        },
+        else => return null,
+    }
 }
 
 fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
