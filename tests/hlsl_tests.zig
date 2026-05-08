@@ -1795,3 +1795,49 @@ test "T28.5: clamp and saturate pattern" {
     try assertContains(hlsl, "discard");
 }
 
+// ---------------------------------------------------------------------------
+// T29: Edge cases and remaining patterns
+// ---------------------------------------------------------------------------
+
+test "T29.1: discard-only main" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    if (u.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T29.2: nested struct uniform" {
+    const source =
+        \\#version 430
+        \\struct Light { vec3 pos; float intensity; };
+        \\layout(binding = 0, std140) uniform U { Light light; } u;
+        \\void main() {
+        \\    float d = length(u.light.pos);
+        \\    if (d * u.light.intensity > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T29.3: uniform array with dynamic index" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 colors[4]; int idx; } u;
+        \\void main() {
+        \\    vec4 c = u.colors[u.idx];
+        \\    if (c.r > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
