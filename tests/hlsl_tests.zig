@@ -1550,3 +1550,82 @@ test "T25.5: mat4 transpose" {
     try assertContains(hlsl, "float4 main");
 }
 
+// ---------------------------------------------------------------------------
+// T26: Additional type and operator coverage
+// ---------------------------------------------------------------------------
+
+test "T26.1: uint type and bitwise operations" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { uint a; uint b; } u;
+        \\void main() {
+        \\    uint c = u.a & u.b;
+        \\    uint d = u.a | u.b;
+        \\    uint e = u.a ^ u.b;
+        \\    if (c + d + e > 0u) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T26.2: boolean logic with uniforms" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
+        \\void main() {
+        \\    bool a = u.x > 0.0;
+        \\    bool b = u.y > 0.0;
+        \\    bool c = a && b;
+        \\    if (c) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T26.3: negate operator" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float v = -u.x;
+        \\    if (v > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T26.4: vec4 negate and multiply" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 color; float scale; } u;
+        \\void main() {
+        \\    vec4 result = -u.color * u.scale;
+        \\    if (result.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T26.5: nested function calls" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\float doubleIt(float v) { return v * 2.0; }
+        \\void main() {
+        \\    float result = doubleIt(abs(u.x));
+        \\    if (result > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
