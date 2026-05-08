@@ -1297,3 +1297,84 @@ test "T23.5: abs and max/min" {
     try assertContains(hlsl, "discard");
 }
 
+test "T23.6: pow and exp" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
+        \\void main() {
+        \\    float p = pow(u.x, u.y);
+        \\    float e = exp(u.x);
+        \\    if (p + e > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "pow");
+    try assertContains(hlsl, "exp");
+    try assertContains(hlsl, "discard");
+}
+
+test "T23.7: sin and cos" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float angle; } u;
+        \\void main() {
+        \\    float s = sin(u.angle);
+        \\    float c = cos(u.angle);
+        \\    if (s * s + c * c > 1.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "sin");
+    try assertContains(hlsl, "cos");
+    try assertContains(hlsl, "discard");
+}
+
+test "T23.8: log and sqrt" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float l = log(u.x);
+        \\    float s = sqrt(u.x);
+        \\    if (l + s > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "log");
+    try assertContains(hlsl, "sqrt");
+    try assertContains(hlsl, "discard");
+}
+
+test "T23.9: ternary operator" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
+        \\void main() {
+        \\    float result = (u.x > 0.0) ? u.x : u.y;
+        \\    if (result > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T23.10: vec4 swizzle and assignment" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 color; } u;
+        \\void main() {
+        \\    float r = u.color.r;
+        \\    float g = u.color.g;
+        \\    float sum = r + g;
+        \\    if (sum > 1.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
