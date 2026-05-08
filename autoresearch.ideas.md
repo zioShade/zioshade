@@ -1,8 +1,18 @@
 # Autoresearch Ideas — glslpp Feature Coverage
 
-## STATUS: 539/566 total pass (209/302 spirv-cross + 330/356 glslang)
-## 26 val_fail, 0 compile_fail, 1 crash (spv.floatFetch.frag)
-## Session: 511→539 (+28 shaders, +5.5%)
+## STATUS: 543/566 total pass (209/302 spirv-cross + 334/356 glslang)
+## 22 val_fail, 0 compile_fail, 1 crash (spv.floatFetch.frag)
+## Session: 511→543 (+32 shaders, +6.3%)
+
+## Dead Ends (investigated but not fixable)
+- PhysSB Aligned: addPhysSBAligned pass crashes on bufferhandle24/25. Tracking loaded PhysSB pointers through pipeline fails because compactIds remaps all IDs.
+- Extension preprocessor: Defining macros for unimplemented extensions causes regressions. Only GL_EXT_null_initializer is safe.
+
+## Remaining Fixable (needs careful work)
+- spv.bufferhandle5/24/25: compactIds ID collision + PhysSB Aligned
+- 460.vert/spv.460.comp/spv.debuginfo.glsl.comp: Forward references from RSE pipeline
+- bool_in_interface bvec (3): Double-free in codegen
+- hoisted-temporary: Double-free in codegen
 
 ## Most Promising Next Steps
 
