@@ -89,6 +89,8 @@ pub fn freeTree(alloc: std.mem.Allocator, root: *ast.Root) void {
 }
 
 fn freeNode(alloc: std.mem.Allocator, node: *const ast.Node) void {
+    // Free the node's type (may contain heap-allocated array bases)
+    if (node.data.ty) |t| freeType(alloc, t);
     for (node.data.children) |*child| {
         freeNode(alloc, child);
     }
@@ -99,7 +101,20 @@ fn freeNode(alloc: std.mem.Allocator, node: *const ast.Node) void {
         alloc.free(node.data.params);
     }
     if (node.data.members.len > 0) {
+        for (node.data.members) |*member| {
+            freeType(alloc, member.ty);
+        }
         alloc.free(node.data.members);
+    }
+}
+
+fn freeType(alloc: std.mem.Allocator, ty: ast.Type) void {
+    switch (ty) {
+        .array => |a| {
+            freeType(alloc, a.base.*);
+            alloc.destroy(a.base);
+        },
+        else => {},
     }
 }
 
