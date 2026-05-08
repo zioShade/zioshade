@@ -38,6 +38,9 @@ pub const Module = struct {
                 }
             }
             self.alloc.free(func.body);
+            if (func.param_ids.len > 0) {
+                self.alloc.free(func.param_ids);
+            }
         }
         self.alloc.free(self.functions);
         self.alloc.free(self.globals);
