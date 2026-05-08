@@ -1947,3 +1947,55 @@ test "T30.7: SSBO read" {
     try assertContains(hlsl, "discard");
 }
 
+test "T30.8: imageStore" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, rgba32f) uniform image2D img;
+        \\layout(binding = 1, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    imageStore(img, ivec2(0, 0), vec4(u.x, 0.0, 0.0, 1.0));
+        \\    if (u.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T30.9: nested function with early return" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
+        \\float compute(float a, float b) {
+        \\    if (a > 1.0) return a * 2.0;
+        \\    return a + b;
+        \\}
+        \\void main() {
+        \\    float r = compute(u.x, u.y);
+        \\    if (r > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T30.10: multi-return function" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int mode; float x; float y; } u;
+        \\float select_val(int m, float a, float b) {
+        \\    if (m == 0) return a;
+        \\    if (m == 1) return b;
+        \\    return a + b;
+        \\}
+        \\void main() {
+        \\    float r = select_val(u.mode, u.x, u.y);
+        \\    if (r > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
