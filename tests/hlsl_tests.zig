@@ -1135,3 +1135,85 @@ test "T21.2: fragment shader with gl_FragCoord component access" {
     try assertContains(hlsl, "discard");
 }
 
+// ---------------------------------------------------------------------------
+// T22: Edge cases and regression guards
+// ---------------------------------------------------------------------------
+
+test "T22.1: empty main produces valid HLSL" {
+    const source =
+        \\#version 430
+        \\void main() {}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4 main(");
+    try assertContains(hlsl, "SV_Target");
+}
+
+test "T22.2: multiple uniforms in single block" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U {
+        \\    float time;
+        \\    vec2 resolution;
+        \\    vec4 color;
+        \\} u;
+        \\void main() {
+        \\    if (u.time + u.resolution.x + u.color.r > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "cbuffer");
+    try assertContains(hlsl, "_m0");
+}
+
+test "T22.3: function with multiple returns" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\float getValue(float t) {
+        \\    if (t > 0.0) return 1.0;
+        \\    return -1.0;
+        \\}
+        \\void main() {
+        \\    float v = getValue(u.x);
+        \\    if (v > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T22.4: inner product (dot with intermediate ops)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 a; vec3 b; } u;
+        \\void main() {
+        \\    vec3 diff = u.a - u.b;
+        \\    float d = dot(diff, diff);
+        \\    if (d > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "dot(");
+    try assertContains(hlsl, "discard");
+}
+
+test "T22.5: chained arithmetic with precedence" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; float z; } u;
+        \\void main() {
+        \\    float a = u.x * u.y + u.z * u.x;
+        \\    if (a > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "discard");
+}
+
