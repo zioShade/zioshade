@@ -4144,13 +4144,13 @@ const Analyzer = struct {
                         // Determine min/max instruction based on argument type
                         const min_inst: u32 = switch (result_ty) {
                             .int, .ivec2, .ivec3, .ivec4 => 39, // SMin
-                            .uint, .uvec2, .uvec3, .uvec4 => 38, // UMin
+                            .uint, .uvec2, .uvec3, .uvec4 => 41, // UMin
                             else => 37, // FMin
                         };
                         const max_inst: u32 = switch (result_ty) {
-                            .int, .ivec2, .ivec3, .ivec4 => 42, // SMax
-                            .uint, .uvec2, .uvec3, .uvec4 => 41, // UMax
-                            else => 40, // FMax
+                            .int, .ivec2, .ivec3, .ivec4 => 40, // SMax
+                            .uint, .uvec2, .uvec3, .uvec4 => 42, // UMax
+                            else => 38, // FMax
                         };
                         const inner_inst: u32 = if (std.mem.eql(u8, node.data.name, "max3")) max_inst else min_inst;
                         if (arg_tids.items.len >= 3) {
@@ -4321,7 +4321,37 @@ const Analyzer = struct {
                         self.pure_op_cache.put(self.alloc, bc_key, result_id) catch {};
                         return .{ .ty = bitcast_ty, .id = result_id };
                     } else {
-                        const glsl_id = self.glslExtInstruction(node.data.name) orelse 1;
+                        var glsl_id = self.glslExtInstruction(node.data.name) orelse 1;
+                        // Type-based dispatch for min/max/clamp
+                        if (std.mem.eql(u8, node.data.name, "min")) {
+                            glsl_id = switch (result_ty) {
+                                .int, .ivec2, .ivec3, .ivec4 => 39, // SMin
+                                .uint, .uvec2, .uvec3, .uvec4 => 41, // UMin
+                                else => 37, // FMin
+                            };
+                        } else if (std.mem.eql(u8, node.data.name, "max")) {
+                            glsl_id = switch (result_ty) {
+                                .int, .ivec2, .ivec3, .ivec4 => 40, // SMax
+                                .uint, .uvec2, .uvec3, .uvec4 => 42, // UMax
+                                else => 38, // FMax
+                            };
+                        } else if (std.mem.eql(u8, node.data.name, "clamp")) {
+                            glsl_id = switch (result_ty) {
+                                .int, .ivec2, .ivec3, .ivec4 => 44, // SClamp
+                                .uint, .uvec2, .uvec3, .uvec4 => 45, // UClamp
+                                else => 43, // FClamp
+                            };
+                        } else if (std.mem.eql(u8, node.data.name, "abs")) {
+                            glsl_id = switch (result_ty) {
+                                .int, .ivec2, .ivec3, .ivec4 => 5, // SAbs
+                                else => 4, // FAbs
+                            };
+                        } else if (std.mem.eql(u8, node.data.name, "sign")) {
+                            glsl_id = switch (result_ty) {
+                                .int, .ivec2, .ivec3, .ivec4 => 7, // SSign
+                                else => 6, // FSign
+                            };
+                        }
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
                         operands[0] = .{ .literal_int = glsl_id };
                         for (arg_tids.items, 1..) |tid, i| {
@@ -5842,42 +5872,40 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "abs")) return 4;         // FAbs
         if (std.mem.eql(u8, name, "sign")) return 6;        // FSign
         if (std.mem.eql(u8, name, "floor")) return 8;       // Floor
-        if (std.mem.eql(u8, name, "ceil")) return 10;       // Ceil
-        if (std.mem.eql(u8, name, "fract")) return 12;      // Fract
-        if (std.mem.eql(u8, name, "radians")) return 14;    // Radians
-        if (std.mem.eql(u8, name, "degrees")) return 16;    // Degrees
-        if (std.mem.eql(u8, name, "sin")) return 18;        // Sin
-        if (std.mem.eql(u8, name, "cos")) return 20;        // Cos
-        if (std.mem.eql(u8, name, "tan")) return 22;        // Tan
-        if (std.mem.eql(u8, name, "asin")) return 24;       // Asin
-        if (std.mem.eql(u8, name, "acos")) return 26;       // Acos
-        if (std.mem.eql(u8, name, "atan")) return 28;       // Atan
-        if (std.mem.eql(u8, name, "atan2")) return 30;      // Atan2
-        if (std.mem.eql(u8, name, "sinh")) return 32;       // Sinh
-        if (std.mem.eql(u8, name, "cosh")) return 34;       // Cosh
-        if (std.mem.eql(u8, name, "tanh")) return 36;       // Tanh
-        if (std.mem.eql(u8, name, "asinh")) return 38;      // Asinh
-        if (std.mem.eql(u8, name, "acosh")) return 40;      // Acosh
-        if (std.mem.eql(u8, name, "atanh")) return 42;      // Atanh
-        if (std.mem.eql(u8, name, "pow")) return 48;        // Pow
-        if (std.mem.eql(u8, name, "exp")) return 50;        // Exp
-        if (std.mem.eql(u8, name, "log")) return 52;        // Log
-        if (std.mem.eql(u8, name, "exp2")) return 54;       // Exp2
-        if (std.mem.eql(u8, name, "log2")) return 56;       // Log2
-        if (std.mem.eql(u8, name, "sqrt")) return 58;       // Sqrt
-        if (std.mem.eql(u8, name, "inversesqrt")) return 60; // InverseSqrt
-        if (std.mem.eql(u8, name, "abs")) return 62;        // Abs (integer)
-        if (std.mem.eql(u8, name, "sign")) return 64;       // Sign (integer)
-        if (std.mem.eql(u8, name, "determinant")) return 100; // Determinant
-        if (std.mem.eql(u8, name, "inverse")) return 102;   // MatrixInverse
+        if (std.mem.eql(u8, name, "ceil")) return 9;        // Ceil
+        if (std.mem.eql(u8, name, "fract")) return 10;      // Fract
+        if (std.mem.eql(u8, name, "radians")) return 11;    // Radians
+        if (std.mem.eql(u8, name, "degrees")) return 12;    // Degrees
+        if (std.mem.eql(u8, name, "sin")) return 13;        // Sin
+        if (std.mem.eql(u8, name, "cos")) return 14;        // Cos
+        if (std.mem.eql(u8, name, "tan")) return 15;        // Tan
+        if (std.mem.eql(u8, name, "asin")) return 16;       // Asin
+        if (std.mem.eql(u8, name, "acos")) return 17;       // Acos
+        if (std.mem.eql(u8, name, "atan")) return 18;       // Atan
+        if (std.mem.eql(u8, name, "sinh")) return 19;       // Sinh
+        if (std.mem.eql(u8, name, "cosh")) return 20;       // Cosh
+        if (std.mem.eql(u8, name, "tanh")) return 21;       // Tanh
+        if (std.mem.eql(u8, name, "asinh")) return 22;      // Asinh
+        if (std.mem.eql(u8, name, "acosh")) return 23;      // Acosh
+        if (std.mem.eql(u8, name, "atanh")) return 24;      // Atanh
+        if (std.mem.eql(u8, name, "atan2")) return 25;      // Atan2
+        if (std.mem.eql(u8, name, "pow")) return 26;        // Pow
+        if (std.mem.eql(u8, name, "exp")) return 27;        // Exp
+        if (std.mem.eql(u8, name, "log")) return 28;        // Log
+        if (std.mem.eql(u8, name, "exp2")) return 29;       // Exp2
+        if (std.mem.eql(u8, name, "log2")) return 30;       // Log2
+        if (std.mem.eql(u8, name, "sqrt")) return 31;       // Sqrt
+        if (std.mem.eql(u8, name, "inversesqrt")) return 32; // InverseSqrt
+        if (std.mem.eql(u8, name, "determinant")) return 33; // Determinant
+        if (std.mem.eql(u8, name, "inverse")) return 34;   // MatrixInverse
         if (std.mem.eql(u8, name, "mod")) return 29;        // unused, mod has special handler
         if (std.mem.eql(u8, name, "modf")) return 36;       // ModfStruct
-        if (std.mem.eql(u8, name, "min")) return 72;        // FMin
-        if (std.mem.eql(u8, name, "max")) return 74;        // FMax
-        if (std.mem.eql(u8, name, "clamp")) return 76;      // FClamp
-        if (std.mem.eql(u8, name, "mix")) return 78;        // FMix
-        if (std.mem.eql(u8, name, "step")) return 80;       // Step
-        if (std.mem.eql(u8, name, "smoothstep")) return 82; // SmoothStep
+        if (std.mem.eql(u8, name, "min")) return 37;        // FMin
+        if (std.mem.eql(u8, name, "max")) return 38;        // FMax
+        if (std.mem.eql(u8, name, "clamp")) return 43;      // FClamp
+        if (std.mem.eql(u8, name, "mix")) return 46;        // FMix
+        if (std.mem.eql(u8, name, "step")) return 48;       // Step
+        if (std.mem.eql(u8, name, "smoothstep")) return 49; // SmoothStep
         if (std.mem.eql(u8, name, "fma")) return 50;        // Fma
         if (std.mem.eql(u8, name, "frexp")) return 52;      // FrexpStruct
         if (std.mem.eql(u8, name, "ldexp")) return 53;      // Ldexp
@@ -5893,13 +5921,13 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "unpackSnorm4x8")) return 63;
         if (std.mem.eql(u8, name, "unpackUnorm4x8")) return 64;
         // Geometric (from SPIR-V spec)
-        if (std.mem.eql(u8, name, "length")) return 84;     // Length
-        if (std.mem.eql(u8, name, "distance")) return 86;   // Distance
-        if (std.mem.eql(u8, name, "cross")) return 88;      // Cross
-        if (std.mem.eql(u8, name, "normalize")) return 90;  // Normalize
-        if (std.mem.eql(u8, name, "faceforward")) return 92; // FaceForward
-        if (std.mem.eql(u8, name, "reflect")) return 94;    // Reflect
-        if (std.mem.eql(u8, name, "refract")) return 96;    // Refract
+        if (std.mem.eql(u8, name, "length")) return 64;     // Length
+        if (std.mem.eql(u8, name, "distance")) return 65;   // Distance
+        if (std.mem.eql(u8, name, "cross")) return 66;      // Cross
+        if (std.mem.eql(u8, name, "normalize")) return 67;  // Normalize
+        if (std.mem.eql(u8, name, "faceforward")) return 68; // FaceForward
+        if (std.mem.eql(u8, name, "reflect")) return 69;    // Reflect
+        if (std.mem.eql(u8, name, "refract")) return 70;    // Refract
         // NOT GLSL.std.450 — handled as core SPIR-V ops or specially
         if (std.mem.eql(u8, name, "transpose") or std.mem.eql(u8, name, "outerProduct"))
             return null;
