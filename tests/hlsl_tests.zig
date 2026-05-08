@@ -1918,3 +1918,17 @@ test "T30.5: faceforward and reflect pattern" {
     try assertContains(hlsl, "discard");
 }
 
+test "T30.6: fwidth derivative" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    float fw = fwidth(u.x);
+        \\    if (fw > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+

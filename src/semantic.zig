@@ -568,10 +568,12 @@ const Analyzer = struct {
         }
         // Check local cache first
         if (self.pure_op_cache.get(key)) |existing_id| {
+            self.alloc.free(operands);
             return existing_id;
         }
         // Check global cache (populated from entry/loop-header blocks)
         if (self.global_pure_op_cache.get(key)) |existing_id| {
+            self.alloc.free(operands);
             return existing_id;
         }
         const result_id = self.allocId();
@@ -2383,6 +2385,7 @@ const Analyzer = struct {
                             }
                             const splat_key = self.constCompositeKey(result_ty, splat_operands);
                             if (self.const_composite_cache.get(splat_key)) |existing_id| {
+                                self.alloc.free(splat_operands);
                                 left_id = existing_id;
                                 did_splat = true;
                             } else {
@@ -2405,6 +2408,7 @@ const Analyzer = struct {
                             }
                             const splat_key = self.constCompositeKey(result_ty, splat_operands);
                             if (self.const_composite_cache.get(splat_key)) |existing_id| {
+                                self.alloc.free(splat_operands);
                                 right_id = existing_id;
                                 did_splat = true;
                             } else {
@@ -2782,6 +2786,7 @@ const Analyzer = struct {
                                         }
                                         const splat_key = self.constCompositeKey(swizzled_ty, splat_ops);
                                         if (self.const_composite_cache.get(splat_key)) |existing_id| {
+                                            self.alloc.free(splat_ops);
                                             value_id = existing_id;
                                         } else {
                                             value_id = try self.emitPureOp(.composite_construct, splat_ops, swizzled_ty);
@@ -4454,6 +4459,7 @@ const Analyzer = struct {
                         // Check const_composite_cache for dedup before emitting
                         const cache_key = self.constCompositeKey(result_ty, operands);
                         if (self.const_composite_cache.get(cache_key)) |existing_id| {
+                            self.alloc.free(operands);
                             return .{ .ty = result_ty, .id = existing_id };
                         }
                         try self.instructions.append(self.alloc, .{
@@ -4802,6 +4808,7 @@ const Analyzer = struct {
                             // Check cache for existing composite
                             const key = self.constCompositeKey(result_ty, cc_ops);
                             if (self.const_composite_cache.get(key)) |existing_id| {
+                                self.alloc.free(cc_ops);
                                 return .{ .ty = result_ty, .id = existing_id };
                             }
                             try self.instructions.append(self.alloc, .{
@@ -4830,6 +4837,7 @@ const Analyzer = struct {
                             }
                             const key = self.constCompositeKey(result_ty, cc_ops);
                             if (self.const_composite_cache.get(key)) |existing_id| {
+                                self.alloc.free(cc_ops);
                                 return .{ .ty = result_ty, .id = existing_id };
                             }
                             try self.instructions.append(self.alloc, .{
@@ -5122,6 +5130,7 @@ const Analyzer = struct {
                     // Check cache
                     const key = self.constCompositeKey(result_ty, cc_ops);
                     if (self.const_composite_cache.get(key)) |existing_id| {
+                        self.alloc.free(cc_ops);
                         return .{ .ty = result_ty, .id = existing_id };
                     }
                     try self.instructions.append(self.alloc, .{
@@ -5151,6 +5160,7 @@ const Analyzer = struct {
                         }
                         const key = self.constCompositeKey(result_ty, cc_ops);
                         if (self.const_composite_cache.get(key)) |existing_id| {
+                            self.alloc.free(cc_ops);
                             return .{ .ty = result_ty, .id = existing_id };
                         }
                         try self.instructions.append(self.alloc, .{
@@ -5192,6 +5202,7 @@ const Analyzer = struct {
                     }
                     const key = self.constCompositeKey(result_ty, cc_ops);
                     if (self.const_composite_cache.get(key)) |existing_id| {
+                        self.alloc.free(cc_ops);
                         return .{ .ty = result_ty, .id = existing_id };
                     }
                     try self.instructions.append(self.alloc, .{
@@ -5223,6 +5234,7 @@ const Analyzer = struct {
                 if (all_const) {
                     const key = self.constCompositeKey(result_ty, operands);
                     if (self.const_composite_cache.get(key)) |existing_id| {
+                        self.alloc.free(operands);
                         return .{ .ty = result_ty, .id = existing_id };
                     }
                 }
