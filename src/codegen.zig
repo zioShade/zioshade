@@ -2904,6 +2904,12 @@ const Codegen = struct {
                 .uint => .uint,
                 .float => .float,
                 .bool => .bool,
+                .int8 => .int8,
+                .uint8 => .uint8,
+                .int16 => .int16,
+                .uint16 => .uint16,
+                .float16 => .float16,
+                .double => .double,
                 else => .int,
             };
             const result_type_id = try self.ensureType(ty);
@@ -2911,9 +2917,10 @@ const Codegen = struct {
             try self.emitTypeWord(result_type_id);
             try self.emitTypeWord(sc.result_id);
             try self.emitTypeWord(sc.default_literal);
-            // Track in emitted_constants so array type emission can find the spec constant
-            const cache_key = (@as(u64, result_type_id) << 32) | @as(u64, sc.default_literal);
-            try self.emitted_constants.put(self.alloc, cache_key, sc.result_id);
+            // DO NOT cache spec constants in emitted_constants — they would collide with
+            // regular OpConstant values and cause struct AccessChain to use spec constants
+            // as indices (which is illegal in SPIR-V).
+            // Spec constant references are resolved via constant_alias in codegen.
         }
         // Pre-scan ALL function bodies for constants and emit them.
         // This ensures constants defined in one function are available when
