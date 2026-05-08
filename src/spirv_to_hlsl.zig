@@ -131,7 +131,7 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .UConvert, .SConvert, .FConvert, .Bitcast,
         .SNegate, .FNegate,
         .IAdd, .FAdd, .ISub, .FSub, .IMul, .FMul,
-        .UDiv, .SDiv, .FDiv, .UMod, .SRem, .FRem,
+        .UDiv, .SDiv, .FDiv, .UMod, .SRem, .FRem, .FMod,
         .VectorTimesScalar, .MatrixTimesScalar,
         .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix,
         .Dot, .Transpose, .OuterProduct,
@@ -1243,9 +1243,10 @@ fn emitInstruction(
             // GLSL mod(x,y) = x - y * floor(x/y) — floor-based, NOT truncation
             // HLSL % and fmod() both use truncation, so we must inline the floor formula
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const result_name = names.get(inst.words[2]) orelse "v";
             const lhs = names.get(inst.words[3]) orelse "a";
             const rhs = names.get(inst.words[4]) orelse "b";
-            try w.print("    {s} {s} = {s} - {s} * floor({s} / {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", lhs, rhs, lhs, rhs });
+            try w.print("    {s} {s} = {s} - {s} * floor({s} / {s});\n", .{ rt, result_name, lhs, rhs, lhs, rhs });
         },
         .UMod, .SRem, .FRem => try emitBinOp(module, names, inst, "%", w, alloc),
 
