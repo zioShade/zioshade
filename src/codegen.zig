@@ -237,7 +237,7 @@ pub fn generate(
     const no_dead_stores = compact_ids.elimDeadVarStores(alloc, folded_ce2) catch folded_ce2;
     if (no_dead_stores.ptr != folded_ce2.ptr) alloc.free(folded_ce2);
     const final_dce = compact_ids.deadCodeElim(alloc, no_dead_stores) catch return no_dead_stores;
-    if (final_dce.ptr != forwarded.ptr) alloc.free(forwarded);
+    if (final_dce.ptr != no_dead_stores.ptr) alloc.free(no_dead_stores);
     const final_retarget = compact_ids.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
     if (final_retarget.ptr != final_dce.ptr) alloc.free(final_dce);
     // Second CSE pass to catch duplicates introduced by store-forward-extract etc.
@@ -3072,7 +3072,12 @@ const Codegen = struct {
         // First pass: emit all function type declarations and save info
         const FuncInfo = struct { func_type_id: u32, param_type_ids: []const u32 };
         var func_infos = try std.ArrayList(FuncInfo).initCapacity(self.alloc, self.module.functions.len);
-        defer func_infos.deinit(self.alloc);
+        defer {
+            for (func_infos.items) |info| {
+                if (info.param_type_ids.len > 0) self.alloc.free(info.param_type_ids);
+            }
+            func_infos.deinit(self.alloc);
+        }
         for (self.module.functions) |func| {
             const return_type_id = try self.ensureType(func.return_type);
             var param_type_ids = try std.ArrayList(u32).initCapacity(self.alloc, func.params.len);

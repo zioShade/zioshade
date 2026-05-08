@@ -1485,11 +1485,15 @@ fn splitPair(pair: []const u8) [2][]const u8 {
 }
 
 fn resolvePointer(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32, alloc: std.mem.Allocator) ![]const u8 {
-    const inst = getDef(module, ptr_id) orelse return names.get(ptr_id) orelse "var";
+    const inst = getDef(module, ptr_id) orelse {
+        const name = names.get(ptr_id) orelse "var";
+        return try alloc.dupe(u8, name);
+    };
     if (inst.op == .AccessChain) {
         return try buildAccessExpr(module, names, inst.words[3], inst.words[4..], alloc);
     }
-    return names.get(ptr_id) orelse "var";
+    const name = names.get(ptr_id) orelse "var";
+    return try alloc.dupe(u8, name);
 }
 
 fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {

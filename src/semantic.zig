@@ -365,6 +365,7 @@ const Analyzer = struct {
             }
         }
         self.instructions.deinit(self.alloc);
+        self.if_insert_points.deinit(self.alloc);
     }
 
     fn allocId(self: *Analyzer) u32 {
@@ -570,13 +571,11 @@ const Analyzer = struct {
             return existing_id;
         }
         const result_id = self.allocId();
-        const ops = try self.alloc.alloc(ir.Instruction.Operand, operands.len);
-        @memcpy(ops, operands);
         try self.instructions.append(self.alloc, .{
             .tag = tag,
             .result_type = null,
             .result_id = result_id,
-            .operands = ops,
+            .operands = operands,
             .ty = ty,
         });
         self.pure_op_cache.put(self.alloc, key, result_id) catch {};
@@ -1194,6 +1193,7 @@ const Analyzer = struct {
                         });
                     }
                     const owned_pts = try self.alloc.dupe(ast.Type, param_types.items);
+                    param_types.deinit(self.alloc);
                     try gop.value_ptr.append(self.alloc, .{
                         .param_types = owned_pts,
                         .ir_id = func_ir_id,
@@ -1213,6 +1213,7 @@ const Analyzer = struct {
                         gop.value_ptr.* = .{};
                     }
                     const owned_pts = try self.alloc.dupe(ast.Type, param_types.items);
+                    param_types.deinit(self.alloc);
                     try gop.value_ptr.append(self.alloc, .{
                         .param_types = owned_pts,
                         .ir_id = func_ir_id,
