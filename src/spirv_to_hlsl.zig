@@ -617,6 +617,51 @@ fn emitFunction(
         }
     }
 
+    // Detect out-parameter pattern: Variable + Store(param_id, value)
+    // When a function parameter is immediately stored into a local variable,
+    // it indicates an out/inout parameter from the GLSL source.
+    // We map the param name to the local variable and add 'out' qualifier.
+    var out_param_var_ids = std.AutoHashMap(u32, u32).init(alloc); // param_id → var_id
+    var out_param_skip_vars = std.AutoHashMap(u32, void).init(alloc); // var_id to skip in body
+    defer out_param_var_ids.deinit();
+    defer out_param_skip_vars.deinit();
+    {
+        var scan_idx = func_idx + 1;
+        while (scan_idx < module.instructions.len) : (scan_idx += 1) {
+            const scan_inst = module.instructions[scan_idx];
+            if (scan_inst.op == .FunctionEnd) break;
+            if (scan_inst.op == .Label) continue;
+            if (scan_inst.op == .FunctionParameter) continue;
+            // Look for Variable (Function storage class) followed by Store
+            if (scan_inst.op == .Variable and scan_inst.words.len >= 4) {
+                const sc: spirv.StorageClass = @enumFromInt(scan_inst.words[3]);
+                if (sc == .Function) {
+                    const var_id = scan_inst.words[2];
+                    // Check if next instruction is Store to this var from a param
+                    if (scan_idx + 1 < module.instructions.len) {
+                        const next = module.instructions[scan_idx + 1];
+                        if (next.op == .Store and next.words.len >= 3 and next.words[1] == var_id) {
+                            const stored_val = next.words[2];
+                            // Check if stored value is one of the params
+                            for (param_ids.items) |pid| {
+                                if (pid == stored_val) {
+                                    out_param_var_ids.put(pid, var_id) catch {};
+                                    out_param_skip_vars.put(var_id, {}) catch {};
+                                    // Alias: the param name should resolve to the var
+                                    const pname = names.get(pid) orelse "p";
+                                    const palias = alloc.dupe(u8, pname) catch continue;
+                                    if (names.fetchPut(var_id, palias) catch null) |old| alloc.free(old.value);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (scan_inst.op != .Variable and scan_inst.op != .Store) break;
+        }
+    }
+
     // Emit signature
     if (is_fragment) {
         try w.writeAll("float4 main(");
@@ -631,6 +676,7 @@ fn emitFunction(
         const p_name = names.get(pid) orelse "p";
 
         // Check if parameter is a pointer type (out/inout param)
+        // Also check if parameter was detected as out via the Variable+Store pattern
         const param_type_inst = getDef(module, p_inst.words[1]);
         var is_out_param = false;
         var inner_type_id = p_inst.words[1];
@@ -639,6 +685,10 @@ fn emitFunction(
                 is_out_param = true;
                 inner_type_id = pti.words[3]; // pointee type
             }
+        }
+        if (out_param_var_ids.contains(pid)) {
+            is_out_param = true;
+            inner_type_id = p_inst.words[1];
         }
         const p_type = try hlslType(module, inner_type_id, names, alloc);
 
