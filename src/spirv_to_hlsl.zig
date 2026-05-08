@@ -721,8 +721,55 @@ fn emitInstruction(
             const result_type = try hlslType(module, inst.words[1], names, alloc);
             const result_name = names.get(inst.words[2]) orelse "v";
             const ptr_id = inst.words[3];
-            const ptr_expr = try resolvePointer(module, names, ptr_id, alloc);
-            try w.print("    {s} {s} = {s};\n", .{ result_type, result_name, ptr_expr });
+            const ptr_name = names.get(ptr_id) orelse "var";
+
+            // Check if loading from a texture/sampler — in HLSL these are used directly
+            const ptr_inst = getDef(module, ptr_id);
+            var is_texture_or_sampler = false;
+            if (ptr_inst) |pi| {
+                if (pi.op == .Variable and pi.words.len >= 4) {
+                    const sc: spirv.StorageClass = @enumFromInt(pi.words[3]);
+                    if (sc == .UniformConstant) {
+                        // Check pointee type
+                        const ptr_type = getDef(module, pi.words[1]);
+                        if (ptr_type) |pt| {
+                            if (pt.op == .TypePointer and pt.words.len > 3) {
+                                const pointee = getDef(module, pt.words[3]);
+                                if (pointee) |pp| {
+                                    if (pp.op == .TypeSampler or pp.op == .TypeSampledImage or pp.op == .TypeImage) {
+                                        is_texture_or_sampler = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (is_texture_or_sampler) {
+                // Check if it's a sampled image (combined texture+sampler)
+                const var_type_id = ptr_inst.?.words[1];
+                const ptr_type_inst2 = getDef(module, var_type_id);
+                var is_sampled_image = false;
+                if (ptr_type_inst2) |pt2| {
+                    if (pt2.op == .TypePointer and pt2.words.len > 3) {
+                        const pointee = getDef(module, pt2.words[3]);
+                        if (pointee) |pp| is_sampled_image = (pp.op == .TypeSampledImage);
+                    }
+                }
+                if (is_sampled_image) {
+                    // Map to texture,sampler pair
+                    const pair = try std.fmt.allocPrint(alloc, "{s},{s}_sampler", .{ ptr_name, ptr_name });
+                    if (try names.fetchPut(inst.words[2], pair)) |old| alloc.free(old.value);
+                } else {
+                    // Plain texture or sampler — pass through name
+                    const alias = try alloc.dupe(u8, ptr_name);
+                    if (try names.fetchPut(inst.words[2], alias)) |old| alloc.free(old.value);
+                }
+            } else {
+                const ptr_expr = try resolvePointer(module, names, ptr_id, alloc);
+                try w.print("    {s} {s} = {s};\n", .{ result_type, result_name, ptr_expr });
+            }
         },
 
         .Store => {
@@ -872,7 +919,8 @@ fn emitInstruction(
         .SampledImage => {
             const result_id = inst.words[2];
             const img_name = names.get(inst.words[3]) orelse "tex";
-            const pair = try std.fmt.allocPrint(alloc, "{s},{s}_sampler", .{ img_name, img_name });
+            const sampler_name = names.get(inst.words[4]) orelse "sampler";
+            const pair = try std.fmt.allocPrint(alloc, "{s},{s}", .{ img_name, sampler_name });
             if (try names.fetchPut(result_id, pair)) |old| alloc.free(old.value);
         },
         .ImageSampleImplicitLod => {
