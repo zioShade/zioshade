@@ -86,7 +86,7 @@ test "T2.1: float uniform produces float in cbuffer" {
     const source =
         \\#version 430
         \\layout(binding = 0, std140) uniform U { float val; } u;
-        \\void main() { float x = u.val; }
+        \\void main() { if (u.val > 0.0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
@@ -109,7 +109,7 @@ test "T2.3: ivec3 produces int3" {
     const source =
         \\#version 430
         \\layout(binding = 0, std140) uniform U { ivec3 pos; } u;
-        \\void main() { ivec3 p = u.pos; }
+        \\void main() { if (u.pos.x > 0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
@@ -120,7 +120,7 @@ test "T2.4: mat4 produces float4x4" {
     const source =
         \\#version 430
         \\layout(binding = 0, std140) uniform U { mat4 mvp; } u;
-        \\void main() { mat4 m = u.mvp; }
+        \\void main() { vec4 v = u.mvp[0]; if (v.x > 0.0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
@@ -135,7 +135,7 @@ test "T3.1: uniform block at binding=1 remapped to register(b0)" {
     const source =
         \\#version 430
         \\layout(binding = 1, std140) uniform Globals { float time; } g;
-        \\void main() {}
+        \\void main() { if (g.time > 0.0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
@@ -146,7 +146,7 @@ test "T3.2: sampler2D produces Texture2D + SamplerState" {
     const source =
         \\#version 430
         \\layout(binding = 0) uniform sampler2D tex;
-        \\void main() { vec4 c = texture(tex, vec2(0.0)); }
+        \\void main() { vec4 c = texture(tex, vec2(0.0)); if (c.x > 0.0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
@@ -158,7 +158,7 @@ test "T3.3: texture() maps to .Sample()" {
     const source =
         \\#version 430
         \\layout(binding = 0) uniform sampler2D tex;
-        \\void main() { vec4 c = texture(tex, vec2(0.5)); }
+        \\void main() { vec4 c = texture(tex, vec2(0.5)); if (c.x > 0.0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
@@ -172,11 +172,13 @@ test "T3.3: texture() maps to .Sample()" {
 test "T4.1: basic arithmetic" {
     const source =
         \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
         \\void main() {
-        \\    float a = 1.0 + 2.0;
-        \\    float b = 3.0 * 4.0;
+        \\    float a = u.x + u.y;
+        \\    float b = u.x * u.y;
         \\    float c = a - b;
         \\    float d = c / 2.0;
+        \\    if (d > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
@@ -204,10 +206,12 @@ test "T4.2: negation" {
 test "T5.1: sin/cos/tan" {
     const source =
         \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
         \\void main() {
-        \\    float a = sin(1.0);
-        \\    float b = cos(1.0);
-        \\    float c = tan(1.0);
+        \\    float a = sin(u.x);
+        \\    float b = cos(u.x);
+        \\    float c = tan(u.x);
+        \\    if (a + b + c > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
@@ -220,10 +224,12 @@ test "T5.1: sin/cos/tan" {
 test "T5.2: pow/exp/log" {
     const source =
         \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
         \\void main() {
-        \\    float a = pow(2.0, 3.0);
-        \\    float b = exp(1.0);
-        \\    float c = log(2.0);
+        \\    float a = pow(u.x, 3.0);
+        \\    float b = exp(u.x);
+        \\    float c = log(u.x);
+        \\    if (a + b + c > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
@@ -236,11 +242,13 @@ test "T5.2: pow/exp/log" {
 test "T5.3: min/max/clamp/lerp" {
     const source =
         \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
         \\void main() {
-        \\    float a = min(1.0, 2.0);
-        \\    float b = max(1.0, 2.0);
-        \\    float c = clamp(0.5, 0.0, 1.0);
-        \\    float d = mix(0.0, 1.0, 0.5);
+        \\    float a = min(u.x, u.y);
+        \\    float b = max(u.x, u.y);
+        \\    float c = clamp(u.x, 0.0, 1.0);
+        \\    float d = mix(u.x, u.y, 0.5);
+        \\    if (a + b + c + d > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
@@ -254,13 +262,13 @@ test "T5.3: min/max/clamp/lerp" {
 test "T5.4: dot/cross/normalize/length" {
     const source =
         \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 v; } u;
         \\void main() {
-        \\    vec3 a = vec3(1.0, 0.0, 0.0);
-        \\    vec3 b = vec3(0.0, 1.0, 0.0);
-        \\    float d = dot(a, b);
-        \\    vec3 c = cross(a, b);
-        \\    vec3 n = normalize(a);
-        \\    float l = length(a);
+        \\    float d = dot(u.v, u.v);
+        \\    vec3 c = cross(u.v, u.v);
+        \\    vec3 n = normalize(u.v);
+        \\    float l = length(u.v);
+        \\    if (d + l > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
@@ -281,6 +289,7 @@ test "T6.1: user function with return value" {
         \\float add(float a, float b) { return a + b; }
         \\void main() {
         \\    float r = add(1.0, 2.0);
+        \\    if (r > 0.0) discard;
         \\}
     ;
     const hlsl = try compileToHlsl(source);
