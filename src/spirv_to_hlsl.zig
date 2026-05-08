@@ -583,15 +583,18 @@ fn emitFunction(
     const return_type = try hlslType(module, return_type_id, names, alloc);
     const is_fragment = is_entry and module.execution_model == .Fragment;
 
-    // Find output variable for fragment shader
+    // Find output and input variables for fragment shader entry
     var output_var_id: ?u32 = null;
+    var input_var_ids = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;
+    defer input_var_ids.deinit(alloc);
     if (is_fragment) {
         for (module.instructions) |inst| {
             if (inst.op == .Variable and inst.words.len >= 4) {
                 const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                 if (sc == .Output) {
                     output_var_id = inst.words[2];
-                    break;
+                } else if (sc == .Input) {
+                    input_var_ids.append(alloc, inst.words[2]) catch {};
                 }
             }
         }
@@ -657,6 +660,28 @@ fn emitFunction(
         } else {
             if (is_out_param) try w.writeAll("out ");
             try w.print("{s} {s}", .{ p_type, p_name });
+        }
+    }
+
+    // Add input variables as parameters for fragment entry function
+    if (is_fragment) {
+        for (input_var_ids.items, 0..) |ivid, i| {
+            if (param_ids.items.len > 0 or i > 0) try w.writeAll(", ");
+            const iv_inst = getDef(module, ivid) orelse continue;
+            const iv_name = names.get(ivid) orelse "input_var";
+            const iv_type = try hlslType(module, iv_inst.words[1], names, alloc);
+            const builtin = getDecorationValue(decorations, ivid, .built_in);
+            if (builtin) |b| {
+                const semantic = builtInToSemantic(b);
+                try w.print("{s} {s} : {s}", .{ iv_type, iv_name, semantic });
+            } else {
+                const loc = getDecorationValue(decorations, ivid, .location);
+                if (loc) |l| {
+                    try w.print("{s} {s} : TEXCOORD{d}", .{ iv_type, iv_name, l });
+                } else {
+                    try w.print("{s} {s}", .{ iv_type, iv_name });
+                }
+            }
         }
     }
 
@@ -913,6 +938,10 @@ fn emitInstruction(
                     }
                     // Skip loads from Output variable in fragment entry — they pass by reference
                     if (sc == .Output and is_fragment) {
+                        is_output_load = true;
+                    }
+                    // Skip loads from Input variable in fragment entry — they're parameters
+                    if (sc == .Input and is_fragment) {
                         is_output_load = true;
                     }
                 }
@@ -1246,9 +1275,15 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
 
     if (indices.len == 0) return try alloc.dupe(u8, base_name);
 
+    // Check if base is a cbuffer/UBO variable (Uniform storage class)
+    // In HLSL, cbuffer members are accessed directly without the cbuffer name prefix
+    const base_is_cbuffer = isUniformVariable(module, base_id);
+
     var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
     defer buf.deinit(alloc);
-    try buf.writer(alloc).writeAll(base_name);
+    if (!base_is_cbuffer) {
+        try buf.writer(alloc).writeAll(base_name);
+    }
 
     // Walk the type chain starting from the base pointer's pointee type
     var current_type_id: ?u32 = resolvePointeeType(module, base_id);
@@ -1268,6 +1303,9 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                     try buf.writer(alloc).writeAll(switch (val) {
                         0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
                     });
+                } else if (base_is_cbuffer) {
+                    // Cbuffer members are global in HLSL — emit just _mN without dot
+                    try buf.writer(alloc).print("_m{d}", .{val});
                 } else {
                     try buf.writer(alloc).print("._m{d}", .{val});
                 }
@@ -1298,6 +1336,16 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     }
 
     return buf.toOwnedSlice(alloc);
+}
+
+/// Check if an ID is a Uniform storage class variable (cbuffer/UBO).
+fn isUniformVariable(module: *const ParsedModule, id: u32) bool {
+    const inst = getDef(module, id) orelse return false;
+    if (inst.op == .Variable and inst.words.len >= 4) {
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        return sc == .Uniform;
+    }
+    return false;
 }
 
 /// Resolve the pointee type of a pointer value (variable or AccessChain result).

@@ -38,7 +38,7 @@ void mainImage(float4 v28, float2 v29)
 {
     float3 v30;
     float2 v31;
-    float3 v33 = Globals._m0;
+    float3 v33 = _m0;
     float2 v34 = float2(v33.x, v33.y);
     float2 v35 = v29 / v34;
     float2 v36 = v35 - float2(0.5, 0.5);
@@ -47,7 +47,7 @@ void mainImage(float4 v28, float2 v29)
     float v40 = v38.y;
     float v41 = abs(v40);
     float v42 = v41 / 5.0;
-    float v43 = acos(v42, 2.0);
+    float v43 = pow(v42, 2.0);
     float v44 = 1.0 + v43;
     float v45 = v31.x;
     float v46 = v45 * v44;
@@ -55,7 +55,7 @@ void mainImage(float4 v28, float2 v29)
     float v48 = v38.x;
     float v49 = abs(v48);
     float v50 = v49 / 4.0;
-    float v51 = acos(v50, 2.0);
+    float v51 = pow(v50, 2.0);
     float v52 = 1.0 + v51;
     float v53 = v31.y;
     float v54 = v53 * v52;
@@ -65,22 +65,22 @@ void mainImage(float4 v28, float2 v29)
     float2 v57 = v56 * 0.92;
     float2 v58 = v57 + float2(0.04, 0.04);
     v31 = v58;
-    float v61 = Globals._m1;
+    float v61 = _m1;
     float v62 = 0.3 * v61;
     float v63 = v58.y;
     float v64 = v63 * 21.0;
     float v65 = v62 + v64;
-    float v66 = pow(v65);
+    float v66 = sin(v65);
     float v67 = 0.7 * v61;
     float v68 = v63 * 29.0;
     float v69 = v67 + v68;
-    float v70 = pow(v69);
+    float v70 = sin(v69);
     float v71 = v66 * v70;
     float v72 = 0.33 * v61;
     float v73 = 0.3 + v72;
     float v74 = v63 * 31.0;
     float v75 = v73 + v74;
-    float v76 = pow(v75);
+    float v76 = sin(v75);
     float v77 = v71 * v76;
     float v78 = v77 * 0.0017;
     float v79 = v58.x;
@@ -142,14 +142,14 @@ void mainImage(float4 v28, float2 v29)
     float3 v135 = v133 * 0.4;
     float3 v136 = v135 * v133;
     float3 v137 = v134 + v136;
-    float3 v138 = sin(v137, 0.0, 1.0);
+    float3 v138 = clamp(v137, 0.0, 1.0);
     float v139 = 16.0 * v79;
     float v140 = v139 * v63;
     float v141 = 1.0 - v79;
     float v142 = v140 * v141;
     float v143 = 1.0 - v63;
     float v144 = v142 * v143;
-    float v145 = acos(v144, 0.3);
+    float v145 = pow(v144, 0.3);
     float3 v146 = float3(v145, v145, v145);
     float3 v147 = v138 * v146;
     float3 v148 = v147 * float3(0.95, 1.05, 0.95);
@@ -159,17 +159,17 @@ void mainImage(float4 v28, float2 v29)
     float v152 = v63 * v151;
     float v153 = v152 * 1.5;
     float v154 = v150 + v153;
-    float v155 = pow(v154);
+    float v155 = sin(v154);
     float v156 = 0.35 * v155;
     float v157 = 0.35 + v156;
-    float v158 = sin(v157, 0.0, 1.0);
-    float v159 = acos(v158, 1.7);
+    float v158 = clamp(v157, 0.0, 1.0);
+    float v159 = pow(v158, 1.7);
     float v160 = 0.7 * v159;
     float v161 = 0.4 + v160;
     float3 v162 = float3(v161, v161, v161);
     float3 v163 = v149 * v162;
     float v164 = 110.0 * v61;
-    float v165 = pow(v164);
+    float v165 = sin(v164);
     float v166 = 0.01 * v165;
     float v167 = 1.0 + v166;
     float3 v168 = v163 * v167;
@@ -194,7 +194,7 @@ void mainImage(float4 v28, float2 v29)
     float v180 = v179 % 2.0;
     float v181 = v180 - 1.0;
     float v182 = v181 * 2.0;
-    float v183 = sin(v182, 0.0, 1.0);
+    float v183 = clamp(v182, 0.0, 1.0);
     float3 v184 = float3(v183, v183, v183);
     float3 v185 = v184 * 0.65;
     float3 v186 = float3(1.0, 1.0, 1.0) - v185;
@@ -203,11 +203,10 @@ void mainImage(float4 v28, float2 v29)
     v30 = v188;
     return;
 }
-float4 main() : SV_Target
+float4 main(float4 gl_FragCoord : SV_Position) : SV_Target
 {
     float4 _fragColor;
-    float4 v25 = gl_FragCoord;
-    float2 v26 = float2(v25.x, v25.y);
+    float2 v26 = float2(gl_FragCoord.x, gl_FragCoord.y);
     mainImage(_fragColor, v26);
     return _fragColor;
 }

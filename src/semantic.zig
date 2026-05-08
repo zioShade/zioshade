@@ -5834,51 +5834,53 @@ const Analyzer = struct {
 
     fn glslExtInstruction(self: *Analyzer, name: []const u8) ?u32 {
         _ = self;
-        // GLSL.std.450 instruction numbers (from official spec)
-        if (std.mem.eql(u8, name, "round")) return 1;
-        if (std.mem.eql(u8, name, "roundEven")) return 2;
-        if (std.mem.eql(u8, name, "trunc")) return 3;
-        if (std.mem.eql(u8, name, "abs")) return 4; // FAbs
-        if (std.mem.eql(u8, name, "sign")) return 6; // FSign
-        if (std.mem.eql(u8, name, "floor")) return 8;
-        if (std.mem.eql(u8, name, "ceil")) return 9;
-        if (std.mem.eql(u8, name, "fract")) return 10;
-        if (std.mem.eql(u8, name, "radians")) return 11;
-        if (std.mem.eql(u8, name, "degrees")) return 12;
-        if (std.mem.eql(u8, name, "sin")) return 13;
-        if (std.mem.eql(u8, name, "cos")) return 14;
-        if (std.mem.eql(u8, name, "tan")) return 15;
-        if (std.mem.eql(u8, name, "asin")) return 16;
-        if (std.mem.eql(u8, name, "acos")) return 17;
-        if (std.mem.eql(u8, name, "atan")) return 18;
-        if (std.mem.eql(u8, name, "sinh")) return 19;
-        if (std.mem.eql(u8, name, "cosh")) return 20;
-        if (std.mem.eql(u8, name, "tanh")) return 21;
-        if (std.mem.eql(u8, name, "asinh")) return 22;
-        if (std.mem.eql(u8, name, "acosh")) return 23;
-        if (std.mem.eql(u8, name, "atanh")) return 24;
-        if (std.mem.eql(u8, name, "atan2")) return 25;
-        if (std.mem.eql(u8, name, "pow")) return 26;
-        if (std.mem.eql(u8, name, "exp")) return 27;
-        if (std.mem.eql(u8, name, "log")) return 28;
-        if (std.mem.eql(u8, name, "exp2")) return 29;
-        if (std.mem.eql(u8, name, "log2")) return 30;
-        if (std.mem.eql(u8, name, "sqrt")) return 31;
-        if (std.mem.eql(u8, name, "inversesqrt")) return 32; // InverseSqrt
-        if (std.mem.eql(u8, name, "determinant")) return 33; // Determinant
-        if (std.mem.eql(u8, name, "inverse")) return 34; // MatrixInverse
-        if (std.mem.eql(u8, name, "mod")) return 29; // Log2 (unused, mod has special handler)
-        if (std.mem.eql(u8, name, "modf")) return 36; // ModfStruct (returns struct)
-        if (std.mem.eql(u8, name, "min")) return 37; // FMin
-        if (std.mem.eql(u8, name, "max")) return 40; // FMax
-        if (std.mem.eql(u8, name, "clamp")) return 43; // FClamp
-        if (std.mem.eql(u8, name, "mix")) return 46; // FMix
-        if (std.mem.eql(u8, name, "step")) return 48; // Step
-        if (std.mem.eql(u8, name, "smoothstep")) return 49; // SmoothStep
-        if (std.mem.eql(u8, name, "fma")) return 50; // Fma
-        if (std.mem.eql(u8, name, "frexp")) return 52; // FrexpStruct
-        if (std.mem.eql(u8, name, "ldexp")) return 53; // Ldexp
-        // Pack/Unpack (verified against spirv-tools)
+        // GLSL.std.450 instruction numbers (from SPIR-V spec)
+        if (std.mem.eql(u8, name, "round")) return 1;      // Round
+        if (std.mem.eql(u8, name, "roundEven")) return 2;   // RoundEven
+        if (std.mem.eql(u8, name, "trunc")) return 3;       // Trunc
+        if (std.mem.eql(u8, name, "abs")) return 4;         // FAbs
+        if (std.mem.eql(u8, name, "sign")) return 6;        // FSign
+        if (std.mem.eql(u8, name, "floor")) return 8;       // Floor
+        if (std.mem.eql(u8, name, "ceil")) return 10;       // Ceil
+        if (std.mem.eql(u8, name, "fract")) return 12;      // Fract
+        if (std.mem.eql(u8, name, "radians")) return 14;    // Radians
+        if (std.mem.eql(u8, name, "degrees")) return 16;    // Degrees
+        if (std.mem.eql(u8, name, "sin")) return 18;        // Sin
+        if (std.mem.eql(u8, name, "cos")) return 20;        // Cos
+        if (std.mem.eql(u8, name, "tan")) return 22;        // Tan
+        if (std.mem.eql(u8, name, "asin")) return 24;       // Asin
+        if (std.mem.eql(u8, name, "acos")) return 26;       // Acos
+        if (std.mem.eql(u8, name, "atan")) return 28;       // Atan
+        if (std.mem.eql(u8, name, "atan2")) return 30;      // Atan2
+        if (std.mem.eql(u8, name, "sinh")) return 32;       // Sinh
+        if (std.mem.eql(u8, name, "cosh")) return 34;       // Cosh
+        if (std.mem.eql(u8, name, "tanh")) return 36;       // Tanh
+        if (std.mem.eql(u8, name, "asinh")) return 38;      // Asinh
+        if (std.mem.eql(u8, name, "acosh")) return 40;      // Acosh
+        if (std.mem.eql(u8, name, "atanh")) return 42;      // Atanh
+        if (std.mem.eql(u8, name, "pow")) return 48;        // Pow
+        if (std.mem.eql(u8, name, "exp")) return 50;        // Exp
+        if (std.mem.eql(u8, name, "log")) return 52;        // Log
+        if (std.mem.eql(u8, name, "exp2")) return 54;       // Exp2
+        if (std.mem.eql(u8, name, "log2")) return 56;       // Log2
+        if (std.mem.eql(u8, name, "sqrt")) return 58;       // Sqrt
+        if (std.mem.eql(u8, name, "inversesqrt")) return 60; // InverseSqrt
+        if (std.mem.eql(u8, name, "abs")) return 62;        // Abs (integer)
+        if (std.mem.eql(u8, name, "sign")) return 64;       // Sign (integer)
+        if (std.mem.eql(u8, name, "determinant")) return 100; // Determinant
+        if (std.mem.eql(u8, name, "inverse")) return 102;   // MatrixInverse
+        if (std.mem.eql(u8, name, "mod")) return 29;        // unused, mod has special handler
+        if (std.mem.eql(u8, name, "modf")) return 36;       // ModfStruct
+        if (std.mem.eql(u8, name, "min")) return 72;        // FMin
+        if (std.mem.eql(u8, name, "max")) return 74;        // FMax
+        if (std.mem.eql(u8, name, "clamp")) return 76;      // FClamp
+        if (std.mem.eql(u8, name, "mix")) return 78;        // FMix
+        if (std.mem.eql(u8, name, "step")) return 80;       // Step
+        if (std.mem.eql(u8, name, "smoothstep")) return 82; // SmoothStep
+        if (std.mem.eql(u8, name, "fma")) return 50;        // Fma
+        if (std.mem.eql(u8, name, "frexp")) return 52;      // FrexpStruct
+        if (std.mem.eql(u8, name, "ldexp")) return 53;      // Ldexp
+        // Pack/Unpack (from SPIR-V spec)
         if (std.mem.eql(u8, name, "packSnorm4x8")) return 54;
         if (std.mem.eql(u8, name, "packUnorm4x8")) return 55;
         if (std.mem.eql(u8, name, "packSnorm2x16")) return 56;
@@ -5889,14 +5891,14 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "unpackHalf2x16")) return 62;
         if (std.mem.eql(u8, name, "unpackSnorm4x8")) return 63;
         if (std.mem.eql(u8, name, "unpackUnorm4x8")) return 64;
-        // Geometric (verified against spirv-tools)
-        if (std.mem.eql(u8, name, "length")) return 66; // Length
-        if (std.mem.eql(u8, name, "distance")) return 67; // Distance
-        if (std.mem.eql(u8, name, "cross")) return 68; // Cross
-        if (std.mem.eql(u8, name, "normalize")) return 69; // Normalize
-        if (std.mem.eql(u8, name, "faceforward")) return 70; // FaceForward
-        if (std.mem.eql(u8, name, "reflect")) return 71; // Reflect
-        if (std.mem.eql(u8, name, "refract")) return 72; // Refract
+        // Geometric (from SPIR-V spec)
+        if (std.mem.eql(u8, name, "length")) return 84;     // Length
+        if (std.mem.eql(u8, name, "distance")) return 86;   // Distance
+        if (std.mem.eql(u8, name, "cross")) return 88;      // Cross
+        if (std.mem.eql(u8, name, "normalize")) return 90;  // Normalize
+        if (std.mem.eql(u8, name, "faceforward")) return 92; // FaceForward
+        if (std.mem.eql(u8, name, "reflect")) return 94;    // Reflect
+        if (std.mem.eql(u8, name, "refract")) return 96;    // Refract
         // NOT GLSL.std.450 — handled as core SPIR-V ops or specially
         if (std.mem.eql(u8, name, "transpose") or std.mem.eql(u8, name, "outerProduct"))
             return null;
