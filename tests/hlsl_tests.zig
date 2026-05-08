@@ -742,7 +742,7 @@ test "T16.1: vertex shader with uniform and discard" {
     try assertContains(hlsl, "cbuffer");
 }
 
-test "T16.2: compute shader with uniform" {
+test "T16.2: compute shader with numthreads" {
     const source =
         \\#version 430
         \\layout(binding = 0, std140) uniform U { float x; } u;
@@ -753,6 +753,7 @@ test "T16.2: compute shader with uniform" {
     ;
     const hlsl = try compileToHlslStage(source, .compute);
     defer alloc.free(hlsl);
+    try assertContains(hlsl, "[numthreads(64, 1, 1)]");
     try assertContains(hlsl, "cbuffer");
 }
 
@@ -1104,5 +1105,33 @@ test "T20.5: clamp with uniform" {
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
     try assertContains(hlsl, "clamp(");
+}
+
+test "T21.1: compute shader with 3D numthreads" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+        \\void main() {
+        \\    if (u.x > 0.0) return;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "[numthreads(8, 8, 1)]");
+}
+
+test "T21.2: fragment shader with gl_FragCoord component access" {
+    const source =
+        \\#version 430
+        \\void main() {
+        \\    float x = gl_FragCoord.x;
+        \\    if (x > 400.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "SV_Position");
+    try assertContains(hlsl, "discard");
 }
 
