@@ -1073,6 +1073,8 @@ const Analyzer = struct {
                     .output
                 else if (qual.is_buffer)
                     .storage_buffer
+                else if (qual.is_shared)
+                    .workgroup
                 else
                     .uniform;
 
@@ -1110,7 +1112,7 @@ const Analyzer = struct {
                     .result_id = ir_id,
                 });
                 // Track as global pointer for cross-block load caching
-                if (storage_class == .input or storage_class == .output or storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant or storage_class == .uniform_constant) {
+                if (storage_class == .input or storage_class == .output or storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant or storage_class == .uniform_constant or storage_class == .workgroup) {
                     self.global_ptr_ids.put(self.alloc, ir_id, {}) catch {};
                 }
                 // Declare the block variable under both names (type name and instance name)
@@ -1127,9 +1129,9 @@ const Analyzer = struct {
                     });
                 }
 
-                // Declare block members as directly accessible for uniform/buffer blocks
+                // Declare block members as directly accessible for uniform/buffer/workgroup blocks
                 // and for anonymous in/out blocks (no instance name).
-                if (storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant or
+                if (storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant or storage_class == .workgroup or
                     ((storage_class == .input or storage_class == .output) and node.data.instance_name.len == 0))
                 {
                     for (node.data.members, 0..) |member, idx| {
