@@ -1,10 +1,10 @@
 # Autoresearch Ideas — glslpp Feature Coverage
 
-## STATUS: 204/222 pass (91.9%)
-## 10 val_fail, 0 compile_fail, 0 crash
+## STATUS: 208/222 pass (93.7%)
+## 5 val_fail, 0 compile_fail, 0 crash
 ## HLSL tests: 76/76 pass (GENUINE), 0 leaked ✅
-## Session: 511→543 (+32 shaders, +6.3%), HLSL 24→76 (GENUINE, +216%)
-## Conformance: 197→204/222 (+3.5% from GLSLstd450 fix + runner cleanup)
+## Session: 511→543→208/222 conformance, HLSL 24→76 (GENUINE, +216%)
+## Conformance: 204→208/222 (+1.8% from OpFunctionCall opcode fix + texelFetchOffset fix)
 
 ## ⚠️ STOP ADDING TESTS — further test additions would be overfitting
 ## Fix real bugs/features or switch to broader conformance metric instead.
@@ -20,10 +20,9 @@
 - Extension preprocessor: Defining macros for unimplemented extensions causes regressions. Only GL_EXT_null_initializer is safe.
 
 ## Remaining Fixable (needs careful work)
-- spv.bufferhandle5/24/25: compactIds ID collision + PhysSB Aligned
-- 460.vert/spv.460.comp/spv.debuginfo.glsl.comp: Forward references from RSE pipeline
-- bool_in_interface bvec (3): Double-free in codegen
-- hoisted-temporary: Double-free in codegen
+- hoisted-temporary: Optimization pipeline reorders constants before types. Raw output is valid, but after optimization, OpConstant references undefined type ID. Likely caused by branchMergePhi or loopCounterToPhi creating new instructions in wrong positions.
+- spv.WorkgroupMemoryExplicitLayout (3): Forward-referenced IDs from RSE cascade
+- ghostty/cell_text.f: Dominance violation in codegen
 
 ## Most Promising Next Steps
 
