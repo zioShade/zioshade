@@ -1216,3 +1216,84 @@ test "T22.5: chained arithmetic with precedence" {
     try assertContains(hlsl, "discard");
 }
 
+// ---------------------------------------------------------------------------
+// T23: Additional coverage for real-world patterns
+// ---------------------------------------------------------------------------
+
+test "T23.1: mat3 multiplication" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { mat3 m; vec3 v; } u;
+        \\void main() {
+        \\    vec3 result = u.m * u.v;
+        \\    if (result.x > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "mul");
+    try assertContains(hlsl, "discard");
+}
+
+test "T23.2: mix with uniform selector (non-constant)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float t; float a; float b; } u;
+        \\void main() {
+        \\    float result = mix(u.a, u.b, u.t);
+        \\    if (result > 0.5) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "lerp");
+    try assertContains(hlsl, "discard");
+}
+
+test "T23.3: integer arithmetic (div and mod)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int x; int y; } u;
+        \\void main() {
+        \\    int q = u.x / u.y;
+        \\    int r = u.x - q * u.y;
+        \\    if (q + r > 0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T23.4: vec2 construction and length" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
+        \\void main() {
+        \\    vec2 v = vec2(u.x, u.y);
+        \\    float len = length(v);
+        \\    if (len > 1.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "length");
+    try assertContains(hlsl, "discard");
+}
+
+test "T23.5: abs and max/min" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
+        \\void main() {
+        \\    float a = abs(u.x);
+        \\    float m = max(a, u.y);
+        \\    if (m > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "abs");
+    try assertContains(hlsl, "discard");
+}
+
