@@ -1,72 +1,88 @@
-# Handoff: glslpp HLSL Backend Session
+# Handoff: glslpp HLSL Backend Session 2
 
-## Session Date: 2026-05-08
+## Session Date: 2026-05-08 (session 2)
 
-## What Was Done
+## What Was Done This Session
 
-### 1. License & Project Setup (L1) — COMPLETE
-- Dual MIT/Apache-2.0 license with SPDX headers on all source files
-- README with API docs, sponsor badge, build instructions
-- `.github/FUNDING.yml`, `NOTICE`, `THIRD_PARTY_NOTICES.md`
+### 1. Fixed Vector Component AccessChain (DXC blocker) ✅
+- `buildAccessExpr` now detects vector types and emits `.x/.y/.z/.w` instead of `._m0`
+- Added `resolvePointeeType()` to walk the type chain from base pointer through indices
+- Handles nested access (struct → vector component, array → element)
+- Before: `v31._m0 = v46; v31._m1 = v54;`
+- After: `v31.x = v46; v31.y = v54;`
 
-### 2. SPIR-V → HLSL Backend (B1) — ~70% COMPLETE
-Created `src/spirv_to_hlsl.zig` (~1100 lines) implementing:
+### 2. Fixed Fragment Output Variable Handling (DXC blocker) ✅
+- Entry function now declares Output variable as local `float4 _fragColor;`
+- Loads from Output variable are aliased (pass var name directly to functions)
+- Bare `Return` instructions suppressed in fragment entry (emit `return _fragColor;` at end instead)
+- Before: `return; return _fragColor;` (double return)
+- After: `float4 _fragColor; mainImage(_fragColor, v26); return _fragColor;`
 
-**Working:**
-- SPIR-V binary parser (header, all instruction types, ID→definition map)
-- Type mapping: `vec`/`float`/`int`/`bool`/`mat` → HLSL equivalents
-- Resource binding: UBO → `cbuffer` with `register(bN)`, binding remap `binding=1 → b0`
-- Combined image-sampler handling: `TypeSampledImage` → `Texture2D` + `SamplerState` pair
-- Correct texture sampling: `iChannel0.Sample(iChannel0_sampler, coord)`
-- Constant inlining: scalars as literal values (`2.0`, `42`), vectors as constructors (`float2(0.5, 0.5)`)
-- User function emission: non-entry functions emitted before `main`
-- `OpFunctionCall` with argument passing
-- 40+ GLSLstd450 → HLSL builtin mappings (sin/cos/pow/exp/log/min/max/clamp/lerp/dot/cross/etc.)
-- All arithmetic, comparison, bitwise, conversion, composite operations
-- Derivatives: `dFdx→ddx`, `dFdy→ddy`, `fwidth`
-- Entry point semantics: `SV_Target`, `SV_Position`, `discard`
+### 3. Fixed Void Function Calls ✅
+- `FunctionCall` now checks if return type is `TypeVoid`
+- Emits `mainImage(args)` instead of `void v27 = mainImage(args)`
+- DXC doesn't allow assigning void results to variables
 
-**Known gaps (next session):**
-- Vector component writes via AccessChain use `._m0` instead of `.x`
-- Full if/else block reconstruction from SelectionMerge+BranchConditional
-- For loop reconstruction from LoopMerge+Branch
-- Fragment output variable pattern (return `_fragColor` → proper return value)
+### 4. Implemented if/else Control Flow Reconstruction ✅
+- Built label→index map and BranchConditional→merge-label map
+- `emitBody` now handles `SelectionMerge + BranchConditional` pattern
+- `emitBlock` recursively handles nested if/else within sub-blocks
+- Proper `if (cond) { ... } else { ... }` emission with closing braces
+- Before: `if (v176) { ... return; }` (unclosed, no else)
+- After: `if (v171) { v30 = v30 * 0.0; }` (properly closed)
 
-### 3. Test Suite — 36 tests created (24 pass)
-`tests/hlsl_tests.zig` with `zig build test-hlsl`:
-- T1 minimal shaders (3/3), T7 constants (3/3), T8 derivatives (3/3) — all pass
-- T9 shadertoy end-to-end (2/2), T14 semantics (3/3) — all pass
-- T2-T5 type/binding/arithmetic/builtins: fail because DCE removes unused code in minimal shaders
+### 5. Added `out` Parameter Detection
+- Function parameter emission checks if type is `OpTypePointer`
+- Adds `out` qualifier for pointer-type parameters
+- Note: currently requires codegen to emit pointer types for out params (see known issues)
 
-### 4. Test Results on CRT Shadertoy Shader
-- Input: wintty CRT shader with shadertoy prefix (68 lines GLSL)
-- Output: 212 lines of HLSL with 0 unhandled operations
+## Test Results
+
+- **24/36 tests pass** (unchanged — no regressions)
+- T13.1 (if/else) continues to pass ✅
+- T13.2 (for loop) — still expected to fail (loop reconstruction not implemented)
+- T2-T5 failures are from DCE in the GLSL→SPIR-V codegen (not HLSL backend issue)
+- T6.2 crashes (out parameter + double-free in codegen)
+
+## CRT Shadertoy Shader Output
+- 211 lines of HLSL (was 212)
 - Correct cbuffer binding, texture sampling, function calls, constant inlining
+- Proper vector component access (`.x`, `.y`, `.z` instead of `._m0`)
+- Proper `if` blocks with closing braces
+- Proper `float4 main() : SV_Target` with `_fragColor` local and return
+- **0 unhandled operations**
+
+## Known Remaining Issues
+
+### Codegen Issues (not HLSL backend)
+1. **`out` parameters not emitted as pointer types**: The semantic analyzer handles `out` params by creating local variables, but the SPIR-V function signature uses value types. HLSL needs `out` qualifier but the type is `float4`, not `pointer(float4)`. Fix requires codegen changes in `semantic.zig` and `codegen.zig`.
+
+2. **ExtInst wrong instruction IDs**: Some GLSLstd450 calls have wrong instruction numbers. E.g., `pow(abs(x)/5.0, 2.0)` becomes `acos(x, 2.0)` in HLSL. This is a codegen bug in `semantic.zig` where the wrong GLSLstd450 enum value is assigned.
+
+3. **DCE removes minimal shader code**: T2-T5 tests use simple `float x = u.val;` which gets DCE'd because `x` is never used. Tests should use patterns that write to the output variable.
+
+### HLSL Backend Issues
+1. **Loop reconstruction**: `for` loops not yet reconstructed from `LoopMerge + Branch` pattern. T13.2 test expects `for (`.
+2. **Indentation in nested blocks**: Instructions inside if/else blocks don't get extra indentation (they use `emitInstruction` which hardcodes `"    "` prefix).
 
 ## Architecture
 
 ```
 src/root.zig                  — Public API: compileToSPIRV, spirvToHLSL, compileShadertoyToHlsl
-src/spirv_to_hlsl.zig         — SPIR-V parser + HLSL emitter (~1100 lines)
-tests/hlsl_tests.zig          — 36 end-to-end HLSL tests
+src/spirv_to_hlsl.zig         — SPIR-V parser + HLSL emitter (~1200 lines)
+tests/hlsl_tests.zig          — 36 end-to-end HLSL tests (24 pass)
 test_hlsl.zig                 — CLI tool for manual testing
 test_crt_full.glsl            — Test shader (shadertoy prefix + CRT effect)
-test_crt_full.glsl.hlsl       — Generated HLSL output (212 lines)
+test_crt_full.glsl.hlsl       — Generated HLSL output (211 lines)
 ```
 
 ## How to Build & Test
 
 ```bash
-ZIG=/path/to/zig-0.15.2/zig.exe
-
-# Build library
-$ZIG build
+ZIG=C:/Users/Alessandro/scoop/apps/zig/0.15.2/zig.exe
 
 # Run HLSL backend tests (24/36 pass)
 $ZIG build test-hlsl
-
-# Run full conformance suite (spirv-val)
-$ZIG build conformance
 
 # Manual test on a specific shader
 $ZIG build-exe -ODebug --dep glslpp -Mroot=test_hlsl.zig -Mglslpp=src/root.zig \
@@ -74,53 +90,42 @@ $ZIG build-exe -ODebug --dep glslpp -Mroot=test_hlsl.zig -Mglslpp=src/root.zig \
 .zig-cache/bin/test_hlsl.exe test_crt_full.glsl --save
 ```
 
-## Zig 0.15 ArrayList API Notes (learned the hard way)
-- `ArrayList(T).init(alloc)` doesn't exist — use `initCapacity(alloc, n)` or `.empty`
-- `.append(item)` takes alloc: `list.append(alloc, item)`
-- `.deinit(alloc)` takes alloc
-- `.toOwnedSlice(alloc)` takes alloc
-- `.writer(alloc)` takes alloc
+**Note**: System has Zig 0.16.0 as default. Must use 0.15.2 explicitly (`C:/Users/Alessandro/scoop/apps/zig/0.15.2/zig.exe`) as the codebase uses Zig 0.15 ArrayList API.
+
+## Zig 0.15 ArrayList API Notes
+- `ArrayList(T).init(alloc)` → use `initCapacity(alloc, n)` or `.empty`
+- `.append(item)` → `list.append(alloc, item)`
+- `.deinit(alloc)`, `.toOwnedSlice(alloc)`, `.writer(alloc)` — all take alloc
 - AutoHashMap deinit doesn't take alloc
 
 ## Next Session Priorities (in order)
 
-### P0: Fix the 3 DXC-blocking issues
-1. **Vector component access**: AccessChain on vectors should emit `.x/.y/.z/.w` not `._m0`
-   - In `emitInstruction` → `.AccessChain`: check if base type is a vector, use swizzle
-   - Also fix stores: `v31._m0 = v46` should be invalid for float2
+### P0: Codegen fixes for proper HLSL output
+1. **Fix `out` parameter SPIR-V emission**: Make codegen emit `OpTypePointer(Function, float4)` for `out` params instead of plain `float4`. This enables HLSL `out` qualifier detection.
+2. **Fix ExtInst instruction IDs**: Debug why `pow` gets wrong GLSLstd450 ID in codegen.
 
-2. **Fragment output handling**: `_fragColor` should be the return value
-   - The entry function should track stores to the output variable
-   - Replace `return _fragColor;` with `return <last_stored_value>;`
+### P1: DXC validation
+1. Install DXC, run `dxc -T ps_6_0 -E main` on generated HLSL
+2. Fix DXC errors (undefined identifiers, type mismatches)
+3. The `out` param fix is critical for DXC — without it, `mainImage(_fragColor, v26)` passes by value, so `_fragColor` is never modified
 
-3. **if/else control flow reconstruction**:
-   - Pattern: `SelectionMerge(merge)` → `BranchConditional(cond, true, false)` → Label blocks → `Branch(merge)`
-   - Need to build a basic block graph, then emit structured `if/else { }` blocks
-   - Simple approach: scan forward from BranchConditional, collect true-block and false-block instructions until merge label
-
-### P1: Loop reconstruction
+### P2: Loop reconstruction
 - Pattern: `Branch → LoopHeader → LoopMerge(merge, continue) → BranchConditional → body → Branch(continue) → Branch(header)`
 - Emit as `for (init; cond; update) { body }`
 
-### P2: Fix failing tests
-- T2-T6 tests fail because minimal shaders have DCE remove the interesting code
-- Fix by using patterns that survive DCE, or by adding specific SPIR-V binary test data
+### P3: Fix failing tests
+- Update T2-T5 test shaders to use patterns that survive DCE
+- Fix T6.2 crash (out parameter double-free)
 
-### P3: DXC validation
-- Install DXC, run `dxc -T ps_6_0 -E main` on generated HLSL
-- Fix any DXC errors (undefined identifiers, type mismatches, etc.)
-
-### P4: Performance comparison
-- Benchmark: glslpp vs glslang+spirv-cross on wintty shaders
-- Measure: wall-clock time, peak RSS, output size
+### P4: Performance benchmark
+- glslpp vs glslang+spirv-cross on wintty shaders
 
 ## Key Files to Read First
 1. `src/spirv_to_hlsl.zig` — the entire HLSL backend
-2. `tests/hlsl_tests.zig` — test suite showing what works and what doesn't
+2. `tests/hlsl_tests.zig` — test suite
 3. `test_crt_full.glsl.hlsl` — actual output from CRT shadertoy shader
 4. `PLAN.md` — full task list with progress tracking
 
 ## Git State
 - Branch: `main`
-- Latest commit: `a2676b8` — "Add HLSL backend test suite"
-- 5 commits this session (license, HLSL backend, texture fix, std450 fallback, tests)
+- Latest commit: `e1b584a` — "Fix HLSL backend: vector AccessChain, void calls, fragment output, if/else control flow"
