@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 const std = @import("std");
 pub const diagnostic = @import("diagnostic.zig");
 pub const lexer = @import("lexer.zig");
@@ -8,6 +9,7 @@ pub const spirv = @import("spirv.zig");
 pub const parser = @import("parser.zig");
 pub const semantic = @import("semantic.zig");
 pub const codegen = @import("codegen.zig");
+pub const spirv_to_hlsl = @import("spirv_to_hlsl.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -28,7 +30,7 @@ pub const CompileDetail = enum {
 
 pub threadlocal var last_compile_detail: ?CompileDetail = null;
 
-pub const Stage = enum { vertex, fragment, compute, geometry };
+pub const Stage = enum { vertex, fragment, compute, geometry, tessellation_control, tessellation_evaluation };
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
 
 pub const ResourceLimits = struct {
@@ -84,6 +86,8 @@ pub fn compileToSPIRV(
         .fragment => .fragment,
         .compute => .compute,
         .geometry => .geometry,
+        .tessellation_control => .tessellation_control,
+        .tessellation_evaluation => .tessellation_evaluation,
     };
     const spirv_ver: codegen.SPIRVVersion = switch (options.spirv_version) {
         .@"1.0" => .@"1.0",
@@ -111,6 +115,36 @@ pub fn spirvToGLSL(
     _ = options;
     return error.CodegenFailed;
 }
+
+/// Cross-compile SPIR-V binary to HLSL source.
+/// Targets Shader Model 6.0 with entry point named `main`.
+pub fn spirvToHLSL(
+    alloc: std.mem.Allocator,
+    spirv_words: []const u32,
+    options: spirv_to_hlsl.HlslCompileOptions,
+) ![]const u8 {
+    return spirv_to_hlsl.spirvToHLSL(alloc, spirv_words, options);
+}
+
+/// One-shot: compile Shadertoy-style GLSL to HLSL.
+/// Chains preprocess → parse → SPIR-V → HLSL.
+pub fn compileShadertoyToHlsl(
+    alloc: std.mem.Allocator,
+    glsl: [:0]const u8,
+    options: CompileOptions,
+) !struct { hlsl: []const u8, diagnostics: []diagnostic.Diagnostic } {
+    const spirv_words = try compileToSPIRV(alloc, glsl, options);
+    defer alloc.free(spirv_words);
+
+    const hlsl = try spirvToHLSL(alloc, spirv_words, .{
+        .binding_shift = -1, // remap binding=1 → register(b0)
+        .shader_model = 60,
+    });
+
+    return .{ .hlsl = hlsl, .diagnostics = &.{} };
+}
+
+
 
 /// Validate a SPIR-V binary using spirv-val. Returns true if validation passed,
 /// false if spirv-val is not found on PATH.

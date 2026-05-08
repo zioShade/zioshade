@@ -86,6 +86,12 @@ fn testShader(alloc: std.mem.Allocator, path: []const u8, save_spv: ?[]const u8)
             break :blk .vertex
         else if (std.mem.endsWith(u8, path, ".comp") or std.mem.endsWith(u8, path, ".c.glsl"))
             break :blk .compute
+        else if (std.mem.endsWith(u8, path, ".geom"))
+            break :blk .geometry
+        else if (std.mem.endsWith(u8, path, ".tesc"))
+            break :blk .tessellation_control
+        else if (std.mem.endsWith(u8, path, ".tese"))
+            break :blk .tessellation_evaluation
         else
             break :blk .fragment;
     };

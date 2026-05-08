@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 /// optimizeMatVecMul: Detect extract -> VecTimesScalar -> FAdd chains implementing
 /// matrix-vector multiplication, replace with OpMatrixTimesVector.
 const std = @import("std");
