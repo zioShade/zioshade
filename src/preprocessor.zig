@@ -628,7 +628,35 @@ pub const Preprocessor = struct {
                     _ = self.if_stack.pop();
                     i += 1;
                 },
-                .pp_error, .pp_pragma, .pp_line, .pp_extension => {
+                .pp_error, .pp_pragma, .pp_line => {
+                    self.skipToEndOfLine(tokens, &i);
+                },
+                .pp_extension => {
+                    // Parse #extension NAME : behavior
+                    // Only define macros for extensions where the feature is actually supported
+                    if (self.isActive() and i + 4 < tokens.len) {
+                        const save_i = i;
+                        i += 1; // skip #extension token
+                        if (i < tokens.len and tokens[i].tag == .identifier) {
+                            const ext_name = self.getTokenText(tokens[i]);
+                            i += 1;
+                            if (i < tokens.len and tokens[i].tag == .colon) {
+                                i += 1; // skip :
+                                if (i < tokens.len and tokens[i].tag == .identifier) {
+                                    const behavior = self.getTokenText(tokens[i]);
+                                    if (std.mem.eql(u8, behavior, "enable") and
+                                        std.mem.eql(u8, ext_name, "GL_EXT_null_initializer"))
+                                    {
+                                        const name_dup = try self.alloc.dupe(u8, ext_name);
+                                        const one_tok = lexer.Token{ .tag = .int_literal, .loc = tokens[i].loc, .start = 0, .len = 1 };
+                                        const body = try self.alloc.dupe(lexer.Token, &.{one_tok});
+                                        try self.defines.put(self.alloc, name_dup, .{ .object = body });
+                                    }
+                                }
+                            }
+                        }
+                        i = save_i;
+                    }
                     self.skipToEndOfLine(tokens, &i);
                 },
                 .identifier => {
