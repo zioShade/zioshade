@@ -5205,20 +5205,82 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
         }
     }
     // Also add 1-store-1-load non-constant vars (not already in const_store_val)
-    // DISABLED: forwarding non-constant values across blocks causes dominance violations.
-    // Only forward actual constants (already handled above).
-    // {
-    //     var it = single_store_val.iterator();
-    //     while (it.next()) |entry| {
-    //         const vid = entry.key_ptr.*;
-    //         const val = entry.value_ptr.*;
-    //         const sc = store_count.get(vid) orelse 0;
-    //         const lc = load_count.get(vid) orelse 0;
-    //         if (sc == 1 and lc == 1 and !unsafe_vars.isSet(vid) and !const_store_val.contains(vid)) {
-    //             const_store_val.put(alloc, vid, val) catch {};
-    //         }
-    //     }
-    // }
+    // With dominance check: only forward if store and load are in the same basic block.
+    {
+        // Build store position map for qualifying vars
+        var store_pos_map = std.AutoHashMapUnmanaged(u32, u32){}; // var_id -> store position
+        defer store_pos_map.deinit(alloc);
+        var sit = single_store_val.iterator();
+        while (sit.next()) |entry| {
+            const vid = entry.key_ptr.*;
+            const sc = store_count.get(vid) orelse 0;
+            const lc = load_count.get(vid) orelse 0;
+            if (sc == 1 and lc == 1 and !unsafe_vars.isSet(vid) and !const_store_val.contains(vid)) {
+                // Find store position
+                var sp: u32 = 5;
+                while (sp < words.len) {
+                    const sh = words[sp]; const swc: u32 = sh >> 16; const sop: u16 = @truncate(sh & 0xFFFF);
+                    if (swc == 0) break;
+                    const sie = sp + swc;
+                    if (sie > words.len) break;
+                    if (sop == 62 and swc >= 3 and words[sp + 1] == vid) {
+                        store_pos_map.put(alloc, vid, sp) catch {};
+                        break;
+                    }
+                    sp = sie;
+                }
+            }
+        }
+        // For each qualifying var, find load position and check same-block
+        var lit = store_pos_map.iterator();
+        while (lit.next()) |entry| {
+            const vid = entry.key_ptr.*;
+            const st_pos = entry.value_ptr.*;
+            // Find store's block
+            const store_block = blk: {
+                var bp: u32 = 5; var cur: u32 = 0;
+                while (bp < words.len) {
+                    if (bp == st_pos) break :blk cur;
+                    const bh = words[bp]; const bwc: u32 = bh >> 16;
+                    if (bwc == 0) break;
+                    if ((@as(u16, @truncate(bh & 0xFFFF)) == 248) and bwc >= 2) cur = words[bp + 1];
+                    const bie = bp + bwc;
+                    if (bie > words.len) break;
+                    bp = bie;
+                }
+                break :blk cur;
+            };
+            // Find load position and its block
+            var load_same_block = true;
+            var lp: u32 = 5;
+            while (lp < words.len) {
+                const lh = words[lp]; const lwc: u32 = lh >> 16; const lop: u16 = @truncate(lh & 0xFFFF);
+                if (lwc == 0) break;
+                const lie = lp + lwc;
+                if (lie > words.len) break;
+                if (lop == 61 and lwc >= 4 and words[lp + 3] == vid) {
+                    const load_block = blk: {
+                        var bp2: u32 = 5; var cur2: u32 = 0;
+                        while (bp2 < words.len) {
+                            if (bp2 == lp) break :blk cur2;
+                            const bh = words[bp2]; const bwc: u32 = bh >> 16;
+                            if (bwc == 0) break;
+                            if ((@as(u16, @truncate(bh & 0xFFFF)) == 248) and bwc >= 2) cur2 = words[bp2 + 1];
+                            const bie = bp2 + bwc;
+                            if (bie > words.len) break;
+                            bp2 = bie;
+                        }
+                        break :blk cur2;
+                    };
+                    if (load_block != store_block) { load_same_block = false; break; }
+                }
+                lp = lie;
+            }
+            if (load_same_block) {
+                const_store_val.put(alloc, vid, single_store_val.get(vid).?) catch {};
+            }
+        }
+    }
 
     if (const_store_val.count() == 0) return words;
 
