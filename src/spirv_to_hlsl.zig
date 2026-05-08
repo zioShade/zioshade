@@ -231,8 +231,23 @@ pub fn spirvToHLSL(
     }
     if (textures.items.len > 0) try w.writeAll("\n");
 
-    // Emit entry function
-    try emitFunction(&module, &names, &decorations, entry_id, w, alloc);
+    // Find ALL function IDs in the module
+    var func_ids = std.ArrayList(u32).initCapacity(alloc, 8) catch return error.OutOfMemory;
+    defer func_ids.deinit(alloc);
+    for (module.instructions) |inst| {
+        if (inst.op == .Function and inst.words.len > 2) {
+            try func_ids.append(alloc, inst.words[2]);
+        }
+    }
+
+    // Emit non-entry functions first (user-defined functions)
+    for (func_ids.items) |fid| {
+        if (fid == entry_id) continue; // emit entry last
+        try emitFunction(&module, &names, &decorations, fid, w, alloc, false);
+    }
+
+    // Emit entry function last
+    try emitFunction(&module, &names, &decorations, entry_id, w, alloc, true);
 
     return output.toOwnedSlice(alloc);
 }
@@ -273,6 +288,54 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
             names.put(id, sanitized) catch {};
         }
 
+        // Resolve constants to literal value strings
+        if (inst.op == .Constant and inst.words.len > 3) {
+            const rid = inst.words[2];
+            const type_id = inst.words[1];
+            const type_inst = getDef(module, type_id);
+            if (type_inst) |ti| {
+                const literal = constantLiteral(alloc, ti, inst.words[3..]) catch continue;
+                // Free any previous name for this ID
+                if (names.fetchPut(rid, literal) catch null) |old| alloc.free(old.value);
+                continue;
+            }
+        }
+        if (inst.op == .ConstantTrue and inst.words.len > 2) {
+            const lit = alloc.dupe(u8, "true") catch continue;
+            if (names.fetchPut(inst.words[2], lit) catch null) |old| alloc.free(old.value);
+            continue;
+        }
+        if (inst.op == .ConstantFalse and inst.words.len > 2) {
+            const lit = alloc.dupe(u8, "false") catch continue;
+            if (names.fetchPut(inst.words[2], lit) catch null) |old| alloc.free(old.value);
+            continue;
+        }
+        // Resolve ConstantComposite (e.g., vec2(0.5, 0.5))
+        if (inst.op == .ConstantComposite and inst.words.len > 3) {
+            const rid = inst.words[2];
+            const type_id = inst.words[1];
+            const type_inst = getDef(module, type_id);
+            if (type_inst) |ti| {
+                if (ti.op == .TypeVector) {
+                    const scalar_type = tryResolveTypeName(module, ti.words[2]);
+                    const count = ti.words[3];
+                    // Build: typeN(comp0, comp1, ...)
+                    var buf = std.ArrayList(u8).initCapacity(alloc, 64) catch continue;
+                    defer buf.deinit(alloc);
+                    buf.writer(alloc).print("{s}{d}(", .{scalar_type, count}) catch continue;
+                    for (inst.words[3..], 0..) |comp_id, i| {
+                        if (i > 0) buf.writer(alloc).writeAll(", ") catch continue;
+                        const comp_name = names.get(comp_id) orelse "0.0";
+                        buf.writer(alloc).writeAll(comp_name) catch continue;
+                    }
+                    buf.writer(alloc).writeAll(")") catch continue;
+                    const lit = buf.toOwnedSlice(alloc) catch continue;
+                    if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
+                    continue;
+                }
+            }
+        }
+
         // Auto-name unnamed result IDs
         if (resultIdFromOp(inst.op, inst.words)) |rid| {
             if (!names.contains(rid)) {
@@ -282,6 +345,38 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
             }
         }
     }
+}
+
+fn tryResolveTypeName(module: *const ParsedModule, type_id: u32) []const u8 {
+    const inst = getDef(module, type_id) orelse return "float";
+    return switch (inst.op) {
+        .TypeFloat => "float",
+        .TypeInt => if (inst.words.len > 3 and inst.words[3] != 0) "int" else "uint",
+        .TypeBool => "bool",
+        else => "float",
+    };
+}
+
+fn constantLiteral(alloc: std.mem.Allocator, type_inst: Instruction, literal_words: []const u32) ![]const u8 {
+    if (type_inst.op == .TypeFloat and literal_words.len > 0) {
+        const val: f32 = @bitCast(literal_words[0]);
+        // Format float: use 0.5, 1.0 etc but ensure it has a decimal point
+        if (val == @floor(val) and @abs(val) < 1e6) {
+            const ival: i32 = @intFromFloat(val);
+            return std.fmt.allocPrint(alloc, "{d}.0", .{ival});
+        }
+        return std.fmt.allocPrint(alloc, "{d}", .{val});
+    }
+    if (type_inst.op == .TypeInt and literal_words.len > 0) {
+        const signed = type_inst.words.len > 3 and type_inst.words[3] != 0;
+        if (signed) {
+            const val: i32 = @bitCast(literal_words[0]);
+            return std.fmt.allocPrint(alloc, "{d}", .{val});
+        } else {
+            return std.fmt.allocPrint(alloc, "{d}u", .{literal_words[0]});
+        }
+    }
+    return std.fmt.allocPrint(alloc, "{d}", .{literal_words[0]});
 }
 
 fn sanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
@@ -474,18 +569,19 @@ fn emitFunction(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
     decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
-    entry_id: u32,
+    func_id: u32,
     w: anytype,
     alloc: std.mem.Allocator,
+    is_entry: bool,
 ) !void {
-    const func_inst = getDef(module, entry_id) orelse return;
+    const func_inst = getDef(module, func_id) orelse return;
     if (func_inst.op != .Function or func_inst.words.len < 5) return;
 
     const func_type_id = func_inst.words[4];
     const func_type_inst = getDef(module, func_type_id) orelse return;
     const return_type_id = func_type_inst.words[2];
     const return_type = try hlslType(module, return_type_id, names, alloc);
-    const is_fragment = module.execution_model == .Fragment;
+    const is_fragment = is_entry and module.execution_model == .Fragment;
 
     // Find output variable for fragment shader
     var output_var_id: ?u32 = null;
@@ -502,7 +598,9 @@ fn emitFunction(
     }
 
     // Collect function parameters
-    const func_idx = module.id_defs.get(entry_id) orelse return;
+    const func_idx = module.id_defs.get(func_id) orelse return;
+    const func_name = names.get(func_id) orelse "func";
+
     var param_ids = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;
     defer param_ids.deinit(alloc);
 
@@ -520,7 +618,7 @@ fn emitFunction(
     if (is_fragment) {
         try w.writeAll("float4 main(");
     } else {
-        try w.print("{s} main(", .{return_type});
+        try w.print("{s} {s}(", .{ return_type, func_name });
     }
 
     // Emit parameters with semantics
@@ -819,11 +917,52 @@ fn emitInstruction(
         .ReturnValue => {
             try w.print("    return {s};\n", .{names.get(inst.words[1]) orelse "0"});
         },
-        .Branch => {},
-        .BranchConditional => {},
-        .SelectionMerge => {},
-        .LoopMerge => {},
-        .Label => {},
+        // Control flow — reconstruct structured flow from SPIR-V branch-based IR
+        .SelectionMerge => {}, // consumed by BranchConditional handler
+        .LoopMerge => {}, // consumed by branch handler
+        .Label => {}, // basic block boundary — handled by control flow tracking
+
+        .Branch => {
+            // Unconditional branch — only meaningful for loop back-edges
+            // For straight-line code, this just goes to the next block
+        },
+
+        .BranchConditional => {
+            if (inst.words.len < 4) return;
+            const cond_id = inst.words[1];
+            const true_label = inst.words[2];
+            const false_label = inst.words[3];
+
+            // Find the merge block from a preceding SelectionMerge
+            // Scan backwards from this instruction to find SelectionMerge in same block
+            const cond_name = names.get(cond_id) orelse "c";
+
+            // Simple approach: emit if/else blocks
+            // The true block starts at the next instruction (after the label)
+            // The false block starts at false_label
+            // The merge point is where both paths rejoin
+            try w.print("    if ({s}) {{\n", .{cond_name});
+            // Emit true branch instructions until we hit a Branch/BranchConditional
+            _ = true_label;
+            _ = false_label;
+            // For now, we rely on the linear scan; the true branch instructions
+            // will be emitted naturally until the Branch to the merge point
+            // The false branch will be emitted after the Branch
+            // TODO: Full structured control flow reconstruction
+        },
+
+        .FunctionCall => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const func_id_call = inst.words[3];
+            const func_name_call = names.get(func_id_call) orelse "func";
+            const result_name = names.get(inst.words[2]) orelse "v";
+            try w.print("    {s} {s} = {s}(", .{ rt, result_name, func_name_call });
+            for (inst.words[4..], 0..) |arg_id, i| {
+                if (i > 0) try w.writeAll(", ");
+                try w.writeAll(names.get(arg_id) orelse "0");
+            }
+            try w.writeAll(");\n");
+        },
         .ControlBarrier => try w.writeAll("    GroupMemoryBarrierWithGroupSync();\n"),
         .MemoryBarrier => try w.writeAll("    DeviceMemoryBarrier();\n"),
 
