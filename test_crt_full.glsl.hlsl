@@ -49,17 +49,17 @@ void mainImage(float4 v28, float2 v29)
     float v42 = v41 / 5.0;
     float v43 = acos(v42, 2.0);
     float v44 = 1.0 + v43;
-    float v45 = v31._m0;
+    float v45 = v31.x;
     float v46 = v45 * v44;
-    v31._m0 = v46;
+    v31.x = v46;
     float v48 = v38.x;
     float v49 = abs(v48);
     float v50 = v49 / 4.0;
     float v51 = acos(v50, 2.0);
     float v52 = 1.0 + v51;
-    float v53 = v31._m1;
+    float v53 = v31.y;
     float v54 = v53 * v52;
-    v31._m1 = v54;
+    v31.y = v54;
     float2 v55 = v38 / float2(2.0, 2.0);
     float2 v56 = v55 + float2(0.5, 0.5);
     float2 v57 = v56 * 0.92;
@@ -112,7 +112,7 @@ void mainImage(float4 v28, float2 v29)
     float v108 = v107.x;
     float v109 = 0.08 * v108;
     float v110 = v86 + v109;
-    v30._m0 = v110;
+    v30.x = v110;
     float v111 = -0.022;
     float v112 = v78 + v111;
     float v113 = -0.02;
@@ -124,7 +124,7 @@ void mainImage(float4 v28, float2 v29)
     float v119 = v118.y;
     float v120 = 0.05 * v119;
     float v121 = v92 + v120;
-    v30._m1 = v121;
+    v30.y = v121;
     float v122 = v78 + v113;
     float v123 = -0.018;
     float2 v124 = float2(v122, v123);
@@ -136,7 +136,7 @@ void mainImage(float4 v28, float2 v29)
     float v130 = v129.z;
     float v131 = 0.08 * v130;
     float v132 = v98 + v131;
-    v30._m2 = v132;
+    v30.z = v132;
     float3 v133 = v30;
     float3 v134 = v133 * 0.6;
     float3 v135 = v133 * 0.4;
@@ -181,6 +181,7 @@ void mainImage(float4 v28, float2 v29)
     float3 v172 = v30;
     float3 v173 = v172 * 0.0;
     v30 = v173;
+    }
     bool v174 = v63 < 0.0;
     bool v175 = v63 > 1.0;
     bool v176 = v174 || v175;
@@ -188,6 +189,7 @@ void mainImage(float4 v28, float2 v29)
     float3 v177 = v30;
     float3 v178 = v177 * 0.0;
     v30 = v178;
+    }
     float v179 = v29.x;
     float v180 = v179 % 2.0;
     float v181 = v180 - 1.0;
@@ -203,10 +205,9 @@ void mainImage(float4 v28, float2 v29)
 }
 float4 main() : SV_Target
 {
-    float4 v24 = _fragColor;
+    float4 _fragColor;
     float4 v25 = gl_FragCoord;
     float2 v26 = float2(v25.x, v25.y);
-    void v27 = mainImage(v24, v26);
-    return;
+    mainImage(_fragColor, v26);
     return _fragColor;
 }
