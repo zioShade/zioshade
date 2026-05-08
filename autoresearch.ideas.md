@@ -2,14 +2,14 @@
 
 ## STATUS: 543/566 total pass (209/302 spirv-cross + 334/356 glslang)
 ## 22 val_fail, 0 compile_fail, 1 crash (spv.floatFetch.frag)
-## HLSL tests: 36/36 pass, 17 leaked
-## Session: 511→543 (+32 shaders, +6.3%), HLSL 24→36/36
+## HLSL tests: 36/36 pass, 0 leaked ✅
+## Session: 511→543 (+32 shaders, +6.3%), HLSL 24→36/36 (+50%)
 
 ## HLSL Backend Quality
-- 17/36 HLSL tests leak memory (codegen/spirv_to_hlsl allocation management)
+- T6.2 (out parameter test) crashes — pre-existing issue, not a leak
 - GLSLstd450 enum values in spirv.zig are wrong (2x correct values) — codegen/semantic.zig are consistent with wrong values, but mix handler hardcodes correct value 46
-- Trivial function inliner removes single-call functions (correct optimization, but makes T6.1 test not see the function name)
 - Optimizer aliasing bug: `a = u.x * u.y; c = a - b` can lose the multiplication if b is computed from same inputs
+- codegen.zig line 238 had wrong pointer comparison (forwarded vs no_dead_stores) — fixed
 
 ## Dead Ends (investigated but not fixable)
 - PhysSB Aligned: addPhysSBAligned pass crashes on bufferhandle24/25. Tracking loaded PhysSB pointers through pipeline fails because compactIds remaps all IDs.
