@@ -2229,3 +2229,22 @@ test "T31.4: textureProj maps to Sample with divided coord" {
     try assertContains(hlsl, "Sample");
     try assertContains(hlsl, "discard");
 }
+
+test "T31.5: textureGather maps to Gather" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 uv = vec2(0.5, 0.5);
+        \\    vec4 c = textureGather(tex, uv, 0);
+        \\    if (c.x > 0.0) discard;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // textureGather → Texture2D.Gather(sampler, coord, component)
+    try assertContains(hlsl, "Gather");
+    try assertContains(hlsl, "discard");
+}
