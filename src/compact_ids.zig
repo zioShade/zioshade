@@ -3238,7 +3238,7 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
         const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
 
-        if (opcode == 1) { // OpLabel - new block, reset tracking
+        if (opcode == 248) { // OpLabel - new block, reset tracking
             last_store_pos.clearRetainingCapacity();
             pos += wc;
             continue;
