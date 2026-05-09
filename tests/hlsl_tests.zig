@@ -6674,3 +6674,81 @@ test "T250.1: gl_PointCoord in fragment" {
     try assertContains(hlsl, "float4");
 }
 
+test "T251.1: dFdxCoarse and dFdxFine" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 dx_c = dFdxCoarse(uv);
+        \\    vec2 dx_f = dFdxFine(uv);
+        \\    vec2 dy_c = dFdyCoarse(uv);
+        \\    vec2 dy_f = dFdyFine(uv);
+        \\    fragColor = vec4(dx_c.x + dx_f.x, dy_c.y + dy_f.y, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T252.1: vec4 frexp and ldexp" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec4 exp;
+        \\    vec4 sig = frexp(v, exp);
+        \\    vec4 reconstructed = ldexp(sig, exp);
+        \\    fragColor = reconstructed;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T253.1: gl_SampleID and gl_SamplePosition" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sid = float(gl_SampleID);
+        \\    vec2 sp = gl_SamplePosition;
+        \\    fragColor = vec4(sid * 0.1, sp.x, sp.y, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T254.1: sample qualifier on input" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) sample in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = v * 0.5;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T255.1: gl_SampleMask" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    gl_SampleMask[0] = 1;
+        \\    fragColor = vec4(1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
