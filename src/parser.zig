@@ -78,6 +78,7 @@ pub fn parse(alloc: std.mem.Allocator, source: [:0]const u8, tokens: []const lex
         .body = try body.toOwnedSlice(alloc),
         .alloc = alloc,
         .heap_types = try p.heap_types.toOwnedSlice(alloc),
+        .heap_children = try p.heap_children.toOwnedSlice(alloc),
     };
 }
 
@@ -93,8 +94,16 @@ pub fn freeTree(alloc: std.mem.Allocator, root: *ast.Root) void {
     if (root.heap_types.len > 0) {
         alloc.free(root.heap_types);
     }
+    // Free heap-allocated children arrays (from dupeNodes and args.toOwnedSlice)
+    for (root.heap_children) |children| {
+        alloc.free(children);
+    }
+    if (root.heap_children.len > 0) {
+        alloc.free(root.heap_children);
+    }
     root.body = &.{};
     root.heap_types = &.{};
+    root.heap_children = &.{};
 }
 
 fn freeNode(alloc: std.mem.Allocator, node: *const ast.Node) void {
@@ -103,9 +112,7 @@ fn freeNode(alloc: std.mem.Allocator, node: *const ast.Node) void {
     for (node.data.children) |*child| {
         freeNode(alloc, child);
     }
-    if (node.data.children.len > 0) {
-        alloc.free(node.data.children);
-    }
+    // Note: node.data.children freed via Root.heap_children in freeTree
     if (node.data.params.len > 0) {
         alloc.free(node.data.params);
     }
@@ -134,6 +141,7 @@ const Parser = struct {
     pos: usize,
     struct_names: std.StringHashMapUnmanaged(void),
     heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
+    heap_children: std.ArrayListUnmanaged([]const ast.Node) = .{},
 
     // ── Navigation ────────────────────────────────────────────
 
@@ -224,7 +232,18 @@ const Parser = struct {
 
     fn dupeNodes(self: *Parser, nodes: []const ast.Node) Error![]const ast.Node {
         if (nodes.len == 0) return &.{};
-        return self.alloc.dupe(ast.Node, nodes);
+        const duped = try self.alloc.dupe(ast.Node, nodes);
+        self.heap_children.append(self.alloc, duped) catch {};
+        return duped;
+    }
+
+    /// Convert ArrayList to owned slice and track for cleanup.
+    fn ownedChildren(self: *Parser, list: *std.ArrayListUnmanaged(ast.Node)) Error![]const ast.Node {
+        const slice = try list.toOwnedSlice(self.alloc);
+        if (slice.len > 0) {
+            self.heap_children.append(self.alloc, slice) catch {};
+        }
+        return slice;
     }
 
     /// Create a binary_op node. Must use this instead of direct struct literal
@@ -760,7 +779,7 @@ const Parser = struct {
             .data = .{
                 .name = self.text(name_tok),
                 .ty = ty,
-                .children = try init_nodes.toOwnedSlice(self.alloc),
+                .children = try self.ownedChildren(&init_nodes),
                 .qualifier = qualifier,
                 .layout = layout,
             },
@@ -917,7 +936,7 @@ const Parser = struct {
             try stmts.append(self.alloc, stmt);
         }
         _ = self.expect(.r_brace) catch {};
-        return try stmts.toOwnedSlice(self.alloc);
+        return try self.ownedChildren(&stmts);
     }
 
     fn parseStatement(self: *Parser) Error!ast.Node {
@@ -1050,7 +1069,7 @@ const Parser = struct {
             .data = .{
                 .name = self.text(name_tok),
                 .ty = ty,
-                .children = try init_nodes.toOwnedSlice(self.alloc),
+                .children = try self.ownedChildren(&init_nodes),
                 .qualifier = qualifier,
             },
         });
@@ -1071,7 +1090,7 @@ const Parser = struct {
                 .data = .{
                     .name = self.text(next_name),
                     .ty = ty,
-                    .children = try next_init.toOwnedSlice(self.alloc),
+                    .children = try self.ownedChildren(&next_init),
                     .qualifier = qualifier,
                 },
             });
@@ -1085,7 +1104,7 @@ const Parser = struct {
         return .{
             .tag = .multi_decl,
             .loc = self.nodeLoc(name_tok),
-            .data = .{ .children = try decl_children.toOwnedSlice(self.alloc) },
+            .data = .{ .children = try self.ownedChildren(&decl_children) },
         };
     }
 
@@ -1108,7 +1127,7 @@ const Parser = struct {
         return .{
             .tag = .if_stmt,
             .loc = self.nodeLoc(tok),
-            .data = .{ .children = try children.toOwnedSlice(self.alloc) },
+            .data = .{ .children = try self.ownedChildren(&children) },
         };
     }
 
@@ -1155,7 +1174,7 @@ const Parser = struct {
         return .{
             .tag = .for_stmt,
             .loc = self.nodeLoc(tok),
-            .data = .{ .children = try children.toOwnedSlice(self.alloc) },
+            .data = .{ .children = try self.ownedChildren(&children) },
         };
     }
 
@@ -1293,7 +1312,7 @@ const Parser = struct {
         return .{
             .tag = .comma_op,
             .loc = expr.loc,
-            .data = .{ .children = try children.toOwnedSlice(self.alloc) },
+            .data = .{ .children = try self.ownedChildren(&children) },
         };
     }
 
@@ -1663,7 +1682,7 @@ const Parser = struct {
                         return .{
                             .tag = .type_constructor,
                             .loc = self.nodeLoc(tok),
-                            .data = .{ .ty = ty, .children = try args.toOwnedSlice(self.alloc) },
+                            .data = .{ .ty = ty, .children = try self.ownedChildren(&args) },
                         };
                     }
                     // Not followed by (, backtrack not easy — but this shouldn't happen for valid GLSL
@@ -1682,7 +1701,7 @@ const Parser = struct {
                     return .{
                         .tag = .func_call,
                         .loc = self.nodeLoc(tok),
-                        .data = .{ .name = self.text(tok), .children = try args.toOwnedSlice(self.alloc) },
+                        .data = .{ .name = self.text(tok), .children = try self.ownedChildren(&args) },
                     };
                 }
                 return .{
@@ -1750,7 +1769,7 @@ const Parser = struct {
                 return .{
                     .tag = .type_constructor,
                     .loc = self.nodeLoc(tok),
-                    .data = .{ .ty = ty, .children = try args.toOwnedSlice(self.alloc) },
+                    .data = .{ .ty = ty, .children = try self.ownedChildren(&args) },
                 };
             },
             // texture2D, texture3D etc. are built-in functions, not type constructors.
@@ -1771,7 +1790,7 @@ const Parser = struct {
                     return .{
                         .tag = .func_call,
                         .loc = self.nodeLoc(tok),
-                        .data = .{ .name = name, .children = try args.toOwnedSlice(self.alloc) },
+                        .data = .{ .name = name, .children = try self.ownedChildren(&args) },
                     };
                 }
                 return .{ .tag = .identifier, .loc = self.nodeLoc(tok), .data = .{ .name = name } };
