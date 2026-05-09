@@ -4084,3 +4084,77 @@ test "T91.1: nested function calls" {
     try assertContains(hlsl, "float4");
 }
 
+test "T92.1: gl_VertexID maps to SV_VertexID" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 pos;
+        \\void main() {
+        \\    gl_Position = vec4(pos, float(gl_VertexID), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T92.2: gl_InstanceID maps to SV_InstanceID" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 pos;
+        \\void main() {
+        \\    gl_Position = vec4(pos, float(gl_InstanceID), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T93.1: modf builtin" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float i;
+        \\    float f = modf(x, i);
+        \\    fragColor = vec4(f, i, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T94.1: sampler2DShadow with textureLod" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DShadow shadowMap;
+        \\layout(location = 0) in vec3 uv_depth;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = textureLod(shadowMap, uv_depth, 0.0);
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T95.1: multiple vec4 outputs with different locations" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 color0;
+        \\layout(location = 1) out vec4 color1;
+        \\void main() {
+        \\    color0 = vec4(x, 0.0, 0.0, 1.0);
+        \\    color1 = vec4(0.0, x, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
