@@ -187,7 +187,7 @@ fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
 // ---------------------------------------------------------------------------
 
 pub const HlslCompileOptions = struct {
-    binding_shift: i32 = -1,
+    binding_shift: i32 = 0,
     shader_model: u32 = 60,
 };
 
