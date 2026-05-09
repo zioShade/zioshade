@@ -4158,3 +4158,81 @@ test "T95.1: multiple vec4 outputs with different locations" {
     try assertContains(hlsl, "float4");
 }
 
+test "T96.1: gl_NumWorkGroups in compute shader" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Output { float data[]; } out_buf;
+        \\void main() {
+        \\    uint idx = gl_GlobalInvocationID.x;
+        \\    out_buf.data[idx] = float(gl_NumWorkGroups.x);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T97.1: nested struct with sampler" {
+    const source =
+        \\#version 450
+        \\struct Inner { float x; float y; };
+        \\struct Outer { Inner i; float z; };
+        \\layout(binding = 0) uniform U { Outer o; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(u.o.i.x, u.o.i.y, u.o.z, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T98.1: vec4 + vec4 addition" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 1) in vec4 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 result = a + b;
+        \\    fragColor = result;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T99.1: array of floats in uniform block" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { float vals[8]; } u;
+        \\layout(location = 0) in int idx;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(u.vals[idx]);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T100.1: mat3 construction and multiply" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat3 m; } u;
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 result = u.m * v;
+        \\    fragColor = vec4(result, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
