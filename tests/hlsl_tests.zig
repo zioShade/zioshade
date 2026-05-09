@@ -5459,3 +5459,92 @@ test "T175.1: vec4 step with uniform edge" {
     try assertContains(hlsl, "float4");
 }
 
+test "T176.1: vec4 fract and ceil" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 f = fract(x);
+        \\    vec4 c = ceil(x);
+        \\    fragColor = f + c * 0.01;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T177.1: compute with gl_GlobalInvocationID 2D" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 8, local_size_y = 8) in;
+        \\layout(std430, binding = 0) buffer Data { vec4 pixels[]; } data;
+        \\void main() {
+        \\    uvec2 id = gl_GlobalInvocationID.xy;
+        \\    uint idx = id.y * 8u + id.x;
+        \\    data.pixels[idx] = vec4(float(id.x) / 8.0, float(id.y) / 8.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T178.1: function with out parameter" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void decompose(float v, out float integral, out float fractional) {
+        \\    integral = floor(v);
+        \\    fractional = fract(v);
+        \\}
+        \\void main() {
+        \\    float i;
+        \\    float f;
+        \\    decompose(x, i, f);
+        \\    fragColor = vec4(i, f, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T179.1: geometry shader with point output" {
+    const source =
+        \\#version 450
+        \\layout(points) in;
+        \\layout(points, max_vertices = 1) out;
+        \\in gl_PointSize { float gl_PointSize; };
+        \\layout(location = 0) in vec4 vColor[];
+        \\layout(location = 0) out vec4 gColor;
+        \\void main() {
+        \\    gl_Position = gl_in[0].gl_Position;
+        \\    gl_PointSize = 4.0;
+        \\    gColor = vColor[0];
+        \\    EmitVertex();
+        \\    EndPrimitive();
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T180.1: vec3 sign function" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 s = sign(v);
+        \\    fragColor = vec4(s, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
