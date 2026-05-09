@@ -2535,3 +2535,52 @@ test "T36.4: round maps to round" {
     try assertContains(hlsl, "round");
     try assertContains(hlsl, "discard");
 }
+
+test "T37.1: mat2 construction" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float a; float b; float c; float d; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat2 m = mat2(u.a, u.b, u.c, u.d);
+        \\    if (m[0][0] > 0.0) discard;
+        \\    fragColor = vec4(m[0], 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T37.2: outerProduct" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 a; vec3 b; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat3 m = outerProduct(u.a, u.b);
+        \\    if (m[0][0] > 0.0) discard;
+        \\    fragColor = vec4(m[0], 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T37.3: determinant on mat2" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { mat2 m; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = determinant(u.m);
+        \\    if (d > 0.0) discard;
+        \\    fragColor = vec4(d, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "determinant");
+    try assertContains(hlsl, "discard");
+}
