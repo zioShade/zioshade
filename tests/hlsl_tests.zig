@@ -4486,3 +4486,82 @@ test "T115.1: layout(std140) uniform block" {
     try assertContains(hlsl, "float4");
 }
 
+test "T116.1: sampler2D with bias (SampleBias)" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = texture(tex, uv, 0.5);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T117.1: float to uint conversion" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint u = uint(x);
+        \\    fragColor = vec4(float(u));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T118.1: gl_LocalInvocationID in compute" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 32) in;
+        \\layout(std430, binding = 0) buffer Data { float vals[]; } data;
+        \\void main() {
+        \\    uint local_id = gl_LocalInvocationID.x;
+        \\    data.vals[local_id] = float(local_id);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T119.1: conditional store with side effects" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) in float cond;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (cond > 0.5) {
+        \\        fragColor = texture(tex, uv);
+        \\    } else {
+        \\        fragColor = vec4(0.0);
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T120.1: vec4 construction from 4 floats" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(a, a * 2.0, a * 3.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
