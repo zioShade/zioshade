@@ -6922,3 +6922,85 @@ test "T265.1: std140 uniform block layout" {
     try assertContains(hlsl, "float4");
 }
 
+test "T266.1: multiple vec2 inputs" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 a;
+        \\layout(location = 1) in vec2 b;
+        \\layout(location = 2) in vec2 c;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 sum = a + b + c;
+        \\    fragColor = vec4(sum, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T267.1: mat3 from 3 vec3 columns" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 1) in vec3 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat3 m = mat3(a, b, vec3(0.0, 0.0, 1.0));
+        \\    vec3 result = m * vec3(1.0);
+        \\    fragColor = vec4(result, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T268.1: nested ternary with function call" {
+    const source =
+        \\#version 450
+        \\float process(float x) { return x * x; }
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v = (x > 0.0) ? process(x) : process(-x);
+        \\    fragColor = vec4(v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T269.1: compute shared memory and barrier" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 16) in;
+        \\shared float s_data[16];
+        \\layout(std430, binding = 0) buffer Data { float input_arr[]; } buf;
+        \\void main() {
+        \\    uint id = gl_LocalInvocationID.x;
+        \\    s_data[id] = buf.input_arr[id] * 2.0;
+        \\    barrier();
+        \\    buf.input_arr[id] = s_data[(id + 1u) % 16u];
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T270.1: vec4 broadcast scalar" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(x) * 0.5 + vec4(0.25);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
