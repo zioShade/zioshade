@@ -2167,3 +2167,23 @@ test "T31.1: texelFetch maps to Load (int2 coord)" {
     try assertContains(hlsl, "Load");
     try assertContains(hlsl, "discard");
 }
+
+test "T31.2: textureLod maps to SampleLevel" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float lod; } u;
+        \\layout(binding = 1) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 uv = vec2(0.5, 0.5);
+        \\    vec4 c = textureLod(tex, uv, u.lod);
+        \\    if (c.x > 0.0) discard;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // textureLod → Texture2D.SampleLevel(sampler, coord, lod)
+    try assertContains(hlsl, "SampleLevel");
+    try assertContains(hlsl, "discard");
+}
