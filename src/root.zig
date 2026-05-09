@@ -137,7 +137,6 @@ pub fn compileShadertoyToHlsl(
     defer alloc.free(spirv_words);
 
     const hlsl = try spirvToHLSL(alloc, spirv_words, .{
-        .binding_shift = -1, // remap binding=1 -> register(b0)
         .shader_model = 60,
     });
 
@@ -146,8 +145,7 @@ pub fn compileShadertoyToHlsl(
 
 /// One-shot GLSL -> HLSL compilation.
 /// Takes GLSL source (with shadertoy prefix already prepended) and returns
-/// a null-terminated HLSL string. Uses binding_shift=-1 to remap binding=1
-/// to register(b0) for DX12 root signature compatibility.
+/// a null-terminated HLSL string.
 /// Caller must free with alloc.free().
 pub fn compileGlslToHlsl(
     alloc: std.mem.Allocator,
@@ -161,7 +159,6 @@ pub fn compileGlslToHlsl(
     defer alloc.free(spirv_words);
 
     const hlsl = try spirvToHLSL(alloc, spirv_words, .{
-        .binding_shift = -1,
         .shader_model = 60,
     });
     // The result from spirvToHLSL is []const u8, not null-terminated.

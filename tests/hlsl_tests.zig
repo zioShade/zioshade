@@ -20,7 +20,6 @@ fn compileToHlsl(source: [:0]const u8) ![]const u8 {
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     return try glslpp.spirvToHLSL(alloc, spirv, .{
-        .binding_shift = -1,
         .shader_model = 60,
     });
 }
@@ -30,7 +29,6 @@ fn compileToHlslStage(source: [:0]const u8, stage: glslpp.Stage) ![]const u8 {
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = stage });
     defer alloc.free(spirv);
     return try glslpp.spirvToHLSL(alloc, spirv, .{
-        .binding_shift = -1,
         .shader_model = 60,
     });
 }
@@ -131,10 +129,10 @@ test "T2.4: mat4 produces float4x4" {
 // T3: Resource binding
 // ---------------------------------------------------------------------------
 
-test "T3.1: uniform block at binding=1 remapped to register(b0)" {
+test "T3.1: uniform block at binding=0 maps to register(b0)" {
     const source =
         \\#version 430
-        \\layout(binding = 1, std140) uniform Globals { float time; } g;
+        \\layout(binding = 0, std140) uniform Globals { float time; } g;
         \\void main() { if (g.time > 0.0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
@@ -433,7 +431,7 @@ test "T8.3: fwidth" {
 test "T9.1: shadertoy-like uniform block + cbuffer" {
     const source =
         \\#version 430 core
-        \\layout(binding = 1, std140) uniform Globals {
+        \\layout(binding = 0, std140) uniform Globals {
         \\    uniform vec3  iResolution;
         \\    uniform float iTime;
         \\};
@@ -453,7 +451,7 @@ test "T9.1: shadertoy-like uniform block + cbuffer" {
 test "T9.2: HLSL output has no 'unhandled' comments" {
     const source =
         \\#version 430 core
-        \\layout(binding = 1, std140) uniform Globals {
+        \\layout(binding = 0, std140) uniform Globals {
         \\    uniform vec3  iResolution;
         \\    uniform float iTime;
         \\};
@@ -1966,7 +1964,7 @@ test "T30.7: SSBO read" {
     const source =
         \\#version 430
         \\layout(std430, binding = 0) buffer Data { vec4 values[]; };
-        \\layout(binding = 1, std140) uniform U { int idx; } u;
+        \\layout(binding = 0, std140) uniform U { int idx; } u;
         \\void main() {
         \\    vec4 v = values[u.idx];
         \\    if (v.r > 0.0) discard;
@@ -1981,7 +1979,7 @@ test "T30.8: imageStore" {
     const source =
         \\#version 430
         \\layout(binding = 0, rgba32f) uniform image2D img;
-        \\layout(binding = 1, std140) uniform U { float x; } u;
+        \\layout(binding = 0, std140) uniform U { float x; } u;
         \\void main() {
         \\    imageStore(img, ivec2(0, 0), vec4(u.x, 0.0, 0.0, 1.0));
         \\    if (u.x > 0.0) discard;
@@ -2123,10 +2121,10 @@ test "WIN-DBG: bool variable with logical OR" {
     try assertContains(hlsl, "discard");
 }
 
-test "WIN3: binding=1 with shift=-1 produces register(b0)" {
+test "WIN3: binding=0 produces register(b0)" {
     const source =
         \\#version 430
-        \\layout(binding = 1, std140) uniform Globals {
+        \\layout(binding = 0, std140) uniform Globals {
         \\    uniform vec3 iResolution;
         \\    uniform float iTime;
         \\};
@@ -2139,12 +2137,11 @@ test "WIN3: binding=1 with shift=-1 produces register(b0)" {
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{
-        .binding_shift = -1,
         .shader_model = 60,
     });
     defer alloc.free(hlsl);
 
-    // Uniform block must be at b0 (shifted from binding=1)
+    // Uniform block must be at register(b0)
     try assertContains(hlsl, "register(b0)");
     // Must use the uniform (proves code wasn't DCE'd)
     try assertContains(hlsl, "discard");
@@ -2175,7 +2172,7 @@ test "T31.2: textureLod maps to SampleLevel" {
     const source =
         \\#version 430
         \\layout(binding = 0, std140) uniform U { float lod; } u;
-        \\layout(binding = 1) uniform sampler2D tex;
+        \\layout(binding = 0) uniform sampler2D tex;
         \\layout(location = 0) out vec4 fragColor;
         \\void main() {
         \\    vec2 uv = vec2(0.5, 0.5);
@@ -2195,7 +2192,7 @@ test "T31.3: textureGrad maps to SampleGrad" {
     const source =
         \\#version 430
         \\layout(binding = 0, std140) uniform U { float dx; } u;
-        \\layout(binding = 1) uniform sampler2D tex;
+        \\layout(binding = 0) uniform sampler2D tex;
         \\layout(location = 0) out vec4 fragColor;
         \\void main() {
         \\    vec2 uv = vec2(0.5, 0.5);
@@ -2217,7 +2214,7 @@ test "T31.4: textureProj maps to Sample with divided coord" {
     const source =
         \\#version 430
         \\layout(binding = 0, std140) uniform U { float w; } u;
-        \\layout(binding = 1) uniform sampler2D tex;
+        \\layout(binding = 0) uniform sampler2D tex;
         \\layout(location = 0) out vec4 fragColor;
         \\void main() {
         \\    vec3 uv3 = vec3(0.5, 0.5, u.w);
@@ -3983,5 +3980,35 @@ test "T87.1: const variable" {
     defer alloc.free(hlsl);
     // Const variable should be folded into constant
     try assertContains(hlsl, "float4");
+}
+
+test "T88.1: multiple cbuffer bindings use correct register slots" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U0 { float x; } u0;
+        \\layout(binding = 1) uniform U1 { float y; } u1;
+        \\layout(location = 0) out float fragColor;
+        \\void main() {
+        \\    fragColor = u0.x + u1.y;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "register(b0)");
+    try assertContains(hlsl, "register(b1)");
+}
+
+test "T88.2: texture binding uses correct register slot" {
+    const source =
+        \\#version 450
+        \\layout(binding = 3) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = texture(tex, vec2(0.5));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "register(t3)");
 }
 
