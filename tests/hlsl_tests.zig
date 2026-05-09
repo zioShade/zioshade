@@ -4236,3 +4236,79 @@ test "T100.1: mat3 construction and multiply" {
     try assertContains(hlsl, "float4");
 }
 
+test "T101.1: interpolation qualifiers (flat)" {
+    const source =
+        \\#version 450
+        \\flat in float flat_val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(flat_val);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T102.1: integer division and modulo" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int a;
+        \\layout(location = 1) in int b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int q = a / b;
+        \\    int r = a % b;
+        \\    fragColor = vec4(float(q), float(r), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T103.1: layout(binding) on uniform buffer" {
+    const source =
+        \\#version 450
+        \\layout(binding = 2, std140) uniform U { vec4 color; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = u.color;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "register(b2)");
+}
+
+test "T104.1: sampler3D" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler3D vol;
+        \\layout(location = 0) in vec3 uvw;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = texture(vol, uvw);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Texture3D");
+}
+
+test "T105.1: vector times matrix" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat4 mvp; } u;
+        \\layout(location = 0) in vec4 pos;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 result = pos * u.mvp;
+        \\    fragColor = result;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
