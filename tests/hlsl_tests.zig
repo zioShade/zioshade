@@ -6832,3 +6832,93 @@ test "T260.1: intBitsToFloat and floatBitsToInt" {
     try assertContains(hlsl, "float4");
 }
 
+test "T261.1: compute with 2D local size" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 8, local_size_y = 8) in;
+        \\layout(std430, binding = 0) buffer Data { float grid[]; } data;
+        \\void main() {
+        \\    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+        \\    int idx = id.y * 8 + id.x;
+        \\    data.grid[idx] = float(id.x + id.y);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T262.1: function with out parameters returning struct" {
+    const source =
+        \\#version 450
+        \\struct RayHit { float t; vec3 normal; };
+        \\RayHit trace(float origin, float dir) {
+        \\    RayHit h;
+        \\    h.t = origin + dir;
+        \\    h.normal = vec3(0.0, 1.0, 0.0);
+        \\    return h;
+        \\}
+        \\layout(location = 0) in float o;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    RayHit h = trace(o, 1.0);
+        \\    fragColor = vec4(h.normal, h.t);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T263.1: geometry shader Points" {
+    const source =
+        \\#version 450
+        \\layout(points) in;
+        \\layout(points, max_vertices = 1) out;
+        \\void main() {
+        \\    gl_Position = gl_in[0].gl_Position;
+        \\    EmitVertex();
+        \\    EndPrimitive();
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Geometry shaders compile through fragment path
+    try assertContains(hlsl, "float");
+}
+
+test "T264.1: vec3 sign on negative" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 s = sign(-v);
+        \\    fragColor = vec4(s, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T265.1: std140 uniform block layout" {
+    const source =
+        \\#version 450
+        \\layout(std140, binding = 0) uniform U {
+        \\    mat4 mvp;
+        \\    vec4 color;
+        \\    float intensity;
+        \\} u;
+        \\layout(location = 0) in vec4 pos;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 transformed = u.mvp * pos;
+        \\    fragColor = transformed * u.intensity + u.color;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
