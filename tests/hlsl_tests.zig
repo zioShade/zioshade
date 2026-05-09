@@ -4900,3 +4900,82 @@ test "T140.1: compute with imageStore and imageLoad" {
     try assertContains(hlsl, "float");
 }
 
+test "T141.1: float comparison chain" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v = 0.0;
+        \\    if (x > 0.0 && x < 1.0) v = 1.0;
+        \\    else if (x >= 1.0 && x < 2.0) v = 2.0;
+        \\    else v = 3.0;
+        \\    fragColor = vec4(v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T142.1: vec2 max and min" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 clamped = max(min(a, vec2(1.0)), vec2(0.0));
+        \\    fragColor = vec4(clamped, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T143.1: matrix column access" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat4 m; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 col0 = u.m[0];
+        \\    vec4 col1 = u.m[1];
+        \\    fragColor = col0 + col1;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T144.1: texture with LOD bias and vec2 offset" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = textureOffset(tex, uv, ivec2(1, -1));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T145.1: double negation" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = -(-x);
+        \\    fragColor = vec4(a);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
