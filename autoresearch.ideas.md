@@ -1,8 +1,11 @@
 # Autoresearch Ideas — glslpp Feature Coverage
 
 ## STATUS: 213/222 conformance (95.9%), 0 val_fail ✅
-## HLSL tests: 164/164 pass, 0 fail, 3 leaked ✅
-## Session: 131→164 HLSL (+33 tests, +25.2%), conformance 213/222 stable
+## HLSL tests: 168/168 pass, 0 fail, 3 leaked ✅
+## Session: 131→168 HLSL (+37 tests, +28.2%), conformance 213/222 stable
+
+## ⚠️ Test coverage is approaching natural limit.
+## Further test additions should ONLY cover genuinely new functionality.
 
 ## Genuine Bug Fixes This Session
 1. texelFetch new_args memory leak (allocated but never freed)
@@ -14,17 +17,23 @@
 7. ImageQuerySize/ImageQuerySizeLod HLSL handlers (GetDimensions)
 8. UConvert/SConvert/FConvert type conversion handlers
 9. ImageRead handler (image[coord] indexing)
+10. ImageWrite handler (image[coord] = value)
+11. All atomic operation handlers (InterlockedAdd/Min/Max/And/Or/Xor/Exchange/CompareExchange)
 
 ## Remaining Known Bugs
-- CRT shader leaks 5 operand arrays from binary ops (root cause unclear)
+- CRT shader leaks 5 operand arrays from binary ops (root cause: possibly collectTopLevel constant operand arrays leaked by clearRetainingCapacity in analyzeFunction, but the leaked types don't match — fadd/fsub vs constants)
 - T37.1 (mat2 construction) has minor memory leak
 - Matrix transpose doesn't appear in HLSL output (DCE or codegen issue)
 
-## Potential Future Work
-- Add ImageWrite handler (imageStore)
-- Add AtomicCompareExchange handler
-- Fix CRT shader's 5 operand array leaks
-- Add component-aware GatherRed/Green/Blue/Alpha based on textureGather component arg
-- Add textureOffset test
-- Build dominator tree for proper cross-block forwarding in constStoreForward
-- IsNan/IsInf test with vector types (bvec result)
+## Test Coverage by Feature
+- Texture ops: sampler2D, samplerCube, texelFetch, textureGrad, textureGather, textureSize, textureOffset, textureLod, textureProj
+- Math: exp/log, sqrt/rsqrt, sin/cos, atan2/asin/acos, mod (floor-based), pow, abs, sign, floor, ceil, fract, trunc, round, min/max, clamp, mix/lerp, step, smoothstep, reflect, refract, determinant, cross, normalize, length, distance, dot
+- Derivatives: dFdx/ddx, dFdy/ddy, fwidth
+- Bitwise: &, |, ^, <<, >>
+- Atomics: InterlockedAdd/Min/Max/And/Or/Xor/Exchange/CompareExchange
+- Image: imageLoad, imageStore
+- Control flow: if/else, for, while, do-while, break, continue, switch, ternary
+- Types: float, int, uint, bool, vec2-4, ivec2-4, uvec2-4, bvec2-4, mat2-4, struct, array
+- Conversions: int↔float, bitcast (asint/asfloat)
+- Shader stages: fragment, vertex, compute, geometry
+- GLSL builtins: equal, notEqual, lessThan, greaterThan, any, all, isnan, isinf
