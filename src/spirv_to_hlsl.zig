@@ -1358,7 +1358,12 @@ fn emitInstruction(
         // Derivatives
         .DPdx, .DPdxFine, .DPdxCoarse => try emitCall(module, names, inst, "ddx", w, alloc),
         .DPdy, .DPdyFine, .DPdyCoarse => try emitCall(module, names, inst, "ddy", w, alloc),
-        .Fwidth, .FwidthFine, .FwidthCoarse => try emitCall(module, names, inst, "fwidth", w, alloc),
+        .Fwidth, .FwidthFine, .FwidthCoarse => {
+            const arg = if (inst.words.len > 3) names.get(inst.words[3]) orelse "0" else "0";
+            const result = if (inst.words.len > 2) names.get(inst.words[2]) orelse "v" else "v";
+            const rt = if (inst.words.len > 1) hlslType(module, inst.words[1], names, alloc) catch "float" else "float";
+            try w.print("    {s} {s} = abs(ddx({s})) + abs(ddy({s}));\n", .{ rt, result, arg, arg });
+        },
 
         .All => try emitCall(module, names, inst, "all", w, alloc),
         .Any => try emitCall(module, names, inst, "any", w, alloc),
