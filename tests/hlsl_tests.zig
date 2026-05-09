@@ -7004,3 +7004,81 @@ test "T270.1: vec4 broadcast scalar" {
     try assertContains(hlsl, "float4");
 }
 
+test "T271.1: gl_Position w-divide in vertex" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 pos;
+        \\void main() {
+        \\    gl_Position = pos;
+        \\    gl_Position = gl_Position / gl_Position.w;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T272.1: float modulus via floor" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 1) in float y;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float m = x - y * floor(x / y);
+        \\    fragColor = vec4(m);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T273.1: vec3 swizzle and normalize" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 rgb = v.rgb;
+        \\    vec3 n = normalize(rgb);
+        \\    fragColor = vec4(n, v.a);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T274.1: int to uint to float chain" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint u = uint(x);
+        \\    float f = float(u);
+        \\    fragColor = vec4(f);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T275.1: complex expression tree" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 1) in vec4 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c = (a + b) * (a - b) + a * b * 0.5;
+        \\    fragColor = c / (abs(c) + vec4(0.001));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
