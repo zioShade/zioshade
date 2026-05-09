@@ -6021,3 +6021,87 @@ test "T210.1: gl_GlobalInvocationID in 1D compute" {
     try assertContains(hlsl, "float");
 }
 
+test "T211.1: vec4 exp and log" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 e = exp(v);
+        \\    vec4 l = log(v + vec4(1.0));
+        \\    fragColor = e - l;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T212.1: uniform vec2 used in condition" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { vec2 bounds; } u;
+        \\layout(location = 0) in vec2 pos;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (pos.x > u.bounds.x && pos.y > u.bounds.y) {
+        \\        fragColor = vec4(1.0);
+        \\    } else {
+        \\        fragColor = vec4(0.0);
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T213.1: vec4 vectorized comparison" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 1) in vec4 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec4 gt = greaterThan(a, b);
+        \\    bvec4 lt = lessThan(a, b);
+        \\    fragColor = vec4(float(any(gt)), float(any(lt)), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T214.1: int division truncation" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int q = x / 7;
+        \\    int r = x - q * 7;
+        \\    fragColor = vec4(float(q), float(r), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T215.1: vec3 normalize and scale" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 n = normalize(v);
+        \\    vec3 scaled = n * 2.0;
+        \\    fragColor = vec4(scaled, length(scaled));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
