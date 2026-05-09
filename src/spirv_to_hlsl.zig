@@ -1300,6 +1300,18 @@ fn emitInstruction(
                 rt, names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0",
             });
         },
+        .Bitcast => {
+            // OpBitcast: reinterpret bits (float ↔ int/uint)
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const val = names.get(inst.words[3]) orelse "0";
+            const result = names.get(inst.words[2]) orelse "v";
+            // HLSL: asfloat() for int→float, asint() for float→int
+            if (std.mem.indexOf(u8, rt, "float") != null) {
+                try w.print("    {s} {s} = asfloat({s});\n", .{ rt, result, val });
+            } else {
+                try w.print("    {s} {s} = asint({s});\n", .{ rt, result, val });
+            }
+        },
 
         // Composites
         .CompositeConstruct => {
