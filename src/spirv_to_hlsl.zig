@@ -1340,6 +1340,8 @@ fn emitInstruction(
             try w.print("    {s} {s} = {s} - {s} * floor({s} / {s});\n", .{ rt, result_name, lhs, rhs, lhs, rhs });
         },
         .UMod, .SRem, .FRem => try emitBinOp(module, names, inst, "%", w, alloc),
+        .ShiftLeftLogical => try emitBinOp(module, names, inst, "<<", w, alloc),
+        .ShiftRightLogical => try emitBinOp(module, names, inst, ">>", w, alloc),
 
         .FNegate, .SNegate => {
             const rt = try hlslType(module, inst.words[1], names, alloc);

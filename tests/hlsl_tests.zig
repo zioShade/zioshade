@@ -3079,3 +3079,140 @@ test "T54.1: switch statement maps to HLSL switch" {
     try assertContains(hlsl, "mode");
 }
 
+test "T55.1: discard maps to HLSL discard" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float alpha;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (alpha < 0.5) discard;
+        \\    fragColor = vec4(1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T55.2: vector swizzle decomposed to component access" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 rgb = fragColor.xyz;
+        \\    fragColor = vec4(rgb, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Swizzle decomposed to individual component access
+    try assertContains(hlsl, ".x");
+}
+
+test "T56.1: struct with sampler2D" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = texture(tex, vec2(0.5));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Texture2D");
+    try assertContains(hlsl, "Sample");
+}
+
+test "T56.2: samplerCube with texture" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform samplerCube envMap;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = texture(envMap, vec3(1.0));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "TextureCube");
+}
+
+test "T57.1: array uniform in block" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform Uniforms {
+        \\    vec4 colors[4];
+        \\} u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = u.colors[0];
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "cbuffer");
+    try assertContains(hlsl, "[");
+}
+
+test "T57.2: bit shift operations" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = 1 << 4;
+        \\    int b = a >> 2;
+        \\    fragColor = vec4(float(a + b));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "<<");
+    try assertContains(hlsl, ">>");
+}
+
+test "T58.1: single cbuffer binding" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U0 { float x; } u0;
+        \\layout(location = 0) out float fragColor;
+        \\void main() {
+        \\    fragColor = u0.x;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "cbuffer");
+    try assertContains(hlsl, "register(b0)");
+}
+
+test "T58.2: compute shader with imageStore" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0, rgba8) uniform writeonly image2D img;
+        \\layout(local_size_x = 1) in;
+        \\void main() {
+        \\    imageStore(img, ivec2(0, 0), vec4(1.0));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Texture2D");
+    try assertContains(hlsl, "int2");
+}
+
+test "T59.1: vertex shader outputs position" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 pos;
+        \\void main() {
+        \\    gl_Position = vec4(pos, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Vertex shader should produce valid HLSL
+    try assertContains(hlsl, "float4");
+    try assertContains(hlsl, "pos");
+}
+
