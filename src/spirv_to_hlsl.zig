@@ -1392,20 +1392,35 @@ fn emitInstruction(
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";
             const parts = splitPair(si);
-            // Find Lod in image operands
-            var lod: []const u8 = "0";
+            // Find image operands: Bit 0=Bias, Bit 1=Lod, Bit 2=Grad, Bit 3=ConstOffset, Bit 4=Offset
             if (inst.words.len > 5) {
                 const mask = inst.words[5];
                 var off: usize = 6;
-                // Bit 0 = Bias, Bit 1 = Lod, Bit 2 = Grad, Bit 3 = ConstOffset, Bit 4 = Offset
                 if (mask & 0x1 != 0) off += 1; // skip Bias
                 if (mask & 0x2 != 0 and off < inst.words.len) {
-                    lod = names.get(inst.words[off]) orelse "0";
+                    // Lod operand
+                    const lod = names.get(inst.words[off]) orelse "0";
+                    try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}, {s});\n", .{
+                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, lod,
+                    });
+                } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
+                    // Grad operands (dx, dy)
+                    const dx = names.get(inst.words[off]) orelse "0";
+                    const dy = names.get(inst.words[off + 1]) orelse "0";
+                    try w.print("    {s} {s} = {s}.SampleGrad({s}, {s}, {s}, {s});\n", .{
+                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, dx, dy,
+                    });
+                } else {
+                    // Fallback: Sample with lod=0
+                    try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}, 0);\n", .{
+                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord,
+                    });
                 }
+            } else {
+                try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}, 0);\n", .{
+                    rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord,
+                });
             }
-            try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}, {s});\n", .{
-                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, lod,
-            });
         },
         .ImageFetch => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
