@@ -2049,3 +2049,18 @@ test "WIN2: wintty focus shader compiles to HLSL" {
     // try assertContains(hlsl, "mainImage");
     // try assertContains(hlsl, "cbuffer");
 }
+
+test "WIN-DBG: bool variable with logical OR" {
+    const source =
+        \\#version 430
+        \\void main() {
+        \\    bool a = true;
+        \\    bool b = false;
+        \\    bool c = a || b;
+        \\    if (c) { discard; }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
