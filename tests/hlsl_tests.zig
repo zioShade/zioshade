@@ -5305,3 +5305,78 @@ test "T165.1: compute workgroup barrier" {
     try assertContains(hlsl, "float");
 }
 
+test "T166.1: vec4 from scalar broadcast" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(x * 0.5);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T167.1: gl_Position with separate w divide" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 pos;
+        \\layout(binding = 0) uniform U { mat4 mvp; float w; } u;
+        \\void main() {
+        \\    vec4 p = u.mvp * vec4(pos, u.w);
+        \\    gl_Position = p / p.w;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T168.1: float modulus via floor" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float m = x - floor(x / 3.0) * 3.0;
+        \\    fragColor = vec4(m);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T169.1: vec3 swizzle and normalize" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 n = normalize(v.xyz);
+        \\    fragColor = vec4(n, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T170.1: int to uint to float conversion chain" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint u = uint(x);
+        \\    float f = float(u);
+        \\    fragColor = vec4(f);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
