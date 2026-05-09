@@ -26,7 +26,7 @@
 13. mat2 construction col_ids temp array leak
 
 ## Remaining Known Issues
-- Matrix transpose from mat4 uniform block gets eliminated by optimization pipeline: raw SPIR-V has OpTranspose (140 words) but after optimization pipeline, final SPIR-V is 39 words (just header+entry point). mat2 from uniform block works. mat4 without uniform block works. The issue is in the DCE/elimUnusedGlobals interaction with mat4 uniforms.
+- **Matrix local variable column access not emitted**: `mat4 t = transpose(u.m); fragColor = t[0];` — the raw SPIR-V contains OpTranspose but the column extract (t[0]) and output store (fragColor = ...) are NEVER emitted to SPIR-V. The semantic analyzer silently drops the assignment. Root cause: the semantic analyzer creates the transpose result ID but the subsequent statement `fragColor = t[0]` doesn't generate IR. Likely a bug in how mat4-typed local variables are resolved — the variable `t` may not be properly declared as a function-local OpVariable, causing the subscript `t[0]` to fail silently with tolerate_errors=true.
 - HLSL variable naming uses fallback "0" for unnamed IDs (quality, not correctness)
 
 ## Test Coverage by Feature
