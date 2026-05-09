@@ -3937,6 +3937,7 @@ const Analyzer = struct {
                                 const is_ms = fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array or fetch_args[0].ty == .isampler2d_ms or fetch_args[0].ty == .usampler2d_ms or fetch_args[0].ty == .isampler2d_ms_array or fetch_args[0].ty == .usampler2d_ms_array;
                                 const operands = try self.alloc.alloc(ir.Instruction.Operand, op_count);
                                 for (operands, 0..) |*op, i| op.* = new_args[i];
+                                self.alloc.free(new_args);
                                 try self.instructions.append(self.alloc, .{
                                     .tag = if (is_ms) .image_fetch_ms else .image_fetch,
                                     .result_type = null,
