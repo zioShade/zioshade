@@ -6,9 +6,9 @@
 
 ### glslpp repo (`C:/Users/Alessandro/CODE/OSS/glslpp`)
 - **Branch**: `main`
-- **Last commit**: `efc92dc` fix: redundantStoreElim block boundary — opcode 248 (OpLabel) not 1 (OpUndef)
+- **Last commit**: `c2ad67c` fix: memory leak cleanup — free owned name keys in types/spec_constants maps
 - **Zig version**: 0.15.2 (pinned via `.mise.toml` + `.zig-version`)
-- **Test status**: 130/130 HLSL tests pass, 0 fail, 2 leaked (pre-existing, from WIN1/WIN2)
+- **Test status**: 130/130 HLSL tests pass, 0 fail, 1 leaked (pre-existing, from WIN1 CRT shader expression operands)
 - **Build status**: Clean
 
 ### wintty repo (`C:/Users/Alessandro/CODE/OSS/wintty`)
@@ -50,10 +50,14 @@ Then used spirv-dis to dump and analyze the SPIR-V, confirming the per-block sto
 - The `>` comparison operator works correctly in all tests
 - WIN3 test checks binding=1 → register(b0) shift
 
-### P2: Memory leak cleanup — Still pre-existing
-- 2 leaks from WIN1/WIN2: `semantic.zig:1190` owned_name allocations
-- These cause the test runner to report failure even though all assertions pass
-- Not caused by current changes, but needs fixing
+### P2: Memory leak cleanup — Partially done
+- Fixed `owned_name` leak when `overloads.getOrPut` returns `found_existing` (lines 1190, 1222)
+- Fixed missing `self.types` key freeing in analyzer deinit
+- Fixed missing `self.spec_constants` key freeing in analyzer deinit
+- Fixed instruction operand arrays leaked on success path
+- Fixed eliminated function bodies not freed in `eliminateDeadFunctions`
+- Reduced leaks from 2 to 1
+- **Remaining**: 1 leak from WIN1 CRT shader — 5 `ir.Instruction.Operand` arrays from `analyzeExpression` line 2502. These are in function bodies that should be freed by Module.deinit but aren't. The root cause is likely in the IR Module lifetime management — possibly `eliminateDeadFunctions` creates a new functions slice that drops references to bodies.
 
 ### P3: MSL backend — Not started
 
@@ -66,7 +70,7 @@ Then used spirv-dis to dump and analyze the SPIR-V, confirming the per-block sto
 
 ## What's Next (Priority Order)
 
-1. **P2: Fix memory leaks** — The `semantic.zig:1190` owned_name leaks affect WIN1/WIN2. These allocations need to be freed in the semantic analyzer's `deinit()`. This is important because the leak causes the test runner to report failure.
+1. **P2: Fix remaining memory leak** — 1 leak remains from WIN1 CRT shader. 5 `ir.Instruction.Operand` arrays from `analyzeExpression:2502` leak. The stack trace goes through `analyzeFunction` → `analyzeWithOptions`, suggesting the operands are in function bodies that aren't properly freed. The `eliminateDeadFunctions` creates a new functions slice, and the original slice is freed (`alloc.free(functions)`), but the individual function body operand arrays from the CRT shader's `curve()` function might not survive the transition. Need to trace the exact lifetime of the `curve()` function body.
 
 2. **Phase 1 of plan: End-to-end DXC validation** — Now that the focus shader produces correct HLSL, validate it with DXC (`dxc -T ps_6_0 -E main`). This catches any HLSL syntax issues.
 
