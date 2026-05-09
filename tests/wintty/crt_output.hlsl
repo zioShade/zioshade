@@ -2,33 +2,33 @@
 
 cbuffer Globals : register(b1)
 {
-    float3 _m0;
-    float _m1;
-    float _m2;
-    float _m3;
-    int _m4;
-    float _m5[4];
-    float3 _m6[4];
-    float4 _m7;
-    float4 _m8;
-    float _m9;
-    float4 _m10;
-    float4 _m11;
-    float4 _m12;
-    float4 _m13;
-    int _m14;
-    int _m15;
-    int _m16;
-    float _m17;
-    float _m18;
-    int _m19;
-    float3 _m20[256];
-    float3 _m21;
-    float3 _m22;
-    float3 _m23;
-    float3 _m24;
-    float3 _m25;
-    float3 _m26;
+    float3 Globals_m0;
+    float Globals_m1;
+    float Globals_m2;
+    float Globals_m3;
+    int Globals_m4;
+    float Globals_m5[4];
+    float3 Globals_m6[4];
+    float4 Globals_m7;
+    float4 Globals_m8;
+    float Globals_m9;
+    float4 Globals_m10;
+    float4 Globals_m11;
+    float4 Globals_m12;
+    float4 Globals_m13;
+    int Globals_m14;
+    int Globals_m15;
+    int Globals_m16;
+    float Globals_m17;
+    float Globals_m18;
+    int Globals_m19;
+    float3 Globals_m20[256];
+    float3 Globals_m21;
+    float3 Globals_m22;
+    float3 Globals_m23;
+    float3 Globals_m24;
+    float3 Globals_m25;
+    float3 Globals_m26;
 };
 
 Texture2D iChannel0 : register(t0);
@@ -38,7 +38,7 @@ void mainImage(out float4 v28, float2 v29)
 {
     float3 v30;
     float2 v31;
-    float3 v33 = _m0;
+    float3 v33 = Globals_m0;
     float2 v34 = float2(v33.x, v33.y);
     float2 v35 = v29 / v34;
     float2 v36 = v35 - float2(0.5, 0.5);
@@ -65,7 +65,7 @@ void mainImage(out float4 v28, float2 v29)
     float2 v57 = v56 * 0.92;
     float2 v58 = v57 + float2(0.04, 0.04);
     v31 = v58;
-    float v61 = _m1;
+    float v61 = Globals_m1;
     float v62 = 0.3 * v61;
     float v63 = v58.y;
     float v64 = v63 * 21.0;
