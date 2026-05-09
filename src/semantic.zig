@@ -1194,6 +1194,9 @@ const Analyzer = struct {
                     var merged = try std.ArrayListUnmanaged(ast.StructMember).initCapacity(self.alloc, existing.?.members.len + new_members.len);
                     try merged.appendSlice(self.alloc, existing.?.members);
                     try merged.appendSlice(self.alloc, new_members);
+                    self.alloc.free(new_members);
+                    // Free the old members slice if it was dupe'd
+                    if (existing.?.members.len > 0) self.alloc.free(existing.?.members);
                     existing.?.members = merged.items;
                     return;
                 }
@@ -1324,6 +1327,12 @@ const Analyzer = struct {
             func_ir_id = self.allocId();
         }
 
+        // Free operands of any leftover instructions from collectTopLevel or previous function
+        for (self.instructions.items) |inst| {
+            if (inst.operands.len > 0) {
+                self.alloc.free(inst.operands);
+            }
+        }
         self.instructions.clearRetainingCapacity();
         // Note: const_cache is NOT cleared here. Constants from previous functions
         // are reused by ID, but their definitions live in the previous function's body.
@@ -1937,6 +1946,8 @@ const Analyzer = struct {
                     var merged = try std.ArrayListUnmanaged(ast.StructMember).initCapacity(self.alloc, existing.?.members.len + new_members.len);
                     try merged.appendSlice(self.alloc, existing.?.members);
                     try merged.appendSlice(self.alloc, new_members);
+                    self.alloc.free(new_members);
+                    if (existing.?.members.len > 0) self.alloc.free(existing.?.members);
                     existing.?.members = merged.items;
                 } else {
                     const members = try self.alloc.dupe(ast.StructMember, node.data.members);
@@ -4982,6 +4993,7 @@ const Analyzer = struct {
                     for (col_ids, 0..) |cid, i| {
                         construct_ops[i] = .{ .id = cid };
                     }
+                    self.alloc.free(col_ids);
                     try self.instructions.append(self.alloc, .{
                         .tag = .composite_construct,
                         .result_type = null,

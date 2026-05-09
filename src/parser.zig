@@ -21,6 +21,17 @@ pub fn parse(alloc: std.mem.Allocator, source: [:0]const u8, tokens: []const lex
     errdefer {
         for (body.items) |*node| freeNode(alloc, node);
         body.deinit(alloc);
+        // Free struct_names HashMap keys on error path
+        var sn_it = p.struct_names.keyIterator();
+        while (sn_it.next()) |key| {
+            alloc.free(key.*);
+        }
+        p.struct_names.deinit(alloc);
+        // Free heap children and types on error path
+        for (p.heap_children.items) |children| alloc.free(children);
+        p.heap_children.deinit(alloc);
+        for (p.heap_types.items) |ptr| alloc.destroy(ptr);
+        p.heap_types.deinit(alloc);
     }
 
     while (p.current().tag != .eof) {
@@ -793,7 +804,11 @@ const Parser = struct {
         _ = self.advance();
         // Register struct name for local var decl detection
         const owned_name = try self.alloc.dupe(u8, self.text(name_tok));
-        try self.struct_names.put(self.alloc, owned_name, {});
+        const gop = try self.struct_names.getOrPut(self.alloc, owned_name);
+        if (gop.found_existing) {
+            // Key already exists, free the new duplicate
+            self.alloc.free(owned_name);
+        }
 
         _ = try self.expect(.l_brace);
         var members = std.ArrayListUnmanaged(ast.StructMember){};
