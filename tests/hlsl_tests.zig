@@ -3216,3 +3216,114 @@ test "T59.1: vertex shader outputs position" {
     try assertContains(hlsl, "pos");
 }
 
+test "T60.1: bitcast maps to asfloat/asint" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float f = 1.0;
+        \\    int i = floatBitsToInt(f);
+        \\    float g = intBitsToFloat(i);
+        \\    fragColor = vec4(g);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Bitcast should use asfloat/asint
+    try assertContains(hlsl, "asint");
+}
+
+test "T60.2: Select (ternary) maps to HLSL ternary" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float c_in;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bool c = c_in > 0.5;
+        \\    float v = c ? 1.0 : 0.0;
+        \\    fragColor = vec4(v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "?");
+    try assertContains(hlsl, ":");
+}
+
+test "T61.1: ConvertSToF maps to (float) cast" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int i = 42;
+        \\    float f = float(i);
+        \\    fragColor = vec4(f);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "(float)");
+}
+
+test "T61.2: ConvertFToS maps to (int) cast" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float f = 3.14;
+        \\    int i = int(f);
+        \\    fragColor = vec4(float(i));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "(int)");
+}
+
+test "T62.1: GLSL std.450 inverse maps to HLSL HLSL inverse" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform Uniforms {
+        \\    mat4 m;
+        \\} u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 inv_m = inverse(u.m);
+        \\    vec4 v = inv_m * vec4(1.0);
+        \\    fragColor = v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4x4");
+}
+
+test "T62.2: GLSL std.450 mix/lerp maps to HLSL lerp" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 a = vec4(0.0);
+        \\    vec4 b = vec4(1.0);
+        \\    fragColor = mix(a, b, 0.5);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "lerp");
+}
+
+test "T63.1: texelFetch maps to Load" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = texelFetch(tex, ivec2(0, 0), 0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Load");
+}
+
