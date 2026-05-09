@@ -2148,3 +2148,22 @@ test "WIN3: binding=1 with shift=-1 produces register(b0)" {
     // Must use iResolution in output
     try assertContains(hlsl, "_m0");
 }
+
+test "T31.1: texelFetch maps to Load (int2 coord)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec2 coord = ivec2(1, 2);
+        \\    vec4 c = texelFetch(tex, coord, 0);
+        \\    if (c.x > 0.0) discard;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // texelFetch → Texture2D.Load(int3(coord, lod))
+    try assertContains(hlsl, "Load");
+    try assertContains(hlsl, "discard");
+}
