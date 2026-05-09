@@ -5625,3 +5625,82 @@ test "T185.1: vec4 clamp with vec4 bounds" {
     try assertContains(hlsl, "float4");
 }
 
+test "T186.1: vec3 multiply add" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 1) in vec3 b;
+        \\layout(location = 2) in vec3 c;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 result = a * b + c;
+        \\    fragColor = vec4(result, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T187.1: textureSize for 2D texture" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec2 size = textureSize(tex, 0);
+        \\    fragColor = vec4(float(size.x), float(size.y), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T188.1: bool uniform condition" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { int flag; } u;
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v = (u.flag != 0) ? x : -x;
+        \\    fragColor = vec4(v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T189.1: mat4 from 4 vec4 columns" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 c0;
+        \\layout(location = 1) in vec4 c1;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 m = mat4(c0, c1, vec4(0.0), vec4(0.0, 0.0, 0.0, 1.0));
+        \\    fragColor = m[0] + m[3];
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T190.1: integer negate" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int neg = -x;
+        \\    fragColor = vec4(float(neg));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
