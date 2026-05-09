@@ -2584,3 +2584,58 @@ test "T37.3: determinant on mat2" {
     try assertContains(hlsl, "determinant");
     try assertContains(hlsl, "discard");
 }
+
+test "T38.1: nested ternary" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; float z; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r = u.x > 0.0 ? u.y : u.z;
+        \\    if (r > 0.0) discard;
+        \\    fragColor = vec4(r, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T38.2: multi-return function" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float getValue(float a) {
+        \\    if (a > 1.0) return a * 2.0;
+        \\    if (a > 0.0) return a + 1.0;
+        \\    return 0.0;
+        \\}
+        \\void main() {
+        \\    float r = getValue(u.x);
+        \\    if (r > 0.0) discard;
+        \\    fragColor = vec4(r, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T38.3: gl_FragCoord component access" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float x = gl_FragCoord.x;
+        \\    float y = gl_FragCoord.y;
+        \\    if (x + y > 0.0) discard;
+        \\    fragColor = vec4(x, y, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // gl_FragCoord → SV_Position
+    try assertContains(hlsl, "SV_Position");
+    try assertContains(hlsl, "discard");
+}
