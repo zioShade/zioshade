@@ -5944,3 +5944,80 @@ test "T205.1: vec4 lerp with uniform alpha" {
     try assertContains(hlsl, "float4");
 }
 
+test "T206.1: vec4 smoothstep per-component" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = smoothstep(vec4(0.2), vec4(0.8), x);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T207.1: uniform mat4x3 multiply vec3" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat4x3 m; } u;
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 result = u.m * v;
+        \\    fragColor = vec4(result, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T208.1: ivec4 clamp" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in ivec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec4 c = clamp(v, ivec4(0), ivec4(255));
+        \\    fragColor = vec4(c);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T209.1: vec3 reflect with normalized input" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 incident;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 n = vec3(0.0, 1.0, 0.0);
+        \\    vec3 r = reflect(incident, n);
+        \\    fragColor = vec4(r, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T210.1: gl_GlobalInvocationID in 1D compute" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 128) in;
+        \\layout(std430, binding = 0) buffer Output { float result[]; } out_buf;
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    float val = float(id) * 0.01;
+        \\    out_buf.result[id] = sin(val) + cos(val);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
