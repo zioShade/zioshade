@@ -125,7 +125,7 @@ pub fn generate(
     if (no_unreachable.ptr != loop_elim.ptr) alloc.free(loop_elim);
     // Iterative inlining: inline, moveVar+elimUninit+DCE+compact, repeat until inline has no changes
     var inlined = compact_ids.inlineTrivialFuncs(alloc, no_unreachable) catch return no_unreachable;
-    if (inlined.ptr != loop_elim.ptr) alloc.free(loop_elim);
+    if (inlined.ptr != no_unreachable.ptr) alloc.free(no_unreachable);
     var iter: u32 = 0;
     while (iter < 5) : (iter += 1) {
         // Fix OpVariable ordering after inlining (vars may be placed mid-block)
