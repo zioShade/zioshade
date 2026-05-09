@@ -50,6 +50,14 @@ pub const Module = struct {
             self.alloc.free(entry.value_ptr.members);
         }
         self.types.deinit(self.alloc);
+        // Free spec_constants keys
+        {
+            var sc_iter = self.spec_constants.iterator();
+            while (sc_iter.next()) |entry| {
+                self.alloc.free(entry.key_ptr.*);
+            }
+        }
+        self.spec_constants.deinit(self.alloc);
         // Free heap-allocated AST types
         for (self.heap_types) |ptr| {
             self.alloc.destroy(ptr);
