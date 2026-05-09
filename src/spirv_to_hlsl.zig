@@ -1379,6 +1379,8 @@ fn emitInstruction(
 
         .All => try emitCall(module, names, inst, "all", w, alloc),
         .Any => try emitCall(module, names, inst, "any", w, alloc),
+        .IsNan => try emitCall(module, names, inst, "isnan", w, alloc),
+        .IsInf => try emitCall(module, names, inst, "isinf", w, alloc),
 
         // GLSLstd450
         .ExtInst => {

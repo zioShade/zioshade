@@ -2697,3 +2697,35 @@ test "T39.3: while with break" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "discard");
 }
+
+test "T40.1: isnan maps to HLSL isnan" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (isnan(u.x)) discard;
+        \\    fragColor = vec4(u.x, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "isnan");
+    try assertContains(hlsl, "discard");
+}
+
+test "T40.2: isinf maps to HLSL isinf" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (isinf(u.x)) discard;
+        \\    fragColor = vec4(u.x, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "isinf");
+    try assertContains(hlsl, "discard");
+}
