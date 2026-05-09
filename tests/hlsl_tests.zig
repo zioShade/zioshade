@@ -4012,3 +4012,75 @@ test "T88.2: texture binding uses correct register slot" {
     try assertContains(hlsl, "register(t3)");
 }
 
+test "T89.1: OpCopyObject produces identity alias" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 a = texture(tex, uv);
+        \\    vec4 b = a;
+        \\    fragColor = b;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // CopyObject should produce valid HLSL
+    try assertContains(hlsl, "Sample");
+}
+
+test "T89.2: OpPhi in if-else merge" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float c;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v;
+        \\    if (c > 0.5) {
+        \\        v = 1.0;
+        \\    } else {
+        \\        v = 0.0;
+        \\    }
+        \\    fragColor = vec4(v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Phi should produce valid HLSL for merged values
+    try assertContains(hlsl, "float4");
+}
+
+test "T90.1: image2D with imageLoad" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0, rgba8) uniform readonly image2D img;
+        \\layout(location = 0) in ivec2 coord;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = imageLoad(img, coord);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // image2D with imageLoad uses subscript syntax in HLSL
+    try assertContains(hlsl, "Texture2D");
+    try assertContains(hlsl, "img");
+}
+
+test "T91.1: nested function calls" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float add(float a, float b) { return a + b; }
+        \\float mul(float a, float b) { return a * b; }
+        \\void main() {
+        \\    fragColor = vec4(add(mul(x, 2.0), 1.0));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
