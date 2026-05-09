@@ -6438,3 +6438,84 @@ test "T235.1: vec3 rotate around axis" {
     try assertContains(hlsl, "float4");
 }
 
+test "T236.1: vec4 transform by mat4 with uniform" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat4 model; mat4 view; } u;
+        \\layout(location = 0) in vec4 pos;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 world = u.model * pos;
+        \\    vec4 view = u.view * world;
+        \\    fragColor = view;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T237.1: float exp and log2" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float e = exp(x);
+        \\    float l = log2(x + 1.0);
+        \\    fragColor = vec4(e, l, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T238.1: vec3 pow per-component" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 p = pow(v, vec3(2.0));
+        \\    fragColor = vec4(p, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T239.1: compute with 1D dispatch and shared" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 16) in;
+        \\shared float shared_data[16];
+        \\layout(std430, binding = 0) buffer Data { float input_data[]; } in_buf;
+        \\layout(std430, binding = 1) buffer Output { float output_data[]; } out_buf;
+        \\void main() {
+        \\    uint id = gl_LocalInvocationID.x;
+        \\    shared_data[id] = in_buf.input_data[id];
+        \\    barrier();
+        \\    out_buf.output_data[id] = shared_data[15 - id];
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T240.1: vec4 construction from ivec4" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in ivec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(v) * 0.01;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
