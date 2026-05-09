@@ -5144,3 +5144,84 @@ test "T155.1: struct returned from function" {
     try assertContains(hlsl, "float4");
 }
 
+test "T156.1: pow and exp2" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = pow(x, 3.0);
+        \\    float b = exp2(x);
+        \\    fragColor = vec4(a, b, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T157.1: log2 and sqrt" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = log2(x + 1.0);
+        \\    float b = sqrt(x);
+        \\    fragColor = vec4(a, b, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T158.1: vertex shader with two inputs" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 position;
+        \\layout(location = 1) in vec3 normal;
+        \\layout(binding = 0) uniform U { mat4 mvp; } u;
+        \\layout(location = 0) out float v_lighting;
+        \\void main() {
+        \\    gl_Position = u.mvp * vec4(position, 1.0);
+        \\    v_lighting = max(dot(normal, vec3(0.0, 1.0, 0.0)), 0.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T159.1: signed integer right shift" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int shifted = x >> 2;
+        \\    fragColor = vec4(float(shifted));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T160.1: gl_FragDepth conditional write" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (x > 0.5) {
+        \\        gl_FragDepth = 0.25;
+        \\    }
+        \\    fragColor = vec4(x);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
