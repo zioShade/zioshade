@@ -1,11 +1,14 @@
 # Autoresearch Ideas — glslpp Feature Coverage
 
 ## STATUS: 213/222 conformance (95.9%), 0 val_fail ✅
-## HLSL tests: 168/168 pass, 0 fail, 3 leaked ✅
-## Session: 131→168 HLSL (+37 tests, +28.2%), conformance 213/222 stable
+## HLSL tests: 168/168 pass, 0 fail, 0 leaked ✅✅
+## Session: 131→168 HLSL (+37 tests, +28.2%), conformance 213/222 stable, leaks 3→0
 
-## ⚠️ Test coverage is approaching natural limit.
-## Further test additions should ONLY cover genuinely new functionality.
+## All Memory Leaks Fixed!
+- CRT shader pure_op_cache leak: operands not freed on cache hit (binary ops)
+- T37.1 mat2 construction col_ids temp array leak
+- texelFetch new_args leak (previous fix)
+- emitPureOp cache hit operand leaks (previous fix)
 
 ## Genuine Bug Fixes This Session
 1. texelFetch new_args memory leak (allocated but never freed)
@@ -19,11 +22,12 @@
 9. ImageRead handler (image[coord] indexing)
 10. ImageWrite handler (image[coord] = value)
 11. All atomic operation handlers (InterlockedAdd/Min/Max/And/Or/Xor/Exchange/CompareExchange)
+12. pure_op_cache operand leak on binary op cache hit
+13. mat2 construction col_ids temp array leak
 
-## Remaining Known Bugs
-- CRT shader leaks 5 operand arrays from binary ops (root cause: possibly collectTopLevel constant operand arrays leaked by clearRetainingCapacity in analyzeFunction, but the leaked types don't match — fadd/fsub vs constants)
-- T37.1 (mat2 construction) has minor memory leak
+## Remaining Known Issues
 - Matrix transpose doesn't appear in HLSL output (DCE or codegen issue)
+- HLSL variable naming uses fallback "0" for unnamed IDs (quality, not correctness)
 
 ## Test Coverage by Feature
 - Texture ops: sampler2D, samplerCube, texelFetch, textureGrad, textureGather, textureSize, textureOffset, textureLod, textureProj
@@ -37,3 +41,10 @@
 - Conversions: int↔float, bitcast (asint/asfloat)
 - Shader stages: fragment, vertex, compute, geometry
 - GLSL builtins: equal, notEqual, lessThan, greaterThan, any, all, isnan, isinf
+
+## Genuinely New Features Worth Testing
+- sampler2DArray / sampler2DMS (multi-sample textures)
+- Subpass input (Vulkan render passes)
+- Buffer textures (samplerBuffer)
+- Geometry shader EmitVertex/EndPrimitive
+- Tessellation shaders
