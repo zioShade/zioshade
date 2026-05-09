@@ -421,7 +421,9 @@ test "T8.3: fwidth" {
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "fwidth(");
+    try assertContains(hlsl, "ddx");
+    try assertContains(hlsl, "ddy");
+    try assertContains(hlsl, "discard");
 }
 
 // ---------------------------------------------------------------------------
@@ -2246,5 +2248,60 @@ test "T31.5: textureGather maps to Gather" {
     defer alloc.free(hlsl);
     // textureGather → Texture2D.Gather(sampler, coord, component)
     try assertContains(hlsl, "Gather");
+    try assertContains(hlsl, "discard");
+}
+
+test "T32.1: dFdx coarse maps to ddx" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = dFdx(u.x);
+        \\    if (d > 0.0) discard;
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // dFdx → ddx (coarse derivative)
+    try assertContains(hlsl, "ddx");
+    try assertContains(hlsl, "discard");
+}
+
+test "T32.2: dFdy coarse maps to ddy" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = dFdy(u.x);
+        \\    if (d > 0.0) discard;
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // dFdy → ddy (coarse derivative)
+    try assertContains(hlsl, "ddy");
+    try assertContains(hlsl, "discard");
+}
+
+test "T32.3: fwidth maps to fwidth (abs(ddx)+abs(ddy))" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = fwidth(u.x);
+        \\    if (d > 0.0) discard;
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // fwidth → abs(ddx) + abs(ddy)
+    try assertContains(hlsl, "ddx");
+    try assertContains(hlsl, "ddy");
     try assertContains(hlsl, "discard");
 }
