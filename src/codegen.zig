@@ -3826,6 +3826,23 @@ const Codegen = struct {
                     try self.emitWord(lod_id);
                 }
             },
+            .image_sample_grad => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const dx_id = self.operandId(resolved, 2);
+                const dy_id = self.operandId(resolved, 3);
+                // textureGrad: sampler, coord, dx, dy → Grad
+                try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleExplicitLod)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(4); // Image Operands Mask: Grad (bit 2)
+                try self.emitWord(dx_id);
+                try self.emitWord(dy_id);
+            },
             .image_sample_proj => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;

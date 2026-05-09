@@ -2187,3 +2187,25 @@ test "T31.2: textureLod maps to SampleLevel" {
     try assertContains(hlsl, "SampleLevel");
     try assertContains(hlsl, "discard");
 }
+
+test "T31.3: textureGrad maps to SampleGrad" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float dx; } u;
+        \\layout(binding = 1) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 uv = vec2(0.5, 0.5);
+        \\    vec2 dx_v = vec2(u.dx, 0.0);
+        \\    vec2 dy_v = vec2(0.0, u.dx);
+        \\    vec4 c = textureGrad(tex, uv, dx_v, dy_v);
+        \\    if (c.x > 0.0) discard;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // textureGrad → Texture2D.SampleGrad(sampler, coord, ddx, ddy)
+    try assertContains(hlsl, "SampleGrad");
+    try assertContains(hlsl, "discard");
+}
