@@ -4979,3 +4979,83 @@ test "T145.1: double negation" {
     try assertContains(hlsl, "float4");
 }
 
+test "T146.1: vec3 faceforward and usage" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 n;
+        \\layout(location = 1) in vec3 i;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 ff = faceforward(n, i, n);
+        \\    fragColor = vec4(ff, dot(ff, i));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T147.1: extract and reconstruct vec3" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r = v.x;
+        \\    float g = v.y;
+        \\    float b = v.z;
+        \\    fragColor = vec4(r, g, b, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T148.1: uniform bool" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { bool flag; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (u.flag) fragColor = vec4(1.0);
+        \\    else fragColor = vec4(0.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T149.1: smoothstep on scalars" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float s = smoothstep(0.0, 1.0, x);
+        \\    fragColor = vec4(s);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T150.1: ivec2 addition and subtraction" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in ivec2 a;
+        \\layout(location = 1) in ivec2 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec2 sum = a + b;
+        \\    ivec2 diff = a - b;
+        \\    fragColor = vec4(float(sum.x), float(diff.y), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
