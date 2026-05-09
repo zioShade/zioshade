@@ -5059,3 +5059,88 @@ test "T150.1: ivec2 addition and subtraction" {
     try assertContains(hlsl, "float4");
 }
 
+test "T151.1: vec4 mix with scalar boundary" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 1) in vec4 b;
+        \\layout(location = 2) in float t;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = mix(a, b, t);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T152.1: int bitwise or and xor" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = x | 0xFF;
+        \\    int b = x ^ 0x0F;
+        \\    fragColor = vec4(float(a), float(b), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T153.1: vec3 construction from vec2 and float" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 v2;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 v3 = vec3(v2, 1.0);
+        \\    fragColor = vec4(v3, 0.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T154.1: texelFetch with explicit LOD" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec2 coord = ivec2(uv * 256.0);
+        \\    fragColor = texelFetch(tex, coord, 2);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T155.1: struct returned from function" {
+    const source =
+        \\#version 450
+        \\struct Result { vec3 color; float alpha; };
+        \\Result makeResult(float v) {
+        \\    Result r;
+        \\    r.color = vec3(v);
+        \\    r.alpha = 1.0;
+        \\    return r;
+        \\}
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    Result r = makeResult(x);
+        \\    fragColor = vec4(r.color, r.alpha);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
