@@ -5704,3 +5704,87 @@ test "T190.1: integer negate" {
     try assertContains(hlsl, "float4");
 }
 
+test "T191.1: vec4 floor and abs combined" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 f = floor(v * 2.0);
+        \\    vec4 a = abs(f);
+        \\    fragColor = a * 0.5;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T192.1: in out function params" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void scale(inout float v) { v *= 2.0; }
+        \\void main() {
+        \\    float s = x;
+        \\    scale(s);
+        \\    fragColor = vec4(s);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T193.1: atan2 on inputs" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float y;
+        \\layout(location = 1) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float angle = atan(y, x);
+        \\    fragColor = vec4(angle);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T194.1: sampler2DArray texelFetch" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DArray tex;
+        \\layout(location = 0) in vec3 uv_layer;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec3 coord = ivec3(uv_layer * 64.0);
+        \\    fragColor = texelFetch(tex, coord, 0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T195.1: vec4 equal and notEqual" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 1) in vec4 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec4 eq = equal(a, b);
+        \\    bvec4 ne = notEqual(a, b);
+        \\    float e = float(any(eq));
+        \\    float n = float(any(ne));
+        \\    fragColor = vec4(e, n, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
