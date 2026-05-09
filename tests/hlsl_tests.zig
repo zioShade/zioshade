@@ -6519,3 +6519,83 @@ test "T240.1: vec4 construction from ivec4" {
     try assertContains(hlsl, "float4");
 }
 
+test "T241.1: float round builtin" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r = round(x);
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T242.1: vec4 inverse sqrt" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 is = inversesqrt(abs(v) + vec4(0.001));
+        \\    fragColor = is;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T243.1: int conditional via ternary" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int v = (x > 0) ? x * 2 : -x;
+        \\    fragColor = vec4(float(v));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T244.1: vec2 scale and bias" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { vec2 scale; vec2 bias; } u;
+        \\layout(location = 0) in vec2 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 result = v * u.scale + u.bias;
+        \\    fragColor = vec4(result, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T245.1: nested if-else ladder" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c;
+        \\    if (x < 0.25) c = vec4(1.0, 0.0, 0.0, 1.0);
+        \\    else if (x < 0.5) c = vec4(0.0, 1.0, 0.0, 1.0);
+        \\    else if (x < 0.75) c = vec4(0.0, 0.0, 1.0, 1.0);
+        \\    else c = vec4(1.0, 1.0, 0.0, 1.0);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
