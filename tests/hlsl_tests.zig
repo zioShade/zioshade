@@ -2782,3 +2782,21 @@ test "T41.2: texelFetchOffset" {
     try assertContains(hlsl, "Load");
     try assertContains(hlsl, "discard");
 }
+
+test "T42.1: compute shader with shared memory" {
+    const source =
+        \\#version 430
+        \\layout(local_size_x = 1) in;
+        \\shared float s_data[4];
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\void main() {
+        \\    s_data[0] = u.x;
+        \\    barrier();
+        \\    if (s_data[0] > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "numthreads");
+    try assertContains(hlsl, "discard");
+}
