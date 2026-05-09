@@ -2639,3 +2639,61 @@ test "T38.3: gl_FragCoord component access" {
     try assertContains(hlsl, "SV_Position");
     try assertContains(hlsl, "discard");
 }
+
+test "T39.1: struct with nested array" {
+    const source =
+        \\#version 430
+        \\struct Light { vec3 color; float intensity; };
+        \\layout(binding = 0, std140) uniform U { Light lights[2]; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 c = u.lights[0].color;
+        \\    float i = u.lights[1].intensity;
+        \\    if (c.x + i > 0.0) discard;
+        \\    fragColor = vec4(c, i);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T39.2: vec4 swizzle write" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 v = vec4(0.0);
+        \\    v.xy = vec2(u.x, u.x);
+        \\    v.zw = vec2(1.0, 1.0);
+        \\    if (v.x > 0.0) discard;
+        \\    fragColor = v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T39.3: while with break" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int n; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int i = 0;
+        \\    float sum = 0.0;
+        \\    while (i < 10) {
+        \\        sum = sum + float(i);
+        \\        if (i >= u.n) break;
+        \\        i = i + 1;
+        \\    }
+        \\    if (sum > 0.0) discard;
+        \\    fragColor = vec4(sum, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
