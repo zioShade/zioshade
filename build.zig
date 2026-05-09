@@ -10,6 +10,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Expose as named module for consumers (e.g., wintty)
+    _ = b.addModule("glslpp", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const lib = b.addLibrary(.{
         .name = "glslpp",
         .root_module = glslpp_mod,
