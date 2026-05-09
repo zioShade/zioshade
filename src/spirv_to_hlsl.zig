@@ -1312,6 +1312,12 @@ fn emitInstruction(
                 try w.print("    {s} {s} = asint({s});\n", .{ rt, result, val });
             }
         },
+        .UConvert, .SConvert, .FConvert => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            try w.print("    {s} {s} = ({s})({s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0",
+            });
+        },
 
         // Composites
         .CompositeConstruct => {
@@ -1456,6 +1462,32 @@ fn emitInstruction(
             // For simplicity, use .GatherRed (component = 0)
             try w.print("    {s} {s} = {s}.GatherRed({s}, {s});\n", .{
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord,
+            });
+        },
+        .ImageQuerySizeLod => {
+            // OpImageQuerySizeLod: result_type, result, image, lod
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const img_name = names.get(inst.words[3]) orelse "tex";
+            const lod = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
+            // Strip _sampler suffix to get texture name
+            var tex_name: []const u8 = img_name;
+            if (std.mem.endsWith(u8, img_name, "_sampler")) {
+                tex_name = img_name[0..img_name.len - "_sampler".len];
+            }
+            try w.print("    {s} {s} = {s}.GetDimensions({s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", tex_name, lod,
+            });
+        },
+        .ImageQuerySize => {
+            // OpImageQuerySize: result_type, result, image (no lod)
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const img_name = names.get(inst.words[3]) orelse "tex";
+            var tex_name: []const u8 = img_name;
+            if (std.mem.endsWith(u8, img_name, "_sampler")) {
+                tex_name = img_name[0..img_name.len - "_sampler".len];
+            }
+            try w.print("    {s} {s} = {s}.GetDimensions(0);\n", .{
+                rt, names.get(inst.words[2]) orelse "v", tex_name,
             });
         },
 

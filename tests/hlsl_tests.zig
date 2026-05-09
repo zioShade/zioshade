@@ -2729,3 +2729,20 @@ test "T40.2: isinf maps to HLSL isinf" {
     try assertContains(hlsl, "isinf");
     try assertContains(hlsl, "discard");
 }
+
+test "T40.3: textureSize maps to GetDimensions" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec2 sz = textureSize(tex, 0);
+        \\    if (sz.x > 0) discard;
+        \\    fragColor = vec4(float(sz.x), float(sz.y), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "GetDimensions");
+    try assertContains(hlsl, "discard");
+}
