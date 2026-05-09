@@ -2869,3 +2869,35 @@ test "T46.1: sampler2DMS maps to Texture2DMS" {
     try assertContains(hlsl, "Load");
 }
 
+test "T47.1: isampler2D integer texture texelFetch" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform isampler2D tex;
+        \\layout(location = 0) out ivec4 fragColor;
+        \\void main() {
+        \\    ivec4 c = texelFetch(tex, ivec2(0, 0), 0);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Texture2D<int4>");
+    try assertContains(hlsl, "Load");
+}
+
+test "T47.2: usampler2D unsigned integer texture" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform usampler2D tex;
+        \\layout(location = 0) out uvec4 fragColor;
+        \\void main() {
+        \\    uvec4 c = texelFetch(tex, ivec2(0, 0), 0);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Texture2D<uint4>");
+    try assertContains(hlsl, "Load");
+}
+
