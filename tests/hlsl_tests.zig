@@ -4565,3 +4565,90 @@ test "T120.1: vec4 construction from 4 floats" {
     try assertContains(hlsl, "float4");
 }
 
+test "T121.1: mat4 inverse" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat4 m; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 inv = inverse(u.m);
+        \\    fragColor = inv[0];
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T122.1: ivec4 arithmetic" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in ivec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec4 doubled = v * 2;
+        \\    fragColor = vec4(doubled);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T123.1: nested if with return" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (x > 0.5) {
+        \\        if (x > 0.9) {
+        \\            fragColor = vec4(1.0);
+        \\            return;
+        \\        }
+        \\        fragColor = vec4(0.5);
+        \\    } else {
+        \\        fragColor = vec4(0.0);
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T124.1: uvec4 bitwise and" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in uvec4 a;
+        \\layout(location = 1) in uvec4 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uvec4 result = a & b;
+        \\    fragColor = vec4(result);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T125.1: multiple samplers with different bindings" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex0;
+        \\layout(binding = 3) uniform sampler2D tex1;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 a = texture(tex0, uv);
+        \\    vec4 b = texture(tex1, uv);
+        \\    fragColor = a + b;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "register(t0)");
+    try assertContains(hlsl, "register(t3)");
+}
+
