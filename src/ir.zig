@@ -164,6 +164,7 @@ pub const Instruction = struct {
         member_access_op,
         image_sample,
         image_sample_explicit_lod,
+        image_sample_grad,
         image_sample_proj,
         image_sample_dref,
         image_sample_dref_explicit_lod,

@@ -3890,14 +3890,16 @@ const Analyzer = struct {
                                 });
                             } else {
                             // texture(sampler, coord) → image_sample (implicit or explicit lod)
-                            const is_explicit_lod = std.mem.eql(u8, node.data.name, "textureLod") or std.mem.eql(u8, node.data.name, "textureLodOffset");
+                            const is_lod = std.mem.eql(u8, node.data.name, "textureLod") or std.mem.eql(u8, node.data.name, "textureLodOffset");
+                            const is_grad = std.mem.eql(u8, node.data.name, "textureGrad") or std.mem.eql(u8, node.data.name, "textureGradOffset");
+                            const is_explicit_lod = is_lod or is_grad or std.mem.eql(u8, node.data.name, "textureProjLod") or std.mem.eql(u8, node.data.name, "textureProjGrad");
                             const is_proj = std.mem.eql(u8, node.data.name, "textureProj");
                             // Shadow samplers use Dref instructions that return float
                             const tag: ir.Instruction.Tag = if (is_shadow_sample) (
                                 if (is_explicit_lod) .image_sample_dref_explicit_lod
                                 else if (is_proj) .image_sample_dref_proj
                                 else .image_sample_dref
-                            ) else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else .image_sample;
+                            ) else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else .image_sample;
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                             for (arg_tids.items, 0..) |tid, i| {
                                 operands[i] = .{ .id = tid.id };
