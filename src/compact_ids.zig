@@ -3652,6 +3652,7 @@ pub fn elimUnreachableCalls(alloc: std.mem.Allocator, words: []const u32) error{
     // Phase 2: Replace OpFunctionCall to unreachable funcs with OpUndef for the result
     // Also remove the unreachable function definitions
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    defer result.deinit(alloc);
     result.appendSliceAssumeCapacity(words[0..5]); // header
 
     var skip_func: ?u32 = null;

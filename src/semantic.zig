@@ -4563,6 +4563,7 @@ const Analyzer = struct {
                         }
                         const arr_base = try self.alloc.create(ast.Type);
                         arr_base.* = inner;
+                        self.heap_types.append(self.alloc, arr_base) catch {};
                         ty = .{ .array = .{ .base = arr_base, .size = @intCast(arg_tids.items.len) } };
                     }
                     break :blk ty;
