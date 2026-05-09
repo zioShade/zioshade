@@ -108,6 +108,11 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
     analyzer.globals = .{};
     analyzer.heap_types = .{};
     analyzer.spec_constants = .{};
+    for (analyzer.instructions.items) |inst| {
+        if (inst.operands.len > 0) {
+            analyzer.alloc.free(inst.operands);
+        }
+    }
     analyzer.instructions.clearRetainingCapacity();
     return mod;
 }
@@ -245,13 +250,27 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) !ir.Module {
             func_copy.body = body_to_keep;
             kept.appendAssumeCapacity(func_copy);
         } else {
-            // Do NOT free unreachable function's body/params here.
-            // The body may contain constants referenced by surviving functions.
-            // The rescued_constants list copies instruction structs but NOT their
-            // operand slices, which still point into these bodies.
-            // These bodies will be cleaned up when the module is deinitialized.
-            // alloc.free(func.body);
-            // alloc.free(func.param_ids);
+            // Free unreachable function body (instruction slice) and params.
+            // The operand arrays inside the instructions are separate allocations
+            // and will be freed when main's body is deinitialized (via rescued constants).
+            for (func.body) |inst| {
+                // Only free operands if this instruction was NOT rescued into main
+                // Rescued constants have their operands still referenced by main's body
+                var was_rescued = false;
+                for (rescued_constants.items) |rc| {
+                    if (rc.result_id != null and inst.result_id != null and rc.result_id.? == inst.result_id.?) {
+                        was_rescued = true;
+                        break;
+                    }
+                }
+                if (!was_rescued and inst.operands.len > 0) {
+                    alloc.free(inst.operands);
+                }
+            }
+            alloc.free(func.body);
+            if (func.param_ids.len > 0) {
+                alloc.free(func.param_ids);
+            }
         }
     }
 
@@ -343,6 +362,22 @@ const Analyzer = struct {
         self.global_ptr_ids.deinit(self.alloc);
         self.pure_op_cache.deinit(self.alloc);
         self.global_pure_op_cache.deinit(self.alloc);
+        // Free owned name keys in the types map
+        {
+            var type_key_it = self.types.keyIterator();
+            while (type_key_it.next()) |key_ptr| {
+                self.alloc.free(key_ptr.*);
+            }
+            self.types.deinit(self.alloc);
+        }
+        // Free owned name keys in the spec_constants map
+        {
+            var sc_key_it = self.spec_constants.keyIterator();
+            while (sc_key_it.next()) |key_ptr| {
+                self.alloc.free(key_ptr.*);
+            }
+            self.spec_constants.deinit(self.alloc);
+        }
         {
             var it = self.overloads.iterator();
             while (it.next()) |entry| {
@@ -1189,7 +1224,9 @@ const Analyzer = struct {
                     // Function overload: store in overload map
                     const owned_name = try self.alloc.dupe(u8, node.data.name);
                     const gop = try self.overloads.getOrPut(self.alloc, owned_name);
-                    if (!gop.found_existing) {
+                    if (gop.found_existing) {
+                        self.alloc.free(owned_name);
+                    } else {
                         gop.value_ptr.* = .{};
                         // Store the original function with its param types from the first declaration
                         // We need to recover the original param types — but we don't have them
@@ -1221,7 +1258,9 @@ const Analyzer = struct {
                     // First declaration of this function name
                     const owned_name = try self.alloc.dupe(u8, node.data.name);
                     const gop = try self.overloads.getOrPut(self.alloc, owned_name);
-                    if (!gop.found_existing) {
+                    if (gop.found_existing) {
+                        self.alloc.free(owned_name);
+                    } else {
                         gop.value_ptr.* = .{};
                     }
                     const owned_pts = try self.alloc.dupe(ast.Type, param_types.items);
