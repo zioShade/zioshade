@@ -26,7 +26,7 @@
 13. mat2 construction col_ids temp array leak
 
 ## Remaining Known Issues
-- Matrix transpose doesn't appear in HLSL output (DCE or codegen issue)
+- Matrix transpose from mat4 uniform block gets eliminated by optimization pipeline: raw SPIR-V has OpTranspose (140 words) but after optimization pipeline, final SPIR-V is 39 words (just header+entry point). mat2 from uniform block works. mat4 without uniform block works. The issue is in the DCE/elimUnusedGlobals interaction with mat4 uniforms.
 - HLSL variable naming uses fallback "0" for unnamed IDs (quality, not correctness)
 
 ## Test Coverage by Feature
