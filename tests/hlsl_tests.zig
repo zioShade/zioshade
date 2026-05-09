@@ -2467,3 +2467,20 @@ test "T35.3: mix with bool selector" {
     try assertContains(hlsl, "lerp");
     try assertContains(hlsl, "discard");
 }
+
+test "T36.1: floatBitsToInt maps to asint" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int bits = floatBitsToInt(u.x);
+        \\    if (bits > 0) discard;
+        \\    fragColor = vec4(float(bits));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "asint");
+    try assertContains(hlsl, "discard");
+}
