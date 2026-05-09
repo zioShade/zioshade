@@ -6105,3 +6105,84 @@ test "T215.1: vec3 normalize and scale" {
     try assertContains(hlsl, "float4");
 }
 
+test "T216.1: uvec4 component access" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in uvec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = float(v.x) + float(v.y) + float(v.z) + float(v.w);
+        \\    fragColor = vec4(sum * 0.25);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T217.1: float to int to float roundtrip" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int i = int(x);
+        \\    float f = float(i);
+        \\    fragColor = vec4(f);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T218.1: vec4 compound assignment operators" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 a = v;
+        \\    a += vec4(1.0);
+        \\    a *= 0.5;
+        \\    a -= vec4(0.25);
+        \\    fragColor = a;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T219.1: nested struct in uniform with vec4 member" {
+    const source =
+        \\#version 450
+        \\struct Material { vec4 baseColor; float roughness; };
+        \\layout(binding = 0) uniform U { Material mat; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 color = u.mat.baseColor.rgb;
+        \\    fragColor = vec4(color * (1.0 - u.mat.roughness), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T220.1: vec2 dot product" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 a;
+        \\layout(location = 1) in vec2 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = dot(a, b);
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
