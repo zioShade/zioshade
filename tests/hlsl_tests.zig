@@ -5863,3 +5863,84 @@ test "T200.1: compute with float atomics" {
     try assertContains(hlsl, "float");
 }
 
+test "T201.1: vec2 distance and length" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 a;
+        \\layout(location = 1) in vec2 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = distance(a, b);
+        \\    float l = length(a);
+        \\    fragColor = vec4(d, l, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T202.1: multiple cbuffer read sequence" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { float a; float b; float c; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float result = u.a * u.b + u.c;
+        \\    fragColor = vec4(result);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T203.1: vec3 construction from single float" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 v = vec3(x);
+        \\    fragColor = vec4(v, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T204.1: uint comparison and branch" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in uint x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (x > 10u) {
+        \\        fragColor = vec4(1.0);
+        \\    } else {
+        \\        fragColor = vec4(0.0);
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T205.1: vec4 lerp with uniform alpha" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { float alpha; } u;
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 1) in vec4 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = mix(a, b, u.alpha);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
