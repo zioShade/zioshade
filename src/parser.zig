@@ -1745,6 +1745,29 @@ const Parser = struct {
                     .data = .{ .ty = ty, .children = try args.toOwnedSlice(self.alloc) },
                 };
             },
+            // texture2D, texture3D etc. are built-in functions, not type constructors.
+            // They're tokenized as keywords but used as function calls: texture2D(sampler, coord)
+            .kw_texture2d, .kw_texture3d, .kw_texture_cube, .kw_texture2d_array, .kw_texture2d_ms,
+            => {
+                const name = self.text(tok);
+                _ = self.advance();
+                if (self.current().tag == .l_paren) {
+                    _ = self.advance(); // (
+                    var args = std.ArrayListUnmanaged(ast.Node){};
+                    defer args.deinit(self.alloc);
+                    while (self.current().tag != .r_paren and self.current().tag != .eof) {
+                        try args.append(self.alloc, try self.parseExpression());
+                        if (self.current().tag == .comma) _ = self.advance();
+                    }
+                    _ = self.expect(.r_paren) catch {};
+                    return .{
+                        .tag = .func_call,
+                        .loc = self.nodeLoc(tok),
+                        .data = .{ .name = name, .children = try args.toOwnedSlice(self.alloc) },
+                    };
+                }
+                return .{ .tag = .identifier, .loc = self.nodeLoc(tok), .data = .{ .name = name } };
+            },
             else => {
                 _ = self.advance();
                 return .{ .tag = .identifier, .loc = self.nodeLoc(tok), .data = .{} };

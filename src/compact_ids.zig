@@ -6754,7 +6754,7 @@ pub fn elimDeadVarStores(alloc: std.mem.Allocator, words: []const u32) error{Out
         if (ie > words.len) break;
         if (opcode == 59 and wc >= 4) { // OpVariable
             const sc = words[pos + 3];
-            if (sc == 6 or sc == 3) { // Private or Output storage class only (NOT Function to avoid group vote issues)
+            if (sc == 6) { // Private storage class only (NOT Output — those are shader outputs that must be preserved)
                 const rid = words[pos + 2];
                 if (rid < bound) func_vars.set(rid);
             }

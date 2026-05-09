@@ -2036,18 +2036,17 @@ test "WIN1: wintty CRT shader compiles to HLSL" {
 }
 
 test "WIN2: wintty focus shader compiles to HLSL" {
-    // Focus shader uses bool variables with || operators which cause
-    // semantic analysis issues — the function body gets dropped.
-    // For now, verify compilation doesn't crash and produces some output.
-    // Full fix tracked in Task 1.2 of the wintty integration plan.
     const hlsl = try compileShadertoy(test_focus);
     defer alloc.free(hlsl);
 
-    try std.testing.expect(hlsl.len > 0);
+    try std.testing.expect(hlsl.len > 100); // Must produce meaningful output
     try assertContains(hlsl, "main");
-    // TODO: once bool/|| is fixed, re-enable:
-    // try assertContains(hlsl, "mainImage");
-    // try assertContains(hlsl, "cbuffer");
+    try assertContains(hlsl, "mainImage");
+    try assertContains(hlsl, "cbuffer");
+    // Focus shader has if/else with bool conditions and || operators
+    try assertContains(hlsl, "if");
+    // TODO: texture sampling is lost during optimization (elimUnusedGlobals removes iChannel0)
+    // try assertContains(hlsl, "Sample");
 }
 
 test "WIN-DBG: bool variable with logical OR" {
