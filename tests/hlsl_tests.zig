@@ -6266,3 +6266,89 @@ test "T225.1: textureGrad with sampler2D" {
     try assertContains(hlsl, "float4");
 }
 
+test "T226.1: vec3 projection onto normal" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 n = normalize(v);
+        \\    float d = dot(v, n);
+        \\    vec3 proj = n * d;
+        \\    fragColor = vec4(proj, d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T227.1: uint bitwise not" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in uint x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint inv = ~x;
+        \\    fragColor = vec4(float(inv & 0xFFu) / 255.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T228.1: vec4 select with bvec4" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 1) in vec4 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec4 cond = greaterThan(a, vec4(0.5));
+        \\    vec4 result = mix(b, a, vec4(cond));
+        \\    fragColor = result;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T229.1: mat4 translation matrix" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 offset;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 m = mat4(1.0, 0.0, 0.0, 0.0,
+        \\                 0.0, 1.0, 0.0, 0.0,
+        \\                 0.0, 0.0, 1.0, 0.0,
+        \\                 offset.x, offset.y, offset.z, 1.0);
+        \\    vec4 pos = m * vec4(1.0, 2.0, 3.0, 1.0);
+        \\    fragColor = pos;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T230.1: early return in if" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (x < 0.0) {
+        \\        fragColor = vec4(1.0, 0.0, 0.0, 1.0);
+        \\        return;
+        \\    }
+        \\    fragColor = vec4(x);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
