@@ -4652,3 +4652,85 @@ test "T125.1: multiple samplers with different bindings" {
     try assertContains(hlsl, "register(t3)");
 }
 
+test "T126.1: gl_WorkGroupSize in compute" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 8, local_size_y = 4) in;
+        \\layout(std430, binding = 0) buffer Data { float vals[]; } data;
+        \\void main() {
+        \\    uint idx = gl_GlobalInvocationID.y * gl_WorkGroupSize.x + gl_GlobalInvocationID.x;
+        \\    data.vals[idx] = float(idx);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T127.1: nested loop with break" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float s = 0.0;
+        \\    for (int i = 0; i < 3; i++) {
+        \\        for (int j = 0; j < 3; j++) {
+        \\            s += x * float(i + j);
+        \\            if (s > 5.0) break;
+        \\        }
+        \\    }
+        \\    fragColor = vec4(s);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T128.1: scalar reciprocal" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(1.0 / x);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T129.1: vec3 normalized multiply" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 n = normalize(v);
+        \\    vec3 reflected = reflect(n, vec3(0.0, 1.0, 0.0));
+        \\    fragColor = vec4(reflected, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T130.1: uint increment and comparison" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in uint x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint y = x + 1u;
+        \\    float f = (y > 10u) ? 1.0 : 0.0;
+        \\    fragColor = vec4(f);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
