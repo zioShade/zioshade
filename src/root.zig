@@ -127,7 +127,7 @@ pub fn spirvToHLSL(
 }
 
 /// One-shot: compile Shadertoy-style GLSL to HLSL.
-/// Chains preprocess → parse → SPIR-V → HLSL.
+/// Chains preprocess -> parse -> SPIR-V -> HLSL.
 pub fn compileShadertoyToHlsl(
     alloc: std.mem.Allocator,
     glsl: [:0]const u8,
@@ -137,11 +137,36 @@ pub fn compileShadertoyToHlsl(
     defer alloc.free(spirv_words);
 
     const hlsl = try spirvToHLSL(alloc, spirv_words, .{
-        .binding_shift = -1, // remap binding=1 → register(b0)
+        .binding_shift = -1, // remap binding=1 -> register(b0)
         .shader_model = 60,
     });
 
     return .{ .hlsl = hlsl, .diagnostics = &.{} };
+}
+
+/// One-shot GLSL -> HLSL compilation.
+/// Takes GLSL source (with shadertoy prefix already prepended) and returns
+/// a null-terminated HLSL string. Uses binding_shift=-1 to remap binding=1
+/// to register(b0) for DX12 root signature compatibility.
+/// Caller must free with alloc.free().
+pub fn compileGlslToHlsl(
+    alloc: std.mem.Allocator,
+    glsl_source: [:0]const u8,
+    stage: Stage,
+) ![:0]const u8 {
+    const spirv_words = try compileToSPIRV(alloc, glsl_source, .{
+        .stage = stage,
+        .version = 430,
+    });
+    defer alloc.free(spirv_words);
+
+    const hlsl = try spirvToHLSL(alloc, spirv_words, .{
+        .binding_shift = -1,
+        .shader_model = 60,
+    });
+    // The result from spirvToHLSL is []const u8, not null-terminated.
+    // Dupe with sentinel for wintty compatibility.
+    return try alloc.dupeZ(u8, hlsl);
 }
 
 
