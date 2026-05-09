@@ -95,4 +95,19 @@ pub fn build(b: *std.Build) void {
     }));
     hlsl_test_step.dependOn(&run_hlsl_tests.step);
     test_step.dependOn(&run_hlsl_tests.step);
+
+    // Tool: dump CRT shader HLSL — run with: zig build dump-crt
+    const dump_step = b.step("dump-crt", "Dump CRT shader HLSL output");
+    const dump_mod = b.createModule(.{
+        .root_source_file = b.path("tools/dump_crt_hlsl.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dump_mod.addImport("glslpp", glslpp_mod);
+    const dump_exe = b.addExecutable(.{
+        .name = "dump-crt",
+        .root_module = dump_mod,
+    });
+    const run_dump = b.addRunArtifact(dump_exe);
+    dump_step.dependOn(&run_dump.step);
 }
