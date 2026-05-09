@@ -6752,3 +6752,83 @@ test "T255.1: gl_SampleMask" {
     try assertContains(hlsl, "float4");
 }
 
+test "T256.1: precise qualifier" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    precise float a = x * x;
+        \\    precise float b = a + a;
+        \\    fragColor = vec4(b);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T257.1: noperspective interpolation" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) noperspective in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T258.1: nested struct array in uniform" {
+    const source =
+        \\#version 450
+        \\struct Light { vec3 position; float intensity; };
+        \\layout(binding = 0) uniform U { Light lights[2]; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 p0 = u.lights[0].position;
+        \\    vec3 p1 = u.lights[1].position;
+        \\    float d = distance(p0, p1);
+        \\    fragColor = vec4(d * u.lights[0].intensity);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T259.1: gl_VertexIndex and gl_InstanceIndex" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float vid = float(gl_VertexID);
+        \\    float iid = float(gl_InstanceID);
+        \\    gl_Position = vec4(vid * 0.01, iid * 0.01, 0.0, 1.0);
+        \\    fragColor = gl_Position;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T260.1: intBitsToFloat and floatBitsToInt" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int bits = floatBitsToInt(x);
+        \\    float reconstructed = intBitsToFloat(bits);
+        \\    fragColor = vec4(reconstructed);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
