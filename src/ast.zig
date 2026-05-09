@@ -5,8 +5,15 @@ pub const Root = struct {
     version: ?u32,
     body: []const Node,
     alloc: std.mem.Allocator,
+    heap_types: []const *Type = &.{},
 
     pub fn deinit(self: *Root) void {
+        for (self.heap_types) |ptr| {
+            self.alloc.destroy(ptr);
+        }
+        if (self.heap_types.len > 0) {
+            self.alloc.free(self.heap_types);
+        }
         self.alloc.free(self.body);
     }
 };

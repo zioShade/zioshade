@@ -77,6 +77,7 @@ pub fn parse(alloc: std.mem.Allocator, source: [:0]const u8, tokens: []const lex
         .version = null,
         .body = try body.toOwnedSlice(alloc),
         .alloc = alloc,
+        .heap_types = try p.heap_types.toOwnedSlice(alloc),
     };
 }
 
@@ -85,7 +86,15 @@ pub fn freeTree(alloc: std.mem.Allocator, root: *ast.Root) void {
         freeNode(alloc, node);
     }
     alloc.free(root.body);
+    // Free heap-allocated AST types (array bases)
+    for (root.heap_types) |ptr| {
+        alloc.destroy(ptr);
+    }
+    if (root.heap_types.len > 0) {
+        alloc.free(root.heap_types);
+    }
     root.body = &.{};
+    root.heap_types = &.{};
 }
 
 fn freeNode(alloc: std.mem.Allocator, node: *const ast.Node) void {
@@ -112,7 +121,7 @@ fn freeType(alloc: std.mem.Allocator, ty: ast.Type) void {
     switch (ty) {
         .array => |a| {
             freeType(alloc, a.base.*);
-            alloc.destroy(a.base);
+            // Note: a.base is destroyed via Root.heap_types in freeTree
         },
         else => {},
     }
@@ -124,6 +133,7 @@ const Parser = struct {
     tokens: []const lexer.Token,
     pos: usize,
     struct_names: std.StringHashMapUnmanaged(void),
+    heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
 
     // ── Navigation ────────────────────────────────────────────
 
@@ -202,6 +212,14 @@ const Parser = struct {
 
     fn text(self: *Parser, tok: lexer.Token) []const u8 {
         return self.source[tok.start..tok.start + tok.len];
+    }
+
+    /// Create a heap-allocated AST type (for array bases) tracked for cleanup.
+    fn createType(self: *Parser, inner: ast.Type) Error!*ast.Type {
+        const ptr = try self.alloc.create(ast.Type);
+        ptr.* = inner;
+        self.heap_types.append(self.alloc, ptr) catch {};
+        return ptr;
     }
 
     fn dupeNodes(self: *Parser, nodes: []const ast.Node) Error![]const ast.Node {
@@ -324,8 +342,7 @@ const Parser = struct {
                 var i: usize = arr_dims.items.len;
                 while (i > 0) {
                     i -= 1;
-                    const arr_base = try self.alloc.create(ast.Type);
-                    arr_base.* = final_ty;
+                    const arr_base = try self.createType(final_ty);
                     final_ty = .{ .array = .{ .base = arr_base, .size = arr_dims.items[i] } };
                 }
             }
@@ -594,8 +611,7 @@ const Parser = struct {
                     const rank = std.fmt.parseInt(u32, self.text(rank_tok), 0) catch 4;
                     _ = self.advance(); // consume rank
                     if (self.current().tag == .gt) _ = self.advance(); // consume >
-                    const elem_ptr = self.alloc.create(ast.Type) catch return null;
-                    elem_ptr.* = elem_ty;
+                    const elem_ptr = self.createType(elem_ty) catch return null;
                     return .{ .tensor_arm = .{ .element = elem_ptr, .rank = rank } };
                 }
                 return .void;
@@ -655,8 +671,7 @@ const Parser = struct {
                 const size_str = self.text(size_tok);
                 const size = std.fmt.parseInt(u32, size_str, 10) catch 0;
                 if (size > 0) {
-                    const base_ptr = try self.alloc.create(ast.Type);
-                    base_ptr.* = p_type;
+                    const base_ptr = try self.createType(p_type);
                     final_type = .{ .array = .{ .base = base_ptr, .size = size } };
                 }
             }
@@ -720,8 +735,7 @@ const Parser = struct {
             var i: usize = arr_dims.items.len;
             while (i > 0) {
                 i -= 1;
-                const arr_base = try self.alloc.create(ast.Type);
-                arr_base.* = ty;
+                const arr_base = try self.createType(ty);
                 ty = .{ .array = .{ .base = arr_base, .size = arr_dims.items[i] } };
             }
         }
@@ -792,8 +806,7 @@ const Parser = struct {
                 var i: usize = member_arr_dims.items.len;
                 while (i > 0) {
                     i -= 1;
-                    const arr_base = try self.alloc.create(ast.Type);
-                    arr_base.* = member_ty_final;
+                    const arr_base = try self.createType(member_ty_final);
                     member_ty_final = .{ .array = .{ .base = arr_base, .size = member_arr_dims.items[i] } };
                 }
             }
@@ -853,8 +866,7 @@ const Parser = struct {
                 var i: usize = member_arr_dims.items.len;
                 while (i > 0) {
                     i -= 1;
-                    const arr_base = try self.alloc.create(ast.Type);
-                    arr_base.* = member_ty_final;
+                    const arr_base = try self.createType(member_ty_final);
                     member_ty_final = .{ .array = .{ .base = arr_base, .size = member_arr_dims.items[i], .size_name = member_arr_size_name } };
                 }
             }
@@ -1017,8 +1029,7 @@ const Parser = struct {
             var i: usize = local_arr_dims.items.len;
             while (i > 0) {
                 i -= 1;
-                const arr_base = try self.alloc.create(ast.Type);
-                arr_base.* = ty;
+                const arr_base = try self.createType(ty);
                 ty = .{ .array = .{ .base = arr_base, .size = local_arr_dims.items[i] } };
             }
         }
@@ -1635,8 +1646,7 @@ const Parser = struct {
                     while (self.current().tag == .l_bracket and self.peek().tag == .r_bracket) {
                         _ = self.advance(); // [
                         _ = self.advance(); // ]
-                        const arr_base = try self.alloc.create(ast.Type);
-                        arr_base.* = ty;
+                        const arr_base = try self.createType(ty);
                         ty = .{ .array = .{ .base = arr_base, .size = 0 } };
                         dim_count += 1;
                     }
@@ -1713,8 +1723,7 @@ const Parser = struct {
                     if (self.current().tag == .r_bracket) {
                         _ = self.advance(); // ]
                         // Unsized array constructor: base_type[](...)
-                        const arr_base = try self.alloc.create(ast.Type);
-                        arr_base.* = ty;
+                        const arr_base = try self.createType(ty);
                         ty = .{ .array = .{ .base = arr_base, .size = 0 } };
                     } else {
                         // Sized array type: base_type[N]
@@ -1722,8 +1731,7 @@ const Parser = struct {
                         _ = self.advance(); // size
                         _ = self.expect(.r_bracket) catch {};
                         const size_val = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
-                        const arr_base = try self.alloc.create(ast.Type);
-                        arr_base.* = ty;
+                        const arr_base = try self.createType(ty);
                         ty = .{ .array = .{ .base = arr_base, .size = size_val } };
                     }
                 }
