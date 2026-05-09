@@ -2305,3 +2305,52 @@ test "T32.3: fwidth maps to fwidth (abs(ddx)+abs(ddy))" {
     try assertContains(hlsl, "ddy");
     try assertContains(hlsl, "discard");
 }
+
+test "T33.1: equal/notEqual on vectors" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 a; vec4 b; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bool eq = equal(u.a, u.b).x;
+        \\    if (eq) discard;
+        \\    fragColor = u.a;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T33.2: lessThan/greaterThan on vectors" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 a; vec4 b; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bool lt = lessThan(u.a, u.b).x;
+        \\    bool gt = greaterThan(u.a, u.b).x;
+        \\    if (lt || gt) discard;
+        \\    fragColor = u.a;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T33.3: any/all on bvec" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 a; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec4 b = greaterThan(u.a, vec4(0.0));
+        \\    if (any(b)) discard;
+        \\    fragColor = u.a;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
