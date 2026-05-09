@@ -4638,6 +4638,7 @@ const Analyzer = struct {
                             var bc_key2: u64 = @intFromEnum(result_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.bitcast);
                             bc_key2 = bc_key2 *% 31 +% @as(u64, ptr_id);
                             if (self.pure_op_cache.get(bc_key2)) |existing_id| {
+                                self.alloc.free(ops);
                                 return .{ .ty = result_ty, .id = existing_id };
                             }
                             try self.instructions.append(self.alloc, .{
