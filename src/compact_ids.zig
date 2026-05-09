@@ -8083,6 +8083,10 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
     // Phase 1: Find global OpVariable IDs (outside functions)
     var global_vars = std.AutoHashMapUnmanaged(u32, void){};
     defer global_vars.deinit(alloc);
+    // Track which globals are output variables (storage class 3 = Output)
+    // These should never be removed as they're used by the fixed-function pipeline
+    var output_vars = std.AutoHashMapUnmanaged(u32, void){};
+    defer output_vars.deinit(alloc);
     var in_func = false;
     var pos: u32 = 5;
     while (pos < words.len) {
@@ -8094,6 +8098,10 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
         if (op == 56) in_func = false;
         if (op == 59 and !in_func and wc >= 4) {
             try global_vars.put(alloc, words[pos + 2], {});
+            // Storage class is at pos+3. 3 = Output
+            if (words[pos + 3] == 3) {
+                try output_vars.put(alloc, words[pos + 2], {});
+            }
         }
         pos = ie;
     }
@@ -8273,13 +8281,13 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
         pos = ie;
     }
 
-    // Build unused set
+    // Build unused set (but never remove output variables)
     var unused = std.AutoHashMapUnmanaged(u32, void){};
     defer unused.deinit(alloc);
     var it = global_vars.iterator();
     while (it.next()) |entry| {
         const vid = entry.key_ptr.*;
-        if ((use_count.get(vid) orelse 0) == 0) {
+        if ((use_count.get(vid) orelse 0) == 0 and !output_vars.contains(vid)) {
             try unused.put(alloc, vid, {});
         }
     }
