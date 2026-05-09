@@ -6599,3 +6599,78 @@ test "T245.1: nested if-else ladder" {
     try assertContains(hlsl, "float4");
 }
 
+test "T246.1: layout qualifier on single input" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0, index = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(x * 2.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T247.1: gl_HelperInvocation" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (gl_HelperInvocation) discard;
+        \\    fragColor = vec4(uv, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T248.1: float trunc and roundEven" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float t = trunc(x);
+        \\    float r = roundEven(x);
+        \\    fragColor = vec4(t, r, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T249.1: sampler2DShadow texture with bias" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DShadow shadowMap;
+        \\layout(location = 0) in vec3 uv_depth;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float shadow = texture(shadowMap, uv_depth);
+        \\    fragColor = vec4(shadow);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T250.1: gl_PointCoord in fragment" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = distance(gl_PointCoord, vec2(0.5));
+        \\    fragColor = vec4(1.0 - smoothstep(0.4, 0.5, d));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
