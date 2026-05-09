@@ -2901,3 +2901,19 @@ test "T47.2: usampler2D unsigned integer texture" {
     try assertContains(hlsl, "Load");
 }
 
+test "T48.1: samplerBuffer maps to Buffer" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform samplerBuffer texBuf;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c = texelFetch(texBuf, 0);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Buffer");
+    try assertContains(hlsl, "Load");
+}
+
