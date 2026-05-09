@@ -6186,3 +6186,83 @@ test "T220.1: vec2 dot product" {
     try assertContains(hlsl, "float4");
 }
 
+test "T221.1: vec3 cross product with normalize" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 b = vec3(0.0, 1.0, 0.0);
+        \\    vec3 c = normalize(cross(a, b));
+        \\    fragColor = vec4(c, dot(c, a));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T222.1: float uniform array indexing" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { float weights[4]; } u;
+        \\layout(location = 0) in int idx;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float w = u.weights[idx];
+        \\    fragColor = vec4(w);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T223.1: vec4 swizzle .wzyx reverse" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 reversed = v.wzyx;
+        \\    fragColor = reversed;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T224.1: mat2 construction from scalars" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat2 m = mat2(a, 0.0, 0.0, a);
+        \\    vec2 v = m * vec2(1.0, 2.0);
+        \\    fragColor = vec4(v, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T225.1: textureGrad with sampler2D" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 dx = dFdx(uv);
+        \\    vec2 dy = dFdy(uv);
+        \\    fragColor = textureGrad(tex, uv, dx * 2.0, dy * 2.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
