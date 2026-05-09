@@ -7250,3 +7250,93 @@ test "T285.1: uniform vec3 array with indexing" {
     try assertContains(hlsl, "float4");
 }
 
+test "T286.1: transpose mat4" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat4 m; } u;
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 t = transpose(u.m);
+        \\    fragColor = t * v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T287.1: matrixCompMult" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat3 a; mat3 b; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat3 c = matrixCompMult(u.a, u.b);
+        \\    vec3 diag = vec3(c[0][0], c[1][1], c[2][2]);
+        \\    fragColor = vec4(diag, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T288.1: outerProduct vec3 x vec3" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 1) in vec3 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat3 m = outerProduct(a, b);
+        \\    vec3 result = m * vec3(1.0, 0.0, 0.0);
+        \\    fragColor = vec4(result, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T289.1: while loop with break" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    float v = x;
+        \\    int i = 0;
+        \\    while (i < 10) {
+        \\        sum += v * 0.1;
+        \\        v *= 0.5;
+        \\        i++;
+        \\        if (v < 0.01) break;
+        \\    }
+        \\    fragColor = vec4(sum);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T290.1: do-while loop" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v = x;
+        \\    do {
+        \\        v = v * 0.5 + 0.1;
+        \\    } while (v > 0.01);
+        \\    fragColor = vec4(v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
