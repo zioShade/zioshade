@@ -2800,3 +2800,22 @@ test "T42.1: compute shader with shared memory" {
     try assertContains(hlsl, "numthreads");
     try assertContains(hlsl, "discard");
 }
+
+test "T43.1: samplerCube maps to TextureCube" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform samplerCube env;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 dir = vec3(1.0, 0.0, 0.0);
+        \\    vec4 c = texture(env, dir);
+        \\    if (c.x > 0.0) discard;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "TextureCube");
+    try assertContains(hlsl, "Sample");
+    try assertContains(hlsl, "discard");
+}
