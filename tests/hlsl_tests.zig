@@ -1573,7 +1573,7 @@ test "T25.5: mat4 transpose" {
         \\layout(binding = 0, std140) uniform U { mat4 m; vec4 v; } u;
         \\void main() {
         \\    mat4 t = transpose(u.m);
-        \\    vec4 result = mul(t, u.v);
+        \\    vec4 result = t * u.v;
         \\    if (result.x > 0.0) discard;
         \\}
     ;
@@ -2819,3 +2819,4 @@ test "T43.1: samplerCube maps to TextureCube" {
     try assertContains(hlsl, "Sample");
     try assertContains(hlsl, "discard");
 }
+
