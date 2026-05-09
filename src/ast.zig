@@ -6,6 +6,7 @@ pub const Root = struct {
     body: []const Node,
     alloc: std.mem.Allocator,
     heap_types: []const *Type = &.{},
+    heap_children: []const []const Node = &.{},
 
     pub fn deinit(self: *Root) void {
         for (self.heap_types) |ptr| {
@@ -13,6 +14,12 @@ pub const Root = struct {
         }
         if (self.heap_types.len > 0) {
             self.alloc.free(self.heap_types);
+        }
+        for (self.heap_children) |children| {
+            self.alloc.free(children);
+        }
+        if (self.heap_children.len > 0) {
+            self.alloc.free(self.heap_children);
         }
         self.alloc.free(self.body);
     }
