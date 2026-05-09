@@ -499,7 +499,7 @@ fn collectResources(
                 const pointee_inst = getDef(module, pointee_type) orelse continue;
                 const binding = getDecorationValue(decorations, result_id, .binding) orelse 0;
                 const name = names.get(result_id) orelse "tex";
-                const hlsl_type: []const u8 = switch (pointee_inst.op) {
+                const hlsl_type = switch (pointee_inst.op) {
                     .TypeSampledImage => hlslTextureTypeFromImage(module, pointee_inst.words[2]),
                     .TypeImage => hlslTextureTypeFromImage(module, pointee_type),
                     .TypeSampler => continue, // samplers paired with textures
@@ -529,17 +529,18 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
     const is_ms = inst.words.len >= 7 and inst.words[6] == 1; // Multisampled
 
     // Determine component type from Sampled_Type (words[2])
-    const sampled_type_id = inst.words[2];
-    const component_prefix: []const u8 = blk: {
-        const type_inst = getDef(module, sampled_type_id) orelse break :blk "";
+    const is_int: ?enum { int, uint } = blk: {
+        const sampled_type_id = inst.words[2];
+        const type_inst = getDef(module, sampled_type_id) orelse break :blk null;
         if (type_inst.op == .TypeInt) {
-            if (type_inst.words.len >= 3 and type_inst.words[2] == 1) break :blk "uint"; // unsigned
-            break :blk "int"; // signed
+            // OpTypeInt layout: header, result_id, bit_width, signedness (0=unsigned, 1=signed)
+            if (type_inst.words.len >= 4 and type_inst.words[3] == 0) break :blk .uint; // unsigned
+            break :blk .int; // signed
         }
-        break :blk ""; // float (default)
+        break :blk null; // float (default)
     };
 
-    // MS textures include component type: Texture2DMS<float4>, Texture2DMS<int4>, etc.
+    // MS textures
     if (is_ms) {
         return switch (dim) {
             .Dim2D => if (is_arrayed) "Texture2DMSArray" else "Texture2DMS",
@@ -547,9 +548,26 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
         };
     }
 
-    // Non-MS: integer textures need prefix
-    const prefix = if (component_prefix.len > 0) component_prefix else "";
-    _ = prefix; // TODO: incorporate into type name for integer textures
+    // Non-MS: integer textures use template parameter
+    if (is_int) |int_type| {
+        // Static lookup table to avoid allocation
+        const ArrayedDim = enum { d1, d1_arr, d2, d2_arr, cube, cube_arr, d3, buffer };
+        const key = switch (dim) {
+            .Dim1D => if (is_arrayed) ArrayedDim.d1_arr else ArrayedDim.d1,
+            .Dim2D => if (is_arrayed) ArrayedDim.d2_arr else ArrayedDim.d2,
+            .DimCube => if (is_arrayed) ArrayedDim.cube_arr else ArrayedDim.cube,
+            .Dim3D => ArrayedDim.d3,
+            .DimBuffer => ArrayedDim.buffer,
+            else => ArrayedDim.d2,
+        };
+        const int_types = [2][8][]const u8{
+            .{ "Texture1D<int4>", "Texture1DArray<int4>", "Texture2D<int4>", "Texture2DArray<int4>", "TextureCube<int4>", "TextureCubeArray<int4>", "Texture3D<int4>", "Buffer<int4>" },
+            .{ "Texture1D<uint4>", "Texture1DArray<uint4>", "Texture2D<uint4>", "Texture2DArray<uint4>", "TextureCube<uint4>", "TextureCubeArray<uint4>", "Texture3D<uint4>", "Buffer<uint4>" },
+        };
+        const int_idx: usize = switch (int_type) { .int => 0, .uint => 1 };
+        const dim_idx: usize = @intFromEnum(key);
+        return int_types[int_idx][dim_idx];
+    }
 
     return switch (dim) {
         .Dim1D => if (is_arrayed) "Texture1DArray" else "Texture1D",
