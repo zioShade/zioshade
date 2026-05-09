@@ -7082,3 +7082,82 @@ test "T275.1: complex expression tree" {
     try assertContains(hlsl, "float4");
 }
 
+test "T276.1: depth comparison texture" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DShadow depthTex;
+        \\layout(location = 0) in vec3 uv_depth;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = texture(depthTex, uv_depth);
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T277.1: vec4 length and distance" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 1) in vec4 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float l = length(a);
+        \\    float d = distance(a, b);
+        \\    fragColor = vec4(l, d, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T278.1: row_major mat4 uniform" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0, row_major) uniform U { mat4 m; } u;
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = u.m * v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T279.1: vec4 step with uniform edge" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { float edge; } u;
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = step(u.edge, v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T280.1: vec4 fract and ceil" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 f = fract(v);
+        \\    vec4 c = ceil(v);
+        \\    fragColor = f + c * 0.5;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
