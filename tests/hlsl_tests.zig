@@ -2413,3 +2413,57 @@ test "T34.3: refract" {
     try assertContains(hlsl, "refract");
     try assertContains(hlsl, "discard");
 }
+
+test "T35.1: atan/asin/acos" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = atan2(u.y, u.x);
+        \\    float b = asin(u.x);
+        \\    float c = acos(u.x);
+        \\    if (a + b + c > 0.0) discard;
+        \\    fragColor = vec4(a, b, c, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "atan2");
+    try assertContains(hlsl, "asin");
+    try assertContains(hlsl, "acos");
+    try assertContains(hlsl, "discard");
+}
+
+test "T35.2: int to float conversion" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float f = float(u.x);
+        \\    if (f > 0.0) discard;
+        \\    fragColor = vec4(f, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "discard");
+}
+
+test "T35.3: mix with bool selector" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; float y; int sel; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r = mix(u.x, u.y, u.sel > 0 ? 1.0 : 0.0);
+        \\    if (r > 0.0) discard;
+        \\    fragColor = vec4(r, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "lerp");
+    try assertContains(hlsl, "discard");
+}
