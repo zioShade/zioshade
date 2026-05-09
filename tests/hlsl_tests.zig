@@ -2354,3 +2354,62 @@ test "T33.3: any/all on bvec" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "discard");
 }
+
+test "T34.1: exp/log/exp2/log2" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = exp(u.x);
+        \\    float b = log(u.x);
+        \\    float c = exp2(u.x);
+        \\    float d = log2(u.x);
+        \\    if (a + b + c + d > 0.0) discard;
+        \\    fragColor = vec4(a, b, c, d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "exp");
+    try assertContains(hlsl, "log");
+    try assertContains(hlsl, "discard");
+}
+
+test "T34.2: inversesqrt/sqrt" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = inversesqrt(u.x);
+        \\    float b = sqrt(u.x);
+        \\    if (a + b > 0.0) discard;
+        \\    fragColor = vec4(a, b, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "rsqrt");
+    try assertContains(hlsl, "sqrt");
+    try assertContains(hlsl, "discard");
+}
+
+test "T34.3: refract" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float eta; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 i = vec3(1.0, 0.0, 0.0);
+        \\    vec3 n = vec3(0.0, 1.0, 0.0);
+        \\    vec3 r = refract(i, n, u.eta);
+        \\    if (r.x > 0.0) discard;
+        \\    fragColor = vec4(r, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "refract");
+    try assertContains(hlsl, "discard");
+}
