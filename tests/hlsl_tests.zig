@@ -3052,3 +3052,30 @@ test "T53.2: logical not operator" {
     try assertContains(hlsl, "!");
 }
 
+test "T54.1: switch statement maps to HLSL switch" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int mode;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    switch(mode) {
+        \\        case 1:
+        \\            fragColor = vec4(1.0, 0.0, 0.0, 1.0);
+        \\            break;
+        \\        case 2:
+        \\            fragColor = vec4(0.0, 1.0, 0.0, 1.0);
+        \\            break;
+        \\        default:
+        \\            fragColor = vec4(0.0);
+        \\            break;
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "switch");
+    try assertContains(hlsl, "case 1");
+    try assertContains(hlsl, "case 2");
+    try assertContains(hlsl, "mode");
+}
+

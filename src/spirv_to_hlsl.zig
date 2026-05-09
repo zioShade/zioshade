@@ -1052,6 +1052,17 @@ fn emitBody(
                 if (next.op == .Branch or next.op == .ReturnValue or next.op == .Return or next.op == .Kill) break;
                 if (next.op != .Label and next.op != .SelectionMerge and next.op != .LoopMerge) break;
             }
+            // Also check for OpSwitch after SelectionMerge
+            var k = idx + 1;
+            while (k < module.instructions.len) : (k += 1) {
+                const next = module.instructions[k];
+                if (next.op == .Switch) {
+                    bc_merge_map.put(k, merge_label) catch {};
+                    break;
+                }
+                if (next.op == .Branch or next.op == .ReturnValue or next.op == .Return or next.op == .Kill) break;
+                if (next.op != .Label and next.op != .SelectionMerge and next.op != .LoopMerge) break;
+            }
         }
     }
 
@@ -1090,6 +1101,41 @@ fn emitBody(
             } else {
                 // No merge info — just emit the condition
                 try w.print("    if ({s}) {{ /* TODO: no merge info */ }}\n", .{cond_name});
+            }
+            continue;
+        }
+
+        if (inst.op == .Switch) {
+            // OpSwitch: Selector Default [Case Target ...]
+            if (inst.words.len < 3) continue;
+            const selector_id = inst.words[1];
+            const default_label = inst.words[2];
+            const merge_label = bc_merge_map.get(idx);
+            const selector_name = names.get(selector_id) orelse "s";
+
+            if (merge_label) |ml| {
+                try w.print("    switch ({s}) {{\n", .{selector_name});
+                // Emit default case first if it's not the merge label
+                if (default_label != ml) {
+                    try w.writeAll("    default:\n");
+                    _ = try emitBlock(module, names, decorations, default_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                }
+                // Emit case labels (word 3+: pairs of literal, target)
+                var wi: usize = 3;
+                while (wi + 1 < inst.words.len) : (wi += 2) {
+                    const case_val = inst.words[wi];
+                    const target_label = inst.words[wi + 1];
+                    if (target_label == ml) continue; // skip branches to merge
+                    try w.print("    case {d}:\n", .{case_val});
+                    _ = try emitBlock(module, names, decorations, target_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                }
+                try w.writeAll("    }\n");
+                // Advance to merge label
+                if (label_map.get(ml)) |merge_idx| {
+                    idx = merge_idx;
+                }
+            } else {
+                try w.print("    // switch ({s}) {{ TODO: no merge info }}\n", .{selector_name});
             }
             continue;
         }
