@@ -3802,3 +3802,92 @@ test "T79.2: integer comparison lessThan/greaterThan" {
     try assertContains(hlsl, "int4");
 }
 
+test "T80.1: uint literal and operations" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint a = 0xFFFFFFFFu;
+        \\    uint b = a >> 4u;
+        \\    fragColor = vec4(float(b));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "uint");
+}
+
+test "T80.2: nested struct uniform access" {
+    const source =
+        \\#version 450
+        \\struct Light { vec3 pos; vec3 color; float intensity; };
+        \\layout(binding = 0) uniform UBO { Light lights[2]; vec3 ambient; } ubo;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 c = ubo.lights[0].color * ubo.lights[0].intensity + ubo.ambient;
+        \\    fragColor = vec4(c, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "cbuffer");
+}
+
+test "T81.1: boolean vector operations" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 0) in vec4 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec4 eq = equal(a, b);
+        \\    bvec4 neq = notEqual(a, b);
+        \\    if (any(eq) && !any(neq)) {
+        \\        fragColor = a;
+        \\    } else {
+        \\        fragColor = b;
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Boolean vector ops produce valid HLSL
+    try assertContains(hlsl, "float4");
+}
+
+test "T82.1: multiple function definitions" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float addOne(float x) { return x + 1.0; }
+        \\float mulTwo(float x) { return x * 2.0; }
+        \\void main() {
+        \\    fragColor = vec4(addOne(v), mulTwo(v), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Multiple functions should be inlined or appear in output
+    try assertContains(hlsl, "float4");
+}
+
+test "T83.1: compound assignment operators" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v = x;
+        \\    v += 1.0;
+        \\    v -= 0.5;
+        \\    v *= 2.0;
+        \\    v /= 3.0;
+        \\    fragColor = vec4(v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
