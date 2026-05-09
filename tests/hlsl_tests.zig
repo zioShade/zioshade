@@ -2836,3 +2836,20 @@ test "T44.1: mat4 uniform transpose" {
     try assertContains(hlsl, "transpose");
 }
 
+test "T45.1: sampler2DArray maps to Texture2DArray" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2DArray tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c = texture(tex, vec3(0.5, 0.5, 0.0));
+        \\    if (c.x > 0.0) discard;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Texture2DArray");
+    try assertContains(hlsl, "Sample");
+}
+

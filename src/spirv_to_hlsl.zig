@@ -524,11 +524,15 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
         Dim1D = 0, Dim2D = 1, Dim3D = 2, DimCube = 3, DimBuffer = 5, _,
     } = @enumFromInt(inst.words[3]);
 
+    // Check if arrayed (word 5: 0 = non-arrayed, 1 = arrayed)
+    // OpTypeImage layout: header, result_id, Sampled_Type, Dim, Depth, Arrayed, MS, Sampled, ImageFormat
+    const is_arrayed = inst.words.len >= 6 and inst.words[5] == 1;
+
     return switch (dim) {
-        .Dim1D => "Texture1D",
-        .Dim2D => "Texture2D",
+        .Dim1D => if (is_arrayed) "Texture1DArray" else "Texture1D",
+        .Dim2D => if (is_arrayed) "Texture2DArray" else "Texture2D",
+        .DimCube => if (is_arrayed) "TextureCubeArray" else "TextureCube",
         .Dim3D => "Texture3D",
-        .DimCube => "TextureCube",
         .DimBuffer => "Buffer",
         else => "Texture2D",
     };
