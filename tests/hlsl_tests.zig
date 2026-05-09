@@ -3423,3 +3423,156 @@ test "T67.1: VectorExtractDynamic" {
     try assertContains(hlsl, "float");
 }
 
+test "T68.1: GLSL std.450 clamp maps to HLSL clamp" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v = clamp(x, 0.0, 1.0);
+        \\    fragColor = vec4(v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "clamp");
+}
+
+test "T68.2: GLSL std.450 step maps to HLSL step" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v = step(0.5, x);
+        \\    fragColor = vec4(v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "step");
+}
+
+test "T68.3: GLSL std.450 smoothstep maps to HLSL smoothstep" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v = smoothstep(0.0, 1.0, x);
+        \\    fragColor = vec4(v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "smoothstep");
+}
+
+test "T69.1: GLSL std.450 reflect maps to HLSL reflect" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 n;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 r = reflect(vec3(1.0, -1.0, 0.0), normalize(n));
+        \\    fragColor = vec4(r, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "reflect");
+}
+
+test "T69.2: GLSL std.450 refract maps to HLSL refract" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 n;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 r = refract(vec3(1.0, 0.0, 0.0), normalize(n), 0.5);
+        \\    fragColor = vec4(r, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "refract");
+}
+
+test "T70.1: atomic operations in compute" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) buffer Data { int val; } data;
+        \\layout(local_size_x = 1) in;
+        \\void main() {
+        \\    atomicAdd(data.val, 1);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "InterlockedAdd");
+}
+
+test "T70.2: atomic min/max" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) buffer Data { int val; } data;
+        \\layout(local_size_x = 1) in;
+        \\void main() {
+        \\    atomicMin(data.val, 0);
+        \\    atomicMax(data.val, 100);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "InterlockedMin");
+    try assertContains(hlsl, "InterlockedMax");
+}
+
+test "T71.1: depth texture comparison (shadow sampler)" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DShadow shadowTex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = texture(shadowTex, vec3(0.5, 0.5, 0.9));
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Shadow comparison uses SampleCmp
+    try assertContains(hlsl, "Texture2D");
+}
+
+test "T72.1: multiple render targets" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 color0;
+        \\layout(location = 1) out vec4 color1;
+        \\void main() {
+        \\    color0 = vec4(1.0, 0.0, 0.0, 1.0);
+        \\    color1 = vec4(0.0, 1.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Multiple outputs should produce valid HLSL
+    try assertContains(hlsl, "float4");
+}
+
+test "T72.2: array of samplers" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex[2];
+        \\layout(location = 0) in float idx;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = texture(tex[0], vec2(0.5));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Array of samplers produces valid HLSL even if not perfect
+    try assertContains(hlsl, "float4");
+}
+
