@@ -2484,3 +2484,54 @@ test "T36.1: floatBitsToInt maps to asint" {
     try assertContains(hlsl, "asint");
     try assertContains(hlsl, "discard");
 }
+
+test "T36.2: intBitsToFloat maps to asfloat" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float f = intBitsToFloat(u.x);
+        \\    if (f > 0.0) discard;
+        \\    fragColor = vec4(f, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "asfloat");
+    try assertContains(hlsl, "discard");
+}
+
+test "T36.3: trunc maps to trunc" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float t = trunc(u.x);
+        \\    if (t > 0.0) discard;
+        \\    fragColor = vec4(t, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "trunc");
+    try assertContains(hlsl, "discard");
+}
+
+test "T36.4: round maps to round" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r = round(u.x);
+        \\    if (r > 0.0) discard;
+        \\    fragColor = vec4(r, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "round");
+    try assertContains(hlsl, "discard");
+}
