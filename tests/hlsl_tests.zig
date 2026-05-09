@@ -6352,3 +6352,89 @@ test "T230.1: early return in if" {
     try assertContains(hlsl, "float4");
 }
 
+test "T231.1: vec2 cross (scalar)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 a;
+        \\layout(location = 1) in vec2 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float cross_val = a.x * b.y - a.y * b.x;
+        \\    fragColor = vec4(cross_val);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T232.1: multiple texture samples blended" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c0 = texture(tex, uv + vec2(-0.001, 0.0));
+        \\    vec4 c1 = texture(tex, uv + vec2( 0.001, 0.0));
+        \\    vec4 c2 = texture(tex, uv + vec2(0.0, -0.001));
+        \\    vec4 c3 = texture(tex, uv + vec2(0.0,  0.001));
+        \\    fragColor = (c0 + c1 + c2 + c3) * 0.25;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T233.1: int abs and sign" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = abs(x);
+        \\    int s = sign(x);
+        \\    fragColor = vec4(float(a), float(s), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T234.1: vec4 fma pattern" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 1) in vec4 b;
+        \\layout(location = 2) in vec4 c;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = a * b + c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T235.1: vec3 rotate around axis" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(binding = 0) uniform U { float angle; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float c = cos(u.angle);
+        \\    float s = sin(u.angle);
+        \\    // Rodrigues rotation around Y axis
+        \\    vec3 result = vec3(v.x * c + v.z * s, v.y, -v.x * s + v.z * c);
+        \\    fragColor = vec4(result, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
