@@ -2548,6 +2548,7 @@ const Analyzer = struct {
                     cache_key = cache_key *% 31 +% @as(u64, left_id);
                     cache_key = cache_key *% 31 +% @as(u64, right_id);
                     if (self.pure_op_cache.get(cache_key)) |existing_id| {
+                        self.alloc.free(operands);
                         return .{ .ty = cacheable_ty, .id = existing_id };
                     }
                 }
@@ -5028,6 +5029,7 @@ const Analyzer = struct {
                         .operands = mat_ops,
                         .ty = result_ty,
                     });
+                    self.alloc.free(col_ids);
                     return .{ .ty = result_ty, .id = result_id };
                 }
 
