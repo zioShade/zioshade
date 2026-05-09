@@ -5758,6 +5758,11 @@ const Analyzer = struct {
             return self.typesCompatible(target.array.base.*, source.array.base.*);
         }
         if (std.meta.eql(target, source)) return true;
+        // GLSL matrix aliases: mat2 == mat2x2, mat3 == mat3x3, mat4 == mat4x4
+        if ((target == .mat2 and source == .mat2x2) or (target == .mat2x2 and source == .mat2) or
+            (target == .mat3 and source == .mat3x3) or (target == .mat3x3 and source == .mat3) or
+            (target == .mat4 and source == .mat4x4) or (target == .mat4x4 and source == .mat4))
+            return true;
         if (target == .float and source.isScalar()) return true;
         if (target == .uint and source == .int) return true;
         // Allow float-vector <- int-vector conversions (e.g., vec2 <- ivec2 for textureSize)
