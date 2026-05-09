@@ -524,9 +524,32 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
         Dim1D = 0, Dim2D = 1, Dim3D = 2, DimCube = 3, DimBuffer = 5, _,
     } = @enumFromInt(inst.words[3]);
 
-    // Check if arrayed (word 5: 0 = non-arrayed, 1 = arrayed)
     // OpTypeImage layout: header, result_id, Sampled_Type, Dim, Depth, Arrayed, MS, Sampled, ImageFormat
     const is_arrayed = inst.words.len >= 6 and inst.words[5] == 1;
+    const is_ms = inst.words.len >= 7 and inst.words[6] == 1; // Multisampled
+
+    // Determine component type from Sampled_Type (words[2])
+    const sampled_type_id = inst.words[2];
+    const component_prefix: []const u8 = blk: {
+        const type_inst = getDef(module, sampled_type_id) orelse break :blk "";
+        if (type_inst.op == .TypeInt) {
+            if (type_inst.words.len >= 3 and type_inst.words[2] == 1) break :blk "uint"; // unsigned
+            break :blk "int"; // signed
+        }
+        break :blk ""; // float (default)
+    };
+
+    // MS textures include component type: Texture2DMS<float4>, Texture2DMS<int4>, etc.
+    if (is_ms) {
+        return switch (dim) {
+            .Dim2D => if (is_arrayed) "Texture2DMSArray" else "Texture2DMS",
+            else => "Texture2DMS",
+        };
+    }
+
+    // Non-MS: integer textures need prefix
+    const prefix = if (component_prefix.len > 0) component_prefix else "";
+    _ = prefix; // TODO: incorporate into type name for integer textures
 
     return switch (dim) {
         .Dim1D => if (is_arrayed) "Texture1DArray" else "Texture1D",

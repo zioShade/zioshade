@@ -2853,3 +2853,19 @@ test "T45.1: sampler2DArray maps to Texture2DArray" {
     try assertContains(hlsl, "Sample");
 }
 
+test "T46.1: sampler2DMS maps to Texture2DMS" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2DMS tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c = texelFetch(tex, ivec2(0, 0), 0);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Texture2DMS");
+    try assertContains(hlsl, "Load");
+}
+
