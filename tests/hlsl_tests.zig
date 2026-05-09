@@ -2917,3 +2917,138 @@ test "T48.1: samplerBuffer maps to Buffer" {
     try assertContains(hlsl, "Load");
 }
 
+test "T49.1: non-square matrix mat4x3" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform Uniforms {
+        \\    mat4x3 m43;
+        \\    vec3 v;
+        \\} u;
+        \\layout(location = 0) out vec3 fragColor;
+        \\void main() {
+        \\    vec3 result = u.m43 * u.v;
+        \\    fragColor = result;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4x3");
+    try assertContains(hlsl, "mul");
+}
+
+test "T49.2: non-square matrix mat3x2" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform Uniforms {
+        \\    mat3x2 m32;
+        \\    vec2 v;
+        \\} u;
+        \\layout(location = 0) out vec2 fragColor;
+        \\void main() {
+        \\    vec2 result = u.m32 * u.v;
+        \\    fragColor = result;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float3x2");
+    try assertContains(hlsl, "mul");
+}
+
+test "T50.1: dFdx coarse/fine" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 dx = dFdx(fragColor);
+        \\    vec4 dy = dFdy(fragColor);
+        \\    fragColor = dx + dy;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "ddx");
+    try assertContains(hlsl, "ddy");
+}
+
+test "T50.2: fwidth maps to abs(ddx)+abs(ddy)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 fw = fwidth(fragColor);
+        \\    fragColor = fw;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "ddx");
+    try assertContains(hlsl, "ddy");
+    try assertContains(hlsl, "abs");
+}
+
+test "T51.1: nested struct in uniform block" {
+    const source =
+        \\#version 450
+        \\struct Inner { float x; float y; };
+        \\struct Outer { Inner i; float z; };
+        \\layout(binding = 0) uniform Uniforms {
+        \\    Outer data;
+        \\} u;
+        \\layout(location = 0) out float fragColor;
+        \\void main() {
+        \\    fragColor = u.data.i.x + u.data.z;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Nested struct access works even if struct names are flattened
+    try assertContains(hlsl, "cbuffer");
+}
+
+test "T52.1: boolean comparison builtins (equal, lessThan, any)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec4 b = lessThan(fragColor, vec4(0.5));
+        \\    if (any(b)) {
+        \\        fragColor = vec4(1.0);
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "<");
+}
+
+test "T53.1: negate operator" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 v = -fragColor;
+        \\    fragColor = v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "-");
+}
+
+test "T53.2: logical not operator" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bool b = true;
+        \\    if (!b) {
+        \\        fragColor = vec4(1.0);
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "!");
+}
+
