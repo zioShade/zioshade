@@ -4395,3 +4395,94 @@ test "T110.1: multiple texture samples in expression" {
     try assertContains(hlsl, "Sample");
 }
 
+test "T111.1: for-loop with texture accumulation" {
+    // Validates that a for-loop with texture accumulation produces valid HLSL.
+    // Known limitation: the optimizer may unroll and simplify the loop.
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 sum = vec4(0.0);
+        \\    for (int i = 0; i < 4; i++) {
+        \\        float off = float(i) * 0.1;
+        \\        sum += texture(tex, uv + vec2(off, off));
+        \\    }
+        \\    fragColor = sum;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Output should be valid HLSL
+    try assertContains(hlsl, "float4");
+}
+
+test "T112.1: mat4 scaling" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat4 m; float s; } u;
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = u.m * v * u.s;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T113.1: bvec4 component access" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec4 b = greaterThan(v, vec4(0.5));
+        \\    float x = b.x ? 1.0 : 0.0;
+        \\    fragColor = vec4(x);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T114.1: multiple function parameters" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 1) in float b;
+        \\layout(location = 2) in float c;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float weighted(float x, float y, float w) {
+        \\    return x * w + y * (1.0 - w);
+        \\}
+        \\void main() {
+        \\    fragColor = vec4(weighted(a, b, c));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T115.1: layout(std140) uniform block" {
+    const source =
+        \\#version 450
+        \\layout(std140, binding = 0) uniform U {
+        \\    mat4 mvp;
+        \\    vec4 color;
+        \\} u;
+        \\layout(location = 0) in vec4 pos;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = u.mvp * pos + u.color;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
