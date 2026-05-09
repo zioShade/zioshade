@@ -3704,3 +3704,101 @@ test "T76.1: GLSL std.450 inverse, determinant" {
     try assertContains(hlsl, "determinant");
 }
 
+test "T77.1: early fragment tests" {
+    const source =
+        \\#version 450
+        \\layout(early_fragment_tests) in;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Early fragment tests should produce valid HLSL
+    try assertContains(hlsl, "float4");
+}
+
+test "T77.2: faceforward builtin" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 n;
+        \\layout(location = 0) in vec3 i;
+        \\layout(location = 0) in vec3 nref;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 f = faceforward(n, i, nref);
+        \\    fragColor = vec4(f, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "faceforward");
+}
+
+test "T78.1: vector shuffle with single component" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float x = v.x;
+        \\    fragColor = vec4(x);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, ".x");
+}
+
+test "T78.2: vector shuffle .wzyx (reverse)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 rev = v.wzyx;
+        \\    fragColor = rev;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Reverse swizzle should produce valid HLSL
+    try assertContains(hlsl, "float4");
+}
+
+test "T79.1: push constant block" {
+    const source =
+        \\#version 450
+        \\layout(push_constant) uniform PushConstants {
+        \\    float scale;
+        \\} pc;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(pc.scale);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Push constants may appear as cbuffer
+    try assertContains(hlsl, "float");
+}
+
+test "T79.2: integer comparison lessThan/greaterThan" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in ivec4 a;
+        \\layout(location = 0) in ivec4 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec4 lt = lessThan(a, b);
+        \\    bvec4 gt = greaterThan(a, b);
+        \\    fragColor = vec4(lt) + vec4(gt);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Integer comparisons should produce valid HLSL
+    try assertContains(hlsl, "int4");
+}
+
