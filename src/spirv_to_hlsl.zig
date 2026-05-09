@@ -127,6 +127,7 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ImageSampleExplicitLod, .ImageFetch, .ImageGather,
         .ImageQuerySizeLod, .ImageQuerySize,
         .ImageTexelPointer, .FunctionCall,
+        .CopyObject, .Phi,
         .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
         .UConvert, .SConvert, .FConvert, .Bitcast,
         .SNegate, .FNegate,
@@ -1314,6 +1315,46 @@ fn emitInstruction(
             const obj_name = names.get(inst.words[2]) orelse "0";
             try w.print("    {s} = {s};\n", .{ ptr_expr, obj_name });
             alloc.free(ptr_expr);
+        },
+
+        .CopyObject => {
+            // OpCopyObject: just alias the source ID to the result ID
+            if (inst.words.len < 4) return;
+            const result_id = inst.words[2];
+            const source_id = inst.words[3];
+            const source_name = names.get(source_id) orelse {
+                const alias = try std.fmt.allocPrint(alloc, "v{d}", .{source_id});
+                if (try names.fetchPut(result_id, alias)) |old| alloc.free(old.value);
+                return;
+            };
+            const alias = try alloc.dupe(u8, source_name);
+            if (try names.fetchPut(result_id, alias)) |old| alloc.free(old.value);
+        },
+
+        .CopyMemory => {
+            // OpCopyMemory: target = source
+            if (inst.words.len < 3) return;
+            const target_expr = try resolvePointer(module, names, inst.words[1], alloc);
+            const source_expr = try resolvePointer(module, names, inst.words[2], alloc);
+            try w.print("    {s} = {s};\n", .{ target_expr, source_expr });
+            alloc.free(target_expr);
+            alloc.free(source_expr);
+        },
+
+        .Phi => {
+            // OpPhi: SSA phi node - just use the first available predecessor value
+            if (inst.words.len < 4) return;
+            const result_id = inst.words[2];
+            // words[3..] are pairs of (value_id, label_id)
+            // Take the first value as the phi result
+            const first_value = inst.words[3];
+            const source_name = names.get(first_value) orelse {
+                const alias = try std.fmt.allocPrint(alloc, "v{d}", .{first_value});
+                if (try names.fetchPut(result_id, alias)) |old| alloc.free(old.value);
+                return;
+            };
+            const alias = try alloc.dupe(u8, source_name);
+            if (try names.fetchPut(result_id, alias)) |old| alloc.free(old.value);
         },
 
         .AccessChain => {
