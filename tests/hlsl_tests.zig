@@ -3891,3 +3891,97 @@ test "T83.1: compound assignment operators" {
     try assertContains(hlsl, "float");
 }
 
+test "T84.1: GLSL 320 sampler with textureLod" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = textureLod(tex, uv, 2.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "SampleLevel");
+}
+
+test "T84.2: textureGrad maps to SampleGrad" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = textureGrad(tex, uv, vec2(1.0, 0.0), vec2(0.0, 1.0));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "SampleGrad");
+}
+
+test "T85.1: geometry shader point output" {
+    const source =
+        \\#version 450
+        \\layout(points) in;
+        \\layout(points, max_vertices = 1) out;
+        \\void main() {
+        \\    gl_Position = gl_in[0].gl_Position;
+        \\    EmitVertex();
+        \\    EndPrimitive();
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Geometry shader should produce valid HLSL
+    try assertContains(hlsl, "float4");
+}
+
+test "T86.1: ivec4 and uvec4 operations" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in ivec4 iv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec4 doubled = iv * 2;
+        \\    fragColor = vec4(doubled);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "int4");
+}
+
+test "T86.2: bvec4 comparison and selection" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 result = mix(vec4(0.0), vec4(1.0), lessThan(a, vec4(0.5)));
+        \\    fragColor = result;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Boolean mix should produce valid HLSL (may use select or branch)
+    try assertContains(hlsl, "float4");
+}
+
+test "T87.1: const variable" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    const float PI = 3.14159265;
+        \\    fragColor = vec4(x * PI);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Const variable should be folded into constant
+    try assertContains(hlsl, "float4");
+}
+
