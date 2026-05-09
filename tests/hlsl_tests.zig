@@ -165,6 +165,33 @@ test "T3.3: texture() maps to .Sample()" {
     try assertContains(hlsl, ".Sample(");
 }
 
+test "T3.4: texture2D() maps to .Sample()" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() { vec4 c = texture2D(tex, vec2(0.5)); if (c.x > 0.0) discard; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, ".Sample(");
+}
+
+test "T3.5: texture2D in function with out param" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 _fragColor;
+        \\void mainImage(out vec4 fragColor, vec2 coord) {
+        \\    vec4 t = texture2D(tex, coord * 0.5);
+        \\    fragColor = t;
+        \\}
+        \\void main() { mainImage(_fragColor, vec2(1.0)); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, ".Sample(");
+}
+
 // ---------------------------------------------------------------------------
 // T4: Arithmetic operations
 // ---------------------------------------------------------------------------
@@ -2045,8 +2072,10 @@ test "WIN2: wintty focus shader compiles to HLSL" {
     try assertContains(hlsl, "cbuffer");
     // Focus shader has if/else with bool conditions and || operators
     try assertContains(hlsl, "if");
-    // TODO: texture sampling is lost during optimization (elimUnusedGlobals removes iChannel0)
-    // try assertContains(hlsl, "Sample");
+    // Texture sampling must be present
+    try assertContains(hlsl, "Texture2D");
+    try assertContains(hlsl, ".Sample(");
+    try assertContains(hlsl, "lerp"); // mix() → lerp()
 }
 
 test "WIN-DBG: bool variable with logical OR" {
