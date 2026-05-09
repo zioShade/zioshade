@@ -4816,3 +4816,87 @@ test "T135.1: vec4 negation and addition" {
     try assertContains(hlsl, "float4");
 }
 
+test "T136.1: vec3 cross and dot chained" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 1) in vec3 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 c = cross(a, b);
+        \\    float d = dot(c, a);
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T137.1: int absolute value" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = abs(x);
+        \\    fragColor = vec4(float(a));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T138.1: multiple cbuffer members accessed" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U {
+        \\    vec4 color;
+        \\    float intensity;
+        \\    vec3 direction;
+        \\} u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = dot(normalize(u.direction), vec3(0.0, 1.0, 0.0));
+        \\    fragColor = u.color * u.intensity * max(d, 0.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T139.1: vec4 component write via swizzle" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 v = vec4(0.0);
+        \\    v.x = x;
+        \\    v.y = x * 2.0;
+        \\    fragColor = v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T140.1: compute with imageStore and imageLoad" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(binding = 0, rgba8) uniform image2D img;
+        \\void main() {
+        \\    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+        \\    vec4 existing = imageLoad(img, coord);
+        \\    imageStore(img, coord, existing + vec4(0.1));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
