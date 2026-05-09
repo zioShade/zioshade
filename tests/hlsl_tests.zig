@@ -2078,6 +2078,33 @@ test "WIN2: wintty focus shader compiles to HLSL" {
     try assertContains(hlsl, "lerp"); // mix() → lerp()
 }
 
+test "WIN-DXC: dump HLSL for DXC validation" {
+    // Dump focus shader HLSL to files for DXC validation
+    const hlsl_focus = try compileShadertoy(test_focus);
+    defer alloc.free(hlsl_focus);
+
+    const focus_file = try std.fs.cwd().createFile("tests/wintty/focus_output.hlsl", .{});
+    defer focus_file.close();
+    try focus_file.writeAll(hlsl_focus);
+
+    const hlsl_crt = try compileShadertoy(test_crt);
+    defer alloc.free(hlsl_crt);
+
+    const crt_file = try std.fs.cwd().createFile("tests/wintty/crt_output.hlsl", .{});
+    defer crt_file.close();
+    try crt_file.writeAll(hlsl_crt);
+
+    // Basic structural checks
+    try assertContains(hlsl_focus, "Texture2D");
+    try assertContains(hlsl_focus, ".Sample(");
+    try assertContains(hlsl_crt, "Texture2D");
+    try assertContains(hlsl_crt, ".Sample(");
+}
+
+// DXC validation commands (run manually):
+//   dxc -T ps_6_0 -E main tests/wintty/focus_output.hlsl -Fo tests/wintty/focus_output.dxil
+//   dxc -T ps_6_0 -E main tests/wintty/crt_output.hlsl -Fo tests/wintty/crt_output.dxil
+
 test "WIN-DBG: bool variable with logical OR" {
     const source =
         \\#version 430
