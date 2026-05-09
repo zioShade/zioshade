@@ -2746,3 +2746,39 @@ test "T40.3: textureSize maps to GetDimensions" {
     try assertContains(hlsl, "GetDimensions");
     try assertContains(hlsl, "discard");
 }
+
+test "T41.1: textureOffset with constant offset" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 uv = vec2(0.5, 0.5);
+        \\    vec4 c = textureOffset(tex, uv, ivec2(1, -1));
+        \\    if (c.x > 0.0) discard;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Sample");
+    try assertContains(hlsl, "discard");
+}
+
+test "T41.2: texelFetchOffset" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec2 coord = ivec2(10, 20);
+        \\    vec4 c = texelFetchOffset(tex, coord, 0, ivec2(1, 1));
+        \\    if (c.x > 0.0) discard;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Load");
+    try assertContains(hlsl, "discard");
+}
