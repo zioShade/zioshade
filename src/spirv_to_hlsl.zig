@@ -240,7 +240,7 @@ pub fn spirvToHLSL(
         binding += options.binding_shift;
         if (binding < 0) binding = 0;
         try w.print("cbuffer {s} : register(b{d})\n{{\n", .{ cb.name, binding });
-        try emitStructMembers(&module, &names, cb.type_id, w, alloc);
+        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, alloc);
         try w.writeAll("};\n\n");
     }
 
@@ -648,7 +648,7 @@ fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
 // Struct member emission
 // ---------------------------------------------------------------------------
 
-fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_type_id: u32, w: anytype, alloc: std.mem.Allocator) !void {
+fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_type_id: u32, cbuffer_name: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
     const inst = getDef(module, struct_type_id) orelse return;
     if (inst.op != .TypeStruct) return;
 
@@ -663,11 +663,11 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
                 const len_id = mi.words[3];
                 const len_inst = getDef(module, len_id);
                 const len_val: u32 = if (len_inst) |li| li.words[3] else 1;
-                try w.print("    {s} _m{d}[{d}];\n", .{ elem_type, member_idx, len_val });
+                try w.print("    {s} {s}_m{d}[{d}];\n", .{ elem_type, cbuffer_name, member_idx, len_val });
                 continue;
             }
         }
-        try w.print("    {s} _m{d};\n", .{ member_type, member_idx });
+        try w.print("    {s} {s}_m{d};\n", .{ member_type, cbuffer_name, member_idx });
     }
 }
 
@@ -1781,8 +1781,9 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     if (indices.len == 0) return try alloc.dupe(u8, base_name);
 
     // Check if base is a cbuffer/UBO variable (Uniform storage class)
-    // In HLSL, cbuffer members are accessed directly without the cbuffer name prefix
+    // In HLSL, cbuffer members are accessed using cbufferName_mN prefix
     const base_is_cbuffer = isUniformVariable(module, base_id);
+    const cbuffer_prefix = if (base_is_cbuffer) names.get(base_id) orelse "Globals" else "";
 
     var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
     defer buf.deinit(alloc);
@@ -1809,8 +1810,8 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                         0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
                     });
                 } else if (base_is_cbuffer) {
-                    // Cbuffer members are global in HLSL — emit just _mN without dot
-                    try buf.writer(alloc).print("_m{d}", .{val});
+                    // Cbuffer members use cbufferName_mN prefix for uniqueness
+                    try buf.writer(alloc).print("{s}_m{d}", .{cbuffer_prefix, val});
                 } else {
                     try buf.writer(alloc).print("._m{d}", .{val});
                 }

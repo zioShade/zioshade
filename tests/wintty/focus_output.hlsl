@@ -2,33 +2,33 @@
 
 cbuffer Globals : register(b1)
 {
-    float3 _m0;
-    float _m1;
-    float _m2;
-    float _m3;
-    int _m4;
-    float _m5[4];
-    float3 _m6[4];
-    float4 _m7;
-    float4 _m8;
-    float _m9;
-    float4 _m10;
-    float4 _m11;
-    float4 _m12;
-    float4 _m13;
-    int _m14;
-    int _m15;
-    int _m16;
-    float _m17;
-    float _m18;
-    int _m19;
-    float3 _m20[256];
-    float3 _m21;
-    float3 _m22;
-    float3 _m23;
-    float3 _m24;
-    float3 _m25;
-    float3 _m26;
+    float3 Globals_m0;
+    float Globals_m1;
+    float Globals_m2;
+    float Globals_m3;
+    int Globals_m4;
+    float Globals_m5[4];
+    float3 Globals_m6[4];
+    float4 Globals_m7;
+    float4 Globals_m8;
+    float Globals_m9;
+    float4 Globals_m10;
+    float4 Globals_m11;
+    float4 Globals_m12;
+    float4 Globals_m13;
+    int Globals_m14;
+    int Globals_m15;
+    int Globals_m16;
+    float Globals_m17;
+    float Globals_m18;
+    int Globals_m19;
+    float3 Globals_m20[256];
+    float3 Globals_m21;
+    float3 Globals_m22;
+    float3 Globals_m23;
+    float3 Globals_m24;
+    float3 Globals_m25;
+    float3 Globals_m26;
 };
 
 Texture2D iChannel0 : register(t0);
@@ -37,17 +37,17 @@ SamplerState iChannel0_sampler : register(s0);
 void mainImage(out float4 v27, float2 v28)
 {
     float3 v29;
-    float3 v31 = _m0;
+    float3 v31 = Globals_m0;
     float2 v32 = float2(v31.x, v31.y);
     float2 v33 = v28 / v32;
     float4 v35 = iChannel0.Sample(iChannel0_sampler, v33);
     float3 v36 = float3(v35.x, v35.y, v35.z);
-    int v38 = _m19;
+    int v38 = Globals_m19;
     bool v39 = v38 > 0;
     v29 = v36;
     if (v39) {
-    float v41 = _m1;
-    float v43 = _m18;
+    float v41 = Globals_m1;
+    float v43 = Globals_m18;
     float v44 = v41 - v43;
     float v45 = v44 / 3.0;
     float v46 = 1.0 - v45;
