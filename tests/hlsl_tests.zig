@@ -7161,3 +7161,92 @@ test "T280.1: vec4 fract and ceil" {
     try assertContains(hlsl, "float4");
 }
 
+test "T281.1: compute 2D global invocation" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 4, local_size_y = 4) in;
+        \\layout(std430, binding = 0) buffer Output { float out_data[]; } buf;
+        \\void main() {
+        \\    uvec2 id = gl_GlobalInvocationID.xy;
+        \\    uint flat_idx = id.y * 4u + id.x;
+        \\    buf.out_data[flat_idx] = float(flat_idx);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T282.1: function with out params" {
+    const source =
+        \\#version 450
+        \\void decompose(vec4 v, out vec3 rgb, out float alpha) {
+        \\    rgb = v.rgb;
+        \\    alpha = v.a;
+        \\}
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 c;
+        \\    float a;
+        \\    decompose(v, c, a);
+        \\    fragColor = vec4(c * a, a);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T283.1: geometry shader point output" {
+    const source =
+        \\#version 450
+        \\layout(points) in;
+        \\layout(line_strip, max_vertices = 2) out;
+        \\void main() {
+        \\    for (int i = 0; i < 2; i++) {
+        \\        gl_Position = gl_in[i].gl_Position + vec4(float(i) * 0.1, 0.0, 0.0, 0.0);
+        \\        EmitVertex();
+        \\    }
+        \\    EndPrimitive();
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Geometry shaders compile through the standard pipeline
+    try assertContains(hlsl, "float");
+}
+
+test "T284.1: vec3 sign on negate" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 s = sign(-abs(v) + 0.001);
+        \\    fragColor = vec4(s, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T285.1: uniform vec3 array with indexing" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { vec3 colors[4]; } u;
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int i0 = int(t) % 4;
+        \\    int i1 = (i0 + 1) % 4;
+        \\    vec3 blended = mix(u.colors[i0], u.colors[i1], fract(t));
+        \\    fragColor = vec4(blended, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
