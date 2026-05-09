@@ -5225,3 +5225,83 @@ test "T160.1: gl_FragDepth conditional write" {
     try assertContains(hlsl, "float4");
 }
 
+test "T161.1: vec4 gather component" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 r = textureGather(tex, uv, 0);
+        \\    fragColor = r;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T162.1: multiple vec2 inputs" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 a;
+        \\layout(location = 1) in vec2 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(a + b, a - b);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T163.1: mat3 construction from 3 vec3" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat3 m = mat3(a, vec3(0.0, 1.0, 0.0), a * 2.0);
+        \\    vec3 result = m * vec3(1.0);
+        \\    fragColor = vec4(result, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T164.1: nested ternary in expression" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v = (x < 0.0) ? -1.0 : (x > 1.0) ? 2.0 : x;
+        \\    fragColor = vec4(v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T165.1: compute workgroup barrier" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 4) in;
+        \\shared float s_data[4];
+        \\layout(std430, binding = 0) buffer Data { float vals[]; } data;
+        \\void main() {
+        \\    uint id = gl_LocalInvocationID.x;
+        \\    s_data[id] = float(id);
+        \\    barrier();
+        \\    data.vals[id] = s_data[(id + 1u) % 4u];
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
