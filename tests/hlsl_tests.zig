@@ -5548,3 +5548,80 @@ test "T180.1: vec3 sign function" {
     try assertContains(hlsl, "float4");
 }
 
+test "T181.1: uniform vec3 array" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { vec3 dirs[4]; } u;
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int idx = int(t * 4.0) % 4;
+        \\    fragColor = vec4(u.dirs[idx], 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T182.1: vec2 to vec4 promotion" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(v, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T183.1: int min and max" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int a;
+        \\layout(location = 1) in int b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int lo = min(a, b);
+        \\    int hi = max(a, b);
+        \\    fragColor = vec4(float(lo), float(hi), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T184.1: ddx and ddy on input" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float dx = dFdx(uv.x);
+        \\    float dy = dFdy(uv.y);
+        \\    fragColor = vec4(dx, dy, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T185.1: vec4 clamp with vec4 bounds" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = clamp(x, vec4(0.0), vec4(1.0));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
