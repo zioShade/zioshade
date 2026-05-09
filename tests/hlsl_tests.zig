@@ -2064,3 +2064,32 @@ test "WIN-DBG: bool variable with logical OR" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "discard");
 }
+
+test "WIN3: binding=1 with shift=-1 produces register(b0)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 1, std140) uniform Globals {
+        \\    uniform vec3 iResolution;
+        \\    uniform float iTime;
+        \\};
+        \\layout(location = 0) out vec4 _fragColor;
+        \\void main() {
+        \\    if (iTime > 0.0) discard;
+        \\    _fragColor = vec4(iResolution, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{
+        .binding_shift = -1,
+        .shader_model = 60,
+    });
+    defer alloc.free(hlsl);
+
+    // Uniform block must be at b0 (shifted from binding=1)
+    try assertContains(hlsl, "register(b0)");
+    // Must use the uniform (proves code wasn't DCE'd)
+    try assertContains(hlsl, "discard");
+    // Must use iResolution in output
+    try assertContains(hlsl, "_m0");
+}
