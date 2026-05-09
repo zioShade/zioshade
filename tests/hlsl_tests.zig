@@ -2209,3 +2209,23 @@ test "T31.3: textureGrad maps to SampleGrad" {
     try assertContains(hlsl, "SampleGrad");
     try assertContains(hlsl, "discard");
 }
+
+test "T31.4: textureProj maps to Sample with divided coord" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float w; } u;
+        \\layout(binding = 1) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 uv3 = vec3(0.5, 0.5, u.w);
+        \\    vec4 c = textureProj(tex, uv3);
+        \\    if (c.x > 0.0) discard;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // textureProj divides coord by last component
+    try assertContains(hlsl, "Sample");
+    try assertContains(hlsl, "discard");
+}
