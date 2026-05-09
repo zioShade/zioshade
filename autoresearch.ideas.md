@@ -26,7 +26,7 @@
 13. mat2 construction col_ids temp array leak
 
 ## Remaining Known Issues
-- **Matrix local variable column access not emitted**: `mat4 t = transpose(u.m); fragColor = t[0];` — the raw SPIR-V contains OpTranspose but the column extract (t[0]) and output store (fragColor = ...) are NEVER emitted to SPIR-V. The semantic analyzer silently drops the assignment. Root cause: the semantic analyzer creates the transpose result ID but the subsequent statement `fragColor = t[0]` doesn't generate IR. Likely a bug in how mat4-typed local variables are resolved — the variable `t` may not be properly declared as a function-local OpVariable, causing the subscript `t[0]` to fail silently with tolerate_errors=true.
+- Conformance runner has 2 double-free errors: after coherent-image.comp and struct.rowmajor.flatten.vert. Only manifests when many shaders are compiled in sequence with shared GPA. Not reproducible in isolation. Likely a subtle corruption from a previous compilation that manifests later.
 - HLSL variable naming uses fallback "0" for unnamed IDs (quality, not correctness)
 
 ## Test Coverage by Feature
