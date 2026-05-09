@@ -1502,6 +1502,78 @@ fn emitInstruction(
 
         // Control flow
         .Kill => try w.writeAll("    discard;\n"),
+        .ImageWrite => {
+            // OpImageWrite: image, coordinate, texel
+            const img = names.get(inst.words[1]) orelse "image";
+            const coord = if (inst.words.len > 2) names.get(inst.words[2]) orelse "0" else "0";
+            const texel = if (inst.words.len > 3) names.get(inst.words[3]) orelse "0" else "0";
+            try w.print("    {s}[{s}] = {s};\n", .{ img, coord, texel });
+        },
+        // Atomics: Interlocked* in HLSL
+        .AtomicIAdd => {
+            // OpAtomicIAdd: result_type, result, pointer, memory_scope, semantics, value
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
+            try w.print("    {s} {s}; InterlockedAdd({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+        },
+        .AtomicISub => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
+            try w.print("    {s} {s}; InterlockedAdd({s}, -({s}));\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+        },
+        .AtomicSMin, .AtomicUMin => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            try w.print("    {s} {s}; InterlockedMin({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+        },
+        .AtomicSMax, .AtomicUMax => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            try w.print("    {s} {s}; InterlockedMax({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+        },
+        .AtomicAnd => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            try w.print("    {s} {s}; InterlockedAnd({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+        },
+        .AtomicOr => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            try w.print("    {s} {s}; InterlockedOr({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+        },
+        .AtomicXor => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            try w.print("    {s} {s}; InterlockedXor({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+        },
+        .AtomicExchange => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            try w.print("    {s} {s}; InterlockedExchange({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+        },
+        .AtomicCompareExchange => {
+            // OpAtomicCompareExchange: result_type, result, pointer, sc1, sem1, sem2, value, comparator
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
+            const cmp = if (inst.words.len > 8) names.get(inst.words[8]) orelse "0" else "0";
+            try w.print("    {s} {s}; InterlockedCompareExchange({s}, {s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, cmp, val });
+        },
+        .AtomicFAddEXT => {
+            // OpAtomicFAddEXT: floating-point atomic add
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1.0" else "1.0";
+            try w.print("    {s} {s}; InterlockedAdd({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+        },
         .Return => {
             // Skip bare return in fragment entry — we emit the output return at function end
             if (is_fragment and output_var_id != null) {} else {
