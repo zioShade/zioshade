@@ -1490,6 +1490,15 @@ fn emitInstruction(
                 rt, names.get(inst.words[2]) orelse "v", tex_name,
             });
         },
+        .ImageRead => {
+            // OpImageRead: result_type, result, image, coordinate
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const img = names.get(inst.words[3]) orelse "image";
+            const coord = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
+            try w.print("    {s} {s} = {s}[{s}];\n", .{
+                rt, names.get(inst.words[2]) orelse "v", img, coord,
+            });
+        },
 
         // Control flow
         .Kill => try w.writeAll("    discard;\n"),
