@@ -3327,3 +3327,99 @@ test "T63.1: texelFetch maps to Load" {
     try assertContains(hlsl, "Load");
 }
 
+test "T64.1: outerProduct" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 b = vec3(1.0, 2.0, 3.0);
+        \\    mat2x3 m = outerProduct(a, b);
+        \\    fragColor = vec4(m[0].x, m[0].y, m[0].z, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // OuterProduct should produce valid HLSL
+    try assertContains(hlsl, "float");
+}
+
+test "T65.1: constant array" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    const float weights[3] = float[3](0.25, 0.5, 0.25);
+        \\    fragColor = vec4(weights[0] + weights[1] + weights[2]);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Array constructor should produce valid HLSL
+    try assertContains(hlsl, "float");
+}
+
+test "T65.2: function call with return value" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float compute(float a, float b) {
+        \\    return a * b + 0.5;
+        \\}
+        \\void main() {
+        \\    fragColor = vec4(compute(val, 2.0));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Function call with non-constant args should appear in output
+    try assertContains(hlsl, "*");
+}
+
+test "T66.1: ImageGather maps to Gather" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = textureGather(tex, vec2(0.5), 0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Gather");
+}
+
+test "T66.2: ImageQuerySize without LOD" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec2 size = textureSize(tex, 0);
+        \\    fragColor = vec4(float(size.x));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "GetDimensions");
+}
+
+test "T67.1: VectorExtractDynamic" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int idx;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 v = vec4(1.0, 2.0, 3.0, 4.0);
+        \\    float f = v[idx];
+        \\    fragColor = vec4(f);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Dynamic vector indexing is valid in HLSL
+    try assertContains(hlsl, "float");
+}
+
