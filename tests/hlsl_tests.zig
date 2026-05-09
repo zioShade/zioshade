@@ -1579,7 +1579,8 @@ test "T25.5: mat4 transpose" {
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    // Just verify it compiles to valid HLSL
+    // Just verify it compiles to valid HLSL with transpose
+    try assertContains(hlsl, "transpose");
     try assertContains(hlsl, "float4 main");
 }
 
@@ -2818,5 +2819,20 @@ test "T43.1: samplerCube maps to TextureCube" {
     try assertContains(hlsl, "TextureCube");
     try assertContains(hlsl, "Sample");
     try assertContains(hlsl, "discard");
+}
+
+test "T44.1: mat4 uniform transpose" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { mat4 m; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 t = transpose(u.m);
+        \\    fragColor = t[0];
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "transpose");
 }
 
