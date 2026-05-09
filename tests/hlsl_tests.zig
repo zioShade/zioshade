@@ -4312,3 +4312,86 @@ test "T105.1: vector times matrix" {
     try assertContains(hlsl, "float4");
 }
 
+test "T106.1: gl_FrontFacing in fragment shader" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (gl_FrontFacing) {
+        \\        fragColor = vec4(1.0);
+        \\    } else {
+        \\        fragColor = vec4(0.0);
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T107.1: imod like behavior" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int m = x - (x / 3) * 3;
+        \\    fragColor = vec4(float(m));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T108.1: vec2 swizzle and arithmetic" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 xy = v.xy;
+        \\    vec2 zw = v.zw;
+        \\    vec2 sum = xy + zw;
+        \\    fragColor = vec4(sum, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T109.1: mat2 multiply with vec2" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat2 m; } u;
+        \\layout(location = 0) in vec2 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 result = u.m * v;
+        \\    fragColor = vec4(result, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T110.1: multiple texture samples in expression" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex0;
+        \\layout(binding = 1) uniform sampler2D tex1;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 a = texture(tex0, uv);
+        \\    vec4 b = texture(tex1, uv);
+        \\    fragColor = a * 0.5 + b * 0.5;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Sample");
+}
+
