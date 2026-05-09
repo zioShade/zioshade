@@ -4734,3 +4734,85 @@ test "T130.1: uint increment and comparison" {
     try assertContains(hlsl, "float4");
 }
 
+test "T131.1: struct passed as function argument" {
+    const source =
+        \\#version 450
+        \\struct Light { vec3 pos; float intensity; };
+        \\float getIntensity(Light l) { return l.intensity; }
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    Light l;
+        \\    l.pos = vec3(1.0);
+        \\    l.intensity = 0.75;
+        \\    fragColor = vec4(getIntensity(l));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T132.1: vec2 multiplication with mat2" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat2 rot; } u;
+        \\layout(location = 0) in vec2 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 rotated = u.rot * v;
+        \\    fragColor = vec4(rotated, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T133.1: multiple assignments in sequence" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = x;
+        \\    float b = a * 2.0;
+        \\    float c = b + a;
+        \\    float d = c * c;
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T134.1: bool to float via constructor" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float b = float(x > 0.5);
+        \\    fragColor = vec4(b);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T135.1: vec4 negation and addition" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 1) in vec4 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = a + (-b);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
