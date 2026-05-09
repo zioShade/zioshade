@@ -117,4 +117,19 @@ pub fn build(b: *std.Build) void {
     });
     const run_dump = b.addRunArtifact(dump_exe);
     dump_step.dependOn(&run_dump.step);
+
+    // Benchmark — run with: zig build bench
+    const bench_step = b.step("bench", "Run wintty shader benchmark");
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("tools/bench_wintty.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_mod.addImport("glslpp", glslpp_mod);
+    const bench_exe = b.addExecutable(.{
+        .name = "bench-wintty",
+        .root_module = bench_mod,
+    });
+    const run_bench = b.addRunArtifact(bench_exe);
+    bench_step.dependOn(&run_bench.step);
 }
