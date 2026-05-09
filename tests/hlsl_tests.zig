@@ -5788,3 +5788,78 @@ test "T195.1: vec4 equal and notEqual" {
     try assertContains(hlsl, "float4");
 }
 
+test "T196.1: uniform float used as condition" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { float threshold; } u;
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = (x > u.threshold) ? vec4(1.0) : vec4(0.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T197.1: vec4 reciprocal" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = 1.0 / v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T198.1: matrix element access via subscript" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat3 m; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float m00 = u.m[0][0];
+        \\    float m11 = u.m[1][1];
+        \\    fragColor = vec4(m00, m11, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T199.1: textureLod offset variant" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = textureLod(tex, uv, 2.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T200.1: compute with float atomics" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Data { float vals[]; } data;
+        \\void main() {
+        \\    uint idx = gl_GlobalInvocationID.x;
+        \\    data.vals[idx] = float(idx) * 0.5 + 1.0;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
