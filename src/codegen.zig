@@ -245,8 +245,11 @@ pub fn generate(
     // Second round: constFold + foldCE after store forwarding exposes new patterns
     const cf2 = compact_ids.constFold(alloc, forwarded) catch forwarded;
     if (cf2.ptr != forwarded.ptr) alloc.free(forwarded);
-    const folded_cce2 = compact_ids.foldConstCompositeExtract(alloc, cf2) catch cf2;
-    if (folded_cce2.ptr != cf2.ptr) alloc.free(cf2);
+    // Second round: fold negates exposed by constFold
+    const neg_folded2 = compact_ids.foldNegateIntoAddSub(alloc, cf2) catch cf2;
+    if (neg_folded2.ptr != cf2.ptr) alloc.free(cf2);
+    const folded_cce2 = compact_ids.foldConstCompositeExtract(alloc, neg_folded2) catch neg_folded2;
+    if (folded_cce2.ptr != neg_folded2.ptr) alloc.free(neg_folded2);
     const folded_ce2 = compact_ids.foldCompositeExtract(alloc, folded_cce2) catch folded_cce2;
     if (folded_ce2.ptr != folded_cce2.ptr) alloc.free(folded_cce2);
     // Second round: fold constant branches after constFold + foldCE
