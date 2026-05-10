@@ -10772,3 +10772,85 @@ test "T471.1: vec3 swizzle operations" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T472.1: sampler3D volume texture" {
+    // Tests sampler3D (volume texture) sampling
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 uvw;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler3D volTex;
+        \\void main() {
+        \\    vec4 c = texture(volTex, uvw);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T473.1: samplerCubeArray" {
+    // Tests samplerCubeArray texture sampling
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 uvLayer;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform samplerCubeArray cubeArr;
+        \\void main() {
+        \\    vec4 c = texture(cubeArr, uvLayer);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T474.1: sampler2DArray layered texture" {
+    // Tests sampler2DArray (texture2DArray) sampling
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 uvLayer;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2DArray texArr;
+        \\void main() {
+        \\    vec4 c = texture(texArr, uvLayer);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T475.1: gl_PrimitiveID in fragment" {
+    // Tests gl_PrimitiveID read in fragment shader
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float id = float(gl_PrimitiveID);
+        \\    fragColor = vec4(id / 100.0, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T476.1: gl_Layer in fragment" {
+    // Tests gl_Layer read in fragment shader (from geometry output)
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float layer = float(gl_Layer);
+        \\    fragColor = vec4(layer / 6.0, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
