@@ -1,6 +1,6 @@
 # Autoresearch Ideas — glslpp SPIR-V Optimization
 
-## STATUS: 480/480 HLSL tests, 213/222 conformance (95.9%), 0 val_fail, 0 leaks ✅✅
+## STATUS: 485/485 HLSL tests, 213/222 conformance (95.9%), 0 val_fail, 0 leaks ✅✅
 
 ## Recent Optimization Passes Added
 - **foldConstBranches**: Fold OpBranchConditional with constant boolean conditions to unconditional OpBranch + remove SelectionMerge
