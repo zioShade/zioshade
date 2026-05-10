@@ -248,8 +248,10 @@ pub fn generate(
     // Second round: fold negates exposed by constFold
     const neg_folded2 = compact_ids.foldNegateIntoAddSub(alloc, cf2) catch cf2;
     if (neg_folded2.ptr != cf2.ptr) alloc.free(cf2);
-    const folded_cce2 = compact_ids.foldConstCompositeExtract(alloc, neg_folded2) catch neg_folded2;
-    if (folded_cce2.ptr != neg_folded2.ptr) alloc.free(neg_folded2);
+    const algebrad2 = compact_ids.algebraicSimpl(alloc, neg_folded2) catch neg_folded2;
+    if (algebrad2.ptr != neg_folded2.ptr) alloc.free(neg_folded2);
+    const folded_cce2 = compact_ids.foldConstCompositeExtract(alloc, algebrad2) catch algebrad2;
+    if (folded_cce2.ptr != algebrad2.ptr) alloc.free(algebrad2);
     const folded_ce2 = compact_ids.foldCompositeExtract(alloc, folded_cce2) catch folded_cce2;
     if (folded_ce2.ptr != folded_cce2.ptr) alloc.free(folded_cce2);
     // Second round: fold constant branches after constFold + foldCE
