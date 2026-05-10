@@ -4181,6 +4181,20 @@ const Analyzer = struct {
                             .ty = result_ty,
                         });
                         return .{ .ty = result_ty, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "bitfieldReverse")) {
+                        // bitfieldReverse(x) → OpBitReverse (core SPIR-V, not GLSL.std.450)
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .bit_reverse,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = result_ty,
+                        });
+                        return .{ .ty = result_ty, .id = result_id };
                     } else if (std.mem.eql(u8, node.data.name, "mix")) {
                         // mix(x, y, a): if a is boolean, use OpSelect(a, x, y); otherwise FMix
                         if (arg_tids.items.len >= 3 and (arg_tids.items[2].ty.isBoolVector() or arg_tids.items[2].ty == .bool)) {
@@ -5849,6 +5863,7 @@ const Analyzer = struct {
             "unpackSnorm4x8", "unpackUnorm4x8",
             "findLSB", "findMSB",
             "bitCount",
+            "bitfieldReverse",
             "imageSize", "imageLoad", "imageStore", "textureSize",
             "textureSamples", "imageSamples", "textureOffset", "textureLodOffset", "texelFetchOffset", "textureGrad", "textureGather", "textureGatherOffsets",
             "textureGradOffset", "textureProjLod", "textureProjGrad",
@@ -6057,6 +6072,9 @@ const Analyzer = struct {
             return null;
         // bitCount is a core SPIR-V op (OpBitCount), not GLSL.std.450
         if (std.mem.eql(u8, name, "bitCount"))
+            return null;
+        // bitfieldReverse is a core SPIR-V op (OpBitReverse), not GLSL.std.450
+        if (std.mem.eql(u8, name, "bitfieldReverse"))
             return null;
         return null;
     }
