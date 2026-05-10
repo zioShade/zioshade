@@ -25,10 +25,10 @@
 - **Impact**: Any shader with loops that accumulate into a local variable and store to output after the loop will have the loop body incorrectly eliminated.
 - **Required fix**: First fix codegen to always emit continue labels for do-while loops, then re-apply Phase 2.5.
 
-### Codegen bug: do-while loop missing continue target label
-- **Shader**: tests/spirv-cross/torture-loop.comp (do-while loop)
-- **Issue**: OpLoopMerge references continue target id 27, but no OpLabel with id 27 is emitted
-- **Current workaround**: deadLoopElim removes the broken loop, hiding the bug
+### Codegen bug: do-while loop missing continue target label — **FIXED**
+- **Root cause**: `mergeBlocks` Pass 4 (empty predecessor merging) did not protect labels that are merge/continue targets of OpLoopMerge. When an empty merge block (from a nested loop) preceded the continue block of an outer loop, Pass 4 would merge the two, replacing the continue label and breaking the LoopMerge reference.
+- **Fix**: Added merge/continue target labels to the `structured2` protection set in Pass 4 of `mergeBlocks`.
+- **Impact**: This fix also unblocks the deadLoopElim Phase 2.5 fix (preserving loops whose func-local vars flow to output).
 
 ### HLSL cross-compiler doesn't reconstruct loops
 - SPIR-V loops (OpBranch + OpLoopMerge) are emitted as flat gotos/ifs
