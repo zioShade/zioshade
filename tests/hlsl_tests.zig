@@ -9434,3 +9434,99 @@ test "T401.1: multiple function calls with recursion-like pattern" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T402.1: layout row_major matrix" {
+    // Tests row_major layout qualifier on uniform buffer
+    const source =
+        \\#version 450
+        \\layout(binding = 0, row_major) uniform U {
+        \\    mat4 mvp;
+        \\    vec4 color;
+        \\};
+        \\layout(location = 0) in vec4 pos;
+        \\void main() {
+        \\    gl_Position = mvp * pos;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T403.1: readonly and writeonly buffers" {
+    // Tests readonly/writeonly buffer qualifiers
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) readonly buffer Input { float data[]; };
+        \\layout(std430, binding = 1) writeonly buffer Output { float result[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    result[id] = data[id] * 2.0;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T404.1: uint bitwise shift and mask" {
+    // Tests uint shift operations and bit masking
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in uint packed;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint r = (packed >> 0u) & 0xFFu;
+        \\    uint g = (packed >> 8u) & 0xFFu;
+        \\    uint b = (packed >> 16u) & 0xFFu;
+        \\    uint a = (packed >> 24u) & 0xFFu;
+        \\    fragColor = vec4(float(r), float(g), float(b), float(a)) / 255.0;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T405.1: early return in if-else" {
+    // Tests early return from nested if-else branches
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\vec4 getColor(float v) {
+        \\    if (v > 0.8) return vec4(1.0, 0.0, 0.0, 1.0);
+        \\    if (v > 0.6) return vec4(0.0, 1.0, 0.0, 1.0);
+        \\    if (v > 0.4) return vec4(0.0, 0.0, 1.0, 1.0);
+        \\    if (v > 0.2) return vec4(1.0, 1.0, 0.0, 1.0);
+        \\    return vec4(0.5);
+        \\}
+        \\void main() {
+        \\    fragColor = getColor(x);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T406.1: mat3 construction from vec3 columns" {
+    // Tests matrix construction from column vectors
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 1) in vec3 b;
+        \\layout(location = 2) in vec3 c;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat3 m = mat3(a, b, c);
+        \\    vec3 d = m * vec3(1.0, 0.0, 0.0);
+        \\    fragColor = vec4(d, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
