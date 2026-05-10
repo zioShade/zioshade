@@ -4578,6 +4578,15 @@ const Codegen = struct {
                 try self.emitWord(a_id);
                 try self.emitWord(b_id);
             },
+            .bit_count => {
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const val_id = self.operandId(resolved, 0);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.BitCount)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(val_id);
+            },
             .derivative => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;

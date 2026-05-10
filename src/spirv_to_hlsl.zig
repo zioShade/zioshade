@@ -1426,6 +1426,10 @@ fn emitInstruction(
             const rt = try hlslType(module, inst.words[1], names, alloc);
             try w.print("    {s} {s} = ~{s};\n", .{ rt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
         },
+        .BitCount => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            try w.print("    {s} {s} = countbits({s});\n", .{ rt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
+        },
 
         // Conversions
         .ConvertSToF, .ConvertUToF, .ConvertFToS, .ConvertFToU => {
@@ -2053,6 +2057,9 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 48 => "step",
                 49 => "smoothstep",
                 51 => "modf",
+                73 => "firstbitlow", // FindILsb → HLSL firstbitlow
+                74 => "firstbithigh", // FindSMsb → HLSL firstbithigh
+                75 => "firstbithigh", // FindUMsb → HLSL firstbithigh
                 else => null,
             };
         },
