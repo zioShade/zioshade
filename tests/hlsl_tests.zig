@@ -8332,3 +8332,79 @@ test "T345.1: compute prefix sum (scan)" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float");
 }
+
+
+test "T346.1: bitCount on int" {
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in int val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int bc = bitCount(val);
+        \\    fragColor = vec4(float(bc));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "countbits");
+}
+
+test "T347.1: bitCount on uint" {
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in uint val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int bc = bitCount(val);
+        \\    fragColor = vec4(float(bc));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "countbits");
+}
+
+test "T348.1: findLSB" {
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in int val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int lsb = findLSB(val);
+        \\    fragColor = vec4(float(lsb));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "firstbitlow");
+}
+
+test "T349.1: findMSB signed" {
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in int val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int msb = findMSB(val);
+        \\    fragColor = vec4(float(msb));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "firstbithigh");
+}
+
+test "T350.1: findMSB unsigned" {
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in uint val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint msb = uint(findMSB(val));
+        \\    fragColor = vec4(float(msb));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "firstbithigh");
+}

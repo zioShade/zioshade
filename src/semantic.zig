@@ -4167,6 +4167,20 @@ const Analyzer = struct {
                             .ty = .float, // dot always returns float
                         });
                         return .{ .ty = .float, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "bitCount")) {
+                        // bitCount(x) → OpBitCount (core SPIR-V, not GLSL.std.450)
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                        for (arg_tids.items, 0..) |tid, i| {
+                            operands[i] = .{ .id = tid.id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .bit_count,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = result_ty,
+                        });
+                        return .{ .ty = result_ty, .id = result_id };
                     } else if (std.mem.eql(u8, node.data.name, "mix")) {
                         // mix(x, y, a): if a is boolean, use OpSelect(a, x, y); otherwise FMix
                         if (arg_tids.items.len >= 3 and (arg_tids.items[2].ty.isBoolVector() or arg_tids.items[2].ty == .bool)) {
@@ -4421,6 +4435,11 @@ const Analyzer = struct {
                             glsl_id = switch (result_ty) {
                                 .int, .ivec2, .ivec3, .ivec4 => 7, // SSign
                                 else => 6, // FSign
+                            };
+                        } else if (std.mem.eql(u8, node.data.name, "findMSB")) {
+                            glsl_id = switch (result_ty) {
+                                .uint, .uvec2, .uvec3, .uvec4 => 75, // FindUMsb
+                                else => 74, // FindSMsb
                             };
                         }
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
@@ -5828,6 +5847,8 @@ const Analyzer = struct {
             "packSnorm2x16", "packUnorm2x16",
             "unpackSnorm2x16", "unpackUnorm2x16", "unpackHalf2x16",
             "unpackSnorm4x8", "unpackUnorm4x8",
+            "findLSB", "findMSB",
+            "bitCount",
             "imageSize", "imageLoad", "imageStore", "textureSize",
             "textureSamples", "imageSamples", "textureOffset", "textureLodOffset", "texelFetchOffset", "textureGrad", "textureGather", "textureGatherOffsets",
             "textureGradOffset", "textureProjLod", "textureProjGrad",
@@ -6015,6 +6036,9 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "faceforward")) return 70; // FaceForward
         if (std.mem.eql(u8, name, "reflect")) return 71;    // Reflect
         if (std.mem.eql(u8, name, "refract")) return 72;    // Refract
+        // Integer ops (from SPIR-V spec)
+        if (std.mem.eql(u8, name, "findLSB")) return 73;      // FindILsb
+        if (std.mem.eql(u8, name, "findMSB")) return 74;      // FindSMsb (signed, GLSL spec says this is correct for both signed/unsigned)
         // NOT GLSL.std.450 — handled as core SPIR-V ops or specially
         if (std.mem.eql(u8, name, "transpose") or std.mem.eql(u8, name, "outerProduct"))
             return null;
@@ -6030,6 +6054,9 @@ const Analyzer = struct {
             return null;
         // isnan/isinf are core SPIR-V ops (OpIsNan/OpIsInf), not GLSL.std.450
         if (std.mem.eql(u8, name, "isnan") or std.mem.eql(u8, name, "isinf"))
+            return null;
+        // bitCount is a core SPIR-V op (OpBitCount), not GLSL.std.450
+        if (std.mem.eql(u8, name, "bitCount"))
             return null;
         return null;
     }
