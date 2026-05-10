@@ -3369,34 +3369,35 @@ pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error
     return dce;
 }
 
-/// Fold FNegate into FAdd/FSub: FAdd(x, FNegate(y)) → FSub(x, y), FSub(x, FNegate(y)) → FAdd(x, y).
+/// Fold Negate into Add/Sub: FNegate→FAdd/FSub and SNegate→IAdd/ISub.
+/// FAdd(x, FNegate(y)) → FSub(x, y), FSub(x, FNegate(y)) → FAdd(x, y)
+/// IAdd(x, SNegate(y)) → ISub(x, y), ISub(x, SNegate(y)) → IAdd(x, y)
 /// This eliminates unnecessary negation instructions.
 pub fn foldNegateIntoAddSub(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
     const bound = words[3];
     if (bound <= 1) return words;
 
-    // Phase 1: Build map of FNegate results: result_id -> operand_id
-    var fneg_map = std.AutoHashMapUnmanaged(u32, u32){};
-    defer fneg_map.deinit(alloc);
+    // Phase 1: Build map of negate results: result_id -> operand_id
+    // FNegate=127, SNegate=126
+    var neg_map = std.AutoHashMapUnmanaged(u32, struct { operand: u32, is_float: bool }){};
+    defer neg_map.deinit(alloc);
 
     var pos: u32 = 5;
     while (pos < words.len) {
         const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
-        if (opcode == 127 and wc == 4) { // OpFNegate
+        if ((opcode == 127 or opcode == 126) and wc == 4) {
             const result_id = words[pos + 2];
             const operand = words[pos + 3];
-            try fneg_map.put(alloc, result_id, operand);
+            try neg_map.put(alloc, result_id, .{ .operand = operand, .is_float = opcode == 127 });
         }
         pos += wc;
     }
 
-    if (fneg_map.count() == 0) return words;
+    if (neg_map.count() == 0) return words;
 
-    // Phase 2: Scan FAdd(129)/FSub(131) and check if an operand is an FNegate result
-    // FAdd(x, -y) → FSub(x, y) [change opcode 129→131]
-    // FAdd(-y, x) → FSub(x, y) [change opcode 129→131, swap operands]
-    // FSub(x, -y) → FAdd(x, y) [change opcode 131→129]
+    // Phase 2: Scan add/sub and check if an operand is a negate result
+    // FAdd=129, FSub=131 (float), IAdd=128, ISub=130 (int)
     var changed = false;
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
     result.appendSliceAssumeCapacity(words[0..5]);
@@ -3407,39 +3408,54 @@ pub fn foldNegateIntoAddSub(alloc: std.mem.Allocator, words: []const u32) error{
         if (wc == 0) break;
         const ie = pos + wc;
 
-        if ((opcode == 129 or opcode == 131) and wc == 5) { // OpFAdd or OpFSub with 2 operands
+        if (wc == 5) {
             const result_type = words[pos + 1];
             const result_id = words[pos + 2];
             const a = words[pos + 3];
             const b = words[pos + 4];
 
-            const neg_a = fneg_map.get(a);
-            const neg_b = fneg_map.get(b);
+            // Determine the add/sub/negate opcodes based on float vs int
+            const is_float = (opcode == 129 or opcode == 131);
+            const is_int = (opcode == 128 or opcode == 130);
 
-            if (opcode == 129) { // FAdd
-                if (neg_b) |nb| {
-                    // FAdd(x, -y) → FSub(x, y)
-                    const new_hdr = (wc << 16) | 131; // FSub
-                    try result.appendSlice(alloc, &[_]u32{ new_hdr, result_type, result_id, a, nb });
-                    changed = true;
-                    pos = ie;
-                    continue;
-                } else if (neg_a) |na| {
-                    // FAdd(-y, x) → FSub(x, y)
-                    const new_hdr = (wc << 16) | 131; // FSub
-                    try result.appendSlice(alloc, &[_]u32{ new_hdr, result_type, result_id, b, na });
-                    changed = true;
-                    pos = ie;
-                    continue;
-                }
-            } else { // FSub
-                if (neg_b) |nb| {
-                    // FSub(x, -y) → FAdd(x, y)
-                    const new_hdr = (wc << 16) | 129; // FAdd
-                    try result.appendSlice(alloc, &[_]u32{ new_hdr, result_type, result_id, a, nb });
-                    changed = true;
-                    pos = ie;
-                    continue;
+            if (is_float or is_int) {
+                const neg_a = neg_map.get(a);
+                const neg_b = neg_map.get(b);
+
+                // Match negate type to arithmetic type
+                const neg_a_match: ?@TypeOf(neg_a.?) = if (neg_a) |n| if (n.is_float == is_float) n else null else null;
+                const neg_b_match: ?@TypeOf(neg_b.?) = if (neg_b) |n| if (n.is_float == is_float) n else null else null;
+
+                const is_add = (opcode == 129 or opcode == 128);
+
+                if (is_add) {
+                    if (neg_b_match) |nb| {
+                        // Add(x, -y) → Sub(x, y)
+                        const sub_op: u16 = if (is_float) 131 else 130;
+                        const new_hdr = (wc << 16) | sub_op;
+                        try result.appendSlice(alloc, &[_]u32{ new_hdr, result_type, result_id, a, nb.operand });
+                        changed = true;
+                        pos = ie;
+                        continue;
+                    } else if (neg_a_match) |na| {
+                        // Add(-y, x) → Sub(x, y)
+                        const sub_op: u16 = if (is_float) 131 else 130;
+                        const new_hdr = (wc << 16) | sub_op;
+                        try result.appendSlice(alloc, &[_]u32{ new_hdr, result_type, result_id, b, na.operand });
+                        changed = true;
+                        pos = ie;
+                        continue;
+                    }
+                } else { // Sub
+                    if (neg_b_match) |nb| {
+                        // Sub(x, -y) → Add(x, y)
+                        const add_op: u16 = if (is_float) 129 else 128;
+                        const new_hdr = (wc << 16) | add_op;
+                        try result.appendSlice(alloc, &[_]u32{ new_hdr, result_type, result_id, a, nb.operand });
+                        changed = true;
+                        pos = ie;
+                        continue;
+                    }
                 }
             }
         }
@@ -3453,7 +3469,7 @@ pub fn foldNegateIntoAddSub(alloc: std.mem.Allocator, words: []const u32) error{
         return words;
     }
 
-    // DCE to remove now-dead FNegate instructions
+    // DCE to remove now-dead negate instructions
     const nw = result.toOwnedSlice(alloc) catch return words;
     const dce = deadCodeElim(alloc, nw) catch return nw;
     if (dce.ptr != nw.ptr) alloc.free(nw);
