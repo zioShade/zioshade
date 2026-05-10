@@ -10395,3 +10395,96 @@ test "T451.1: flat interpolation on struct member" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T452.1: sampler2DShadow comparison" {
+    // Tests shadow sampler depth comparison
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2DShadow shadow;
+        \\void main() {
+        \\    float d = texture(shadow, vec3(uv, 0.5));
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T453.1: textureGather with shadow sampler" {
+    // Tests textureGather on sampler2DShadow
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2DShadow shadow;
+        \\void main() {
+        \\    vec4 g = textureGather(shadow, uv, 0.5);
+        \\    fragColor = g;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T454.1: compute scatter write" {
+    // Tests compute with indirect (scattered) write pattern
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) readonly buffer Input { float data[]; };
+        \\layout(std430, binding = 1) buffer Output { float result[]; };
+        \\layout(std430, binding = 2) readonly buffer Indices { uint indices[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    uint dest = indices[id];
+        \\    result[dest] = data[id] * 2.0;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T455.1: float16 conversions" {
+    // Tests float <-> float16 conversion via pack/unpack
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint packed = packHalf2x16(vec2(x, x * 0.5));
+        \\    vec2 unpacked = unpackHalf2x16(packed);
+        \\    fragColor = vec4(unpacked, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T456.1: layout std140 uniform block" {
+    // Tests explicit std140 layout on uniform block
+    const source =
+        \\#version 450
+        \\layout(std140, binding = 0) uniform U {
+        \\    mat4 mvp;
+        \\    vec4 color;
+        \\    float intensity;
+        \\    vec3 direction;
+        \\};
+        \\layout(location = 0) in vec4 pos;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 p = mvp * pos;
+        \\    fragColor = p + color * intensity;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
