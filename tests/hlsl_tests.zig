@@ -7842,3 +7842,89 @@ test "T320.1: matrixCompMult" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T321.1: deep if-else chain" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int mode;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c = vec4(0.0);
+        \\    if (mode == 0) c = vec4(1.0, 0.0, 0.0, 1.0);
+        \\    else if (mode == 1) c = vec4(0.0, 1.0, 0.0, 1.0);
+        \\    else if (mode == 2) c = vec4(0.0, 0.0, 1.0, 1.0);
+        \\    else if (mode == 3) c = vec4(1.0, 1.0, 0.0, 1.0);
+        \\    else if (mode == 4) c = vec4(0.0, 1.0, 1.0, 1.0);
+        \\    else c = vec4(1.0);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T322.1: vec4 shuffle/reshape" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = v.wzyx;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T323.1: multiple function calls chained" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float double_it(float v) { return v * 2.0; }
+        \\float add_one(float v) { return v + 1.0; }
+        \\void main() {
+        \\    float r = double_it(add_one(double_it(x)));
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T324.1: bool to float conversion" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bool b = x > 0.5;
+        \\    float f = float(b);
+        \\    fragColor = vec4(f);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T325.1: complex expression tree" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = length(uv - 0.5);
+        \\    float a = smoothstep(0.3, 0.5, d);
+        \\    float b = smoothstep(0.5, 0.7, d);
+        \\    fragColor = vec4(a * (1.0 - b));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
