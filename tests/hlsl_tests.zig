@@ -11779,3 +11779,92 @@ test "T526.1: clamp min max on vectors" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T527.1: gl_DrawID in vertex" {
+    // Tests gl_DrawID in multi-draw vertex shader
+    const source =
+        \\#version 460
+        \\layout(location = 0) in vec4 pos;
+        \\void main() {
+        \\    float offset = float(gl_DrawID) * 0.1;
+        \\    gl_Position = pos + vec4(offset, 0.0, 0.0, 0.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T528.1: noise functions" {
+    // Tests that noise builtins compile (may return 0)
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float n1 = noise1(v.xy);
+        \\    vec2 n2 = noise2(v.xyz);
+        \\    vec3 n3 = noise3(v.xyzw);
+        \\    fragColor = vec4(n1, n2.x, n3.x, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T529.1: mat4x3 and mat3x4 operations" {
+    // Tests non-square matrix types
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4x3 m43 = mat4x3(1.0);
+        \\    mat3x4 m34 = mat3x4(1.0);
+        \\    vec3 r1 = m43 * v;
+        \\    vec4 r2 = m34 * r1;
+        \\    fragColor = r2;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T530.1: gl_MaxUniformBindings and constants" {
+    // Tests that GLSL max constants compile
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = x / float(gl_MaxTextureImageUnits);
+        \\    float b = x / float(gl_MaxCombinedTextureImageUnits);
+        \\    fragColor = vec4(a, b, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T531.1: inout parameter modification" {
+    // Tests inout parameter that modifies the argument
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void modify(inout float v, float delta) { v += delta; }
+        \\void main() {
+        \\    float a = x;
+        \\    modify(a, 1.0);
+        \\    modify(a, 2.0);
+        \\    fragColor = vec4(a);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
