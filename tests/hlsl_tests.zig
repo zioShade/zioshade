@@ -7579,3 +7579,101 @@ test "T305.1: dual texture blend" {
     try assertContains(hlsl, "float4");
 }
 
+
+test "T306.1: for-loop accumulation into local" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 4; i++) {
+        \\        sum += x * float(i);
+        \\    }
+        \\    fragColor = vec4(sum);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T307.1: while-loop accumulation into local" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = x;
+        \\    int i = 0;
+        \\    while (i < 8) {
+        \\        sum += sum * 0.5;
+        \\        i++;
+        \\    }
+        \\    fragColor = vec4(sum);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T308.1: compute loop with buffer store after accumulation" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer SSBO { float data; };
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 10; i++) {
+        \\        sum += float(i);
+        \\    }
+        \\    data = sum;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T309.1: nested for-loop with matrix accumulation" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform U { mat4 mvp; };
+        \\void main() {
+        \\    vec4 v = vec4(x);
+        \\    for (int i = 0; i < 2; i++) {
+        \\        for (int j = 0; j < 3; j++) {
+        \\            v = mvp * v;
+        \\        }
+        \\        v = v * 0.5;
+        \\    }
+        \\    fragColor = v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T310.1: compute nested loop buffer read/write" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) readonly buffer In { vec4 in_data[]; };
+        \\layout(std430, binding = 1) writeonly buffer Out { vec4 out_data[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    vec4 v = in_data[id];
+        \\    for (int i = 0; i < 4; i++) {
+        \\        v = v * 2.0 + vec4(1.0);
+        \\    }
+        \\    out_data[id] = v;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
