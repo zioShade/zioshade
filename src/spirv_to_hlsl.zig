@@ -192,36 +192,13 @@ pub const HlslCompileOptions = struct {
     shader_model: u32 = 60,
 };
 
-// Thread-local parse cache
-threadlocal var _cache_mod_hlsl: ?ParsedModule = null;
-threadlocal var _cache_ptr_hlsl: ?[*]const u32 = null;
-threadlocal var _cache_len_hlsl: usize = 0;
-threadlocal var _cache_alloc_hlsl: ?std.mem.Allocator = null;
-
-fn getCachedModuleHLSL(alloc: std.mem.Allocator, spirv_words: []const u32) !ParsedModule {
-    if (_cache_ptr_hlsl) |p| {
-        if (p == spirv_words.ptr and _cache_len_hlsl == spirv_words.len and _cache_mod_hlsl != null) {
-            return _cache_mod_hlsl.?;
-        }
-    }
-    if (_cache_mod_hlsl) |*old| {
-        if (_cache_alloc_hlsl) |a| old.deinit(a);
-        _cache_mod_hlsl = null;
-    }
-    const m = try parseModule(alloc, spirv_words);
-    _cache_mod_hlsl = m;
-    _cache_ptr_hlsl = spirv_words.ptr;
-    _cache_len_hlsl = spirv_words.len;
-    _cache_alloc_hlsl = alloc;
-    return m;
-}
-
 pub fn spirvToHLSL(
     alloc: std.mem.Allocator,
     spirv_words: []const u32,
     options: HlslCompileOptions,
 ) ![]const u8 {
-    var module = try getCachedModuleHLSL(alloc, spirv_words);
+    var module = try parseModule(alloc, spirv_words);
+    defer module.deinit(alloc);
 
     const entry_id = module.entry_point_id orelse return error.NoEntryPoint;
 
