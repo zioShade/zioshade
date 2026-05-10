@@ -10,6 +10,7 @@
 - **algebraicSimpl x*0=0**: FMul(x, 0.0) = 0.0, IMul(x, 0) = 0
 - **algebraicSimpl div/sub identities**: FDiv/SDiv/UDiv by 1, ISub by 0
 - **algebraicSimpl bitwise identities**: Or/Xor with 0 = x, And with 0 = 0, Shift by 0 = x
+- **algebraicSimpl x-x=0**: FSub(a,a) = 0.0, ISub(a,a) = 0
 - **elimUnreachableBlocks**: Forward reachability analysis + OpPhi cleanup after foldConstBranches
 - **foldConstCompositeExtract**: Fold extract(const_composite, N) -> Nth component using zero-alloc position tracking
 - **simplifyTrivialPhi**: Eliminate OpPhi where all incoming values are identical; runs at 3 pipeline points (after branchMergePhi, after each elimUnreachableBlocks)
