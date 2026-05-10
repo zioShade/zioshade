@@ -8121,3 +8121,81 @@ test "T335.1: nested switch with returns" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T336.1: packSnorm2x16" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint packed = packSnorm2x16(v);
+        \\    fragColor = vec4(float(packed));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T337.1: unpackHalf2x16" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float f;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint u = floatBitsToUint(f);
+        \\    vec2 v = unpackHalf2x16(u);
+        \\    fragColor = vec4(v, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T338.1: packUnorm4x8" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint packed = packUnorm4x8(v);
+        \\    fragColor = vec4(float(packed));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T339.1: bitfieldExtract" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int extracted = bitfieldExtract(val, 4, 8);
+        \\    fragColor = vec4(float(extracted));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T340.1: bitfieldInsert" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int base_;
+        \\layout(location = 1) in int insert_;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int result = bitfieldInsert(base_, insert_, 4, 8);
+        \\    fragColor = vec4(float(result));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
