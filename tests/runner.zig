@@ -187,6 +187,7 @@ fn runDir(alloc: std.mem.Allocator, dir_path: []const u8, stats: *Stats) !void {
             },
             .skip => {
                 stats.skip += 1;
+                log("  SKIP {s}\n", .{full_path});
             },
         }
     }
