@@ -1,0 +1,226 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct Globals
+{
+    float3 _m0;
+    float _m1;
+    float _m2;
+    float _m3;
+    int _m4;
+    float _m5[4];
+    float3 _m6[4];
+    float4 _m7;
+    float4 _m8;
+    float _m9;
+    float4 _m10;
+    float4 _m11;
+    float4 _m12;
+    float4 _m13;
+    int _m14;
+    int _m15;
+    int _m16;
+    float _m17;
+    float _m18;
+    int _m19;
+    float3 _m20[256];
+    float3 _m21;
+    float3 _m22;
+    float3 _m23;
+    float3 _m24;
+    float3 _m25;
+    float3 _m26;
+};
+
+struct main0_out
+{
+    float4 _fragColor [[color(0)]];
+};
+
+void mainImage(thread float4& v28, float2 v29)
+{
+    float3 v30;
+    float2 v31;
+    float3 v33 = Globals[0];
+    float2 v34 = float2(v33[0], v33[1]);
+    float2 v35 = v29 / v34;
+    float2 v36 = v35 - float2(0.5);
+    float2 v37 = v36 * 2.0;
+    float2 v38 = v37 * 1.1;
+    float v40 = v38[1];
+    float v41 = abs(v40);
+    float v42 = v41 / 5.0;
+    float v43 = powr(v42, 2.0);
+    float v44 = 1.0 + v43;
+    float v45 = v31.x;
+    float v46 = v45 * v44;
+    v31.x = v46;
+    float v48 = v38[0];
+    float v49 = abs(v48);
+    float v50 = v49 / 4.0;
+    float v51 = powr(v50, 2.0);
+    float v52 = 1.0 + v51;
+    float v53 = v31.y;
+    float v54 = v53 * v52;
+    v31.y = v54;
+    float2 v55 = v38 / float2(2.0);
+    float2 v56 = v55 + float2(0.5);
+    float2 v57 = v56 * 0.92;
+    float2 v58 = v57 + float2(0.04);
+    v31 = v58;
+    float v61 = Globals[1];
+    float v62 = 0.3 * v61;
+    float v63 = v58[1];
+    float v64 = v63 * 21.0;
+    float v65 = v62 + v64;
+    float v66 = sin(v65);
+    float v67 = 0.7 * v61;
+    float v68 = v63 * 29.0;
+    float v69 = v67 + v68;
+    float v70 = sin(v69);
+    float v71 = v66 * v70;
+    float v72 = 0.33 * v61;
+    float v73 = 0.3 + v72;
+    float v74 = v63 * 31.0;
+    float v75 = v73 + v74;
+    float v76 = sin(v75);
+    float v77 = v71 * v76;
+    float v78 = v77 * 0.0017;
+    float v79 = v58[0];
+    float v80 = v78 + v79;
+    float v81 = v80 + 0.001;
+    float v82 = v63 + 0.001;
+    float2 v83 = float2(v81, v82);
+    float4 v84 = iChannel0.sample(iChannel0Smplr, v83);
+    float v85 = v84[0];
+    float v86 = v85 + 0.05;
+    float v88 = v63 - 0.002;
+    float2 v89 = float2(v80, v88);
+    float4 v90 = iChannel0.sample(iChannel0Smplr, v89);
+    float v91 = v90[1];
+    float v92 = v91 + 0.05;
+    float v94 = v80 - 0.002;
+    float2 v95 = float2(v94, v63);
+    float4 v96 = iChannel0.sample(iChannel0Smplr, v95);
+    float v97 = v96[2];
+    float v98 = v97 + 0.05;
+    float v100 = v78 + 0.025;
+    float v101 = -0.027;
+    float2 v102 = float2(v100, v101);
+    float2 v103 = v102 * 0.75;
+    float v104 = v79 + 0.001;
+    float2 v105 = float2(v104, v82);
+    float2 v106 = v103 + v105;
+    float4 v107 = iChannel0.sample(iChannel0Smplr, v106);
+    float v108 = v107[0];
+    float v109 = 0.08 * v108;
+    float v110 = v86 + v109;
+    v30.x = v110;
+    float v111 = v78 - 0.022;
+    float v112 = -0.02;
+    float2 v113 = float2(v111, v112);
+    float2 v114 = v113 * 0.75;
+    float2 v115 = float2(v79, v88);
+    float2 v116 = v114 + v115;
+    float4 v117 = iChannel0.sample(iChannel0Smplr, v116);
+    float v118 = v117[1];
+    float v119 = 0.05 * v118;
+    float v120 = v92 + v119;
+    v30.y = v120;
+    float v121 = v78 - 0.02;
+    float v122 = -0.018;
+    float2 v123 = float2(v121, v122);
+    float2 v124 = v123 * 0.75;
+    float v125 = v79 - 0.002;
+    float2 v126 = float2(v125, v63);
+    float2 v127 = v124 + v126;
+    float4 v128 = iChannel0.sample(iChannel0Smplr, v127);
+    float v129 = v128[2];
+    float v130 = 0.08 * v129;
+    float v131 = v98 + v130;
+    v30.z = v131;
+    float3 v132 = v30;
+    float3 v133 = v132 * 0.6;
+    float3 v134 = v132 * 0.4;
+    float3 v135 = v134 * v132;
+    float3 v136 = v133 + v135;
+    float3 v137 = clamp(v136, 0.0, 1.0);
+    float v138 = 16.0 * v79;
+    float v139 = v138 * v63;
+    float v140 = 1.0 - v79;
+    float v141 = v139 * v140;
+    float v142 = 1.0 - v63;
+    float v143 = v141 * v142;
+    float v144 = powr(v143, 0.3);
+    float3 v145 = float3(v144, v144, v144);
+    float3 v146 = v137 * v145;
+    float3 v147 = v146 * float3(0.95, 1.05, 0.95);
+    float3 v148 = v147 * 2.8;
+    float v149 = 3.5 * v61;
+    float v150 = v33[1];
+    float v151 = v63 * v150;
+    float v152 = v151 * 1.5;
+    float v153 = v149 + v152;
+    float v154 = sin(v153);
+    float v155 = 0.35 * v154;
+    float v156 = 0.35 + v155;
+    float v157 = clamp(v156, 0.0, 1.0);
+    float v158 = powr(v157, 1.7);
+    float v159 = 0.7 * v158;
+    float v160 = 0.4 + v159;
+    float3 v161 = float3(v160, v160, v160);
+    float3 v162 = v148 * v161;
+    float v163 = 110.0 * v61;
+    float v164 = sin(v163);
+    float v165 = 0.01 * v164;
+    float v166 = 1.0 + v165;
+    float3 v167 = v162 * v166;
+    v30 = v167;
+    bool v168 = v79 < 0.0;
+    bool v169 = v79 > 1.0;
+    bool v170 = v168 || v169;
+    if (v170)
+    {
+    float3 v171 = v30;
+    float3 v172 = v171 * 0.0;
+    v30 = v172;
+    }
+    bool v173 = v63 < 0.0;
+    bool v174 = v63 > 1.0;
+    bool v175 = v173 || v174;
+    if (v175)
+    {
+    float3 v176 = v30;
+    float3 v177 = v176 * 0.0;
+    v30 = v177;
+    }
+    float v178 = v29[0];
+    float v179 = v178 % 2.0;
+    float v180 = v179 - 1.0;
+    float v181 = v180 * 2.0;
+    float v182 = clamp(v181, 0.0, 1.0);
+    float3 v183 = float3(v182, v182, v182);
+    float3 v184 = v183 * 0.65;
+    float3 v185 = float3(1.0) - v184;
+    float3 v186 = v30;
+    float3 v187 = v186 * v185;
+    v30 = v187;
+    float4 v188 = float4(v187, 1.0);
+    v28 = v188;
+    return;
+}
+static inline __attribute__((always_inline))
+void main0_impl(thread float4& _fragColor, float2 _fragCoord, constant Globals& Globals_1, texture2d<float> iChannel0, sampler iChannel0Smplr)
+{
+    float2 v26 = float2(gl_FragCoord[0], gl_FragCoord[1]);
+    mainImage(_fragColor, v26);
+}
+
+fragment main0_out main0(constant Globals& Globals_1 [[buffer(1)]], texture2d<float> iChannel0 [[texture(0)]], sampler iChannel0Smplr [[sampler(0)]], float4 gl_FragCoord [[position]])
+{
+    main0_out out = {};
+    main0_impl(out._fragColor, gl_FragCoord.xy, Globals_1, iChannel0, iChannel0Smplr);
+    return out;
+}
