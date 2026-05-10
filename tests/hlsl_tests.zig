@@ -7928,3 +7928,84 @@ test "T325.1: complex expression tree" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T326.1: #define preprocessor" {
+    const source =
+        \\#version 450
+        \\#define COLOR vec4(1.0, 0.0, 0.0, 1.0)
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = COLOR;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T327.1: #ifdef preprocessor" {
+    const source =
+        \\#version 450
+        \\#define USE_RED
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c;
+        \\    #ifdef USE_RED
+        \\    c = vec4(1.0, 0.0, 0.0, 1.0);
+        \\    #else
+        \\    c = vec4(0.0, 1.0, 0.0, 1.0);
+        \\    #endif
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T328.1: #ifndef with #define" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\#ifndef SKIP
+        \\#define RESULT vec4(0.5)
+        \\#endif
+        \\void main() {
+        \\    fragColor = RESULT;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T329.1: const array initialization" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    const float vals[3] = float[3](0.25, 0.5, 0.75);
+        \\    fragColor = vec4(vals[0], vals[1], vals[2], 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T330.1: global const variable" {
+    const source =
+        \\#version 450
+        \\const float PI = 3.14159;
+        \\layout(location = 0) in float angle;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r = sin(angle * PI);
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}

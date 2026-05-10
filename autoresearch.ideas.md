@@ -1,6 +1,6 @@
 # Autoresearch Ideas — glslpp SPIR-V Optimization
 
-## STATUS: 470/470 HLSL tests, 213/222 conformance (95.9%), 0 val_fail, 0 leaks ✅✅
+## STATUS: 480/480 HLSL tests, 213/222 conformance (95.9%), 0 val_fail, 0 leaks ✅✅
 
 ## Recent Optimization Passes Added
 - **foldConstBranches**: Fold OpBranchConditional with constant boolean conditions to unconditional OpBranch + remove SelectionMerge
@@ -12,7 +12,10 @@
 - **algebraicSimpl bitwise identities**: Or/Xor with 0 = x, And with 0 = 0, Shift by 0 = x
 - **elimUnreachableBlocks**: Forward reachability analysis + OpPhi cleanup after foldConstBranches
 - **foldConstCompositeExtract**: Fold extract(const_composite, N) -> Nth component using zero-alloc position tracking
-- All optimizations cascade: constFold -> foldSelect -> foldConstBranches -> elimUnreachableBlocks -> DCE -> mergeBlocks
+- **simplifyTrivialPhi**: Eliminate OpPhi where all incoming values are identical; runs at 3 pipeline points (after branchMergePhi, after each elimUnreachableBlocks)
+- **deadLoopElim Phase 2.5**: Preserve loops whose func-local vars are loaded after merge
+- **mergeBlocks Pass 4 fix**: Protect OpLoopMerge merge/continue target labels from empty-predecessor merging
+- All optimizations cascade: constFold -> foldSelect -> foldConstBranches -> elimUnreachableBlocks -> simplifyTrivialPhi -> DCE -> mergeBlocks
 - Failed attempt: extending foldCompositeExtract with OpConstantComposite via construct_map caused 91 leaks (ArrayList ownership issue)
 
 ## Known Issues / Future Work
