@@ -12067,3 +12067,102 @@ test "T541.1: complex expression with many operators" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T542.1: struct with sampler member" {
+    // Tests struct containing a sampler
+    const source =
+        \\#version 450
+        \\struct Material { sampler2D diffuse; vec4 tint; float roughness; };
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    Material m;
+        \\    m.diffuse = tex;
+        \\    m.tint = vec4(1.0);
+        \\    m.roughness = 0.5;
+        \\    vec4 c = texture(m.diffuse, uv) * m.tint;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T543.1: array parameter to function" {
+    // Tests passing array to function
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float sum4(float a[4]) {
+        \\    return a[0] + a[1] + a[2] + a[3];
+        \\}
+        \\void main() {
+        \\    float arr[4];
+        \\    for (int i = 0; i < 4; i++) arr[i] = x * float(i);
+        \\    fragColor = vec4(sum4(arr));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T544.1: vec4 lerp via mix chain" {
+    // Tests vec4 chained mix (lerp) operations
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 b = vec4(1.0, 0.0, 0.0, 1.0);
+        \\    vec4 c = vec4(0.0, 1.0, 0.0, 1.0);
+        \\    vec4 d = mix(a, b, 0.5);
+        \\    vec4 e = mix(d, c, 0.25);
+        \\    fragColor = mix(e, a, 0.1);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T545.1: gl_FrontFacing" {
+    // Tests gl_FrontFacing built-in
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 color;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (gl_FrontFacing) {
+        \\        fragColor = color;
+        \\    } else {
+        \\        fragColor = color * 0.5;
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T546.1: struct return from function" {
+    // Tests returning struct from function
+    const source =
+        \\#version 450
+        \\struct Ray { vec3 origin; vec3 dir; float t; };
+        \\Ray makeRay(vec3 o, vec3 d) { return Ray(o, normalize(d), 1000.0); }
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    Ray r = makeRay(v, vec3(0.0, 1.0, 0.0));
+        \\    fragColor = vec4(r.origin + r.dir * r.t, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
