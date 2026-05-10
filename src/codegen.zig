@@ -209,9 +209,12 @@ pub fn generate(
     // CSE duplicate OpAccessChain and OpSampledImage within blocks
     const no_dup_ac = compact_ids.cseWithinBlocks(alloc, no_rle) catch return no_rle;
     if (no_dup_ac.ptr != no_rle.ptr) alloc.free(no_rle);
+    // Fold CompositeExtract from OpConstantComposite
+    const folded_cce = compact_ids.foldConstCompositeExtract(alloc, no_dup_ac) catch no_dup_ac;
+    if (folded_cce.ptr != no_dup_ac.ptr) alloc.free(no_dup_ac);
     // Fold CompositeExtract from CompositeConstruct
-    const folded_ce = compact_ids.foldCompositeExtract(alloc, no_dup_ac) catch return no_dup_ac;
-    if (folded_ce.ptr != no_dup_ac.ptr) alloc.free(no_dup_ac);
+    const folded_ce = compact_ids.foldCompositeExtract(alloc, folded_cce) catch return folded_cce;
+    if (folded_ce.ptr != folded_cce.ptr) alloc.free(folded_cce);
     // Fold VectorShuffle from CompositeConstruct into CompositeConstruct
     const folded_sh = compact_ids.foldShuffleFromComposite(alloc, folded_ce) catch folded_ce;
     if (folded_sh.ptr != folded_ce.ptr) alloc.free(folded_ce);
@@ -236,8 +239,10 @@ pub fn generate(
     // Second round: constFold + foldCE after store forwarding exposes new patterns
     const cf2 = compact_ids.constFold(alloc, forwarded) catch forwarded;
     if (cf2.ptr != forwarded.ptr) alloc.free(forwarded);
-    const folded_ce2 = compact_ids.foldCompositeExtract(alloc, cf2) catch cf2;
-    if (folded_ce2.ptr != cf2.ptr) alloc.free(cf2);
+    const folded_cce2 = compact_ids.foldConstCompositeExtract(alloc, cf2) catch cf2;
+    if (folded_cce2.ptr != cf2.ptr) alloc.free(cf2);
+    const folded_ce2 = compact_ids.foldCompositeExtract(alloc, folded_cce2) catch folded_cce2;
+    if (folded_ce2.ptr != folded_cce2.ptr) alloc.free(folded_cce2);
     // Second round: fold constant branches after constFold + foldCE
     const folded_br2 = compact_ids.foldConstBranches(alloc, folded_ce2) catch folded_ce2;
     if (folded_br2.ptr != folded_ce2.ptr) alloc.free(folded_ce2);
