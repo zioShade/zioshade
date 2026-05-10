@@ -8673,3 +8673,131 @@ pub fn fixTypeOrdering(alloc: std.mem.Allocator, words: []const u32) error{OutOf
     result.appendSliceAssumeCapacity(func_sec.items);
     return result.toOwnedSlice(alloc) catch return alloc.dupe(u32, words);
 }
+
+/// Fold OpBranchConditional with constant boolean conditions to unconditional OpBranch.
+/// Also removes the associated OpSelectionMerge when the branch becomes unconditional.
+pub fn foldConstBranches(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find bool type and true/false constants
+    var bool_type: u32 = 0;
+    var true_id: u32 = 0;
+    var false_id: u32 = 0;
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 20 and wc >= 2) bool_type = words[pos + 1]; // OpTypeBool
+        if (opcode == 41 and wc >= 3 and words[pos + 1] == bool_type) true_id = words[pos + 2]; // OpConstantTrue
+        if (opcode == 42 and wc >= 3 and words[pos + 1] == bool_type) false_id = words[pos + 2]; // OpConstantFalse
+        pos += wc;
+    }
+
+    if (true_id == 0 and false_id == 0) return words;
+
+    // Phase 2: Find foldable OpBranchConditional instructions
+    // An OpBranchConditional with constant condition can become OpBranch.
+    // Build set of positions to fold.
+    var fold_positions = std.AutoHashMapUnmanaged(u32, u32){}; // position -> target label
+    defer fold_positions.deinit(alloc);
+    // Also track associated SelectionMerge positions to remove
+    var merge_positions = std.AutoHashMapUnmanaged(u32, void){}; // position of SelectionMerge to remove
+    defer merge_positions.deinit(alloc);
+
+    pos = 5;
+    var prev_pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 250 and wc >= 4) { // OpBranchConditional
+            const cond = words[pos + 1];
+            const true_label = words[pos + 2];
+            const false_label = words[pos + 3];
+            if (cond == true_id) {
+                fold_positions.put(alloc, pos, true_label) catch {};
+                // Find associated SelectionMerge (should be just before this in the same block)
+                // Walk backwards from this position to find SelectionMerge
+                var pp: u32 = prev_pos;
+                while (pp < pos) {
+                    const ph = words[pp];
+                    const pw: u32 = ph >> 16;
+                    const pop: u16 = @truncate(ph & 0xFFFF);
+                    if (pw == 0) break;
+                    if (pop == 247) { // OpSelectionMerge
+                        merge_positions.put(alloc, pp, {}) catch {};
+                        break;
+                    }
+                    pp += pw;
+                }
+            } else if (cond == false_id) {
+                fold_positions.put(alloc, pos, false_label) catch {};
+                var pp: u32 = prev_pos;
+                while (pp < pos) {
+                    const ph = words[pp];
+                    const pw: u32 = ph >> 16;
+                    const pop: u16 = @truncate(ph & 0xFFFF);
+                    if (pw == 0) break;
+                    if (pop == 247) { // OpSelectionMerge
+                        merge_positions.put(alloc, pp, {}) catch {};
+                        break;
+                    }
+                    pp += pw;
+                }
+            }
+        }
+
+        // Track label boundaries for finding SelectionMerge
+        if (opcode == 248 and wc >= 2) { // OpLabel
+            prev_pos = pos;
+        }
+
+        pos = ie;
+    }
+
+    if (fold_positions.count() == 0) return words;
+
+    // Phase 3: Rewrite — remove SelectionMerge, replace OpBranchConditional with OpBranch
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Skip SelectionMerge instructions that are being removed
+        if (merge_positions.contains(pos)) {
+            pos = ie;
+            continue;
+        }
+
+        // Replace foldable OpBranchConditional with OpBranch
+        if (fold_positions.get(pos)) |target| {
+            result.append(alloc, (2 << 16) | 249) catch return words; // OpBranch
+            result.append(alloc, target) catch return words;
+            pos = ie;
+            continue;
+        }
+
+        result.appendSlice(alloc, words[pos..ie]) catch return words;
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
+    return result.toOwnedSlice(alloc) catch return alloc.dupe(u32, words);
+}
