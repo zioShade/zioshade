@@ -196,8 +196,11 @@ pub fn generate(
     if (cf.ptr != algebrad.ptr) alloc.free(algebrad);
     const folded = compact_ids.foldSelect(alloc, cf) catch return cf;
     if (folded.ptr != cf.ptr) alloc.free(cf);
-    const compacted = compact_ids.compactIds(alloc, folded) catch return folded;
-    if (compacted.ptr != folded.ptr) alloc.free(folded);
+    // Fold constant branches: OpBranchConditional with constant condition -> OpBranch
+    const folded_br = compact_ids.foldConstBranches(alloc, folded) catch folded;
+    if (folded_br.ptr != folded.ptr) alloc.free(folded);
+    const compacted = compact_ids.compactIds(alloc, folded_br) catch return folded_br;
+    if (compacted.ptr != folded_br.ptr) alloc.free(folded_br);
     // Eliminate redundant loads of read-only variables
     const no_rle = compact_ids.elimRedundantLoads(alloc, compacted) catch return compacted;
     if (no_rle.ptr != compacted.ptr) alloc.free(compacted);
