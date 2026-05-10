@@ -12383,3 +12383,111 @@ test "T556.1: compute wave simulation" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "main");
 }
+
+
+test "T557.1: layout depth_greater" {
+    // Tests layout(depth_greater) in fragment shader
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(depth_greater) out float gl_FragDepth;
+        \\void main() {
+        \\    gl_FragDepth = x;
+        \\    fragColor = vec4(x);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T558.1: sample shading layout" {
+    // Tests sample_rate_shading qualifier in fragment
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\sample layout(location = 1) in vec2 sampleUV;
+        \\void main() {
+        \\    fragColor = v + vec4(sampleUV, 0.0, 0.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T559.1: mat4 from float16 values" {
+    // Tests matrix operations with explicit float precision
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mediump mat4 m = mat4(1.0);
+        \\    highp vec4 r = m * v;
+        \\    fragColor = r;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T560.1: extract and insert vector components" {
+    // Tests vector component extraction and insertion patterns
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 a = v;
+        \\    a.x = v.y;
+        \\    a.y = v.z;
+        \\    a.zw = v.xx;
+        \\    fragColor = a;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T561.1: PBR lighting model" {
+    // Tests simplified PBR lighting calculation
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 normal;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D albedoMap;
+        \\layout(binding = 1) uniform sampler2D metallicMap;
+        \\const float PI = 3.14159265;
+        \\float distributionGGX(vec3 N, vec3 H, float roughness) {
+        \\    float a = roughness * roughness;
+        \\    float a2 = a * a;
+        \\    float NdotH = max(dot(N, H), 0.0);
+        \\    float denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
+        \\    return a2 / (PI * denom * denom);
+        \\}
+        \\void main() {
+        \\    vec3 N = normalize(normal);
+        \\    vec3 V = vec3(0.0, 0.0, 1.0);
+        \\    vec3 L = normalize(vec3(1.0, 1.0, 1.0));
+        \\    vec3 H = normalize(V + L);
+        \\    float NDF = distributionGGX(N, H, 0.5);
+        \\    vec3 F0 = vec3(0.04);
+        \\    float NdotV = max(dot(N, V), 0.0);
+        \\    vec3 F = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
+        \\    vec3 kD = (1.0 - F) * 0.5;
+        \\    float NdotL = max(dot(N, L), 0.0);
+        \\    vec3 diffuse = kD * vec3(0.8) / PI;
+        \\    vec3 specular = NDF * F / (4.0 * NdotV * NdotL + 0.001);
+        \\    vec3 Lo = (diffuse + specular) * vec3(1.0) * NdotL;
+        \\    fragColor = vec4(Lo, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
