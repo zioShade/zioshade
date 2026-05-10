@@ -11031,3 +11031,95 @@ test "T486.1: nested ternary with functions" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T487.1: mat4 column access and assignment" {
+    // Tests mat4 column access with array indexing
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 m = mat4(1.0);
+        \\    m[0] = vec4(2.0, 0.0, 0.0, 0.0);
+        \\    m[1] = vec4(0.0, 3.0, 0.0, 0.0);
+        \\    m[2] = vec4(0.0, 0.0, 4.0, 0.0);
+        \\    m[3] = vec4(0.0, 0.0, 0.0, 5.0);
+        \\    fragColor = m * v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T488.1: struct copy assignment" {
+    // Tests copying one struct to another
+    const source =
+        \\#version 450
+        \\struct Point { vec3 pos; float w; vec3 normal; };
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    Point a = Point(v.xyz, 1.0, vec3(0.0, 1.0, 0.0));
+        \\    Point b = a;
+        \\    b.pos.x += 1.0;
+        \\    fragColor = vec4(b.pos, b.w);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T489.1: gl_ViewportIndex in vertex" {
+    // Tests gl_ViewportIndex write in vertex shader
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 pos;
+        \\void main() {
+        \\    gl_Position = pos;
+        \\    gl_ViewportIndex = 0;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "gl_Position");
+}
+
+test "T490.1: layout binding point uniform" {
+    // Tests uniform block with explicit binding point
+    const source =
+        \\#version 450
+        \\layout(binding = 3) uniform U { mat4 mvp; vec4 tint; };
+        \\layout(location = 0) in vec4 pos;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = mvp * pos + tint;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T491.1: uint loop counter with bitwise ops" {
+    // Tests uint loop with shift and mask operations
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint bits = floatBitsToUint(x);
+        \\    uint result = 0u;
+        \\    for (uint i = 0u; i < 32u; i++) {
+        \\        uint bit = (bits >> i) & 1u;
+        \\        result |= bit << (31u - i);
+        \\    }
+        \\    fragColor = vec4(uintBitsToFloat(result));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
