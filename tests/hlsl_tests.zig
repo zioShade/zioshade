@@ -12941,3 +12941,123 @@ test "T581.1: compute radix sort prefix" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "main");
 }
+
+
+test "T582.1: vertex skinning with bone weights" {
+    // Tests vertex skinning with bone matrix palette
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 position;
+        \\layout(location = 1) in vec4 boneWeights;
+        \\layout(location = 2) in ivec4 boneIds;
+        \\layout(std140, binding = 0) uniform Bones { mat4 boneMatrices[64]; };
+        \\void main() {
+        \\    vec4 pos = vec4(0.0);
+        \\    for (int i = 0; i < 4; i++) {
+        \\        float w = boneWeights[i];
+        \\        if (w > 0.0) {
+        \\            int id = boneIds[i];
+        \\            pos += boneMatrices[id] * vec4(position, 1.0) * w;
+        \\        }
+        \\    }
+        \\    gl_Position = pos;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T583.1: parallax mapping" {
+    // Tests parallax mapping with depth texture
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D diffuse;
+        \\layout(binding = 1) uniform sampler2D heightMap;
+        \\void main() {
+        \\    float h = texture(heightMap, uv).r;
+        \\    vec2 parallaxUV = uv + vec2(0.0, 0.0) * (h * 0.1 - 0.05);
+        \\    fragColor = texture(diffuse, parallaxUV);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T584.1: compute FFT butterfly" {
+    // Tests compute FFT butterfly stage
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 256) in;
+        \\layout(std430, binding = 0) buffer Real { float re[]; };
+        \\layout(std430, binding = 1) buffer Imag { float im[]; };
+        \\layout(std430, binding = 2) uniform Params { uint stage; };
+        \\const float PI = 3.14159265;
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    uint N = 1u << stage;
+        \\    uint k = id & (N - 1u);
+        \\    uint j = id >> stage;
+        \\    uint even = j * N * 2u + k;
+        \\    uint odd = even + N;
+        \\    float angle = -2.0 * PI * float(k) / float(N * 2u);
+        \\    float cs = cos(angle);
+        \\    float sn = sin(angle);
+        \\    float tr = cs * re[odd] - sn * im[odd];
+        \\    float ti = sn * re[odd] + cs * im[odd];
+        \\    re[id] = re[even] + tr;
+        \\    im[id] = im[even] + ti;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T585.1: chromatic aberration post-process" {
+    // Tests chromatic aberration with per-channel UV offset
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec2 dir = uv - vec2(0.5);
+        \\    float d = length(dir);
+        \\    vec2 offset = dir * d * 0.02;
+        \\    float r = texture(tex, uv + offset).r;
+        \\    float g = texture(tex, uv).g;
+        \\    float b = texture(tex, uv - offset).b;
+        \\    fragColor = vec4(r, g, b, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T586.1: compute particle emission" {
+    // Tests compute particle system with emission
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\struct Particle { vec4 pos; vec4 vel; float life; };
+        \\layout(std430, binding = 0) buffer Particles { Particle p[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    p[id].life -= 0.016;
+        \\    if (p[id].life <= 0.0) {
+        \\        p[id].pos = vec4(0.0);
+        \\        p[id].vel = vec4(float(id) * 0.01, 1.0, 0.0, 0.0);
+        \\        p[id].life = 1.0;
+        \\    }
+        \\    p[id].pos += p[id].vel * 0.016;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
