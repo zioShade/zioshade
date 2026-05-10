@@ -18,7 +18,7 @@ pub const Instruction = struct {
 
 pub const ParsedModule = struct {
     instructions: []const Instruction,
-    id_defs: std.AutoHashMapUnmanaged(u32, usize),
+    id_defs: []const ?usize,
     entry_point_id: ?u32 = null,
     execution_model: spirv.ExecutionModel = .Fragment,
     local_size: [3]u32 = [3]u32{ 1, 1, 1 },
@@ -28,7 +28,7 @@ pub const ParsedModule = struct {
             const bytes = @constCast(self.instructions.ptr);
             alloc.free(bytes[0..self.instructions.len]);
         }
-        self.id_defs.deinit(alloc);
+        alloc.free(@constCast(self.id_defs.ptr)[0..self.id_defs.len]);
     }
 };
 
@@ -40,8 +40,9 @@ pub fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         return error.OutOfMemory;
     errdefer instructions.deinit(alloc);
 
-    var id_defs = std.AutoHashMapUnmanaged(u32, usize){};
-    errdefer id_defs.deinit(alloc);
+    const bound = if (words.len > 3) words[3] else 0;
+    const id_defs = try alloc.alloc(?usize, bound);
+    @memset(id_defs, null);
 
     var i: usize = 5;
     while (i < words.len) {
@@ -56,8 +57,7 @@ pub fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         const inst_words = words[i .. i + word_count];
 
         if (resultIdFromOp(op, inst_words)) |id| {
-            id_defs.put(alloc, id, instructions.items.len) catch
-                return error.OutOfMemory;
+            if (id < bound) id_defs[id] = instructions.items.len;
         }
 
         instructions.append(alloc, .{ .op = op, .words = inst_words }) catch
@@ -154,7 +154,7 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
 // ---------------------------------------------------------------------------
 
 pub fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
-    const idx = module.id_defs.get(id) orelse return null;
+    const idx = if (id < module.id_defs.len) module.id_defs[id] orelse return null else return null;
     if (idx >= module.instructions.len) return null;
     return module.instructions[idx];
 }

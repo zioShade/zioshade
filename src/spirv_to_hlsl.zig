@@ -22,7 +22,7 @@ const Instruction = struct {
 
 const ParsedModule = struct {
     instructions: []const Instruction,
-    id_defs: std.AutoHashMapUnmanaged(u32, usize),
+    id_defs: []const ?usize,
     entry_point_id: ?u32 = null,
     execution_model: spirv.ExecutionModel = .Fragment,
     local_size: [3]u32 = [3]u32{ 1, 1, 1 },
@@ -36,7 +36,7 @@ const ParsedModule = struct {
             const bytes = @constCast(self.instructions.ptr);
             alloc.free(bytes[0..self.instructions.len]);
         }
-        self.id_defs.deinit(alloc);
+        alloc.free(@constCast(self.id_defs.ptr)[0..self.id_defs.len]);
     }
 };
 
@@ -48,8 +48,9 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         return error.OutOfMemory;
     errdefer instructions.deinit(alloc);
 
-    var id_defs = std.AutoHashMapUnmanaged(u32, usize){};
-    errdefer id_defs.deinit(alloc);
+    const bound = if (words.len > 3) words[3] else 0;
+    const id_defs = try alloc.alloc(?usize, bound);
+    @memset(id_defs, null);
 
     var i: usize = 5;
     while (i < words.len) {
@@ -64,8 +65,7 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         const inst_words = words[i .. i + word_count];
 
         if (resultIdFromOp(op, inst_words)) |id| {
-            id_defs.put(alloc, id, instructions.items.len) catch
-                return error.OutOfMemory;
+            if (id < bound) id_defs[id] = instructions.items.len;
         }
 
         instructions.append(alloc, .{ .op = op, .words = inst_words }) catch
@@ -167,7 +167,7 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
 // ---------------------------------------------------------------------------
 
 fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
-    const idx = module.id_defs.get(id) orelse return null;
+    const idx = if (id < module.id_defs.len) module.id_defs[id] orelse return null else return null;
     if (idx >= module.instructions.len) return null;
     return module.instructions[idx];
 }
@@ -685,7 +685,7 @@ fn detectOutParams(
     out_param_info: *std.AutoHashMap(u32, std.ArrayList(usize)),
     alloc: std.mem.Allocator,
 ) void {
-    const func_idx = module.id_defs.get(entry_id) orelse return;
+    const func_idx = if (entry_id < module.id_defs.len) module.id_defs[entry_id] orelse return else return;
 
     // Collect all Output storage class variable IDs
     var output_vars = std.AutoHashMap(u32, void).init(alloc);
@@ -776,7 +776,7 @@ fn emitFunction(
     }
 
     // Collect function parameters
-    const func_idx = module.id_defs.get(func_id) orelse return;
+    const func_idx = if (func_id < module.id_defs.len) module.id_defs[func_id] orelse return else return;
     const func_name = names.get(func_id) orelse "func";
 
     var param_ids = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;

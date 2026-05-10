@@ -8,13 +8,13 @@ const spirv = @import("spirv.zig");
 const Instruction = struct { op: spirv.Op, words: []const u32 };
 const ParsedModule = struct {
     instructions: []const Instruction,
-    id_defs: std.AutoHashMapUnmanaged(u32, usize),
+    id_defs: []const ?usize,
     entry_point_id: ?u32 = null,
     execution_model: spirv.ExecutionModel = .Fragment,
     local_size: [3]u32 = [3]u32{ 1, 1, 1 },
     pub fn deinit(self: *ParsedModule, alloc: std.mem.Allocator) void {
         if (self.instructions.len > 0) { const b = @constCast(self.instructions.ptr); alloc.free(b[0..self.instructions.len]); }
-        self.id_defs.deinit(alloc);
+        alloc.free(@constCast(self.id_defs.ptr)[0..self.id_defs.len]);
     }
 };
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
@@ -22,7 +22,7 @@ const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32 };
 const TextureDecl = struct { name: []const u8, binding: u32 };
 
 // ---- Helpers ----
-fn getDef(m: *const ParsedModule, id: u32) ?Instruction { const i = m.id_defs.get(id) orelse return null; if (i >= m.instructions.len) return null; return m.instructions[i]; }
+fn getDef(m: *const ParsedModule, id: u32) ?Instruction { if (id >= m.id_defs.len) return null; const i = m.id_defs[id] orelse return null; if (i >= m.instructions.len) return null; return m.instructions[i]; }
 fn swizzleChar(i: u32) []const u8 { return switch(i){ 0=>".x",1=>".y",2=>".z",3=>".w",else=>".x"}; }
 fn parseLitStr(alloc: std.mem.Allocator, words: []const u32) ![]const u8 { var buf = try std.ArrayList(u8).initCapacity(alloc, words.len*4); for(words)|word|{const bytes:[4]u8=@bitCast(word);for(bytes)|c|{if(c==0)break;buf.appendAssumeCapacity(c);}} return buf.toOwnedSlice(alloc); }
 fn sanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 { var buf = try std.ArrayList(u8).initCapacity(alloc, name.len); for(name)|c|{switch(c){'a'...'z','A'...'Z','0'...'9','_'=>buf.appendAssumeCapacity(c),else=>buf.appendAssumeCapacity('_'),}} return buf.toOwnedSlice(alloc); }
@@ -263,15 +263,16 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     if (words[0] != spirv.MAGIC) return error.InvalidSpirvMagic;
     var instructions = std.ArrayList(Instruction).initCapacity(alloc, words.len / 4) catch return error.OutOfMemory;
     errdefer instructions.deinit(alloc);
-    var id_defs = std.AutoHashMapUnmanaged(u32, usize){};
-    errdefer id_defs.deinit(alloc);
+    const bound = if (words.len > 3) words[3] else 0;
+    const id_defs = try alloc.alloc(?usize, bound);
+    @memset(id_defs, null);
     var i: usize = 5;
     while (i < words.len) {
         const hw = words[i]; const wc: u16 = @intCast(hw >> 16); const oc: u16 = @truncate(hw & 0xFFFF);
         if (wc == 0) return error.InvalidSpirv;
         if (i + wc > words.len) return error.InvalidSpirvTruncated;
         const op: spirv.Op = @enumFromInt(oc); const iw = words[i..i+wc];
-        if (resultIdFromOp(op, iw)) |id| { id_defs.put(alloc, id, instructions.items.len) catch return error.OutOfMemory; }
+        if (resultIdFromOp(op, iw)) |id| { if (id < bound) id_defs[id] = instructions.items.len; }
         instructions.append(alloc, .{.op=op,.words=iw}) catch return error.OutOfMemory;
         i += wc;
     }
@@ -359,7 +360,7 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
 }
 
 fn detectOutParams(m: *const ParsedModule, entry_id: u32, opi: *std.AutoHashMap(u32, std.ArrayList(usize)), alloc: std.mem.Allocator) void {
-    const fi = m.id_defs.get(entry_id) orelse return;
+    const fi = if (entry_id < m.id_defs.len) m.id_defs[entry_id] orelse return else return;
     var ov = std.AutoHashMap(u32, void).init(alloc); defer ov.deinit();
     for (m.instructions) |inst| { if (inst.op == .Variable and inst.words.len >= 4) { const sc: spirv.StorageClass = @enumFromInt(inst.words[3]); if (sc == .Output) ov.put(inst.words[2], {}) catch {}; } }
     var lfo = std.AutoHashMap(u32, void).init(alloc); defer lfo.deinit();
@@ -408,7 +409,7 @@ fn emitFunction(
     const rt = try mslType(m, rtid, names, alloc);
     const is_frag = is_entry and m.execution_model == .Fragment;
 
-    const func_idx = m.id_defs.get(func_id) orelse return;
+    const func_idx = if (func_id < m.id_defs.len) m.id_defs[func_id] orelse return else return;
     const func_name = if (is_entry) "main0" else (names.get(func_id) orelse "func");
 
     var param_ids = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;
