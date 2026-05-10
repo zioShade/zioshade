@@ -10016,3 +10016,96 @@ test "T431.1: function with array parameter" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T432.1: memory barrier buffer" {
+    // Tests memoryBarrierBuffer in compute shader
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    values[id] *= 2.0;
+        \\    memoryBarrierBuffer();
+        \\    barrier();
+        \\    values[id] += values[(id + 1u) % 64u];
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T433.1: vec2/vec3/vec4 component-wise multiply" {
+    // Tests component-wise vector multiply (not dot product)
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 1) in vec4 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 v2 = a.xy * b.xy;
+        \\    vec3 v3 = a.xyz * b.xyz;
+        \\    vec4 v4 = a * b;
+        \\    fragColor = vec4(v2, v3.z, v4.w);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T434.1: gl_NumWorkGroups query" {
+    // Tests gl_NumWorkGroups in compute shader
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Output { float result[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    uint total = gl_NumWorkGroups.x * 64u;
+        \\    result[id] = float(id) / float(total);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T435.1: matrix from rows" {
+    // Tests constructing mat4 from 4 vec4 rows then transposing
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 r0;
+        \\layout(location = 1) in vec4 r1;
+        \\layout(location = 2) in vec4 r2;
+        \\layout(location = 3) in vec4 r3;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 m = transpose(mat4(r0, r1, r2, r3));
+        \\    vec4 v = m * vec4(1.0, 0.0, 0.0, 0.0);
+        \\    fragColor = v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T436.1: textureQueryLod" {
+    // Tests textureQueryLod for mip level query
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec2 lod = textureQueryLod(tex, uv);
+        \\    fragColor = vec4(lod.x / 10.0, lod.y, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
