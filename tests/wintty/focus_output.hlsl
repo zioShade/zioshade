@@ -37,17 +37,17 @@ SamplerState iChannel0_sampler : register(s0);
 void mainImage(out float4 v27, float2 v28)
 {
     float3 v29;
-    float3 v31 = Globals_m0;
+    float3 v31 = Globals[0];
     float2 v32 = float2(v31.x, v31.y);
     float2 v33 = v28 / v32;
     float4 v35 = iChannel0.Sample(iChannel0_sampler, v33);
     float3 v36 = float3(v35.x, v35.y, v35.z);
-    int v38 = Globals_m19;
+    int v38 = Globals[19];
     bool v39 = v38 > 0;
     v29 = v36;
     if (v39) {
-    float v41 = Globals_m1;
-    float v43 = Globals_m18;
+    float v41 = Globals[1];
+    float v43 = Globals[18];
     float v44 = v41 - v43;
     float v45 = v44 / 3.0;
     float v46 = 1.0 - v45;

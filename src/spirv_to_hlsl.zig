@@ -1303,18 +1303,18 @@ fn emitInstruction(
                     if (try names.fetchPut(inst.words[2], alias)) |old| alloc.free(old.value);
                 }
             } else {
-                const ptr_expr = try resolvePointer(module, names, ptr_id, alloc);
-                try w.print("    {s} {s} = {s};\n", .{ result_type, result_name, ptr_expr });
-                alloc.free(ptr_expr);
+                try w.print("    {s} {s} = ", .{ result_type, result_name });
+                try writeResolvePointer(module, names, ptr_id, w);
+                try w.writeAll(";\n");
             }
         },
 
         .Store => {
             if (inst.words.len < 3) return;
-            const ptr_expr = try resolvePointer(module, names, inst.words[1], alloc);
             const obj_name = names.get(inst.words[2]) orelse "0";
-            try w.print("    {s} = {s};\n", .{ ptr_expr, obj_name });
-            alloc.free(ptr_expr);
+            try w.writeAll("    ");
+            try writeResolvePointer(module, names, inst.words[1], w);
+            try w.print(" = {s};\n", .{obj_name});
         },
 
         .CopyObject => {
@@ -1334,11 +1334,11 @@ fn emitInstruction(
         .CopyMemory => {
             // OpCopyMemory: target = source
             if (inst.words.len < 3) return;
-            const target_expr = try resolvePointer(module, names, inst.words[1], alloc);
-            const source_expr = try resolvePointer(module, names, inst.words[2], alloc);
-            try w.print("    {s} = {s};\n", .{ target_expr, source_expr });
-            alloc.free(target_expr);
-            alloc.free(source_expr);
+            try w.writeAll("    ");
+            try writeResolvePointer(module, names, inst.words[1], w);
+            try w.writeAll(" = ");
+            try writeResolvePointer(module, names, inst.words[2], w);
+            try w.writeAll(";\n");
         },
 
         .Phi => {
@@ -1820,6 +1820,48 @@ fn splitPair(pair: []const u8) [2][]const u8 {
         return .{ pair[0..comma], pair[comma + 1 ..] };
     }
     return .{ pair, pair };
+}
+
+fn writeResolvePointer(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32, w: anytype) !void {
+    const inst = getDef(module, ptr_id) orelse {
+        try w.writeAll(names.get(ptr_id) orelse "var");
+        return;
+    };
+    if (inst.op == .AccessChain) {
+        try writeAccessExpr(module, names, inst.words[3], inst.words[4..], w);
+        return;
+    }
+    try w.writeAll(names.get(ptr_id) orelse "var");
+}
+
+fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
+    const base_name = names.get(base_id) orelse "base";
+    if (indices.len == 0) { try w.writeAll(base_name); return; }
+    try w.writeAll(base_name);
+    var cur_type: ?u32 = resolvePointeeType(module, base_id);
+    for (indices) |index_id| {
+        const idx_inst = getDef(module, index_id);
+        if (idx_inst) |def| {
+            if (def.op == .Constant and def.words.len > 3) {
+                const val = def.words[3];
+                const is_vector = if (cur_type) |tid| blk: { const ti = getDef(module, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
+                if (is_vector) {
+                    try w.writeAll(swizzleChar(val));
+                } else {
+                    try w.print("[{d}]", .{val});
+                }
+                if (cur_type) |tid| {
+                    const ti = getDef(module, tid);
+                    if (ti) |tinst| {
+                        if (tinst.op == .TypeVector) { cur_type = tinst.words[2]; }
+                        else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur_type = tinst.words[val + 2]; }
+                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                        else { cur_type = null; }
+                    }
+                }
+            } else { try w.print("[{s}]", .{names.get(index_id) orelse "i"}); }
+        } else { try w.print("[{s}]", .{names.get(index_id) orelse "i"}); }
+    }
 }
 
 fn resolvePointer(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32, alloc: std.mem.Allocator) ![]const u8 {

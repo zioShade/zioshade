@@ -148,6 +148,49 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     return buf.toOwnedSlice(alloc);
 }
 
+fn writeResolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32, w: anytype) !void {
+    const inst = getDef(m, ptr_id) orelse { try w.writeAll(names.get(ptr_id) orelse "var"); return; };
+    if (inst.op == .AccessChain) {
+        try writeAccessExpr(m, names, inst.words[3], inst.words[4..], w);
+        return;
+    }
+    try w.writeAll(names.get(ptr_id) orelse "var");
+}
+
+fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
+    const base_name = names.get(base_id) orelse "base";
+    if (indices.len == 0) { try w.writeAll(base_name); return; }
+    const base_is_cb = isUniformVar(m, base_id);
+    const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
+    if (!base_is_cb) try w.writeAll(base_name);
+    var cur_type: ?u32 = resolvePointee(m, base_id);
+    for (indices) |index_id| {
+        const idx_inst = getDef(m, index_id);
+        if (idx_inst) |def| {
+            if (def.op == .Constant and def.words.len > 3) {
+                const val = def.words[3];
+                const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
+                if (is_vector) {
+                    try w.writeAll(swizzleChar(val));
+                } else if (base_is_cb) {
+                    try w.print("{s}_m{d}", .{cb_prefix, val});
+                } else {
+                    try w.print("[{d}]", .{val});
+                }
+                if (cur_type) |tid| {
+                    const ti = getDef(m, tid);
+                    if (ti) |tinst| {
+                        if (tinst.op == .TypeVector) { cur_type = tinst.words[2]; }
+                        else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur_type = tinst.words[val + 2]; }
+                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                        else { cur_type = null; }
+                    }
+                }
+            } else { try w.print("[{s}]", .{names.get(index_id) orelse "i"}); }
+        } else { try w.print("[{s}]", .{names.get(index_id) orelse "i"}); }
+    }
+}
+
 fn resolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32, alloc: std.mem.Allocator) ![]const u8 {
     const inst = getDef(m, ptr_id) orelse { const n = names.get(ptr_id) orelse "var"; return try alloc.dupe(u8, n); };
     if (inst.op == .AccessChain) return try buildAccessExpr(m, names, inst.words[3], inst.words[4..], alloc);
@@ -802,17 +845,17 @@ fn emitInstruction(
                 if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
             } else {
                 const rtt = try glslType(m, inst.words[1], names, alloc);
-                const pe = try resolvePointer(m, names, pid, alloc);
-                try w.print("    {s} {s} = {s};\n", .{ rtt, rn, pe });
-                alloc.free(pe);
+                try w.print("    {s} {s} = ", .{ rtt, rn });
+                try writeResolvePointer(m, names, pid, w);
+                try w.writeAll(";\n");
             }
         },
         .Store => {
             if (inst.words.len < 3) return;
-            const pe = try resolvePointer(m, names, inst.words[1], alloc);
             const on = names.get(inst.words[2]) orelse "0";
-            try w.print("    {s} = {s};\n", .{ pe, on });
-            alloc.free(pe);
+            try w.writeAll("    ");
+            try writeResolvePointer(m, names, inst.words[1], w);
+            try w.print(" = {s};\n", .{on});
         },
         .CopyObject => {
             if (inst.words.len < 4) return;
@@ -822,11 +865,11 @@ fn emitInstruction(
         },
         .CopyMemory => {
             if (inst.words.len < 3) return;
-            const pe1 = try resolvePointer(m, names, inst.words[1], alloc);
-            const pe2 = try resolvePointer(m, names, inst.words[2], alloc);
-            try w.print("    {s} = {s};\n", .{pe1, pe2});
-            alloc.free(pe1);
-            alloc.free(pe2);
+            try w.writeAll("    ");
+            try writeResolvePointer(m, names, inst.words[1], w);
+            try w.writeAll(" = ");
+            try writeResolvePointer(m, names, inst.words[2], w);
+            try w.writeAll(";\n");
         },
         .Phi => {
             if (inst.words.len < 4) return;
