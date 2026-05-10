@@ -11592,3 +11592,93 @@ test "T516.1: mat3 from 3 vec3 columns" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T517.1: gl_FragDepth write" {
+    // Tests gl_FragDepth output in fragment shader
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    gl_FragDepth = x;
+        \\    fragColor = vec4(x);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T518.1: depth range gl_DepthRange" {
+    // Tests gl_DepthRange built-in struct access
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float near = gl_DepthRange.near;
+        \\    float far = gl_DepthRange.far;
+        \\    float diff = gl_DepthRange.diff;
+        \\    fragColor = vec4(near, far, diff, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T519.1: nonuniformEXT qualifier" {
+    // Tests nonuniformEXT on buffer access
+    const source =
+        \\#version 450
+        \\#extension GL_EXT_nonuniform_qualifier : enable
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    int idx = int(x * 10.0);
+        \\    fragColor = vec4(values[nonuniformEXT(idx)]);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T520.1: compute workgroup size 3D" {
+    // Tests compute with 3D workgroup size
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+        \\layout(std430, binding = 0) buffer Voxel { float density[]; };
+        \\void main() {
+        \\    uvec3 id = gl_GlobalInvocationID;
+        \\    uint flat_id = id.x + id.y * 4u + id.z * 16u;
+        \\    density[flat_id] = float(flat_id) / 64.0;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T521.1: multiple function calls with recursion-like pattern" {
+    // Tests chain of function calls (not actual recursion)
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float add(float a, float b) { return a + b; }
+        \\float mul(float a, float b) { return a * b; }
+        \\float combine(float v) { return add(mul(v, 2.0), 1.0); }
+        \\void main() {
+        \\    float a = combine(x);
+        \\    float b = combine(a);
+        \\    float c = combine(b);
+        \\    fragColor = vec4(c);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
