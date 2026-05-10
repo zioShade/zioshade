@@ -8408,3 +8408,83 @@ test "T350.1: findMSB unsigned" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "firstbithigh");
 }
+
+
+test "T351.1: bitfieldReverse on uint" {
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in uint val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint r = bitfieldReverse(val);
+        \\    fragColor = vec4(float(r));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "reversebits");
+}
+
+test "T352.1: bitfieldReverse on int" {
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in int val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int r = bitfieldReverse(val);
+        \\    fragColor = vec4(float(r));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "reversebits");
+}
+
+test "T353.1: combined bit ops (bitCount + bitfieldReverse)" {
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in uint val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint reversed = bitfieldReverse(val);
+        \\    int bc = bitCount(reversed);
+        \\    int lsb = findLSB(reversed);
+        \\    int msb = findMSB(reversed);
+        \\    fragColor = vec4(float(bc), float(lsb), float(msb), float(reversed));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T354.1: bitfieldExtract on uint" {
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in uint val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint extracted = bitfieldExtract(val, 4, 8);
+        \\    fragColor = vec4(float(extracted));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T355.1: bitfieldInsert on uint" {
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in uint base_;
+        \\flat layout(location = 1) in uint insert_;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint result = bitfieldInsert(base_, insert_, 4, 8);
+        \\    fragColor = vec4(float(result));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
