@@ -37,6 +37,9 @@ pub fn main() !void {
     const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 });
     defer alloc.free(glsl);
 
+    const msl = try glslpp.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+
     const out_file = try std.fs.cwd().createFile("tests/wintty/crt_output.hlsl", .{});
     defer out_file.close();
     try out_file.writeAll(hlsl);
@@ -46,5 +49,10 @@ pub fn main() !void {
     defer glsl_file.close();
     try glsl_file.writeAll(glsl);
     std.debug.print("GLSL output: {d} bytes\n", .{glsl.len});
+
+    const msl_file = try std.fs.cwd().createFile("tests/wintty/crt_output.msl", .{});
+    defer msl_file.close();
+    try msl_file.writeAll(msl);
+    std.debug.print("MSL output: {d} bytes\n", .{msl.len});
     std.debug.print("Saved to tests/wintty/crt_output.hlsl\n", .{});
 }
