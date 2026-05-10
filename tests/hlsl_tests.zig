@@ -11868,3 +11868,104 @@ test "T531.1: inout parameter modification" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T532.1: matrix transpose on mat3" {
+    // Tests transpose on mat3
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat3 m = mat3(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);
+        \\    mat3 t = transpose(m);
+        \\    vec3 r = t * v;
+        \\    fragColor = vec4(r, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T533.1: ivec4 relational lessThanEqual" {
+    // Tests lessThanEqual on ivec4
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec4 a = ivec4(v * 10.0);
+        \\    ivec4 b = ivec4(5, 5, 5, 5);
+        \\    bvec4 le = lessThanEqual(a, b);
+        \\    bvec4 ge = greaterThanEqual(a, b);
+        \\    fragColor = vec4(le) + vec4(ge);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T534.1: global variable initialization" {
+    // Tests global variable with initializer expression
+    const source =
+        \\#version 450
+        \\const float PI = 3.14159265;
+        \\const float HALF_PI = PI * 0.5;
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = sin(x * PI);
+        \\    float b = cos(x * HALF_PI);
+        \\    fragColor = vec4(a, b, PI, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T535.1: matrix scalar multiply and add" {
+    // Tests matrix * scalar + matrix operations
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 a = mat4(1.0);
+        \\    mat4 b = mat4(2.0);
+        \\    mat4 c = a * x + b;
+        \\    vec4 v = c * vec4(1.0);
+        \\    fragColor = v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T536.1: switch with multiple cases fall-through" {
+    // Tests switch with fall-through cases
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int i = int(x);
+        \\    float r = 0.0;
+        \\    switch (i) {
+        \\        case 0: r = 0.1; break;
+        \\        case 1:
+        \\        case 2: r = 0.2; break;
+        \\        case 3: r = 0.3;
+        \\        case 4: r = 0.4; break;
+        \\        default: r = 1.0; break;
+        \\    }
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
