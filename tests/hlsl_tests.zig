@@ -8400,7 +8400,7 @@ test "T350.1: findMSB unsigned" {
         \\flat layout(location = 0) in uint val;
         \\layout(location = 0) out vec4 fragColor;
         \\void main() {
-        \\    uint msb = uint(findMSB(val));
+        \\    int msb = findMSB(val);
         \\    fragColor = vec4(float(msb));
         \\}
     ;
@@ -8487,4 +8487,25 @@ test "T355.1: bitfieldInsert on uint" {
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
+}
+
+
+test "T356.1: bitCount uint to int conversion" {
+    // Verifies that bitCount(uint) returns int, not uint (GLSL spec requirement)
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in uint val;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int bc = bitCount(val);
+        \\    int lsb = findLSB(val);
+        \\    int msb = findMSB(val);
+        \\    fragColor = vec4(float(bc + lsb + msb));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "countbits");
+    try assertContains(hlsl, "firstbitlow");
+    try assertContains(hlsl, "firstbithigh");
 }
