@@ -1,26 +1,32 @@
 #!/bin/bash
-set -o pipefail
+set -euo pipefail
+
 cd "$(dirname "$0")"
-ZIG="C:/Users/Alessandro/scoop/apps/zig/0.15.2/zig.exe"
-OUTPUT=$($ZIG build test-hlsl --summary all 2>&1)
-echo "$OUTPUT"
-# Extract pass/fail counts from various output formats
-# Format 1: "N/M passed, K failed" (on failure)
-# Format 2: "N/M tests passed; K failed" (on failure with details)
-# Format 3: "N passed" (on success with --summary)
-PASSED=$(echo "$OUTPUT" | grep -Eo '[0-9]+/[0-9]+ (tests )?passed' | head -1 | grep -Eo '^[0-9]+' | head -1)
-if [ -z "$PASSED" ]; then
-    PASSED=$(echo "$OUTPUT" | grep -Eo '[0-9]+ passed' | head -1 | grep -Eo '[0-9]+')
+
+# Pre-check: build first (fast syntax check)
+mise exec -- zig build 2>&1
+
+# Run core tests (must always pass)
+core_result=$(mise exec -- zig test src/root.zig 2>&1)
+core_passed=$(echo "$core_result" | grep -oP '\d+(?=/d+ tests passed)' || echo "0")
+core_total=$(echo "$core_result" | grep -oP '(?<=/)\d+(?= tests passed)' || echo "1")
+if [ "$core_passed" != "$core_total" ]; then
+    echo "METRIC test_failures=999"
+    echo "METRIC build_ms=0"
+    exit 0
 fi
-if [ -z "$PASSED" ]; then
-    PASSED=0
-fi
-FAILED=$(echo "$OUTPUT" | grep -Eo '[0-9]+ failed' | head -1 | grep -Eo '[0-9]+' | head -1)
-if [ -z "$FAILED" ]; then
-    FAILED=0
-fi
-LEAKED=$(echo "$OUTPUT" | grep -Eo '[0-9]+ leaked' | head -1 | grep -Eo '[0-9]+')
-echo ""
-echo "METRIC tests_passed=${PASSED:-0}"
-echo "METRIC tests_failed=${FAILED:-0}"
-echo "METRIC tests_leaked=${LEAKED:-0}"
+
+# Run reference tests — count failures
+ref_output=$(mise exec -- zig build test-reference 2>&1) || true
+ref_passed=$(echo "$ref_output" | grep -oP '\d+(?=/\d+ tests passed)' || echo "0")
+ref_total=$(echo "$ref_output" | grep -oP '(?<=/)\d+(?= tests passed)' || echo "76")
+ref_failed=$((ref_total - ref_passed))
+
+# Time the test run
+start_ms=$(date +%s%N | cut -b1-13)
+mise exec -- zig build test-reference 2>&1 >/dev/null || true
+end_ms=$(date +%s%N | cut -b1-13)
+build_ms=$((end_ms - start_ms))
+
+echo "METRIC test_failures=${ref_failed}"
+echo "METRIC build_ms=${build_ms}"
