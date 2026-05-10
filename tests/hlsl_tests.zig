@@ -11315,3 +11315,92 @@ test "T501.1: const array initializer" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T502.1: gl_VertexIndex and gl_InstanceIndex" {
+    // Tests gl_VertexIndex and gl_InstanceIndex in vertex shader
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 pos;
+        \\void main() {
+        \\    float offset = float(gl_VertexIndex) * 0.01 + float(gl_InstanceIndex) * 0.1;
+        \\    gl_Position = pos + vec4(offset, 0.0, 0.0, 0.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T503.1: push constant block" {
+    // Tests push_constant block in vertex shader
+    const source =
+        \\#version 450
+        \\layout(push_constant) uniform PushConstants {
+        \\    mat4 transform;
+        \\    float scale;
+        \\};
+        \\layout(location = 0) in vec4 pos;
+        \\void main() {
+        \\    gl_Position = transform * (pos * scale);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T504.1: coherent and volatile buffer" {
+    // Tests coherent/volatile buffer qualifiers
+    const source =
+        \\#version 450
+        \\layout(std430, binding = 0) coherent buffer Data {
+        \\    volatile int flags[];
+        \\    float values[];
+        \\};
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(values[0] + x);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T505.1: vec2/vec3/vec4 constructor chaining" {
+    // Tests chaining vector constructors
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 a = vec2(v.x, v.y);
+        \\    vec3 b = vec3(a, v.z);
+        \\    vec4 c = vec4(b, v.w);
+        \\    fragColor = c * 2.0;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T506.1: imul and unsigned overflow" {
+    // Tests uint multiplication with overflow behavior
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint a = uint(x * 65536.0);
+        \\    uint b = a * 65537u;
+        \\    float c = float(b) / 4294967296.0;
+        \\    fragColor = vec4(c);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
