@@ -10672,3 +10672,103 @@ test "T466.1: dFdx and dFdy derivatives" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T467.1: sampler1D texture fetch" {
+    // Tests sampler1D basic texture sampling
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float coord;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler1D tex;
+        \\void main() {
+        \\    vec4 c = texture(tex, coord);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T468.1: samplerBuffer texel fetch" {
+    // Tests samplerBuffer (texel buffer) fetch
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float index;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform samplerBuffer tbuf;
+        \\void main() {
+        \\    vec4 c = texelFetch(tbuf, int(index * 256.0));
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T469.1: EmitVertex and EndPrimitive in geometry" {
+    // Tests geometry shader with EmitVertex/EndPrimitive (triangle strip)
+    const source =
+        \\#version 450
+        \\layout(triangles) in;
+        \\layout(triangle_strip, max_vertices = 3) out;
+        \\layout(location = 0) in vec3 vColor[];
+        \\layout(location = 0) out vec3 gColor;
+        \\void main() {
+        \\    for (int i = 0; i < 3; i++) {
+        \\        gl_Position = gl_in[i].gl_Position;
+        \\        gColor = vColor[i] * 0.5;
+        \\        EmitVertex();
+        \\    }
+        \\    EndPrimitive();
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .geometry);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T470.1: compute shared memory reduction" {
+    // Tests compute shader with shared memory for parallel reduction
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 128) in;
+        \\layout(std430, binding = 0) buffer Input { float input_data[]; };
+        \\layout(std430, binding = 1) buffer Output { float output_data[]; };
+        \\shared float shared_buf[128];
+        \\void main() {
+        \\    uint id = gl_LocalInvocationID.x;
+        \\    shared_buf[id] = input_data[gl_GlobalInvocationID.x];
+        \\    barrier();
+        \\    for (uint s = 64u; s > 0u; s >>= 1u) {
+        \\        if (id < s) shared_buf[id] += shared_buf[id + s];
+        \\        barrier();
+        \\    }
+        \\    if (id == 0u) output_data[gl_WorkGroupID.x] = shared_buf[0];
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T471.1: vec3 swizzle operations" {
+    // Tests various vec3 swizzle patterns
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 a = v.xyx;
+        \\    vec3 b = v.zxy;
+        \\    vec3 c = a + b;
+        \\    float d = dot(c, v.yyz);
+        \\    fragColor = vec4(c, d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
