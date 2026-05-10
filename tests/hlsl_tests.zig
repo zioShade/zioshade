@@ -10943,3 +10943,91 @@ test "T481.1: mix function with bool selector" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T482.1: frexp and ldexp" {
+    // Tests frexp/ldexp float decomposition
+    const source =
+        \\#version 450
+        \\#extension GL_ARB_shader_bit_encoding : enable
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sig = frexp(x);
+        \\    float y = ldexp(sig, 2);
+        \\    fragColor = vec4(sig, y, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T483.1: vec4 constructor from two vec2" {
+    // Tests vec4 constructed from two vec2 values
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c = vec4(a, a.yx);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T484.1: ivec4 constructor from components" {
+    // Tests ivec4 constructed from mix of scalars and vectors
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec2 a = ivec2(uv * 100.0);
+        \\    ivec4 b = ivec4(a, a.yx);
+        \\    vec4 c = vec4(b) / 100.0;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T485.1: compute double buffer ping-pong" {
+    // Tests compute with two SSBOs for ping-pong pattern
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer A { float a[]; };
+        \\layout(std430, binding = 1) buffer B { float b[]; };
+        \\layout(std430, binding = 2) buffer O { float o[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    o[id] = a[id] + b[id];
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T486.1: nested ternary with functions" {
+    // Tests nested ternary operators with function calls
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float f(float v) { return v * v; }
+        \\void main() {
+        \\    float a = x < 0.0 ? f(x) : (x > 1.0 ? f(x - 1.0) : x);
+        \\    fragColor = vec4(a);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
