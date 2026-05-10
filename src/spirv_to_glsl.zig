@@ -370,6 +370,7 @@ fn std450ToGlsl(val: u32) ?[]const u8 {
         40 => "max", 41 => "min", 42 => "max", 43 => "clamp", 44 => "clamp",
         45 => "clamp", 46 => "mix", 48 => "step", 49 => "smoothstep",
         66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
+        70 => "faceforward", 71 => "reflect", 72 => "refract",
         73 => "findLSB", 74 => "findMSB", 75 => "findMSB",
         else => null,
     };
@@ -779,6 +780,14 @@ fn emitInstruction(
             const a = try alloc.dupe(u8, sn);
             if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
         },
+        .CopyMemory => {
+            if (inst.words.len < 3) return;
+            const pe1 = try resolvePointer(m, names, inst.words[1], alloc);
+            const pe2 = try resolvePointer(m, names, inst.words[2], alloc);
+            try w.print("    {s} = {s};\n", .{pe1, pe2});
+            alloc.free(pe1);
+            alloc.free(pe2);
+        },
         .Phi => {
             if (inst.words.len < 4) return;
             const fv = inst.words[3];
@@ -832,6 +841,8 @@ fn emitInstruction(
         .BitwiseOr => try emitBinOp(m, names, inst, "|", w, alloc),
         .BitwiseXor => try emitBinOp(m, names, inst, "^", w, alloc),
         .BitwiseAnd => try emitBinOp(m, names, inst, "&", w, alloc),
+        .ShiftRightLogical, .ShiftRightArithmetic => try emitBinOp(m, names, inst, ">>", w, alloc),
+        .ShiftLeftLogical => try emitBinOp(m, names, inst, "<<", w, alloc),
         .Not => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = ~{s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
@@ -902,11 +913,25 @@ fn emitInstruction(
             const a = try alloc.dupe(u8, iname);
             if (names.fetchPut(ri, a) catch null) |old| alloc.free(old.value);
         },
+        .OpImage => {
+            // OpImage extracts image from sampled_image — in GLSL, combined sampler is passed directly
+            const ri = inst.words[2];
+            const iname = names.get(inst.words[3]) orelse "tex";
+            const a = try alloc.dupe(u8, iname);
+            if (names.fetchPut(ri, a) catch null) |old| alloc.free(old.value);
+        },
         .ImageSampleImplicitLod => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             try w.print("    {s} {s} = texture({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
+        },
+        .ImageSampleProjImplicitLod => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            // Projected: textureProj(sampler, vec4(xy, z, w)) divides xy by w
+            try w.print("    {s} {s} = textureProj({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
         },
         .ImageSampleExplicitLod => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
