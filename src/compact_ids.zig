@@ -3369,6 +3369,97 @@ pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error
     return dce;
 }
 
+/// Fold FNegate into FAdd/FSub: FAdd(x, FNegate(y)) → FSub(x, y), FSub(x, FNegate(y)) → FAdd(x, y).
+/// This eliminates unnecessary negation instructions.
+pub fn foldNegateIntoAddSub(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Build map of FNegate results: result_id -> operand_id
+    var fneg_map = std.AutoHashMapUnmanaged(u32, u32){};
+    defer fneg_map.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (opcode == 127 and wc == 4) { // OpFNegate
+            const result_id = words[pos + 2];
+            const operand = words[pos + 3];
+            try fneg_map.put(alloc, result_id, operand);
+        }
+        pos += wc;
+    }
+
+    if (fneg_map.count() == 0) return words;
+
+    // Phase 2: Scan FAdd(129)/FSub(131) and check if an operand is an FNegate result
+    // FAdd(x, -y) → FSub(x, y) [change opcode 129→131]
+    // FAdd(-y, x) → FSub(x, y) [change opcode 129→131, swap operands]
+    // FSub(x, -y) → FAdd(x, y) [change opcode 131→129]
+    var changed = false;
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+
+        if ((opcode == 129 or opcode == 131) and wc == 5) { // OpFAdd or OpFSub with 2 operands
+            const result_type = words[pos + 1];
+            const result_id = words[pos + 2];
+            const a = words[pos + 3];
+            const b = words[pos + 4];
+
+            const neg_a = fneg_map.get(a);
+            const neg_b = fneg_map.get(b);
+
+            if (opcode == 129) { // FAdd
+                if (neg_b) |nb| {
+                    // FAdd(x, -y) → FSub(x, y)
+                    const new_hdr = (wc << 16) | 131; // FSub
+                    try result.appendSlice(alloc, &[_]u32{ new_hdr, result_type, result_id, a, nb });
+                    changed = true;
+                    pos = ie;
+                    continue;
+                } else if (neg_a) |na| {
+                    // FAdd(-y, x) → FSub(x, y)
+                    const new_hdr = (wc << 16) | 131; // FSub
+                    try result.appendSlice(alloc, &[_]u32{ new_hdr, result_type, result_id, b, na });
+                    changed = true;
+                    pos = ie;
+                    continue;
+                }
+            } else { // FSub
+                if (neg_b) |nb| {
+                    // FSub(x, -y) → FAdd(x, y)
+                    const new_hdr = (wc << 16) | 129; // FAdd
+                    try result.appendSlice(alloc, &[_]u32{ new_hdr, result_type, result_id, a, nb });
+                    changed = true;
+                    pos = ie;
+                    continue;
+                }
+            }
+        }
+
+        try result.appendSlice(alloc, words[pos..ie]);
+        pos = ie;
+    }
+
+    if (!changed) {
+        result.deinit(alloc);
+        return words;
+    }
+
+    // DCE to remove now-dead FNegate instructions
+    const nw = result.toOwnedSlice(alloc) catch return words;
+    const dce = deadCodeElim(alloc, nw) catch return nw;
+    if (dce.ptr != nw.ptr) alloc.free(nw);
+    return dce;
+}
+
 /// Redundant store elimination: remove stores to function-local variables
 /// that are overwritten by a subsequent store in the same basic block
 /// without an intervening load.
