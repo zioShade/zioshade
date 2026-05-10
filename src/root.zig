@@ -11,6 +11,7 @@ pub const semantic = @import("semantic.zig");
 pub const codegen = @import("codegen.zig");
 pub const spirv_to_hlsl = @import("spirv_to_hlsl.zig");
 pub const spirv_to_glsl = @import("spirv_to_glsl.zig");
+pub const spirv_to_msl = @import("spirv_to_msl.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -123,6 +124,16 @@ pub fn spirvToHLSL(
     options: spirv_to_hlsl.HlslCompileOptions,
 ) ![]const u8 {
     return spirv_to_hlsl.spirvToHLSL(alloc, spirv_words, options);
+}
+
+/// Cross-compile SPIR-V binary to MSL source.
+/// Targets Metal Shading Language.
+pub fn spirvToMSL(
+    alloc: std.mem.Allocator,
+    spirv_words: []const u32,
+    options: spirv_to_msl.MslCompileOptions,
+) ![]const u8 {
+    return spirv_to_msl.spirvToMSL(alloc, spirv_words, options);
 }
 
 /// One-shot: compile Shadertoy-style GLSL to HLSL.
