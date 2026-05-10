@@ -10577,3 +10577,98 @@ test "T461.1: vec4 from scalar broadcast" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T462.1: textureLod with shadow sampler" {
+    // Tests textureLod on sampler2DShadow
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2DShadow shadow;
+        \\void main() {
+        \\    float d = textureLod(shadow, vec3(uv, 0.5), 0.0);
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T463.1: isampler2D integer texture" {
+    // Tests isampler2D for signed integer texture reads
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform isampler2D intTex;
+        \\void main() {
+        \\    ivec4 iv = texelFetch(intTex, ivec2(uv * 128.0), 0);
+        \\    fragColor = vec4(iv) / 255.0;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T464.1: sampler2DMS multisampled fetch" {
+    // Tests texelFetch on multisampled sampler2DMS
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2DMS msTex;
+        \\void main() {
+        \\    ivec2 coord = ivec2(uv * 256.0);
+        \\    vec4 c = vec4(0.0);
+        \\    for (int s = 0; s < 4; s++) {
+        \\        c += texelFetch(msTex, coord, s);
+        \\    }
+        \\    fragColor = c / 4.0;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T465.1: gl_HelperInvocation" {
+    // Tests gl_HelperInvocation for derivative operations
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    if (gl_HelperInvocation) {
+        \\        fragColor = vec4(0.0);
+        \\    } else {
+        \\        fragColor = vec4(1.0);
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T466.1: dFdx and dFdy derivatives" {
+    // Tests screen-space derivative functions
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec4 c = texture(tex, uv);
+        \\    float dx = dFdx(c.x);
+        \\    float dy = dFdy(c.y);
+        \\    float fw = fwidth(c.z);
+        \\    fragColor = vec4(dx, dy, fw, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
