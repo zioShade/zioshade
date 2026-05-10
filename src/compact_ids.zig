@@ -4681,7 +4681,9 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
             while (ci < ie) : (ci += 1) {
                 components.append(alloc, words[ci]) catch return words;
             }
-            construct_map.put(alloc, result_id, components) catch return words;
+            const gop = construct_map.getOrPut(alloc, result_id) catch return words;
+            if (gop.found_existing) gop.value_ptr.deinit(alloc);
+            gop.value_ptr.* = components;
         }
         // Also handle OpConstantComposite (44): same format, constituents are constants
         if (opcode == 44 and wc >= 4) { // OpConstantComposite
