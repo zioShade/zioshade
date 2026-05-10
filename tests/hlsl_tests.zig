@@ -11404,3 +11404,97 @@ test "T506.1: imul and unsigned overflow" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T507.1: gl_PointCoord in fragment" {
+    // Tests gl_PointCoord for point sprite rendering
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = distance(gl_PointCoord, vec2(0.5));
+        \\    if (d > 0.5) discard;
+        \\    fragColor = vec4(1.0 - d * 2.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T508.1: matrix construction from vectors" {
+    // Tests mat4 constructed from 4 vec4 columns
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c0 = vec4(1.0, 0.0, 0.0, 0.0);
+        \\    vec4 c1 = vec4(0.0, a.x, 0.0, 0.0);
+        \\    vec4 c2 = vec4(0.0, 0.0, a.y, 0.0);
+        \\    vec4 c3 = vec4(a.zw, 0.0, 1.0);
+        \\    mat4 m = mat4(c0, c1, c2, c3);
+        \\    fragColor = m * a;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T509.1: layout qualifier on individual members" {
+    // Tests layout offset on individual struct members
+    const source =
+        \\#version 450
+        \\layout(std140, binding = 0) uniform U {
+        \\    layout(offset = 0) vec4 a;
+        \\    layout(offset = 16) vec4 b;
+        \\    layout(offset = 32) vec4 c;
+        \\};
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = a * x + b + c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T510.1: bool vector operations" {
+    // Tests bvec4 and all/any/none operations
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec4 b = greaterThan(v, vec4(0.5));
+        \\    bool allB = all(b);
+        \\    bool anyB = any(b);
+        \\    fragColor = vec4(float(allB), float(anyB), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T511.1: integer division and modulo" {
+    // Tests integer division and modulo edge cases
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = int(x * 100.0);
+        \\    int d = a / 7;
+        \\    int m = a % 7;
+        \\    int neg = -a / 3;
+        \\    fragColor = vec4(float(d), float(m), float(neg), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
