@@ -9617,3 +9617,102 @@ test "T411.1: texture with bias" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T412.1: mat2 operations" {
+    // Tests mat2 construction, multiply, and transpose
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat2 m = mat2(1.0, 2.0, 3.0, 4.0);
+        \\    mat2 t = transpose(m);
+        \\    vec2 r = t * uv;
+        \\    fragColor = vec4(r, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T413.1: textureLodOffset" {
+    // Tests texture sampling with explicit LOD and offset
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec4 c = textureLodOffset(tex, uv, 0.0, ivec2(1, -1));
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T414.1: complex nested loop with break and continue" {
+    // Tests nested loops with both break and continue
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 8; i++) {
+        \\        if (i == 3) continue;
+        \\        for (int j = 0; j < 4; j++) {
+        \\            float val = x * float(i + j);
+        \\            if (val > 10.0) break;
+        \\            sum += val;
+        \\        }
+        \\    }
+        \\    fragColor = vec4(sum);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T415.1: switch with default only" {
+    // Tests switch that falls through to default
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in int mode;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v;
+        \\    switch (mode) {
+        \\        case 0: v = 1.0; break;
+        \\        case 1: v = 0.5; break;
+        \\        default: v = 0.0; break;
+        \\    }
+        \\    fragColor = vec4(v);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T416.1: mixed integer and float conversions" {
+    // Tests int/uint/float type conversion chains
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in int i;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint u = uint(i);
+        \\    float f = float(u);
+        \\    int back = int(f);
+        \\    fragColor = vec4(float(back));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
