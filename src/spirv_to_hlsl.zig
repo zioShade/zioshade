@@ -2018,6 +2018,9 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
         .Distance => "distance",
         .Cross => "cross",
         .Normalize => "normalize",
+        .Sinh => "sinh",
+        .Cosh => "cosh",
+        .Tanh => "tanh",
         .Reflect => "reflect",
         .Refract => "refract",
         .FaceForward => "faceforward",
@@ -2042,6 +2045,9 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 15 => "tan",
                 25 => "atan2",
                 26 => "pow",
+                19 => "sinh",
+                20 => "cosh",
+                21 => "tanh",
                 27 => "exp",
                 28 => "log",
                 29 => "exp2",
@@ -2060,6 +2066,13 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 46 => "lerp",      // FMix / mix
                 48 => "step",
                 49 => "smoothstep",
+                66 => "length",
+                67 => "distance",
+                68 => "cross",
+                69 => "normalize",
+                70 => "faceforward",
+                71 => "reflect",
+                72 => "refract",
                 51 => "modf",
                 73 => "firstbitlow", // FindILsb → HLSL firstbitlow
                 74 => "firstbithigh", // FindSMsb → HLSL firstbithigh

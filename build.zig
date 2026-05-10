@@ -133,6 +133,22 @@ pub fn build(b: *std.Build) void {
     msl_test_step.dependOn(&run_msl_tests.step);
     test_step.dependOn(&run_msl_tests.step);
 
+    // Reference correctness tests - run with: zig build test-reference
+    // Uses spirv-cross test shaders (Apache-2.0) + hand-crafted patterns
+    const reference_test_step = b.step("test-reference", "Run reference correctness tests");
+    const reference_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/reference_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    reference_test_mod.addImport("glslpp", glslpp_mod);
+    const run_reference_tests = b.addRunArtifact(b.addTest(.{
+        .name = "reference-tests",
+        .root_module = reference_test_mod,
+    }));
+    reference_test_step.dependOn(&run_reference_tests.step);
+    test_step.dependOn(&run_reference_tests.step);
+
     // Tool: dump CRT shader HLSL — run with: zig build dump-crt
     const dump_step = b.step("dump-crt", "Dump CRT shader HLSL output");
     const dump_mod = b.createModule(.{
