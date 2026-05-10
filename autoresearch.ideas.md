@@ -17,13 +17,11 @@
 
 ## Known Issues / Future Work
 
-### deadLoopElim removes loops whose results flow to output via function-local vars
+### deadLoopElim removes loops whose results flow to output via function-local vars — **FIXED**
 - **Symptom**: For-loop with texture samples gets entirely eliminated because `sum` is function-local
-- **Root cause**: deadLoopElim only checks immediate side effects (stores to non-func-local vars). Stores to function-local vars that later flow to output variables are missed.
-- **Attempted fix**: Phase 2.5 in deadLoopElim that checks if stored-to func-local vars are loaded after merge. BLOCKED by nested loop codegen bugs.
-- **Blocker**: torture-loop.comp has nested loops with complex structure. The Phase 2.5 fix preserves the `while(++k<10)` loop and nested for-loops because `idat` (func-local) is stored to `out_data` (buffer) after the loops. But preserving these loops triggers codegen bugs (missing continue labels in do-while loops).
-- **Impact**: Any shader with loops that accumulate into a local variable and store to output after the loop will have the loop body incorrectly eliminated.
-- **Required fix**: First fix codegen to always emit continue labels for do-while loops, then re-apply Phase 2.5.
+- **Root cause**: deadLoopElim only checked immediate side effects (stores to non-func-local vars). Stores to function-local vars that later flow to output variables were missed.
+- **Fix**: Added Phase 2.5 to deadLoopElim that checks if stored-to func-local vars are loaded after the loop's merge label. If so, the loop is preserved.
+- **Prerequisite**: mergeBlocks Pass 4 bug fix (protecting LoopMerge merge/continue target labels)
 
 ### Codegen bug: do-while loop missing continue target label — **FIXED**
 - **Root cause**: `mergeBlocks` Pass 4 (empty predecessor merging) did not protect labels that are merge/continue targets of OpLoopMerge. When an empty merge block (from a nested loop) preceded the continue block of an outer loop, Pass 4 would merge the two, replacing the continue label and breaking the LoopMerge reference.
