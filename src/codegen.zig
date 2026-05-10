@@ -236,9 +236,12 @@ pub fn generate(
     if (cf2.ptr != forwarded.ptr) alloc.free(forwarded);
     const folded_ce2 = compact_ids.foldCompositeExtract(alloc, cf2) catch cf2;
     if (folded_ce2.ptr != cf2.ptr) alloc.free(cf2);
+    // Second round: fold constant branches after constFold + foldCE
+    const folded_br2 = compact_ids.foldConstBranches(alloc, folded_ce2) catch folded_ce2;
+    if (folded_br2.ptr != folded_ce2.ptr) alloc.free(folded_ce2);
     // Remove dead stores to function-local vars (stores with no loads after forwarding)
-    const no_dead_stores = compact_ids.elimDeadVarStores(alloc, folded_ce2) catch folded_ce2;
-    if (no_dead_stores.ptr != folded_ce2.ptr) alloc.free(folded_ce2);
+    const no_dead_stores = compact_ids.elimDeadVarStores(alloc, folded_br2) catch folded_br2;
+    if (no_dead_stores.ptr != folded_br2.ptr) alloc.free(folded_br2);
     const final_dce = compact_ids.deadCodeElim(alloc, no_dead_stores) catch return no_dead_stores;
     if (final_dce.ptr != no_dead_stores.ptr) alloc.free(no_dead_stores);
     const final_retarget = compact_ids.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
