@@ -10,6 +10,7 @@ pub const parser = @import("parser.zig");
 pub const semantic = @import("semantic.zig");
 pub const codegen = @import("codegen.zig");
 pub const spirv_to_hlsl = @import("spirv_to_hlsl.zig");
+pub const spirv_to_glsl = @import("spirv_to_glsl.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -105,15 +106,13 @@ pub fn compileToSPIRV(
 }
 
 /// Cross-compile SPIR-V binary to GLSL source.
+/// Targets GLSL 430 by default.
 pub fn spirvToGLSL(
     alloc: std.mem.Allocator,
     spirv_words: []const u32,
-    options: CrossCompileOptions,
-) Error![:0]const u8 {
-    _ = alloc;
-    _ = spirv_words;
-    _ = options;
-    return error.CodegenFailed;
+    options: spirv_to_glsl.GlslCompileOptions,
+) ![]const u8 {
+    return spirv_to_glsl.spirvToGLSL(alloc, spirv_words, options);
 }
 
 /// Cross-compile SPIR-V binary to HLSL source.

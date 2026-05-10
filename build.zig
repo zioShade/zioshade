@@ -132,4 +132,22 @@ pub fn build(b: *std.Build) void {
     });
     const run_bench = b.addRunArtifact(bench_exe);
     bench_step.dependOn(&run_bench.step);
+
+    // Tool: dump SPIR-V binary — run with: zig build dump-spv
+    const dump_spv_step = b.step("dump-spv", "Compile GLSL to SPIR-V binary");
+    const dump_spv_mod = b.createModule(.{
+        .root_source_file = b.path("tools/dump_spv.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dump_spv_mod.addImport("glslpp", glslpp_mod);
+    const dump_spv_exe = b.addExecutable(.{
+        .name = "dump-spv",
+        .root_module = dump_spv_mod,
+    });
+    const run_dump_spv = b.addRunArtifact(dump_spv_exe);
+    if (b.args) |a| {
+        for (a) |arg| run_dump_spv.addArg(arg);
+    }
+    dump_spv_step.dependOn(&run_dump_spv.step);
 }
