@@ -11123,3 +11123,96 @@ test "T491.1: uint loop counter with bitwise ops" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T492.1: textureProj with sampler2D" {
+    // Tests textureProj (projected texture coordinate)
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec4 c = textureProj(tex, uv);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T493.1: imageLoad store compute rgba32f" {
+    // Tests image load/store with rgba32f format in compute
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 8, local_size_y = 8) in;
+        \\layout(binding = 0, rgba32f) uniform image2D img;
+        \\void main() {
+        \\    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+        \\    vec4 c = imageLoad(img, coord);
+        \\    imageStore(img, coord, c + vec4(1.0));
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T494.1: nested struct with array member" {
+    // Tests struct containing another struct with an array
+    const source =
+        \\#version 450
+        \\struct Inner { float values[4]; };
+        \\struct Outer { Inner inner; float scale; };
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    Outer o;
+        \\    o.scale = x;
+        \\    for (int i = 0; i < 4; i++) o.inner.values[i] = float(i) * x;
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 4; i++) sum += o.inner.values[i];
+        \\    fragColor = vec4(sum * o.scale);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T495.1: reflect and refract" {
+    // Tests reflect and refract built-in functions
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 incident;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 n = vec3(0.0, 1.0, 0.0);
+        \\    vec3 r = reflect(incident, n);
+        \\    vec3 t = refract(incident, n, 0.5);
+        \\    fragColor = vec4(r + t, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T496.1: faceforward and normalize" {
+    // Tests faceforward and normalize built-in functions
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 n;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 ref = vec3(0.0, 0.0, 1.0);
+        \\    vec3 f = faceforward(n, ref, vec3(0.0, 1.0, 0.0));
+        \\    vec3 fn = normalize(f);
+        \\    fragColor = vec4(fn, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
