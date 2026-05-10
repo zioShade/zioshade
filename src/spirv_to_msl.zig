@@ -241,10 +241,33 @@ fn getDecVal(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), 
 // ---- Public API ----
 pub const MslCompileOptions = struct { metal_version: u32 = 21 };
 
+// Thread-local parse cache
+threadlocal var _cache_mod_msl: ?ParsedModule = null;
+threadlocal var _cache_ptr_msl: ?[*]const u32 = null;
+threadlocal var _cache_len_msl: usize = 0;
+threadlocal var _cache_alloc_msl: ?std.mem.Allocator = null;
+
+fn getCachedModuleMSL(alloc: std.mem.Allocator, spirv_words: []const u32) !ParsedModule {
+    if (_cache_ptr_msl) |p| {
+        if (p == spirv_words.ptr and _cache_len_msl == spirv_words.len and _cache_mod_msl != null) {
+            return _cache_mod_msl.?;
+        }
+    }
+    if (_cache_mod_msl) |*old| {
+        if (_cache_alloc_msl) |a| old.deinit(a);
+        _cache_mod_msl = null;
+    }
+    const m = try parseModule(alloc, spirv_words);
+    _cache_mod_msl = m;
+    _cache_ptr_msl = spirv_words.ptr;
+    _cache_len_msl = spirv_words.len;
+    _cache_alloc_msl = alloc;
+    return m;
+}
+
 pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: MslCompileOptions) ![]const u8 {
     _ = options;
-    var module = try parseModule(alloc, spirv_words);
-    defer module.deinit(alloc);
+    var module = try getCachedModuleMSL(alloc, spirv_words);
     const entry_id = module.entry_point_id orelse return error.NoEntryPoint;
 
     var arena = std.heap.ArenaAllocator.init(alloc);
