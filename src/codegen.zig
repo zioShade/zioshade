@@ -199,8 +199,10 @@ pub fn generate(
     // Fold constant branches: OpBranchConditional with constant condition -> OpBranch
     const folded_br = compact_ids.foldConstBranches(alloc, folded) catch folded;
     if (folded_br.ptr != folded.ptr) alloc.free(folded);
-    const compacted = compact_ids.compactIds(alloc, folded_br) catch return folded_br;
-    if (compacted.ptr != folded_br.ptr) alloc.free(folded_br);
+    const elim_dead_blks = compact_ids.elimUnreachableBlocks(alloc, folded_br) catch folded_br;
+    if (elim_dead_blks.ptr != folded_br.ptr) alloc.free(folded_br);
+    const compacted = compact_ids.compactIds(alloc, elim_dead_blks) catch return elim_dead_blks;
+    if (compacted.ptr != elim_dead_blks.ptr) alloc.free(elim_dead_blks);
     // Eliminate redundant loads of read-only variables
     const no_rle = compact_ids.elimRedundantLoads(alloc, compacted) catch return compacted;
     if (no_rle.ptr != compacted.ptr) alloc.free(compacted);
@@ -239,9 +241,11 @@ pub fn generate(
     // Second round: fold constant branches after constFold + foldCE
     const folded_br2 = compact_ids.foldConstBranches(alloc, folded_ce2) catch folded_ce2;
     if (folded_br2.ptr != folded_ce2.ptr) alloc.free(folded_ce2);
+    const elim_dead_blks2 = compact_ids.elimUnreachableBlocks(alloc, folded_br2) catch folded_br2;
+    if (elim_dead_blks2.ptr != folded_br2.ptr) alloc.free(folded_br2);
     // Remove dead stores to function-local vars (stores with no loads after forwarding)
-    const no_dead_stores = compact_ids.elimDeadVarStores(alloc, folded_br2) catch folded_br2;
-    if (no_dead_stores.ptr != folded_br2.ptr) alloc.free(folded_br2);
+    const no_dead_stores = compact_ids.elimDeadVarStores(alloc, elim_dead_blks2) catch elim_dead_blks2;
+    if (no_dead_stores.ptr != elim_dead_blks2.ptr) alloc.free(elim_dead_blks2);
     const final_dce = compact_ids.deadCodeElim(alloc, no_dead_stores) catch return no_dead_stores;
     if (final_dce.ptr != no_dead_stores.ptr) alloc.free(no_dead_stores);
     const final_retarget = compact_ids.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
