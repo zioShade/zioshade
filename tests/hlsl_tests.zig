@@ -11498,3 +11498,97 @@ test "T511.1: integer division and modulo" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T512.1: gl_CullDistance in vertex" {
+    // Tests gl_CullDistance write in vertex shader
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 pos;
+        \\layout(cull_distance = 2) out float cullDist[2];
+        \\void main() {
+        \\    gl_Position = pos;
+        \\    cullDist[0] = pos.z;
+        \\    cullDist[1] = -pos.z;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "gl_Position");
+}
+
+test "T513.1: component-wise multiply vec4" {
+    // Tests component-wise vector multiplication
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 b = a * a;
+        \\    vec4 c = b + a;
+        \\    vec4 d = c / (a + vec4(1.0));
+        \\    fragColor = d - vec4(0.5);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T514.1: float comparison and selection" {
+    // Tests float comparisons with step and smoothstep
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float s1 = step(0.5, x);
+        \\    float s2 = smoothstep(0.2, 0.8, x);
+        \\    float sel = x > 0.0 ? s1 : s2;
+        \\    fragColor = vec4(sel);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T515.1: ivec and uvec conversions" {
+    // Tests int/uint/float type conversions
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int i = int(x);
+        \\    uint u = uint(x);
+        \\    float a = float(i);
+        \\    float b = float(u);
+        \\    int j = int(u);
+        \\    fragColor = vec4(a, b, float(j), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T516.1: mat3 from 3 vec3 columns" {
+    // Tests mat3 construction from 3 vec3 columns
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 a = vec3(1.0, 0.0, 0.0);
+        \\    vec3 b = vec3(0.0, v.x, 0.0);
+        \\    vec3 c = vec3(0.0, 0.0, v.y);
+        \\    mat3 m = mat3(a, b, c);
+        \\    vec3 r = m * v;
+        \\    fragColor = vec4(r, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
