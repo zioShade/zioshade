@@ -5652,6 +5652,66 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
             }
         }
 
+        // Constant logical op folding: LogicalOr/LogicalAnd with boolean constant operands
+        if (bool_type != 0 and true_id != 0 and false_id != 0 and wc >= 5) {
+            const rid = words[pos + 2];
+            const a = words[pos + 3];
+            const b = words[pos + 4];
+            if (rid >= 1 and rid < bound) {
+                const a_is_true = a == true_id;
+                const a_is_false = a == false_id;
+                const b_is_true = b == true_id;
+                const b_is_false = b == false_id;
+                if ((a_is_true or a_is_false) and (b_is_true or b_is_false)) {
+                    switch (opcode) {
+                        166 => { // OpLogicalOr
+                            const result = a_is_true or b_is_true;
+                            bool_replacements.put(alloc, rid, if (result) true_id else false_id) catch {};
+                            to_skip.set(rid);
+                        },
+                        167 => { // OpLogicalAnd
+                            const result = a_is_true and b_is_true;
+                            bool_replacements.put(alloc, rid, if (result) true_id else false_id) catch {};
+                            to_skip.set(rid);
+                        },
+                        else => {},
+                    }
+                }
+                // Partial folding: one operand is constant
+                if (!to_skip.isSet(rid)) {
+                    if (opcode == 166) { // OpLogicalOr
+                        if (a_is_true or b_is_true) {
+                            // x || true = true
+                            bool_replacements.put(alloc, rid, true_id) catch {};
+                            to_skip.set(rid);
+                        } else if (a_is_false) {
+                            // false || b = b
+                            bool_replacements.put(alloc, rid, b) catch {};
+                            to_skip.set(rid);
+                        } else if (b_is_false) {
+                            // a || false = a
+                            bool_replacements.put(alloc, rid, a) catch {};
+                            to_skip.set(rid);
+                        }
+                    } else if (opcode == 167) { // OpLogicalAnd
+                        if (a_is_false or b_is_false) {
+                            // x && false = false
+                            bool_replacements.put(alloc, rid, false_id) catch {};
+                            to_skip.set(rid);
+                        } else if (a_is_true) {
+                            // true && b = b
+                            bool_replacements.put(alloc, rid, b) catch {};
+                            to_skip.set(rid);
+                        } else if (b_is_true) {
+                            // a && true = a
+                            bool_replacements.put(alloc, rid, a) catch {};
+                            to_skip.set(rid);
+                        }
+                    }
+                }
+            }
+        }
+
         pos = ie;
     }
 
