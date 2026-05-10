@@ -12702,3 +12702,122 @@ test "T571.1: shadow comparison PCF" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T572.1: compute bloom extraction" {
+    // Tests compute bright extraction for bloom
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 8, local_size_y = 8) in;
+        \\layout(binding = 0, rgba16f) uniform readonly image2D inputImg;
+        \\layout(binding = 1, rgba16f) uniform writeonly image2D brightImg;
+        \\void main() {
+        \\    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+        \\    vec4 c = imageLoad(inputImg, coord);
+        \\    float brightness = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+        \\    if (brightness > 1.0) {
+        \\        imageStore(brightImg, coord, c);
+        \\    } else {
+        \\        imageStore(brightImg, coord, vec4(0.0));
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T573.1: cascaded shadow maps" {
+    // Tests cascaded shadow map sampling pattern
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 worldPos;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2DArrayShadow csmTex;
+        \\layout(std140, binding = 0) uniform CSM {
+        \\    mat4 viewProj[4];
+        \\    float splits[4];
+        \\};
+        \\void main() {
+        \\    int cascade = 0;
+        \\    for (int i = 0; i < 4; i++) {
+        \\        if (worldPos.z > splits[i]) cascade = i;
+        \\    }
+        \\    vec4 lpos = viewProj[cascade] * vec4(worldPos, 1.0);
+        \\    vec3 uvw = lpos.xyz * 0.5 + 0.5;
+        \\    fragColor = vec4(uvw, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T574.1: compute gaussian blur separable" {
+    // Tests compute separable Gaussian blur (horizontal pass)
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 256) in;
+        \\layout(binding = 0, rgba8) uniform readonly image2D inputImg;
+        \\layout(binding = 1, rgba8) uniform writeonly image2D outputImg;
+        \\void main() {
+        \\    ivec2 coord = ivec2(gl_GlobalInvocationID.x, gl_LocalInvocationID.x);
+        \\    vec4 sum = vec4(0.0);
+        \\    float weights[5] = float[5](0.227, 0.194, 0.121, 0.054, 0.016);
+        \\    sum += imageLoad(inputImg, coord) * weights[0];
+        \\    for (int i = 1; i < 5; i++) {
+        \\        sum += imageLoad(inputImg, coord + ivec2(i, 0)) * weights[i];
+        \\        sum += imageLoad(inputImg, coord - ivec2(i, 0)) * weights[i];
+        \\    }
+        \\    imageStore(outputImg, coord, sum);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T575.1: deferred G-buffer fill" {
+    // Tests deferred rendering G-buffer fill
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 normal;
+        \\layout(location = 1) in vec2 uv;
+        \\layout(location = 2) in vec3 worldPos;
+        \\layout(location = 0) out vec4 gNormal;
+        \\layout(location = 1) out vec4 gAlbedo;
+        \\layout(location = 2) out vec4 gPosition;
+        \\layout(binding = 0) uniform sampler2D albedo;
+        \\void main() {
+        \\    gNormal = vec4(normalize(normal) * 0.5 + 0.5, 1.0);
+        \\    gAlbedo = texture(albedo, uv);
+        \\    gPosition = vec4(worldPos, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T576.1: deferred lighting pass" {
+    // Tests deferred rendering lighting pass
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D gNormal;
+        \\layout(binding = 1) uniform sampler2D gAlbedo;
+        \\layout(binding = 2) uniform sampler2D gPosition;
+        \\void main() {
+        \\    vec3 N = texture(gNormal, uv).rgb * 2.0 - 1.0;
+        \\    vec3 albedo = texture(gAlbedo, uv).rgb;
+        \\    vec3 pos = texture(gPosition, uv).rgb;
+        \\    vec3 L = normalize(vec3(1.0, 1.0, 1.0) - pos);
+        \\    float diff = max(dot(N, L), 0.0);
+        \\    fragColor = vec4(albedo * diff, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
