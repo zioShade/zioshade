@@ -6,18 +6,9 @@ const std = @import("std");
 const spirv = @import("spirv.zig");
 const log = std.log.scoped(.spirv_to_glsl);
 
-const Instruction = struct { op: spirv.Op, words: []const u32 };
-const ParsedModule = struct {
-    instructions: []const Instruction,
-    id_defs: []const ?usize,
-    entry_point_id: ?u32 = null,
-    execution_model: spirv.ExecutionModel = .Fragment,
-    local_size: [3]u32 = [3]u32{ 1, 1, 1 },
-    pub fn deinit(self: *ParsedModule, alloc: std.mem.Allocator) void {
-        if (self.instructions.len > 0) { const b = @constCast(self.instructions.ptr); alloc.free(b[0..self.instructions.len]); }
-        alloc.free(@constCast(self.id_defs.ptr)[0..self.id_defs.len]);
-    }
-};
+const common = @import("spirv_cross_common.zig");
+const Instruction = common.Instruction;
+const ParsedModule = common.ParsedModule;
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
 const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32 };
 const TextureDecl = struct { name: []const u8, binding: u32 };
@@ -257,33 +248,10 @@ fn getDecVal(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), 
 // ---- Public API ----
 pub const GlslCompileOptions = struct { version: u32 = 430, es: bool = false };
 
-// Thread-local parse cache to avoid re-parsing same SPIR-V across backends
-threadlocal var _cache_mod: ?ParsedModule = null;
-threadlocal var _cache_ptr: ?[*]const u32 = null;
-threadlocal var _cache_len: usize = 0;
-threadlocal var _cache_alloc: ?std.mem.Allocator = null;
-
-fn getCachedModule(alloc: std.mem.Allocator, spirv_words: []const u32) !ParsedModule {
-    if (_cache_ptr) |p| {
-        if (p == spirv_words.ptr and _cache_len == spirv_words.len and _cache_mod != null) {
-            return _cache_mod.?;
-        }
-    }
-    // Evict old cache
-    if (_cache_mod) |*old| {
-        if (_cache_alloc) |a| old.deinit(a);
-        _cache_mod = null;
-    }
-    const m = try parseModule(alloc, spirv_words);
-    _cache_mod = m;
-    _cache_ptr = spirv_words.ptr;
-    _cache_len = spirv_words.len;
-    _cache_alloc = alloc;
-    return m;
-}
-
+// Use shared parse cache from root (avoids circular import — cache is passed via allocator context)
 pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: GlslCompileOptions) ![]const u8 {
-    var module = try getCachedModule(alloc, spirv_words);
+    var module = try parseModule(alloc, spirv_words);
+    defer module.deinit(alloc);
     const entry_id = module.entry_point_id orelse return error.NoEntryPoint;
 
     // Arena allocator for all backend internals — eliminates individual free() overhead
