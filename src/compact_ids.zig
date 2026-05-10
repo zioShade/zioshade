@@ -9259,3 +9259,152 @@ pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error
     }
     return result.toOwnedSlice(alloc) catch return alloc.dupe(u32, words);
 }
+
+/// Fold OpCompositeExtract from OpConstantComposite into the constant component.
+/// Unlike foldCompositeExtract (which handles runtime OpCompositeConstruct), this pass
+/// only handles constants and uses simple ID mapping without ArrayList allocations.
+pub fn foldConstCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Build map of OpConstantComposite: result_id -> start_pos, component_count
+    var const_comp = std.AutoHashMapUnmanaged(u32, struct { start: u32, count: u32 }){};
+    defer const_comp.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        // OpConstantComposite = 44, format: type_id, result_id, constituent...
+        if (opcode == 44 and wc >= 4) {
+            const result_id = words[pos + 2];
+            const_comp.put(alloc, result_id, .{ .start = pos + 3, .count = wc - 3 }) catch {};
+        }
+        pos = ie;
+    }
+
+    if (const_comp.count() == 0) return words;
+
+    // Phase 2: Find OpCompositeExtract from constant composites and build replacement map
+    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // extract_result_id -> component_id
+    defer replacements.deinit(alloc);
+    var to_skip = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer to_skip.deinit();
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // OpCompositeExtract = 81, format: type_id, result_id, composite_id, index_literals...
+        if (opcode == 81 and wc >= 5) {
+            const result_id = words[pos + 2];
+            const composite_id = words[pos + 3];
+            const index = words[ie - 1]; // last word is the (first) index
+            if (result_id >= 1 and result_id < bound) {
+                if (const_comp.get(composite_id)) |cc| {
+                    // Single-level extract only (wc == 5 means one index)
+                    if (wc == 5 and index < cc.count) {
+                        const component_id = words[cc.start + index];
+                        replacements.put(alloc, result_id, component_id) catch {};
+                        to_skip.set(result_id);
+                    }
+                }
+            }
+        }
+        pos = ie;
+    }
+
+    if (replacements.count() == 0) return words;
+
+    // Phase 3: Rewrite — skip folded extracts, replace operand references
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Skip folded extracts
+        if (opcode == 81 and wc >= 3 and words[pos + 2] < bound and to_skip.isSet(words[pos + 2])) {
+            pos = ie;
+            continue;
+        }
+
+        // Rewrite operand references
+        const info = getOpInfo(opcode) orelse {
+            result.append(alloc, hdr) catch return words;
+            var wi: u32 = pos + 1;
+            while (wi < ie) : (wi += 1) {
+                result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+            }
+            pos = ie;
+            continue;
+        };
+
+        result.append(alloc, hdr) catch return words;
+        var wi: u32 = pos + 1;
+        switch (info.fixed) {
+            0 => {},
+            1 => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
+            2 => {
+                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } // skip result
+            },
+            3 => { if (wi < ie) { result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => { result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
+                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                'I' => { while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; },
+                'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
+                'M' => {
+                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                'W' => {
+                    while (wi + 1 < ie) {
+                        wi += 1; result.append(alloc, words[wi]) catch return words;
+                        wi += 1; result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    }
+                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                },
+                'E' => {
+                    while (wi < ie) {
+                        const w = words[wi]; result.append(alloc, w) catch return words; wi += 1;
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                    }
+                    while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+            }
+        }
+        // Append any remaining words
+        while (wi < ie) : (wi += 1) {
+            result.append(alloc, words[wi]) catch return words;
+        }
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
+    return result.toOwnedSlice(alloc) catch return alloc.dupe(u32, words);
+}
