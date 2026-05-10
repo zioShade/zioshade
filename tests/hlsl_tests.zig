@@ -12595,3 +12595,110 @@ test "T566.1: texture with bias and lod" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T567.1: subgroup ballot and shuffle" {
+    // Tests subgroup ballot and shuffle operations
+    const source =
+        \\#version 450
+        \\#extension GL_KHR_shader_subgroup_ballot : enable
+        \\#extension GL_KHR_shader_subgroup_shuffle : enable
+        \\layout(local_size_x = 32) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    uvec4 ballot = subgroupBallot(values[id] > 0.5);
+        \\    float shuffled = subgroupShuffle(values[id], 0u);
+        \\    values[id] = shuffled + float(ballot.x);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T568.1: quad operations" {
+    // Tests quad swap operations
+    const source =
+        \\#version 450
+        \\#extension GL_KHR_shader_subgroup_quad : enable
+        \\layout(local_size_x = 4) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    float horiz = subgroupQuadSwapHorizontal(values[id]);
+        \\    float vert = subgroupQuadSwapVertical(values[id]);
+        \\    values[id] = horiz + vert;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T569.1: compute histogram" {
+    // Tests compute histogram with atomic counter
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 256) in;
+        \\layout(std430, binding = 0) readonly buffer Input { float data[]; };
+        \\layout(std430, binding = 1) buffer Histogram { uint bins[256]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    float v = data[id];
+        \\    uint bin = uint(clamp(v * 255.0, 0.0, 255.0));
+        \\    atomicAdd(bins[bin], 1u);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T570.1: bilinear interpolation helper" {
+    // Tests bilinear interpolation with mix
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\vec4 bilinear(vec2 p) {
+        \\    vec2 f = fract(p);
+        \\    vec2 lo = floor(p) + 0.5;
+        \\    vec4 a = texelFetch(tex, ivec2(lo), 0);
+        \\    vec4 b = texelFetch(tex, ivec2(lo) + ivec2(1, 0), 0);
+        \\    vec4 c = texelFetch(tex, ivec2(lo) + ivec2(0, 1), 0);
+        \\    vec4 d = texelFetch(tex, ivec2(lo) + ivec2(1, 1), 0);
+        \\    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+        \\}
+        \\void main() {
+        \\    fragColor = bilinear(uv * 128.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T571.1: shadow comparison PCF" {
+    // Tests PCF shadow mapping with multiple samples
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2DShadow shadow;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int x = -1; x <= 1; x++) {
+        \\        for (int y = -1; y <= 1; y++) {
+        \\            vec2 offset = vec2(float(x), float(y)) / 1024.0;
+        \\            sum += texture(shadow, vec3(uv + offset, 0.5));
+        \\        }
+        \\    }
+        \\    fragColor = vec4(sum / 9.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
