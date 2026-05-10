@@ -9042,3 +9042,165 @@ pub fn foldConstBranches(alloc: std.mem.Allocator, words: []const u32) error{Out
     }
     return result.toOwnedSlice(alloc) catch return alloc.dupe(u32, words);
 }
+
+/// Eliminate unreachable blocks: blocks that are never targeted by any OpBranch, OpBranchConditional,
+/// OpSwitch, or OpLoopMerge. After foldConstBranches removes conditional branches, the dead branch
+/// target becomes unreachable and its instructions can be removed.
+pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Collect all label IDs that are targeted by branches
+    var targeted = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer targeted.deinit();
+    // Entry point function labels are always reachable
+    var func_entry_labels = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer func_entry_labels.deinit();
+
+    var pos: u32 = 5;
+    var in_function = false;
+    var first_label_in_func = true;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        switch (opcode) {
+            54 => { // OpFunction
+                in_function = true;
+                first_label_in_func = true;
+            },
+            56 => { // OpFunctionEnd
+                in_function = false;
+            },
+            248 => { // OpLabel
+                if (in_function and first_label_in_func) {
+                    const lbl = words[pos + 1];
+                    if (lbl >= 1 and lbl < bound) func_entry_labels.set(lbl);
+                    first_label_in_func = false;
+                }
+            },
+            249 => { // OpBranch
+                if (wc >= 2) {
+                    const target = words[pos + 1];
+                    if (target >= 1 and target < bound) targeted.set(target);
+                }
+            },
+            250 => { // OpBranchConditional
+                if (wc >= 4) {
+                    if (words[pos + 2] >= 1 and words[pos + 2] < bound) targeted.set(words[pos + 2]);
+                    if (words[pos + 3] >= 1 and words[pos + 3] < bound) targeted.set(words[pos + 3]);
+                }
+            },
+            251 => { // OpSwitch
+                if (wc >= 3) {
+                    const default_target = words[pos + 2];
+                    if (default_target >= 1 and default_target < bound) targeted.set(default_target);
+                    var si: u32 = pos + 3;
+                    while (si + 1 < ie) : (si += 2) {
+                        const case_target = words[si + 1];
+                        if (case_target >= 1 and case_target < bound) targeted.set(case_target);
+                    }
+                }
+            },
+            246 => { // OpLoopMerge
+                if (wc >= 3) {
+                    const merge = words[pos + 1];
+                    const cont = words[pos + 2];
+                    if (merge >= 1 and merge < bound) targeted.set(merge);
+                    if (cont >= 1 and cont < bound) targeted.set(cont);
+                }
+            },
+            247 => { // OpSelectionMerge
+                if (wc >= 2) {
+                    const merge = words[pos + 1];
+                    if (merge >= 1 and merge < bound) targeted.set(merge);
+                }
+            },
+            245 => { // OpPhi: (value, parent)+ — protect parent labels
+                if (wc >= 5) {
+                    var pi: u32 = pos + 4; // skip type, result, first value
+                    while (pi < ie) : (pi += 2) {
+                        if (pi < ie) {
+                            const parent = words[pi];
+                            if (parent >= 1 and parent < bound) targeted.set(parent);
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+        pos = ie;
+    }
+
+    // Entry labels are always reachable
+    var bli = func_entry_labels.iterator(.{});
+    while (bli.next()) |idx| targeted.set(idx);
+
+    // Phase 2: Find unreachable blocks (labels not targeted)
+    var unreachable_labels = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer unreachable_labels.deinit();
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 248 and wc >= 2) { // OpLabel
+            const lbl = words[pos + 1];
+            if (lbl >= 1 and lbl < bound and !targeted.isSet(lbl)) {
+                unreachable_labels.set(lbl);
+            }
+        }
+        pos = ie;
+    }
+
+    if (unreachable_labels.count() == 0) {
+        func_entry_labels.deinit();
+        return words;
+    }
+
+    // Phase 3: Remove unreachable blocks
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    var in_unreachable = false;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 248 and wc >= 2) { // OpLabel
+            const lbl = words[pos + 1];
+            if (lbl >= 1 and lbl < bound and unreachable_labels.isSet(lbl)) {
+                in_unreachable = true;
+                pos = ie;
+                continue;
+            }
+            // Reached a reachable label - end of unreachable block
+            in_unreachable = false;
+        }
+
+        if (!in_unreachable) {
+            result.appendSlice(alloc, words[pos..ie]) catch return words;
+        }
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
+    return result.toOwnedSlice(alloc) catch return alloc.dupe(u32, words);
+}

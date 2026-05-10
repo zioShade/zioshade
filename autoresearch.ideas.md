@@ -6,6 +6,11 @@
 - **foldConstBranches**: Fold OpBranchConditional with constant boolean conditions to unconditional OpBranch + remove SelectionMerge
 - **constFold comparison folding**: Fold OpFOrdEqual/LessThan/GreaterThan etc with constant operands to OpConstantTrue/OpConstantFalse
 - **constFold logical op folding**: Fold OpLogicalOr/OpLogicalAnd with boolean constants, including partial folding (true && b = b, x || true = true)
+- **constFold LogicalNot**: Fold LogicalNot(true) = false, LogicalNot(false) = true
+- **algebraicSimpl x*0=0**: FMul(x, 0.0) = 0.0, IMul(x, 0) = 0
+- **algebraicSimpl div/sub identities**: FDiv/SDiv/UDiv by 1, ISub by 0
+- **algebraicSimpl bitwise identities**: Or/Xor with 0 = x, And with 0 = 0, Shift by 0 = x
+- All optimizations cascade: constFold -> foldSelect -> foldConstBranches -> DCE -> mergeBlocks
 
 ## Known Issues / Future Work
 
