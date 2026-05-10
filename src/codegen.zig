@@ -161,8 +161,10 @@ pub fn generate(
     // Convert branch-merge variables to OpPhi early so subsequent passes can optimize
     const bphi_early = compact_ids.branchMergePhi(alloc, phi) catch return phi;
     if (bphi_early.ptr != phi.ptr) alloc.free(phi);
-    const rse = compact_ids.redundantStoreElim(alloc, bphi_early) catch return bphi_early;
-    if (rse.ptr != bphi_early.ptr) alloc.free(bphi_early);
+    const simpl_phi_early = compact_ids.simplifyTrivialPhi(alloc, bphi_early) catch bphi_early;
+    if (simpl_phi_early.ptr != bphi_early.ptr) alloc.free(bphi_early);
+    const rse = compact_ids.redundantStoreElim(alloc, simpl_phi_early) catch return simpl_phi_early;
+    if (rse.ptr != simpl_phi_early.ptr) alloc.free(simpl_phi_early);
     const retargeted = rse;
     if (retargeted.ptr != rse.ptr) alloc.free(rse);
     const blk_merged = compact_ids.mergeBlocks(alloc, retargeted) catch return retargeted;
