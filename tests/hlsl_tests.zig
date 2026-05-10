@@ -11216,3 +11216,102 @@ test "T496.1: faceforward and normalize" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T497.1: exp2 log2 radians degrees" {
+    // Tests exp2, log2, radians, degrees functions
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = exp2(x);
+        \\    float b = log2(a);
+        \\    float c = radians(x * 180.0);
+        \\    float d = degrees(c);
+        \\    fragColor = vec4(b, c, d, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T498.1: cross product and length" {
+    // Tests cross product, length, distance
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 b = vec3(1.0, 0.0, 0.0);
+        \\    vec3 c = cross(a, b);
+        \\    float l = length(c);
+        \\    float d = distance(a, b);
+        \\    fragColor = vec4(c / (l + 0.001), d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T499.1: complex control flow with continue and break" {
+    // Tests nested loops with continue and break at different levels
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 10; i++) {
+        \\        if (float(i) < x) continue;
+        \\        for (int j = 0; j < 5; j++) {
+        \\            if (j > i) break;
+        \\            sum += float(i * j);
+        \\        }
+        \\    }
+        \\    fragColor = vec4(sum / 100.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T500.1: multiple render targets" {
+    // Tests fragment shader with multiple output locations
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 color;
+        \\layout(location = 0) out vec4 fragColor0;
+        \\layout(location = 1) out vec4 fragColor1;
+        \\layout(location = 2) out vec4 fragColor2;
+        \\void main() {
+        \\    fragColor0 = color;
+        \\    fragColor1 = color * 0.5;
+        \\    fragColor2 = color * 0.25;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T501.1: const array initializer" {
+    // Tests const qualifier on array variable
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    const float weights[4] = float[4](0.1, 0.2, 0.3, 0.4);
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 4; i++) sum += weights[i] * x;
+        \\    fragColor = vec4(sum);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
