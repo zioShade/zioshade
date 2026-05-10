@@ -11682,3 +11682,100 @@ test "T521.1: multiple function calls with recursion-like pattern" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T522.1: gl_NumWorkGroups query" {
+    // Tests gl_NumWorkGroups read in compute shader
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint total = gl_NumWorkGroups.x * 64u;
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    if (id < total) values[id] = float(id) / float(total);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T523.1: memoryBarrier and barrier" {
+    // Tests memoryBarrier + barrier in compute
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 128) in;
+        \\layout(std430, binding = 0) buffer Data { float data[]; };
+        \\shared float sdata[128];
+        \\void main() {
+        \\    uint id = gl_LocalInvocationID.x;
+        \\    sdata[id] = data[gl_GlobalInvocationID.x];
+        \\    memoryBarrierShared();
+        \\    barrier();
+        \\    data[gl_GlobalInvocationID.x] = sdata[127u - id];
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T524.1: vec4 equal/notEqual comparison" {
+    // Tests vector comparison functions equal and notEqual
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 b = vec4(0.5);
+        \\    bvec4 eq = equal(a, b);
+        \\    bvec4 ne = notEqual(a, b);
+        \\    vec4 v = vec4(eq) + vec4(ne);
+        \\    fragColor = v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T525.1: lessThan greaterThan vector comparisons" {
+    // Tests lessThan/greaterThan on vec4
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 b = vec4(0.5);
+        \\    bvec4 lt = lessThan(a, b);
+        \\    bvec4 gt = greaterThan(a, b);
+        \\    float ltf = float(any(lt));
+        \\    float gtf = float(any(gt));
+        \\    fragColor = vec4(ltf, gtf, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T526.1: clamp min max on vectors" {
+    // Tests clamp/min/max on vec4
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 lo = vec4(0.0);
+        \\    vec4 hi = vec4(1.0);
+        \\    vec4 c = clamp(v, lo, hi);
+        \\    vec4 m1 = min(v, hi);
+        \\    vec4 m2 = max(m1, lo);
+        \\    fragColor = c + m2;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
