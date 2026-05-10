@@ -10305,3 +10305,93 @@ test "T446.1: uint sampler texture fetch" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T447.1: textureQueryLevels" {
+    // Tests textureQueryLevels for mip level count
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    int levels = textureQueryLevels(tex);
+        \\    fragColor = vec4(float(levels));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T448.1: beginInvocationInterlockARB" {
+    // Tests fragment shader interlock (if available)
+    const source =
+        \\#version 450
+        \\#extension GL_ARB_fragment_shader_interlock : enable
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0, rgba8) uniform image2D img;
+        \\void main() {
+        \\    beginInvocationInterlockARB();
+        \\    vec4 c = imageLoad(img, ivec2(uv * 256.0));
+        \\    imageStore(img, ivec2(uv * 256.0), c + vec4(0.1));
+        \\    endInvocationInterlockARB();
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T449.1: smoothstep edge cases" {
+    // Tests smoothstep with edge==edge (undefined per spec, but shouldn't crash)
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = smoothstep(0.0, 1.0, x);
+        \\    float b = smoothstep(0.5, 0.5, x);
+        \\    fragColor = vec4(a, b, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T450.1: complex nested expressions" {
+    // Tests deeply nested arithmetic expression
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float b = a * a + a;
+        \\    float c = b * b - a * a;
+        \\    float d = c / (a + 1.0);
+        \\    float e = sqrt(d * d + c * c);
+        \\    fragColor = vec4(e);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T451.1: flat interpolation on struct member" {
+    // Tests flat qualifier on individual struct member
+    const source =
+        \\#version 450
+        \\struct V2F { vec2 uv; flat int id; vec4 color; };
+        \\layout(location = 0) in V2F v2f;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = v2f.color + vec4(float(v2f.id));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
