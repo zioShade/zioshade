@@ -5712,6 +5712,21 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
             }
         }
 
+        // Unary boolean constant folding: OpLogicalNot(true) = false, OpLogicalNot(false) = true
+        if (bool_type != 0 and true_id != 0 and false_id != 0 and opcode == 168 and wc == 4) { // OpLogicalNot
+            const rid = words[pos + 2];
+            const operand = words[pos + 3];
+            if (rid >= 1 and rid < bound) {
+                if (operand == true_id) {
+                    bool_replacements.put(alloc, rid, false_id) catch {};
+                    to_skip.set(rid);
+                } else if (operand == false_id) {
+                    bool_replacements.put(alloc, rid, true_id) catch {};
+                    to_skip.set(rid);
+                }
+            }
+        }
+
         pos = ie;
     }
 

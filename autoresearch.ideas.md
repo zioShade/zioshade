@@ -1,34 +1,11 @@
-# Autoresearch Ideas — glslpp Feature Coverage
+# Autoresearch Ideas — glslpp SPIR-V Optimization
 
-## STATUS: 213/222 conformance (95.9%), 0 val_fail, 0 leaks ✅✅
-## HLSL tests: 245/245 pass, 0 fail, 0 leaked ✅✅
-## Session: 131→245 HLSL (+114 tests, +87.0%), conformance 213/222 stable, leaks ALL FIXED
+## STATUS: 460/460 HLSL tests, 213/222 conformance (95.9%), 0 val_fail, 0 leaks ✅✅
 
-## Session Summary
-- Started at 131 HLSL tests, now 245 (+87.0%)
-- Fixed ALL memory leaks: ~150→0 conformance leaks, 0 double-frees
-- Fixed elimUnusedGlobals to preserve Output storage class variables
-- Fixed binding_shift=-1 bug (all cbuffers used register(b0))
-- Fixed cbuffer member name collision (multi-cbuffer member access)
-- Implemented OpSwitch, ShiftLeftLogical/ShiftRightLogical in HLSL cross-compiler
-- Implemented OpCopyMemory, OpCopyObject, OpPhi in HLSL cross-compiler
-- Added OpCopyMemory=63, OpCopyObject=83, OpPhi=245 to spirv.zig Op enum
-- Added 114 new HLSL tests covering virtually all GLSL features
-
-## Test Coverage (245 tests)
-- Texture ops: sampler2D, samplerCube, sampler2DArray, sampler2DMS, samplerBuffer, isampler2D, usampler2D, sampler2DShadow, textureLod, textureGrad, textureGather, texelFetch, texelFetchOffset, textureOffset, textureSize, textureProj
-- Math builtins: sin/cos/tan, asin/acos/atan2, pow/exp/log/exp2/log2, sqrt/rsqrt, floor/ceil/fract/abs/sign, min/max/clamp, mix/lerp/step/smoothstep, reflect/refract/faceforward, cross/normalize/length/distance, determinant/inverse/outerProduct, round/roundEven, mod, fma
-- Derivatives: dFdx/ddx, dFdy/ddy, fwidth, dFdxCoarse/dFdxFine
-- Bitwise: &, |, ^, <<, >>
-- Atomics: InterlockedAdd/Min/Max/And/Or/Xor/Exchange/CompareExchange
-- Image: imageLoad/imageStore
-- Control flow: if/else, for, while, do-while, break, continue, switch, ternary
-- Types: float, int, uint, bool, vec2-4, ivec2-4, uvec2-4, bvec2-4, mat2-4, mat2x3/mat3x2 (non-square), struct, array
-- Conversions: int↔float, bitcast (asint/asfloat), ConvertSToF/ConvertFToS
-- Shader stages: fragment, vertex, compute, geometry
-- GLSL builtins: equal, notEqual, lessThan, greaterThan, any, all, isnan, isinf, gl_FragCoord, gl_Position, gl_FrontFacing, gl_Layer
-- HLSL backend features: OpCopyObject, OpCopyMemory, OpPhi, cbuffer prefix naming
-- Other: discard, early_fragment_tests, push constants, multiple render targets, sampler arrays, nested structs, compound assignments, function calls, const variables, dynamic vector indexing, vector shuffle
+## Recent Optimization Passes Added
+- **foldConstBranches**: Fold OpBranchConditional with constant boolean conditions to unconditional OpBranch + remove SelectionMerge
+- **constFold comparison folding**: Fold OpFOrdEqual/LessThan/GreaterThan etc with constant operands to OpConstantTrue/OpConstantFalse
+- **constFold logical op folding**: Fold OpLogicalOr/OpLogicalAnd with boolean constants, including partial folding (true && b = b, x || true = true)
 
 ## Known Issues / Future Work
 
