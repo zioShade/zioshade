@@ -192,8 +192,10 @@ pub fn generate(
     if (negated.ptr != deduped.ptr) alloc.free(deduped);
     const negated2 = compact_ids.eliminateDoubleNegate(alloc, negated) catch return negated;
     if (negated2.ptr != negated.ptr) alloc.free(negated);
-    const algebrad = compact_ids.algebraicSimpl(alloc, negated2) catch return negated2;
-    if (algebrad.ptr != negated2.ptr) alloc.free(negated2);
+    const neg_folded = compact_ids.foldNegateIntoAddSub(alloc, negated2) catch return negated2;
+    if (neg_folded.ptr != negated2.ptr) alloc.free(negated2);
+    const algebrad = compact_ids.algebraicSimpl(alloc, neg_folded) catch return neg_folded;
+    if (algebrad.ptr != neg_folded.ptr) alloc.free(neg_folded);
     const cf = compact_ids.constFold(alloc, algebrad) catch return algebrad;
     if (cf.ptr != algebrad.ptr) alloc.free(algebrad);
     const folded = compact_ids.foldSelect(alloc, cf) catch return cf;
