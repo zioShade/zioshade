@@ -354,7 +354,7 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         37 => "min", 38 => "max", 39 => "min",
         40 => "max", 41 => "min", 42 => "max", 43 => "clamp", 44 => "clamp",
         45 => "fast::clamp", 46 => "mix", 48 => "step", 49 => "smoothstep",
-        50 => "length", 51 => "distance", 52 => "cross", 53 => "normalize", 54 => "dot",
+        66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
         else => null,
     };
 }
