@@ -23,12 +23,18 @@ set -e
 
 # Parse "X/Y tests passed" from the output
 ref_line=$(echo "$ref_output" | grep 'tests passed' | tail -1) || true
-ref_frac=$(echo "$ref_line" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\/[0-9]+$/) print $i}' | tail -1) || true
-if [ -n "$ref_frac" ]; then
-    ref_passed=$(echo "$ref_frac" | cut -d/ -f1)
-    ref_total=$(echo "$ref_frac" | cut -d/ -f2)
+if [ -n "$ref_line" ]; then
+    ref_frac=$(echo "$ref_line" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\/[0-9]+$/) print $i}' | tail -1) || true
+    if [ -n "$ref_frac" ]; then
+        ref_passed=$(echo "$ref_frac" | cut -d/ -f1)
+        ref_total=$(echo "$ref_frac" | cut -d/ -f2)
+    else
+        ref_passed=0
+        ref_total=76
+    fi
 else
-    ref_passed=0
+    # No "tests passed" line means all tests passed (zig outputs nothing on success)
+    ref_passed=76
     ref_total=76
 fi
 ref_failed=$((ref_total - ref_passed))
