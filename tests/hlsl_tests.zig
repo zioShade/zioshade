@@ -9818,3 +9818,110 @@ test "T421.1: conditional store to output" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T422.1: geometry shader triangle_strip" {
+    // Tests geometry shader with triangle_strip output
+    const source =
+        \\#version 450
+        \\layout(triangles) in;
+        \\layout(triangle_strip, max_vertices = 3) out;
+        \\void main() {
+        \\    for (int i = 0; i < 3; i++) {
+        \\        gl_Position = gl_in[i].gl_Position;
+        \\        EmitVertex();
+        \\    }
+        \\    EndPrimitive();
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .geometry);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T423.1: gl_ClipDistance vertex shader" {
+    // Tests gl_ClipDistance output in vertex shader
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 pos;
+        \\out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[1]; };
+        \\void main() {
+        \\    gl_Position = pos;
+        \\    gl_ClipDistance[0] = pos.z;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T424.1: integer sampler texture" {
+    // Tests isampler2D for integer texture reads
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform isampler2D intTex;
+        \\void main() {
+        \\    ivec4 iv = texelFetch(intTex, ivec2(uv * 128.0), 0);
+        \\    fragColor = vec4(iv) / 255.0;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T425.1: compute image atomics" {
+    // Tests atomic operations on image variables
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(binding = 0, r32ui) uniform uimage2D img;
+        \\void main() {
+        \\    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+        \\    uint old = imageAtomicAdd(img, coord, 1u);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "uint");
+}
+
+test "T426.1: PBR metallic-roughness lighting" {
+    // Full PBR BRDF with Fresnel-Schlick, GGX distribution
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 N;
+        \\layout(location = 1) in vec3 V;
+        \\layout(location = 2) in vec3 L;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform U {
+        \\    vec3 albedo;
+        \\    float metallic;
+        \\    float roughness;
+        \\    float ao;
+        \\};
+        \\void main() {
+        \\    vec3 H = normalize(V + L);
+        \\    float NdotV = max(dot(N, V), 0.001);
+        \\    float NdotL = max(dot(N, L), 0.001);
+        \\    float NdotH = max(dot(N, H), 0.0);
+        \\    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+        \\    vec3 F = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
+        \\    float alpha = roughness * roughness;
+        \\    float alpha2 = alpha * alpha;
+        \\    float denom = NdotH * NdotH * (alpha2 - 1.0) + 1.0;
+        \\    float D = alpha2 / (3.14159 * denom * denom);
+        \\    float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+        \\    float G = NdotL / (NdotL * (1.0 - k) + k);
+        \\    vec3 spec = (D * G * F) / (4.0 * NdotV * NdotL + 0.001);
+        \\    vec3 kD = (1.0 - F) * (1.0 - metallic);
+        \\    vec3 Lo = (kD * albedo / 3.14159 + spec) * NdotL;
+        \\    fragColor = vec4(Lo * ao, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
