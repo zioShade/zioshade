@@ -69,9 +69,12 @@ fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
 fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) return try alloc.dupe(u8, base_name);
-    var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
-    defer buf.deinit(alloc);
-    try buf.writer(alloc).writeAll(base_name);
+    // Use a stack buffer to avoid heap allocation for typical access chains
+    var stack_buf: [512]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&stack_buf);
+    var writer = fbs.writer();
+    var overflow = false;
+    writer.writeAll(base_name) catch { overflow = true; };
     var cur_type: ?u32 = resolvePointee(m, base_id);
     for (indices) |index_id| {
         const idx_inst = getDef(m, index_id);
@@ -80,22 +83,46 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 const val = def.words[3];
                 const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
                 if (is_vector) {
-                    try buf.writer(alloc).writeAll(swizzleChar(val));
+                    writer.writeAll(swizzleChar(val)) catch { overflow = true; };
                 } else {
-                    try buf.writer(alloc).print("[{d}]", .{val});
+                    writer.print("[{d}]", .{val}) catch { overflow = true; };
                 }
                 if (cur_type) |tid| {
                     const ti = getDef(m, tid);
                     if (ti) |tinst| {
-                        if (tinst.op == .TypeVector) {
-                            cur_type = tinst.words[2];
-                        } else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) {
-                            cur_type = tinst.words[val + 2];
-                        } else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
-                            cur_type = tinst.words[2];
-                        } else {
-                            cur_type = null;
-                        }
+                        if (tinst.op == .TypeVector) { cur_type = tinst.words[2]; }
+                        else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur_type = tinst.words[val + 2]; }
+                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                        else { cur_type = null; }
+                    }
+                }
+            } else { writer.print("[{s}]", .{names.get(index_id) orelse "i"}) catch { overflow = true; }; }
+        } else { writer.print("[{s}]", .{names.get(index_id) orelse "i"}) catch { overflow = true; }; }
+    }
+    if (!overflow) {
+        const len = fbs.pos;
+        return try alloc.dupe(u8, stack_buf[0..len]);
+    }
+    // Fallback to heap for long chains
+    var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
+    defer buf.deinit(alloc);
+    try buf.writer(alloc).writeAll(base_name);
+    cur_type = resolvePointee(m, base_id);
+    for (indices) |index_id| {
+        const idx_inst = getDef(m, index_id);
+        if (idx_inst) |def| {
+            if (def.op == .Constant and def.words.len > 3) {
+                const val = def.words[3];
+                const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
+                if (is_vector) { try buf.writer(alloc).writeAll(swizzleChar(val)); }
+                else { try buf.writer(alloc).print("[{d}]", .{val}); }
+                if (cur_type) |tid| {
+                    const ti = getDef(m, tid);
+                    if (ti) |tinst| {
+                        if (tinst.op == .TypeVector) { cur_type = tinst.words[2]; }
+                        else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur_type = tinst.words[val + 2]; }
+                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                        else { cur_type = null; }
                     }
                 }
             } else { try buf.writer(alloc).print("[{s}]", .{names.get(index_id) orelse "i"}); }
