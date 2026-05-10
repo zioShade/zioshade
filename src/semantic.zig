@@ -3120,7 +3120,19 @@ const Analyzer = struct {
                 else if (std.mem.eql(u8, node.data.name, "transpose") and arg_tids.items.len > 0 and arg_tids.items[0].ty.isMatrix())
                     arg_tids.items[0].ty.transposeType()
                 else if (self.isGLSLBuiltin(node.data.name) and arg_tids.items.len > 0)
-                    arg_tids.items[0].ty
+                    // bitCount/findLSB/findMSB always return int (or ivecN), regardless of uint input
+                    if (std.mem.eql(u8, node.data.name, "bitCount") or
+                        std.mem.eql(u8, node.data.name, "findLSB") or
+                        std.mem.eql(u8, node.data.name, "findMSB"))
+                        switch (arg_tids.items[0].ty) {
+                            .uint => .int,
+                            .uvec2 => .ivec2,
+                            .uvec3 => .ivec3,
+                            .uvec4 => .ivec4,
+                            else => arg_tids.items[0].ty,
+                        }
+                    else
+                        arg_tids.items[0].ty
                 else if (sym) |s| s.ty
                 else .void;
 
@@ -4451,7 +4463,8 @@ const Analyzer = struct {
                                 else => 6, // FSign
                             };
                         } else if (std.mem.eql(u8, node.data.name, "findMSB")) {
-                            glsl_id = switch (result_ty) {
+                            // Dispatch based on argument type (not result type, which we force to int)
+                            glsl_id = switch (arg_tids.items[0].ty) {
                                 .uint, .uvec2, .uvec3, .uvec4 => 75, // FindUMsb
                                 else => 74, // FindSMsb
                             };
