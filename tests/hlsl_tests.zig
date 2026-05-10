@@ -9332,3 +9332,105 @@ test "T396.1: complex boolean logic" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T397.1: while loop with break" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float threshold;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float x = 1.0;
+        \\    int i = 0;
+        \\    while (x > 0.01) {
+        \\        x *= 0.5;
+        \\        i++;
+        \\        if (i > 10) break;
+        \\    }
+        \\    fragColor = vec4(x);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T398.1: do-while with continue" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    int i = 0;
+        \\    do {
+        \\        i++;
+        \\        if (i == 3) continue;
+        \\        sum += x * float(i);
+        \\    } while (i < 5);
+        \\    fragColor = vec4(sum);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T399.1: matrix scalar operations" {
+    // Tests mat * scalar, mat + mat, mat * mat
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat4 a; mat4 b; float s; };
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 scaled = a * s;
+        \\    mat4 sum = scaled + b;
+        \\    mat4 prod = sum * b;
+        \\    vec4 v = prod * vec4(1.0, 0.0, 0.0, 1.0);
+        \\    fragColor = v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T400.1: const array initializer" {
+    // Tests compile-time constant arrays
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int idx;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    const vec3 colors[3] = vec3[3](
+        \\        vec3(1.0, 0.0, 0.0),
+        \\        vec3(0.0, 1.0, 0.0),
+        \\        vec3(0.0, 0.0, 1.0)
+        \\    );
+        \\    int i = clamp(idx, 0, 2);
+        \\    fragColor = vec4(colors[i], 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T401.1: multiple function calls with recursion-like pattern" {
+    // Tests function chain: f calls g calls h
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float h(float v) { return v * v; }
+        \\float g(float v) { return h(v) + 1.0; }
+        \\float f(float v) { return g(v + 0.5); }
+        \\void main() {
+        \\    float r = f(x);
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
