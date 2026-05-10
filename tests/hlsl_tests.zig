@@ -12491,3 +12491,107 @@ test "T561.1: PBR lighting model" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T562.1: subgroup basic operations" {
+    // Tests subgroup basic operations
+    const source =
+        \\#version 450
+        \\#extension GL_KHR_shader_subgroup_basic : enable
+        \\layout(local_size_x = 32) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    uint elect = subgroupElect();
+        \\    if (elect != 0u) values[id] = 1.0;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T563.1: subgroup arithmetic add" {
+    // Tests subgroup arithmetic add operation
+    const source =
+        \\#version 450
+        \\#extension GL_KHR_shader_subgroup_arithmetic : enable
+        \\layout(local_size_x = 32) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    float sum = subgroupAdd(values[id]);
+        \\    values[id] = sum;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T564.1: compute matrix multiply tiled" {
+    // Tests compute tiled matrix multiply
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 16, local_size_y = 16) in;
+        \\layout(std430, binding = 0) readonly buffer A { float matA[]; };
+        \\layout(std430, binding = 1) readonly buffer B { float matB[]; };
+        \\layout(std430, binding = 2) writeonly buffer C { float matC[]; };
+        \\shared float tileA[16][16];
+        \\shared float tileB[16][16];
+        \\void main() {
+        \\    uvec2 id = gl_GlobalInvocationID;
+        \\    uvec2 lid = gl_LocalInvocationID;
+        \\    float sum = 0.0;
+        \\    for (uint t = 0u; t < 4u; t++) {
+        \\        tileA[lid.y][lid.x] = matA[id.y * 64u + t * 16u + lid.x];
+        \\        tileB[lid.y][lid.x] = matB[(t * 16u + lid.y) * 64u + id.x];
+        \\        barrier();
+        \\        for (uint k = 0u; k < 16u; k++) {
+        \\            sum += tileA[lid.y][k] * tileB[k][lid.x];
+        \\        }
+        \\        barrier();
+        \\    }
+        \\    matC[id.y * 64u + id.x] = sum;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T565.1: conditional discard with side effects" {
+    // Tests discard with preceding side effects
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = length(v.xy);
+        \\    float a = d * d;
+        \\    if (a > 1.0) discard;
+        \\    fragColor = vec4(a);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T566.1: texture with bias and lod" {
+    // Tests texture with bias and textureLod together
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec4 a = texture(tex, uv, 0.5);
+        \\    vec4 b = textureLod(tex, uv, 2.0);
+        \\    fragColor = mix(a, b, 0.5);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
