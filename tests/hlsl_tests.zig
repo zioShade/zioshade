@@ -8810,3 +8810,107 @@ test "T371.1: chromatic aberration post-process" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T372.1: integer negate folding" {
+    // Exercises foldNegateIntoAddSub integer path: IAdd(x, SNegate(y)) -> ISub(x, y)
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in int x;
+        \\flat layout(location = 1) in int y;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int neg_y = -y;
+        \\    int sum = x + neg_y;
+        \\    fragColor = vec4(float(sum));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T373.1: integer negate with subtraction" {
+    // Exercises: ISub(x, SNegate(y)) -> IAdd(x, y)
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in int a;
+        \\flat layout(location = 1) in int b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int neg_b = -b;
+        \\    int result = a - neg_b;
+        \\    fragColor = vec4(float(result));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T374.1: Reinhard tone mapping" {
+    // Common post-processing: Reinhard tone mapping
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D hdrTex;
+        \\void main() {
+        \\    vec3 hdr = texture(hdrTex, uv).rgb;
+        \\    vec3 mapped = hdr / (hdr + 1.0);
+        \\    fragColor = vec4(mapped, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T375.1: screen-space ambient occlusion" {
+    // Common rendering technique: SSAO sampling pattern
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D depthTex;
+        \\layout(binding = 1) uniform sampler2D noiseTex;
+        \\const vec3 kernel[4] = vec3[4](
+        \\    vec3(0.1, 0.0, 0.0),
+        \\    vec3(-0.1, 0.1, 0.0),
+        \\    vec3(0.0, -0.1, 0.1),
+        \\    vec3(0.1, 0.1, -0.1)
+        \\);
+        \\void main() {
+        \\    float depth = texture(depthTex, uv).r;
+        \\    vec3 random = texture(noiseTex, uv * 4.0).xyz;
+        \\    float occlusion = 0.0;
+        \\    for (int i = 0; i < 4; i++) {
+        \\        vec3 sample_dir = kernel[i];
+        \\        occlusion += step(depth, depth + 0.1);
+        \\    }
+        \\    occlusion /= 4.0;
+        \\    fragColor = vec4(vec3(1.0 - occlusion), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T376.1: push_constant uniform block" {
+    // Tests push_constant layout (common in Vulkan)
+    const source =
+        \\#version 450
+        \\layout(push_constant) uniform PushConstants {
+        \\    mat4 transform;
+        \\    vec4 color;
+        \\} pc;
+        \\layout(location = 0) in vec3 pos;
+        \\void main() {
+        \\    gl_Position = pc.transform * vec4(pos, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
