@@ -7677,3 +7677,90 @@ test "T310.1: compute nested loop buffer read/write" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+test "T311.1: function with array parameter" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float sum3(float v[3]) {
+        \\    return v[0] + v[1] + v[2];
+        \\}
+        \\void main() {
+        \\    float arr[3];
+        \\    arr[0] = x;
+        \\    arr[1] = x * 2.0;
+        \\    arr[2] = x * 3.0;
+        \\    fragColor = vec4(sum3(arr));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T312.1: mat3x4 times vec4" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform U { mat3x4 m; };
+        \\void main() {
+        \\    vec3 r = m * v;
+        \\    fragColor = vec4(r, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T313.1: nested struct uniform access" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\struct Inner { vec4 color; float scale; };
+        \\struct Outer { Inner inner; vec4 offset; };
+        \\layout(binding = 0) uniform U { Outer data; };
+        \\void main() {
+        \\    fragColor = data.inner.color * data.inner.scale + data.offset;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T314.1: vec4 swizzle assign then use" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 v = vec4(0.0);
+        \\    v.xy = uv;
+        \\    v.zw = uv * 0.5;
+        \\    fragColor = v * 2.0;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T315.1: integer abs and sign chain" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = abs(x);
+        \\    int s = sign(x);
+        \\    float r = float(a * s);
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
