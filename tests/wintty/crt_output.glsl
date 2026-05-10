@@ -40,7 +40,7 @@ void mainImage(out vec4 v28, vec2 v29)
     vec3 v33 = Globals_m0;
     vec2 v34 = vec2(v33.x, v33.y);
     vec2 v35 = v29 / v34;
-    vec2 v36 = v35 - float(0.5, 0.5);
+    vec2 v36 = v35 - vec2(0.5);
     vec2 v37 = v36 * 2.0;
     vec2 v38 = v37 * 1.1;
     float v40 = v38.y;
@@ -59,10 +59,10 @@ void mainImage(out vec4 v28, vec2 v29)
     float v53 = v31.y;
     float v54 = v53 * v52;
     v31.y = v54;
-    vec2 v55 = v38 / float(2.0, 2.0);
-    vec2 v56 = v55 + float(0.5, 0.5);
+    vec2 v55 = v38 / vec2(2.0);
+    vec2 v56 = v55 + vec2(0.5);
     vec2 v57 = v56 * 0.92;
-    vec2 v58 = v57 + float(0.04, 0.04);
+    vec2 v58 = v57 + vec2(0.04);
     v31 = v58;
     float v61 = Globals_m1;
     float v62 = 0.3 * v61;
@@ -150,7 +150,7 @@ void mainImage(out vec4 v28, vec2 v29)
     float v144 = pow(v143, 0.3);
     vec3 v145 = vec3(v144, v144, v144);
     vec3 v146 = v137 * v145;
-    vec3 v147 = v146 * float(0.95, 1.05, 0.95);
+    vec3 v147 = v146 * vec3(0.95, 1.05, 0.95);
     vec3 v148 = v147 * 2.8;
     float v149 = 3.5 * v61;
     float v150 = v33.y;
@@ -197,7 +197,7 @@ void mainImage(out vec4 v28, vec2 v29)
     float v182 = clamp(v181, 0.0, 1.0);
     vec3 v183 = vec3(v182, v182, v182);
     vec3 v184 = v183 * 0.65;
-    vec3 v185 = float(1.0, 1.0, 1.0) - v184;
+    vec3 v185 = vec3(1.0) - v184;
     vec3 v186 = v30;
     vec3 v187 = v186 * v185;
     v30 = v187;
@@ -207,7 +207,7 @@ void mainImage(out vec4 v28, vec2 v29)
 }
 layout(location = 0) out vec4 _fragColor;
 
-void main(vec4 gl_FragCoord)
+void main()
 {
     vec2 v26 = vec2(gl_FragCoord.x, gl_FragCoord.y);
     mainImage(_fragColor, v26);
