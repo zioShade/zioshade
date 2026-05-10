@@ -8690,3 +8690,123 @@ test "T366.1: compute matrix multiply chain" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T367.1: sampler3D volume texture" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 uvw;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler3D vol;
+        \\void main() {
+        \\    vec4 d = texture(vol, uvw);
+        \\    fragColor = d;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Texture3D");
+}
+
+test "T368.1: skeleton animation vertex shader" {
+    // Common game engine pattern: skeletal animation with bone weights
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 position;
+        \\layout(location = 1) in vec3 normal;
+        \\layout(location = 2) in vec4 weights;
+        \\layout(location = 3) in ivec4 joints;
+        \\layout(binding = 0) uniform U {
+        \\    mat4 model;
+        \\    mat4 viewProj;
+        \\    mat4 bones[64];
+        \\};
+        \\void main() {
+        \\    mat4 skin =
+        \\        weights.x * bones[joints.x] +
+        \\        weights.y * bones[joints.y] +
+        \\        weights.z * bones[joints.z] +
+        \\        weights.w * bones[joints.w];
+        \\    vec4 skinned = skin * vec4(position, 1.0);
+        \\    gl_Position = viewProj * model * skinned;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T369.1: ACES tone mapping" {
+    // Common post-processing pattern: ACES filmic tone mapping
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D hdrTex;
+        \\vec3 ACESFilm(vec3 x) {
+        \\    float a = 2.51;
+        \\    float b = 0.03;
+        \\    float c = 2.43;
+        \\    float d = 0.59;
+        \\    float e = 0.14;
+        \\    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+        \\}
+        \\void main() {
+        \\    vec3 hdr = texture(hdrTex, uv).rgb;
+        \\    vec3 ldr = ACESFilm(hdr);
+        \\    fragColor = vec4(ldr, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T370.1: compute particle simulation" {
+    // Common compute pattern: particle physics update
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 256) in;
+        \\layout(std430, binding = 0) buffer Particles {
+        \\    vec4 positions[];
+        \\    vec4 velocities[];
+        \\};
+        \\layout(binding = 1) uniform U {
+        \\    float dt;
+        \\    vec3 gravity;
+        \\};
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    vec3 pos = positions[id].xyz;
+        \\    vec3 vel = velocities[id].xyz;
+        \\    vel += gravity * dt;
+        \\    pos += vel * dt;
+        \\    positions[id] = vec4(pos, 1.0);
+        \\    velocities[id] = vec4(vel, 0.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T371.1: chromatic aberration post-process" {
+    // Common post-processing pattern: chromatic aberration
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D image;
+        \\void main() {
+        \\    float offset = 0.005;
+        \\    vec2 dir = uv - 0.5;
+        \\    float r = texture(image, uv + dir * offset).r;
+        \\    float g = texture(image, uv).g;
+        \\    float b = texture(image, uv - dir * offset).b;
+        \\    fragColor = vec4(r, g, b, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
