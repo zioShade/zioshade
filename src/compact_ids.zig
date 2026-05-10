@@ -5474,6 +5474,10 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
     // Track all defined type IDs for validation
     var defined_types = try std.DynamicBitSet.initEmpty(alloc, bound);
     defer defined_types.deinit();
+    // Track bool type and true/false constants for comparison folding
+    var bool_type: u32 = 0;
+    var true_id: u32 = 0;
+    var false_id: u32 = 0;
 
     var pos: u32 = 5;
     while (pos < words.len) {
@@ -5504,8 +5508,15 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                 try const_vals.put(alloc, rid, val);
             }
         }
+        if (opcode == 20 and wc >= 2) bool_type = words[pos + 1]; // OpTypeBool
+        if (opcode == 41 and wc >= 3) true_id = words[pos + 2]; // OpConstantTrue
+        if (opcode == 42 and wc >= 3) false_id = words[pos + 2]; // OpConstantFalse
         pos += wc;
     }
+
+    // Track bool replacements: comparison result_id -> true_id or false_id
+    var bool_replacements = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> true_id or false_id
+    defer bool_replacements.deinit(alloc);
 
     // Phase 2: Find foldable ops and compute replacement values
     var fold_map = std.AutoHashMapUnmanaged(u32, struct { rtype: u32, val: u32 }){};
@@ -5580,10 +5591,71 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                 }
             }
         }
+
+        // Constant comparison folding: both operands are constants -> boolean result
+        if (bool_type != 0 and (true_id != 0 or false_id != 0) and wc >= 5) {
+            const rid = words[pos + 2];
+            const a = words[pos + 3];
+            const b = words[pos + 4];
+            if (rid >= 1 and rid < bound and
+                const_vals.get(a) != null and const_vals.get(b) != null and
+                const_types.get(a) != null and const_types.get(b) != null)
+            {
+                const av = const_vals.get(a).?;
+                const bv = const_vals.get(b).?;
+                const a_type = const_types.get(a).?;
+                var bool_result: ?bool = null;
+
+                if (float_types.isSet(a_type)) {
+                    const af: f32 = @bitCast(av);
+                    const bf: f32 = @bitCast(bv);
+                    switch (opcode) {
+                        180 => { bool_result = af == bf; }, // OpFOrdEqual
+                        182 => { bool_result = af != bf; }, // OpFOrdNotEqual
+                        184 => { bool_result = af < bf; },   // OpFOrdLessThan
+                        186 => { bool_result = af > bf; },   // OpFOrdGreaterThan
+                        188 => { bool_result = af <= bf; },  // OpFOrdLessThanEqual
+                        190 => { bool_result = af >= bf; },  // OpFOrdGreaterThanEqual
+                        else => {},
+                    }
+                } else if (int_unsigned.isSet(a_type)) {
+                    switch (opcode) {
+                        170 => { bool_result = av == bv; }, // OpIEqual
+                        171 => { bool_result = av != bv; }, // OpINotEqual
+                        172 => { bool_result = av > bv; },  // OpUGreaterThan
+                        174 => { bool_result = av >= bv; }, // OpUGreaterThanEqual
+                        176 => { bool_result = av < bv; },  // OpULessThan
+                        178 => { bool_result = av <= bv; }, // OpULessThanEqual
+                        else => {},
+                    }
+                } else if (int_signed.isSet(a_type)) {
+                    const as_i: i32 = @bitCast(av);
+                    const bs_i: i32 = @bitCast(bv);
+                    switch (opcode) {
+                        170 => { bool_result = as_i == bs_i; }, // OpIEqual
+                        171 => { bool_result = as_i != bs_i; }, // OpINotEqual
+                        173 => { bool_result = as_i > bs_i; },  // OpSGreaterThan
+                        175 => { bool_result = as_i >= bs_i; }, // OpSGreaterThanEqual
+                        177 => { bool_result = as_i < bs_i; },  // OpSLessThan
+                        179 => { bool_result = as_i <= bs_i; }, // OpSLessThanEqual
+                        else => {},
+                    }
+                }
+
+                if (bool_result) |br| {
+                    const target = if (br) true_id else false_id;
+                    if (target != 0) {
+                        bool_replacements.put(alloc, rid, target) catch {};
+                        to_skip.set(rid);
+                    }
+                }
+            }
+        }
+
         pos = ie;
     }
 
-    if (fold_map.count() == 0) return words;
+    if (fold_map.count() == 0 and bool_replacements.count() == 0) return words;
 
     // Phase 3: Find the insertion point for new OpConstants
     // In SPIR-V, constants come after types and before global variables.
@@ -5668,6 +5740,64 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
         result.deinit(alloc);
         return words;
     };
+
+    // Phase 5: Replace operand references for bool_replacements
+    // (comparison results folded to existing true_id/false_id)
+    if (bool_replacements.count() > 0) {
+        const br_result = result_owned;
+        var br_out = std.ArrayList(u32).initCapacity(alloc, br_result.len) catch return br_result;
+        br_out.appendSliceAssumeCapacity(br_result[0..5]);
+        pos = 5;
+        while (pos < br_result.len) {
+            const bhdr = br_result[pos];
+            const bwc: u32 = bhdr >> 16;
+            if (bwc == 0) break;
+            const bie = pos + bwc;
+            if (bie > br_result.len) break;
+
+            // Skip instructions that were folded (their result_id should not appear as operand)
+            const binfo = getOpInfo(@as(u16, @truncate(bhdr & 0xFFFF)));
+            const b_is_arithmetic = binfo != null and binfo.?.fixed == 2;
+            if (b_is_arithmetic and bwc >= 3 and br_result[pos + 2] < bound and
+                to_skip.isSet(br_result[pos + 2]))
+            {
+                pos = bie;
+                continue;
+            }
+
+            // Rewrite ID operands using bool_replacements
+            var any_replaced = false;
+            var bw: u32 = pos;
+            while (bw < bie) : (bw += 1) {
+                if (bool_replacements.contains(br_result[bw])) {
+                    any_replaced = true;
+                    break;
+                }
+            }
+            if (any_replaced) {
+                var br_buf = std.ArrayListUnmanaged(u32).initCapacity(alloc, bwc) catch {
+                    br_out.appendSlice(alloc, br_result[pos..bie]) catch return br_result;
+                    pos = bie;
+                    continue;
+                };
+                bw = pos;
+                while (bw < bie) : (bw += 1) {
+                    br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                }
+                br_out.appendSlice(alloc, br_buf.items) catch return br_result;
+                br_buf.deinit(alloc);
+            } else {
+                br_out.appendSlice(alloc, br_result[pos..bie]) catch return br_result;
+            }
+            pos = bie;
+        }
+        alloc.free(br_result);
+        return br_out.toOwnedSlice(alloc) catch {
+            br_out.deinit(alloc);
+            return alloc.dupe(u32, br_result);
+        };
+    }
+
     return result_owned;
 }
 
