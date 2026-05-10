@@ -12283,3 +12283,103 @@ test "T551.1: compute bitonic sort" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "main");
 }
+
+
+test "T552.1: gl_SampleID and gl_SamplePosition" {
+    // Tests gl_SampleID and gl_SamplePosition in fragment
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sid = float(gl_SampleID);
+        \\    vec2 sp = gl_SamplePosition;
+        \\    fragColor = vec4(sp, sid, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T553.1: mat2 rotation matrix" {
+    // Tests mat2 used as 2D rotation matrix
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float angle = v.x * 3.14159;
+        \\    float c = cos(angle);
+        \\    float s = sin(angle);
+        \\    mat2 rot = mat2(c, -s, s, c);
+        \\    vec2 r = rot * v;
+        \\    fragColor = vec4(r, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T554.1: multiple textures with different bindings" {
+    // Tests multiple sampler2D with different binding points
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex0;
+        \\layout(binding = 1) uniform sampler2D tex1;
+        \\layout(binding = 2) uniform sampler2D tex2;
+        \\void main() {
+        \\    vec4 a = texture(tex0, uv);
+        \\    vec4 b = texture(tex1, uv);
+        \\    vec4 c = texture(tex2, uv);
+        \\    fragColor = a * 0.5 + b * 0.3 + c * 0.2;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T555.1: integer abs sign ceil floor round" {
+    // Tests integer abs/sign and float rounding functions
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = abs(x);
+        \\    float b = sign(x);
+        \\    float c = ceil(x);
+        \\    float d = floor(x);
+        \\    float e = round(x);
+        \\    float f = trunc(x);
+        \\    fragColor = vec4(a + b, c + d, e + f, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T556.1: compute wave simulation" {
+    // Tests compute with wave equation (neighbor reads)
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 128) in;
+        \\layout(std430, binding = 0) buffer Curr { float curr[]; };
+        \\layout(std430, binding = 1) buffer Prev { float prev[]; };
+        \\layout(std430, binding = 2) buffer Next { float next_out[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    uint n = id > 0u ? id - 1u : id;
+        \\    uint p = id < 127u ? id + 1u : id;
+        \\    float laplacian = curr[p] - 2.0 * curr[id] + curr[n];
+        \\    next_out[id] = 2.0 * curr[id] - prev[id] + 0.5 * laplacian;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
