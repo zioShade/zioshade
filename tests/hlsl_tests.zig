@@ -9236,3 +9236,99 @@ test "T391.1: multi-pass blur (separable)" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T392.1: nested struct uniform access" {
+    // Tests deeply nested struct member access through uniform buffer
+    const source =
+        \\#version 450
+        \\struct Material { vec3 albedo; float metallic; float roughness; };
+        \\struct Object { mat4 transform; Material mat; };
+        \\layout(binding = 0) uniform U { Object obj; };
+        \\layout(location = 0) in vec3 pos;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 world = obj.transform * vec4(pos, 1.0);
+        \\    float r = obj.mat.roughness;
+        \\    fragColor = vec4(obj.mat.albedo * (1.0 - r), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T393.1: texture projection" {
+    // Tests textureProj for projected texturing
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 coord;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    fragColor = textureProj(tex, coord);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T394.1: integer division and modulo" {
+    // Tests integer arithmetic: div, mod, and mixed operations
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in int x;
+        \\flat layout(location = 1) in int y;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int d = x / y;
+        \\    int m = x % y;
+        \\    int neg = -d;
+        \\    int result = d + neg + m;
+        \\    fragColor = vec4(float(result));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T395.1: vec4 swizzle chain optimization" {
+    // Tests complex swizzle chains through the optimization pipeline
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 a = v.wxyz;
+        \\    vec4 b = a.zxyw;
+        \\    vec4 c = b.yxzw;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T396.1: complex boolean logic" {
+    // Tests boolean operations with short-circuit patterns
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 1) in float b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bool cond1 = a > 0.5;
+        \\    bool cond2 = b < 0.3;
+        \\    bool cond3 = !cond1 && cond2;
+        \\    bool cond4 = cond1 || cond3;
+        \\    float result = cond4 ? a : b;
+        \\    fragColor = vec4(result);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
