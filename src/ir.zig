@@ -239,6 +239,7 @@ pub const Instruction = struct {
         bit_or,
         bit_xor,
         bit_not,
+        bit_count,
         shift_left,
         shift_right,
         ext_inst,
