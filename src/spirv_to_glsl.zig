@@ -262,28 +262,34 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     defer module.deinit(alloc);
     const entry_id = module.entry_point_id orelse return error.NoEntryPoint;
 
-    var names = std.AutoHashMap(u32, []const u8).init(alloc);
-    defer { var it = names.iterator(); while(it.next())|e| alloc.free(e.value_ptr.*); names.deinit(); }
-    var decs = std.AutoHashMap(u32, std.ArrayList(DecorationEntry)).init(alloc);
-    defer { var it = decs.iterator(); while(it.next())|e| e.value_ptr.deinit(alloc); decs.deinit(); }
+    // Arena allocator for all backend internals — eliminates individual free() overhead
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
 
-    collectNames(alloc, &module, &names);
-    try collectDecorations(alloc, &module, &decs);
+    var names = std.AutoHashMap(u32, []const u8).init(aa);
+    defer names.deinit();
+    var decs = std.AutoHashMap(u32, std.ArrayList(DecorationEntry)).init(aa);
+    defer decs.deinit();
 
-    var cbuffers = std.ArrayList(CbufferDecl).initCapacity(alloc, 0) catch return error.OutOfMemory;
-    defer cbuffers.deinit(alloc);
-    var textures = std.ArrayList(TextureDecl).initCapacity(alloc, 0) catch return error.OutOfMemory;
-    defer textures.deinit(alloc);
-    collectResources(&module, &names, &decs, &cbuffers, &textures, alloc);
+    collectNames(aa, &module, &names);
+    try collectDecorations(aa, &module, &decs);
+
+    var cbuffers = std.ArrayList(CbufferDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
+    defer cbuffers.deinit(aa);
+    var textures = std.ArrayList(TextureDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
+    defer textures.deinit(aa);
+    collectResources(&module, &names, &decs, &cbuffers, &textures, aa);
 
     var output = std.ArrayList(u8).initCapacity(alloc, 4096) catch return error.OutOfMemory;
-    defer output.deinit(alloc);
+    var output_owned = true;
+    defer if (output_owned) output.deinit(alloc);
     const w = output.writer(alloc);
 
     try w.print("#version {d}\n\n", .{options.version});
     for (cbuffers.items) |cb| {
         try w.print("layout(binding = {d}, std140) uniform {s}\n{{\n", .{cb.binding, cb.name});
-        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, alloc);
+        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa);
         try w.print("}} {s}_1;\n\n", .{cb.name});
     }
     for (textures.items) |tex| {
@@ -291,16 +297,17 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
     if (textures.items.len > 0) try w.writeAll("\n");
 
-    var func_ids = std.ArrayList(u32).initCapacity(alloc, 8) catch return error.OutOfMemory;
-    defer func_ids.deinit(alloc);
-    for (module.instructions) |inst| { if (inst.op == .Function and inst.words.len > 2) try func_ids.append(alloc, inst.words[2]); }
+    var func_ids = std.ArrayList(u32).initCapacity(aa, 8) catch return error.OutOfMemory;
+    defer func_ids.deinit(aa);
+    for (module.instructions) |inst| { if (inst.op == .Function and inst.words.len > 2) try func_ids.append(aa, inst.words[2]); }
 
-    var out_param_info = std.AutoHashMap(u32, std.ArrayList(usize)).init(alloc);
-    defer { var it = out_param_info.iterator(); while(it.next())|e| e.value_ptr.deinit(alloc); out_param_info.deinit(); }
-    detectOutParams(&module, entry_id, &out_param_info, alloc);
+    var out_param_info = std.AutoHashMap(u32, std.ArrayList(usize)).init(aa);
+    defer { var it = out_param_info.iterator(); while(it.next())|e| e.value_ptr.deinit(aa); out_param_info.deinit(); }
+    detectOutParams(&module, entry_id, &out_param_info, aa);
 
-    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, alloc, false, &out_param_info); }
-    try emitFunction(&module, &names, &decs, entry_id, w, alloc, true, &out_param_info);
+    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info); }
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info);
+    output_owned = false;
     return output.toOwnedSlice(alloc);
 }
 
