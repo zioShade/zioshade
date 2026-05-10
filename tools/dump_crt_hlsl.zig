@@ -34,9 +34,17 @@ pub fn main() !void {
     });
     defer alloc.free(hlsl);
 
+    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+
     const out_file = try std.fs.cwd().createFile("tests/wintty/crt_output.hlsl", .{});
     defer out_file.close();
     try out_file.writeAll(hlsl);
     std.debug.print("HLSL output: {d} bytes, {d} SPIR-V words\n", .{ hlsl.len, spirv.len });
+
+    const glsl_file = try std.fs.cwd().createFile("tests/wintty/crt_output.glsl", .{});
+    defer glsl_file.close();
+    try glsl_file.writeAll(glsl);
+    std.debug.print("GLSL output: {d} bytes\n", .{glsl.len});
     std.debug.print("Saved to tests/wintty/crt_output.hlsl\n", .{});
 }
