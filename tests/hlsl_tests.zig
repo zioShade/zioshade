@@ -8914,3 +8914,79 @@ test "T376.1: push_constant uniform block" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T377.1: sampler1D texture lookup" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float coord;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler1D tex1d;
+        \\void main() {
+        \\    fragColor = texture(tex1d, coord);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Texture1D");
+}
+
+test "T378.1: samplerBuffer texel fetch" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int index;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform samplerBuffer texBuf;
+        \\void main() {
+        \\    fragColor = texelFetch(texBuf, index);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T379.1: samplerCubeArray" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 coord;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform samplerCubeArray cubeArr;
+        \\void main() {
+        \\    fragColor = texture(cubeArr, coord);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T380.1: dual source blending" {
+    // Tests layout(location = 0, index = 1) for dual-source blending
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0, index = 1) out vec4 fragBlend;
+        \\void main() {
+        \\    fragColor = vec4(1.0, 0.0, 0.0, 0.5);
+        \\    fragBlend = vec4(0.0, 1.0, 0.0, 0.5);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T381.1: gl_FragCoord in fragment shader" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 uv = gl_FragCoord.xy / vec2(800.0, 600.0);
+        \\    fragColor = vec4(uv, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
