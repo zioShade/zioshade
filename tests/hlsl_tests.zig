@@ -13182,3 +13182,117 @@ test "T591.1: FXAA edge detection" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T592.1: bloom composite upsampling" {
+    // Tests bloom composite with upsampling blend
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D scene;
+        \\layout(binding = 1) uniform sampler2D bloom0;
+        \\layout(binding = 2) uniform sampler2D bloom1;
+        \\layout(binding = 3) uniform sampler2D bloom2;
+        \\void main() {
+        \\    vec3 c = texture(scene, uv).rgb;
+        \\    c += texture(bloom0, uv).rgb * 0.5;
+        \\    c += texture(bloom1, uv).rgb * 0.25;
+        \\    c += texture(bloom2, uv).rgb * 0.125;
+        \\    fragColor = vec4(c, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T593.1: depth of field bokeh" {
+    // Tests depth of field with circle of confusion
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D colorTex;
+        \\layout(binding = 1) uniform sampler2D depthTex;
+        \\void main() {
+        \\    float depth = texture(depthTex, uv).r;
+        \\    float coc = abs(depth - 0.5) * 0.01;
+        \\    vec4 sum = vec4(0.0);
+        \\    for (int i = 0; i < 4; i++) {
+        \\        float angle = float(i) * 1.5708;
+        \\        vec2 offset = vec2(cos(angle), sin(angle)) * coc;
+        \\        sum += texture(colorTex, uv + offset);
+        \\    }
+        \\    fragColor = sum / 4.0;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T594.1: compute meshlet culling" {
+    // Tests compute meshlet culling with frustum check
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\struct Meshlet { vec4 bounds; uint offset; uint count; };
+        \\layout(std430, binding = 0) readonly buffer Meshlets { Meshlet meshlets[]; };
+        \\layout(std430, binding = 1) buffer Visible { uint visible[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    vec4 b = meshlets[id].bounds;
+        \\    float r = b.w;
+        \\    bool inside = b.x + r > -1.0 && b.x - r < 1.0 &&
+        \\                b.y + r > -1.0 && b.y - r < 1.0 &&
+        \\                b.z + r > 0.0;
+        \\    visible[id] = inside ? 1u : 0u;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T595.1: tessellation control passthrough" {
+    // Tests tessellation control shader passthrough
+    const source =
+        \\#version 450
+        \\layout(vertices = 3) out;
+        \\layout(location = 0) in vec3 vPos[];
+        \\layout(location = 0) out vec3 tcPos[];
+        \\void main() {
+        \\    tcPos[gl_InvocationID] = vPos[gl_InvocationID];
+        \\    if (gl_InvocationID == 0) {
+        \\        gl_TessLevelInner[0] = 1.0;
+        \\        gl_TessLevelOuter[0] = 1.0;
+        \\        gl_TessLevelOuter[1] = 1.0;
+        \\        gl_TessLevelOuter[2] = 1.0;
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .tessellation_control);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T596.1: tessellation evaluation triangle" {
+    // Tests tessellation evaluation shader for triangles
+    const source =
+        \\#version 450
+        \\layout(triangles, equal_spacing, cw) in;
+        \\layout(location = 0) in vec3 tcPos[];
+        \\layout(location = 0) out vec3 tePos;
+        \\void main() {
+        \\    vec3 p0 = gl_TessCoord.x * tcPos[0];
+        \\    vec3 p1 = gl_TessCoord.y * tcPos[1];
+        \\    vec3 p2 = gl_TessCoord.z * tcPos[2];
+        \\    tePos = p0 + p1 + p2;
+        \\    gl_Position = vec4(tePos, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .tessellation_evaluation);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
