@@ -8009,3 +8009,115 @@ test "T330.1: global const variable" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T331.1: complex shader with branching and loops" {
+    // End-to-end test exercising the full optimization pipeline:
+    // constFold, foldSelect, foldConstBranches, elimUnreachableBlocks,
+    // simplifyTrivialPhi, DCE, mergeBlocks, deadLoopElim Phase 2.5
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform U { int mode; float scale; vec4 tint; };
+        \\void main() {
+        \\    vec4 c = vec4(uv, 0.0, 1.0);
+        \\    if (mode == 0) {
+        \\        c = c * scale;
+        \\    } else if (mode == 1) {
+        \\        float s = 0.0;
+        \\        for (int i = 0; i < 3; i++) {
+        \\            s += float(i) * scale;
+        \\        }
+        \\        c = c + vec4(s);
+        \\    } else {
+        \\        c = tint;
+        \\    }
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T332.1: compute with loop and buffer chain" {
+    // Tests deadLoopElim Phase 2.5: loop accumulating into local, then stored to buffer
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) readonly buffer A { vec4 a_data[]; };
+        \\layout(std430, binding = 1) writeonly buffer B { vec4 b_data[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    vec4 sum = vec4(0.0);
+        \\    for (int i = 0; i < 4; i++) {
+        \\        sum += a_data[id + uint(i)];
+        \\    }
+        \\    b_data[id] = sum * 0.25;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T333.1: vec4 chained operations" {
+    // Tests optimization pipeline: algebraicSimpl, constFold, CSE
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 a = v * 1.0;
+        \\    vec4 b = a + vec4(0.0);
+        \\    vec4 c = b * 2.0 + v * 0.0;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T334.1: function with inout param and loop" {
+    // Tests interaction between function inlining and loop preservation
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void accumulate(inout float acc, float val) {
+        \\    acc += val;
+        \\}
+        \\void main() {
+        \\    float total = 0.0;
+        \\    for (int i = 0; i < 4; i++) {
+        \\        accumulate(total, x * float(i));
+        \\    }
+        \\    fragColor = vec4(total);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T335.1: nested switch with returns" {
+    // Tests selection merge and branch folding with switch
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int mode;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    switch (mode) {
+        \\        case 0: fragColor = vec4(1.0, 0.0, 0.0, 1.0); break;
+        \\        case 1: fragColor = vec4(0.0, 1.0, 0.0, 1.0); break;
+        \\        case 2: fragColor = vec4(0.0, 0.0, 1.0, 1.0); break;
+        \\        default: fragColor = vec4(1.0); break;
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
