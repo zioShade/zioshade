@@ -9925,3 +9925,94 @@ test "T426.1: PBR metallic-roughness lighting" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T427.1: textureGather component selection" {
+    // Tests textureGather with explicit component
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec4 g = textureGather(tex, uv, 0);
+        \\    fragColor = g;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T428.1: compute 3D dispatch" {
+    // Tests compute with 3D workgroup dimensions
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uvec3 id = gl_GlobalInvocationID;
+        \\    uint idx = id.x + id.y * 4u + id.z * 16u;
+        \\    values[idx] = float(idx);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T429.1: nested ternary expressions" {
+    // Tests deeply nested ternary operators
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v = x < 0.25 ? 0.0 : (x < 0.5 ? 1.0 : (x < 0.75 ? 2.0 : 3.0));
+        \\    fragColor = vec4(v / 3.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T430.1: integer absolute and sign" {
+    // Tests abs and sign on integer types
+    const source =
+        \\#version 450
+        \\flat layout(location = 0) in int x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = abs(x);
+        \\    int s = sign(x);
+        \\    int r = a * s + x;
+        \\    fragColor = vec4(float(r));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T431.1: function with array parameter" {
+    // Tests passing array as function parameter
+    const source =
+        \\#version 450
+        \\layout(location = 0) in int idx;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float sum3(float v[3]) {
+        \\    return v[0] + v[1] + v[2];
+        \\}
+        \\void main() {
+        \\    float vals[3];
+        \\    vals[0] = 1.0;
+        \\    vals[1] = 2.0;
+        \\    vals[2] = 3.0;
+        \\    fragColor = vec4(sum3(vals));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
