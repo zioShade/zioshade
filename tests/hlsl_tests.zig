@@ -12821,3 +12821,123 @@ test "T576.1: deferred lighting pass" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T577.1: SSAO screen-space ambient occlusion" {
+    // Tests SSAO kernel sampling pattern
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D gDepth;
+        \\layout(binding = 1) uniform sampler2D gNormal;
+        \\layout(binding = 2) uniform sampler2D noiseTex;
+        \\const vec3 kernel[4] = vec3[4](
+        \\    vec3(0.1, 0.0, 0.1), vec3(-0.1, 0.1, 0.0),
+        \\    vec3(0.0, -0.1, 0.1), vec3(0.1, 0.1, 0.1));
+        \\void main() {
+        \\    vec3 N = normalize(texture(gNormal, uv).rgb * 2.0 - 1.0);
+        \\    vec3 rand = texture(noiseTex, uv * 4.0).xyz;
+        \\    float occlusion = 0.0;
+        \\    for (int i = 0; i < 4; i++) {
+        \\        vec3 s = kernel[i];
+        \\        s = mix(N, s, 0.5);
+        \\        occlusion += max(dot(N, s), 0.0);
+        \\    }
+        \\    fragColor = vec4(1.0 - occlusion / 4.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T578.1: compute N-body gravity" {
+    // Tests compute N-body gravity simulation
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\struct Particle { vec4 pos; vec4 vel; };
+        \\layout(std430, binding = 0) buffer Particles { Particle p[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    vec3 acc = vec3(0.0);
+        \\    for (uint i = 0u; i < 64u; i++) {
+        \\        if (i != id) {
+        \\            vec3 r = p[i].pos.xyz - p[id].pos.xyz;
+        \\            float d = length(r) + 0.001;
+        \\            acc += r / (d * d * d);
+        \\        }
+        \\    }
+        \\    p[id].vel.xyz += acc * 0.01;
+        \\    p[id].pos.xyz += p[id].vel.xyz * 0.01;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T579.1: tone mapping Reinhard extended" {
+    // Tests extended Reinhard tone mapping with white point
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D hdrTex;
+        \\void main() {
+        \\    vec3 hdr = texture(hdrTex, uv).rgb;
+        \\    float white = 4.0;
+        \\    vec3 mapped = hdr * (1.0 + hdr / (white * white)) / (1.0 + hdr);
+        \\    mapped = pow(mapped, vec3(1.0 / 2.2));
+        \\    fragColor = vec4(mapped, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T580.1: atmospheric fog" {
+    // Tests atmospheric fog calculation
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 worldPos;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float dist = length(worldPos);
+        \\    float fogFactor = exp(-0.02 * dist);
+        \\    fogFactor = clamp(fogFactor, 0.0, 1.0);
+        \\    vec3 fogColor = vec3(0.7, 0.8, 0.9);
+        \\    vec3 objColor = vec3(0.5);
+        \\    fragColor = vec4(mix(fogColor, objColor, fogFactor), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T581.1: compute radix sort prefix" {
+    // Tests compute radix sort prefix sum for histogram
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 256) in;
+        \\layout(std430, binding = 0) buffer Keys { uint keys[]; };
+        \\layout(std430, binding = 1) buffer Counts { uint counts[]; };
+        \\shared uint local_counts[256];
+        \\void main() {
+        \\    uint id = gl_LocalInvocationID.x;
+        \\    local_counts[id] = 0u;
+        \\    barrier();
+        \\    uint key = keys[gl_GlobalInvocationID.x];
+        \\    uint digit = key & 0xFFu;
+        \\    atomicAdd(local_counts[digit], 1u);
+        \\    barrier();
+        \\    counts[id] = local_counts[id];
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
