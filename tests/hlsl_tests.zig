@@ -8199,3 +8199,136 @@ test "T340.1: bitfieldInsert" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T341.1: PCF shadow mapping" {
+    // Common real-world pattern: percentage-closer filtering
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2DShadow shadowMap;
+        \\layout(location = 0) uniform vec3 lightPos;
+        \\void main() {
+        \\    float shadow = 0.0;
+        \\    vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0));
+        \\    for (int x = -1; x <= 1; ++x) {
+        \\        for (int y = -1; y <= 1; ++y) {
+        \\            shadow += texture(shadowMap, vec3(uv + vec2(x, y) * texelSize, lightPos.z));
+        \\        }
+        \\    }
+        \\    shadow /= 9.0;
+        \\    fragColor = vec4(shadow);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T342.1: normal mapping with tangent space" {
+    // Common pattern: normal mapping with tangent-space transform
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 normal;
+        \\layout(location = 1) in vec3 tangent;
+        \\layout(location = 2) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D normalMap;
+        \\void main() {
+        \\    vec3 N = normalize(normal);
+        \\    vec3 T = normalize(tangent);
+        \\    vec3 B = cross(N, T);
+        \\    vec3 mapN = texture(normalMap, uv).xyz * 2.0 - 1.0;
+        \\    vec3 result = normalize(T * mapN.x + B * mapN.y + N * mapN.z);
+        \\    fragColor = vec4(result * 0.5 + 0.5, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T343.1: Gaussian blur horizontal" {
+    // Common post-processing pattern: separable Gaussian blur
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D image;
+        \\void main() {
+        \\    vec2 texSize = vec2(textureSize(image, 0));
+        \\    vec2 texel = 1.0 / texSize;
+        \\    vec4 result = vec4(0.0);
+        \\    result += texture(image, uv + vec2(-3.0, 0.0) * texel) * 0.015625;
+        \\    result += texture(image, uv + vec2(-2.0, 0.0) * texel) * 0.09375;
+        \\    result += texture(image, uv + vec2(-1.0, 0.0) * texel) * 0.234375;
+        \\    result += texture(image, uv) * 0.3125;
+        \\    result += texture(image, uv + vec2(1.0, 0.0) * texel) * 0.234375;
+        \\    result += texture(image, uv + vec2(2.0, 0.0) * texel) * 0.09375;
+        \\    result += texture(image, uv + vec2(3.0, 0.0) * texel) * 0.015625;
+        \\    fragColor = result;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T344.1: Cook-Torrance BRDF" {
+    // PBR lighting: Cook-Torrance specular BRDF
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 N;
+        \\layout(location = 1) in vec3 V;
+        \\layout(location = 2) in vec3 L;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 H = normalize(V + L);
+        \\    float NdotH = max(dot(N, H), 0.0);
+        \\    float NdotV = max(dot(N, V), 0.0);
+        \\    float NdotL = max(dot(N, L), 0.0);
+        \\    float VdotH = max(dot(V, H), 0.0);
+        \\    float roughness = 0.5;
+        \\    float a2 = roughness * roughness;
+        \\    float D = a2 / (3.14159 * pow(NdotH * NdotH * (a2 - 1.0) + 1.0, 2.0));
+        \\    float G = min(1.0, min(2.0 * NdotH * NdotV / VdotH, 2.0 * NdotH * NdotL / VdotH));
+        \\    vec3 F0 = vec3(0.04);
+        \\    vec3 F = F0 + (1.0 - F0) * pow(1.0 - VdotH, 5.0);
+        \\    vec3 spec = (D * G * F) / (4.0 * NdotV * NdotL + 0.001);
+        \\    fragColor = vec4(spec, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T345.1: compute prefix sum (scan)" {
+    // Common compute pattern: parallel prefix sum
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 256) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\shared float temp[256];
+        \\void main() {
+        \\    uint id = gl_LocalInvocationID.x;
+        \\    temp[id] = values[id];
+        \\    barrier();
+        \\    uint offset = 1u;
+        \\    for (uint d = 128u; d > 0u; d >>= 1u) {
+        \\        if (id < d) {
+        \\            uint ai = offset * (2u * id + 1u) - 1u;
+        \\            uint bi = offset * (2u * id + 2u) - 1u;
+        \\            temp[bi] += temp[ai];
+        \\        }
+        \\        offset *= 2u;
+        \\        barrier();
+        \\    }
+        \\    values[id] = temp[id];
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
