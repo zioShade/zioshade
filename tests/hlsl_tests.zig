@@ -13061,3 +13061,124 @@ test "T586.1: compute particle emission" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "main");
 }
+
+
+test "T587.1: screen-space reflections" {
+    // Tests SSR ray marching pattern
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D gDepth;
+        \\layout(binding = 1) uniform sampler2D gNormal;
+        \\layout(binding = 2) uniform sampler2D gColor;
+        \\void main() {
+        \\    vec3 N = normalize(texture(gNormal, uv).rgb * 2.0 - 1.0);
+        \\    vec3 V = vec3(0.0, 0.0, 1.0);
+        \\    vec3 R = reflect(-V, N);
+        \\    vec2 hitUV = uv + R.xy * 0.1;
+        \\    vec4 reflection = texture(gColor, hitUV);
+        \\    fragColor = texture(gColor, uv) + reflection * 0.3;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T588.1: motion blur post-process" {
+    // Tests motion blur with velocity buffer
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D colorTex;
+        \\layout(binding = 1) uniform sampler2D velocityTex;
+        \\void main() {
+        \\    vec2 vel = texture(velocityTex, uv).rg;
+        \\    vec4 sum = vec4(0.0);
+        \\    for (int i = 0; i < 5; i++) {
+        \\        float t = float(i) / 4.0;
+        \\        sum += texture(colorTex, uv - vel * t);
+        \\    }
+        \\    fragColor = sum / 5.0;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T589.1: compute marching cubes table lookup" {
+    // Tests compute with uniform buffer table lookup
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+        \\layout(std430, binding = 0) buffer Densities { float density[]; };
+        \\layout(std430, binding = 1) buffer Vertices { float vertices[]; };
+        \\layout(std140, binding = 0) uniform Params {
+        \\    uvec3 gridSize;
+        \\    float isoLevel;
+        \\};
+        \\void main() {
+        \\    uvec3 id = gl_GlobalInvocationID;
+        \\    uint flat = id.x + id.y * gridSize.x + id.z * gridSize.x * gridSize.y;
+        \\    float d = density[flat];
+        \\    if (d > isoLevel) {
+        \\        vertices[flat * 3u] = float(id.x);
+        \\        vertices[flat * 3u + 1u] = float(id.y);
+        \\        vertices[flat * 3u + 2u] = float(id.z);
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T590.1: vertex morph targets" {
+    // Tests vertex morph target blending
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 pos0;
+        \\layout(location = 1) in vec3 pos1;
+        \\layout(location = 2) in vec3 normal0;
+        \\layout(location = 3) in vec3 normal1;
+        \\layout(push_constant) uniform PC { float blend; };
+        \\void main() {
+        \\    vec3 pos = mix(pos0, pos1, blend);
+        \\    vec3 norm = normalize(mix(normal0, normal1, blend));
+        \\    gl_Position = vec4(pos, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T591.1: FXAA edge detection" {
+    // Tests FXAA luminance-based edge detection
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    float l = dot(texture(tex, uv).rgb, vec3(0.299, 0.587, 0.114));
+        \\    float lN = dot(texture(tex, uv + vec2(0.0, 0.001)).rgb, vec3(0.299, 0.587, 0.114));
+        \\    float lS = dot(texture(tex, uv - vec2(0.0, 0.001)).rgb, vec3(0.299, 0.587, 0.114));
+        \\    float lE = dot(texture(tex, uv + vec2(0.001, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
+        \\    float lW = dot(texture(tex, uv - vec2(0.001, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
+        \\    float range = max(l, max(lN, max(lS, max(lE, lW)))) - min(l, min(lN, min(lS, min(lE, lW))));
+        \\    if (range > 0.1) {
+        \\        vec2 dir = vec2(lE - lW, lN - lS) / range;
+        \\        fragColor = texture(tex, uv + dir * 0.002);
+        \\    } else {
+        \\        fragColor = texture(tex, uv);
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
