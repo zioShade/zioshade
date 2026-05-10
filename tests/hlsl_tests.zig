@@ -10109,3 +10109,94 @@ test "T436.1: textureQueryLod" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T437.1: image load/store rgba8" {
+    // Tests image2D with rgba8 format qualifier
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 8, local_size_y = 8) in;
+        \\layout(binding = 0, rgba8) uniform image2D img;
+        \\void main() {
+        \\    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+        \\    vec4 c = imageLoad(img, coord);
+        \\    imageStore(img, coord, c * 0.5);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T438.1: gl_BaseVertex and gl_BaseInstance" {
+    // Tests gl_BaseVertex and gl_BaseInstance draw parameters
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 pos;
+        \\void main() {
+        \\    float offset = float(gl_BaseVertex + gl_BaseInstance);
+        \\    gl_Position = pos + vec4(offset, 0.0, 0.0, 0.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T439.1: vec4 negation chain" {
+    // Tests multiple negations: a = -x, b = -a, c = a + b (should fold to 0)
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 a = -x;
+        \\    vec4 b = -a;
+        \\    vec4 c = a + b;
+        \\    fragColor = c + x;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T440.1: float comparision chain" {
+    // Tests chained comparisons: min(max(clamp(...)))
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float c = clamp(x, 0.0, 1.0);
+        \\    float m = min(c * 2.0, 1.0);
+        \\    float mx = max(m - 0.5, 0.0);
+        \\    fragColor = vec4(mx);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T441.1: struct array in uniform block" {
+    // Tests array of structs in uniform buffer
+    const source =
+        \\#version 450
+        \\struct Light { vec3 pos; vec3 color; float intensity; };
+        \\layout(binding = 0) uniform U { Light lights[4]; vec3 ambient; };
+        \\layout(location = 0) in vec3 normal;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 color = ambient;
+        \\    for (int i = 0; i < 4; i++) {
+        \\        float d = distance(lights[i].pos, normal * 10.0);
+        \\        color += lights[i].color * lights[i].intensity / (d + 1.0);
+        \\    }
+        \\    fragColor = vec4(color, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
