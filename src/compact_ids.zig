@@ -9382,6 +9382,7 @@ pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error
             }
             if (phi_ok and phi_buf.items.len >= 4) {
                 // Emit fixed OpPhi with only valid entries
+                // Single-entry phis will be cleaned up by simplifyTrivialPhi
                 const new_wc: u32 = @intCast(phi_buf.items.len + 1);
                 result.append(alloc, (new_wc << 16) | 245) catch return words;
                 result.appendSlice(alloc, phi_buf.items) catch return words;
