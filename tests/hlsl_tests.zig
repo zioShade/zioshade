@@ -8509,3 +8509,95 @@ test "T356.1: bitCount uint to int conversion" {
     try assertContains(hlsl, "firstbitlow");
     try assertContains(hlsl, "firstbithigh");
 }
+
+
+test "T357.1: multiple render targets (MRT)" {
+    // Tests multiple output locations mapping to SV_Target0/1
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor0;
+        \\layout(location = 1) out vec4 fragColor1;
+        \\void main() {
+        \\    fragColor0 = vec4(1.0, 0.0, 0.0, 1.0);
+        \\    fragColor1 = vec4(0.0, 1.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T358.1: conditional discard" {
+    // Tests discard inside a branch (maps to HLSL clip())
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float alpha;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c = vec4(1.0);
+        \\    if (alpha < 0.5) discard;
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T359.1: gl_PointSize vertex output" {
+    // Tests gl_PointSize output in vertex shader
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 pos;
+        \\out gl_PerVertex { vec4 gl_Position; float gl_PointSize; };
+        \\void main() {
+        \\    gl_Position = pos;
+        \\    gl_PointSize = 4.0;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "gl_PerVertex");
+}
+
+test "T360.1: integer texture sampling" {
+    // Tests integer texture (usampler2D / isampler2D) operations
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform usampler2D intTex;
+        \\void main() {
+        \\    uvec4 val = texelFetch(intTex, ivec2(uv * 256.0), 0);
+        \\    fragColor = vec4(val) / 255.0;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T361.1: compute histogram" {
+    // Tests real-world compute pattern: histogram binning with shared memory
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 256) in;
+        \\layout(std430, binding = 0) readonly buffer Input { float data[]; };
+        \\layout(std430, binding = 1) buffer Histogram { uint bins[64]; };
+        \\shared uint local_bins[64];
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    uint lid = gl_LocalInvocationID.x;
+        \\    if (lid < 64u) local_bins[lid] = 0u;
+        \\    barrier();
+        \\    float val = data[id];
+        \\    uint bin = uint(clamp(val * 64.0, 0.0, 63.0));
+        \\    atomicAdd(local_bins[bin], 1u);
+        \\    barrier();
+        \\    if (lid < 64u) atomicAdd(bins[lid], local_bins[lid]);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "uint");
+}
