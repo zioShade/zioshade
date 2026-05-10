@@ -11969,3 +11969,101 @@ test "T536.1: switch with multiple cases fall-through" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T537.1: outerProduct vec3xvec3" {
+    // Tests outerProduct producing a mat3 from two vec3
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 b = vec3(1.0, 2.0, 3.0);
+        \\    mat3 m = outerProduct(a, b);
+        \\    vec3 r = m * vec3(1.0);
+        \\    fragColor = vec4(r, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T538.1: matrixCompMult" {
+    // Tests matrixCompMult component-wise multiply
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 a = mat4(1.0);
+        \\    mat4 b = mat4(x);
+        \\    mat4 c = matrixCompMult(a, b);
+        \\    vec4 r = c * vec4(1.0);
+        \\    fragColor = r;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T539.1: inverse mat4" {
+    // Tests inverse on mat4
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 m = mat4(1.0, 0.0, 0.0, 0.0,
+        \\                   0.0, 2.0, 0.0, 0.0,
+        \\                   0.0, 0.0, 3.0, 0.0,
+        \\                   1.0, 2.0, 3.0, 1.0);
+        \\    mat4 inv = inverse(m);
+        \\    fragColor = inv * v;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T540.1: compute with conditional SSBO write" {
+    // Tests compute with conditional store to SSBO
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    float v = values[id];
+        \\    if (v > 0.5) {
+        \\        values[id] = v * 2.0;
+        \\    } else {
+        \\        values[id] = v * 0.5;
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T541.1: complex expression with many operators" {
+    // Tests complex arithmetic expression chain
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = x + x * x - x / (x + 1.0);
+        \\    float b = sin(a) * cos(a) + tan(a * 0.1);
+        \\    float c = pow(abs(b), 2.0) + sqrt(abs(a));
+        \\    float d = log(max(c, 0.001)) + exp(min(c, 10.0));
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
