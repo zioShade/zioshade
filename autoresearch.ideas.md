@@ -38,3 +38,17 @@
 
 ### Array of samplers HLSL emission not ideal
 - Treated as cbuffer members instead of Texture2D arrays
+
+### findMSB(uint) type mismatch — needs proper fix
+- **Symptom**: `findMSB(uint_val)` returns `uint` in our implementation but should return `int` per GLSL spec
+- **Root cause**: The semantic analyzer uses `arg_tids.items[0].ty` as `result_ty` for GLSL builtins. For `findMSB(uint)`, result_ty = uint, but GLSL says findMSB always returns int/ivec.
+- **Fix needed**: Add special-case in the function call handler to override result_ty for findLSB/findMSB to always be int (or ivecN based on input vector size)
+- **Workaround**: Test T350 uses explicit `uint()` cast
+
+### bitfieldReverse unimplemented
+- GLSL `bitfieldReverse(x)` → SPIR-V OpBitReverse (opcode 189)
+- Need to add to spirv.zig enum, ir.zig tag, semantic.zig handler, codegen.zig, spirv_to_hlsl.zig
+- HLSL equivalent: `reversebits()` for uint, `reversebits()` for int
+
+### uaddCarry, usubBorrow unimplemented
+- These return structs (carry + result) making them more complex to implement
