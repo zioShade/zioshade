@@ -3,10 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Pre-check: build first (fast syntax check)
+# Pre-check: build in Debug mode (fast syntax check) + run reference tests
 mise exec -- zig build 2>&1
 
-# Pre-check: reference tests must still pass
 set +e
 ref_output=$(mise exec -- zig build test-reference 2>&1)
 set -e
@@ -32,11 +31,11 @@ if [ "$ref_failed" -ne 0 ]; then
     exit 0
 fi
 
-# Find the latest dump-crt binary
-EXE=$(find .zig-cache -name "dump-crt.exe" -newer tools/dump_crt_hlsl.zig -type f | head -1)
-if [ -z "$EXE" ]; then
-    EXE=$(find .zig-cache -name "dump-crt.exe" -type f -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
-fi
+# Build dump-crt in ReleaseFast for accurate performance measurement
+mise exec -- zig build -Doptimize=ReleaseFast dump-crt 2>&1
+
+# Find the ReleaseFast dump-crt binary (smallest exe = optimized, no debug info)
+EXE=$(find .zig-cache -name "dump-crt.exe" -type f -printf '%s %p\n' | sort -n | head -1 | cut -d' ' -f2-)
 if [ -z "$EXE" ]; then
     echo "METRIC total_ms=99999"
     echo "METRIC test_failures=999"
