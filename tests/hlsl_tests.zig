@@ -9530,3 +9530,90 @@ test "T406.1: mat3 construction from vec3 columns" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T407.1: mat4x3 multiply vec4" {
+    // Non-square matrix: mat4x3 * vec4 = vec3
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat4x3 m; };
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 r = m * v;
+        \\    fragColor = vec4(r, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T408.1: mat3x2 multiply vec3" {
+    // Non-square matrix: mat3x2 * vec3 = vec2
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat3x2 m; };
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 r = m * v;
+        \\    fragColor = vec4(r, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T409.1: vec * mat (vector-matrix multiply)" {
+    // vec4 * mat4 = vec4 (row vector convention)
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat4 m; };
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 r = v * m;
+        \\    fragColor = r;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T410.1: layout offset and align" {
+    // Tests explicit layout(offset) on uniform block members
+    const source =
+        \\#version 450
+        \\layout(std140, binding = 0) uniform U {
+        \\    layout(offset = 0) vec3 color;
+        \\    layout(offset = 16) float intensity;
+        \\};
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(color * intensity, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T411.1: texture with bias" {
+    // Tests texture() with optional bias parameter
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec4 c = texture(tex, uv, 1.5);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
