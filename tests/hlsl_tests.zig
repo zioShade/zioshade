@@ -10854,3 +10854,92 @@ test "T476.1: gl_Layer in fragment" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T477.1: textureGrad explicit gradients" {
+    // Tests textureGrad with explicit gradients
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec2 dx = dFdx(uv);
+        \\    vec2 dy = dFdy(uv);
+        \\    vec4 c = textureGrad(tex, uv, dx * 2.0, dy * 2.0);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T478.1: layout early_fragment_tests" {
+    // Tests early_fragment_tests layout qualifier
+    const source =
+        \\#version 450
+        \\layout(early_fragment_tests) in;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(uv, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T479.1: mat2 inverse and determinant" {
+    // Tests mat2 inverse() and determinant()
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat2 m = mat2(1.0, 2.0, 3.0, 4.0);
+        \\    float d = determinant(m);
+        \\    mat2 inv = inverse(m);
+        \\    vec2 v = inv * uv;
+        \\    fragColor = vec4(v, d, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T480.1: compute atomic add" {
+    // Tests atomic add in compute shader
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Data { uint counters[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    atomicAdd(counters[id % 16u], 1u);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T481.1: mix function with bool selector" {
+    // Tests mix() with boolean third argument
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bool sel = x > 0.5;
+        \\    float v = mix(0.0, 1.0, sel);
+        \\    vec4 w = mix(vec4(0.0), vec4(1.0), bvec4(sel, !sel, sel, true));
+        \\    fragColor = vec4(v) + w;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
