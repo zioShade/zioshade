@@ -159,6 +159,7 @@ pub fn compileGlslToHlsl(
     defer alloc.free(spirv_words);
 
     const hlsl = try spirvToHLSL(alloc, spirv_words, .{
+        .binding_shift = -1, // remap binding=1 (shadertoy Globals) -> register(b0)
         .shader_model = 60,
     });
     // The result from spirvToHLSL is []const u8, not null-terminated.
@@ -275,10 +276,12 @@ test "compileToSPIRVWithDiagnostics reports error location" {
         diags.deinit(alloc);
     }
 
-    // Use a shader that fails at lex stage
+    // Use a shader with a deliberate semantic error that triggers error reporting
     const result = compileToSPIRVWithDiagnostics(
         alloc,
-        "void main() { \x00\x01\x02 }",
+        \\#version 430
+        \\void main() { undeclared_var = 42; }
+    ,
         .{ .stage = .fragment },
         &diags,
     );

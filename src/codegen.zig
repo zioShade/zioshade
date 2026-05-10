@@ -6,6 +6,7 @@ const spirv = @import("spirv.zig");
 const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 const semantic = @import("semantic.zig");
+const preprocessor = @import("preprocessor.zig");
 const compact_ids = @import("compact_ids.zig");
 const loop_phi = @import("loop_counter_phi.zig");
 const fold_ec = @import("fold_extract_construct.zig");
@@ -4895,10 +4896,24 @@ test "codegen: if/else produces OpSelectionMerge and OpBranchConditional" {
 
 test "codegen: for loop produces OpLoopMerge" {
     const alloc = std.testing.allocator;
-    const source = "void main() { for (int i = 0; i < 10; i = i + 1) { float x = 1.0; } }";
+    // The loop must have an observable effect (write to output) so DCE/deadLoopElim
+    // doesn't remove it. A bare `float x = 1.0;` is dead code.
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 _fragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 10; i = i + 1) { sum = sum + 1.0; }
+        \\    _fragColor = vec4(sum);
+        \\}
+    ;
     const tokens = try lexer.tokenize(alloc, source);
     defer alloc.free(tokens);
-    var root = try parser.parse(alloc, source, tokens);
+    var pp = preprocessor.Preprocessor.init(alloc);
+    defer pp.deinit();
+    const pp_tokens = pp.process(source, tokens) catch tokens;
+    defer if (pp_tokens.ptr != tokens.ptr) alloc.free(pp_tokens);
+    var root = try parser.parse(alloc, source, pp_tokens);
     defer parser.freeTree(alloc, &root);
     var module = semantic.analyze(alloc, &root) catch |err| {
         if (err == error.TypeMismatch) return;
