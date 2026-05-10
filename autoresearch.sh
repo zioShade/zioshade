@@ -44,23 +44,22 @@ fi
 
 # Performance benchmark: measure cross-compilation time (SPIR-V → HLSL+GLSL+MSL)
 # Run 11 iterations, take minimum (most stable estimator for noisy benchmarks)
-min_cross_ms=99999
+min_cross_us=999999999
 for i in $(seq 1 11); do
     output=$("$EXE" 2>&1) || true
     cross_us=$(echo "$output" | grep 'METRIC cross_us=' | sed 's/METRIC cross_us=//')
     if [ -n "$cross_us" ]; then
-        cross_ms=$((cross_us / 1000))
-        if [ "$cross_ms" -lt "$min_cross_ms" ]; then
-            min_cross_ms=$cross_ms
+        if [ "$cross_us" -lt "$min_cross_us" ]; then
+            min_cross_us=$cross_us
         fi
     fi
 done
 
-if [ "$min_cross_ms" -eq 99999 ]; then
-    echo "METRIC total_ms=99999"
+if [ "$min_cross_us" -eq 999999999 ]; then
+    echo "METRIC cross_total_us=999999999"
     echo "METRIC test_failures=999"
     exit 0
 fi
 
-echo "METRIC total_ms=${min_cross_ms}"
+echo "METRIC cross_total_us=${min_cross_us}"
 echo "METRIC test_failures=${ref_failed}"
