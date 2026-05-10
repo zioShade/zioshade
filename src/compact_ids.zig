@@ -9050,16 +9050,16 @@ pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error
     const bound = words[3];
     if (bound <= 1) return words;
 
-    // Phase 1: Collect all label IDs that are targeted by branches
-    var targeted = try std.DynamicBitSet.initEmpty(alloc, bound);
-    defer targeted.deinit();
-    // Entry point function labels are always reachable
-    var func_entry_labels = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
-    defer func_entry_labels.deinit();
+    // Phase 1: Build map of label_id -> position of OpLabel instruction
+    var label_pos = std.AutoHashMapUnmanaged(u32, u32){};
+    defer label_pos.deinit(alloc);
+    // Also collect function entry labels
+    var func_entries = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer func_entries.deinit();
+    var in_function = false;
+    var first_label = true;
 
     var pos: u32 = 5;
-    var in_function = false;
-    var first_label_in_func = true;
     while (pos < words.len) {
         const hdr = words[pos];
         const wc: u32 = hdr >> 16;
@@ -9067,68 +9067,15 @@ pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
-
         switch (opcode) {
-            54 => { // OpFunction
-                in_function = true;
-                first_label_in_func = true;
-            },
-            56 => { // OpFunctionEnd
-                in_function = false;
-            },
-            248 => { // OpLabel
-                if (in_function and first_label_in_func) {
-                    const lbl = words[pos + 1];
-                    if (lbl >= 1 and lbl < bound) func_entry_labels.set(lbl);
-                    first_label_in_func = false;
-                }
-            },
-            249 => { // OpBranch
-                if (wc >= 2) {
-                    const target = words[pos + 1];
-                    if (target >= 1 and target < bound) targeted.set(target);
-                }
-            },
-            250 => { // OpBranchConditional
-                if (wc >= 4) {
-                    if (words[pos + 2] >= 1 and words[pos + 2] < bound) targeted.set(words[pos + 2]);
-                    if (words[pos + 3] >= 1 and words[pos + 3] < bound) targeted.set(words[pos + 3]);
-                }
-            },
-            251 => { // OpSwitch
-                if (wc >= 3) {
-                    const default_target = words[pos + 2];
-                    if (default_target >= 1 and default_target < bound) targeted.set(default_target);
-                    var si: u32 = pos + 3;
-                    while (si + 1 < ie) : (si += 2) {
-                        const case_target = words[si + 1];
-                        if (case_target >= 1 and case_target < bound) targeted.set(case_target);
-                    }
-                }
-            },
-            246 => { // OpLoopMerge
-                if (wc >= 3) {
-                    const merge = words[pos + 1];
-                    const cont = words[pos + 2];
-                    if (merge >= 1 and merge < bound) targeted.set(merge);
-                    if (cont >= 1 and cont < bound) targeted.set(cont);
-                }
-            },
-            247 => { // OpSelectionMerge
-                if (wc >= 2) {
-                    const merge = words[pos + 1];
-                    if (merge >= 1 and merge < bound) targeted.set(merge);
-                }
-            },
-            245 => { // OpPhi: (value, parent)+ — protect parent labels
-                if (wc >= 5) {
-                    var pi: u32 = pos + 4; // skip type, result, first value
-                    while (pi < ie) : (pi += 2) {
-                        if (pi < ie) {
-                            const parent = words[pi];
-                            if (parent >= 1 and parent < bound) targeted.set(parent);
-                        }
-                    }
+            54 => { in_function = true; first_label = true; },
+            56 => { in_function = false; },
+            248 => if (wc >= 2) {
+                const lbl = words[pos + 1];
+                label_pos.put(alloc, lbl, pos) catch {};
+                if (in_function and first_label and lbl >= 1 and lbl < bound) {
+                    func_entries.set(lbl);
+                    first_label = false;
                 }
             },
             else => {},
@@ -9136,11 +9083,87 @@ pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error
         pos = ie;
     }
 
-    // Entry labels are always reachable
-    var bli = func_entry_labels.iterator(.{});
-    while (bli.next()) |idx| targeted.set(idx);
+    // Phase 2: Forward reachability analysis
+    // Start from function entry labels, follow branches transitively
+    var reachable = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer reachable.deinit();
 
-    // Phase 2: Find unreachable blocks (labels not targeted)
+    // Seed with function entry labels
+    var fei = func_entries.iterator(.{});
+    while (fei.next()) |idx| reachable.set(idx);
+
+    // Iteratively discover reachable blocks
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var ri = reachable.iterator(.{});
+        while (ri.next()) |lbl| {
+            // Find the block starting at this label and scan for branch instructions
+            const lp = label_pos.get(@intCast(lbl)) orelse continue;
+            var bp: u32 = lp;
+            while (bp < words.len) {
+                const bhdr = words[bp];
+                const bwc: u32 = bhdr >> 16;
+                const bop: u16 = @truncate(bhdr & 0xFFFF);
+                if (bwc == 0) break;
+                const bie = bp + bwc;
+                if (bie > words.len) break;
+
+                if (bop == 248 and bp != lp) break; // Hit next block
+
+                switch (bop) {
+                    249 => { // OpBranch
+                        if (bwc >= 2) {
+                            const t = words[bp + 1];
+                            if (t >= 1 and t < bound and !reachable.isSet(t)) { reachable.set(t); changed = true; }
+                        }
+                    },
+                    250 => { // OpBranchConditional
+                        if (bwc >= 4) {
+                            const t1 = words[bp + 2]; const t2 = words[bp + 3];
+                            if (t1 >= 1 and t1 < bound and !reachable.isSet(t1)) { reachable.set(t1); changed = true; }
+                            if (t2 >= 1 and t2 < bound and !reachable.isSet(t2)) { reachable.set(t2); changed = true; }
+                        }
+                    },
+                    251 => { // OpSwitch
+                        if (bwc >= 3) {
+                            const dt = words[bp + 2];
+                            if (dt >= 1 and dt < bound and !reachable.isSet(dt)) { reachable.set(dt); changed = true; }
+                            var si: u32 = bp + 3;
+                            while (si + 1 < bie) : (si += 2) {
+                                const ct = words[si + 1];
+                                if (ct >= 1 and ct < bound and !reachable.isSet(ct)) { reachable.set(ct); changed = true; }
+                            }
+                        }
+                    },
+                    246 => { // OpLoopMerge — merge and continue targets are reachable
+                        if (bwc >= 3) {
+                            const m = words[bp + 1]; const c = words[bp + 2];
+                            if (m >= 1 and m < bound and !reachable.isSet(m)) { reachable.set(m); changed = true; }
+                            if (c >= 1 and c < bound and !reachable.isSet(c)) { reachable.set(c); changed = true; }
+                        }
+                    },
+                    247 => { // OpSelectionMerge
+                        if (bwc >= 2) {
+                            const m = words[bp + 1];
+                            if (m >= 1 and m < bound and !reachable.isSet(m)) { reachable.set(m); changed = true; }
+                        }
+                    },
+                    245 => { // OpPhi: parent labels are structural predecessors — keep them
+                        var pi: u32 = bp + 3;
+                        while (pi + 1 < bie) : (pi += 2) {
+                            const p = words[pi + 1];
+                            if (p >= 1 and p < bound and !reachable.isSet(p)) { reachable.set(p); changed = true; }
+                        }
+                    },
+                    else => {},
+                }
+                bp = bie;
+            }
+        }
+    }
+
+    // Phase 3: Find unreachable labels
     var unreachable_labels = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
     defer unreachable_labels.deinit();
 
@@ -9152,22 +9175,18 @@ pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
-
-        if (opcode == 248 and wc >= 2) { // OpLabel
+        if (opcode == 248 and wc >= 2) {
             const lbl = words[pos + 1];
-            if (lbl >= 1 and lbl < bound and !targeted.isSet(lbl)) {
+            if (lbl >= 1 and lbl < bound and !reachable.isSet(lbl)) {
                 unreachable_labels.set(lbl);
             }
         }
         pos = ie;
     }
 
-    if (unreachable_labels.count() == 0) {
-        func_entry_labels.deinit();
-        return words;
-    }
+    if (unreachable_labels.count() == 0) return words;
 
-    // Phase 3: Remove unreachable blocks
+    // Phase 4: Remove unreachable blocks + fix OpPhi entries referencing removed labels
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
     result.appendSliceAssumeCapacity(words[0..5]);
 
@@ -9188,13 +9207,47 @@ pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error
                 pos = ie;
                 continue;
             }
-            // Reached a reachable label - end of unreachable block
             in_unreachable = false;
         }
 
-        if (!in_unreachable) {
-            result.appendSlice(alloc, words[pos..ie]) catch return words;
+        if (in_unreachable) { pos = ie; continue; }
+
+        // Fix OpPhi: remove entries whose parent label was removed
+        if (opcode == 245 and wc >= 5) { // OpPhi
+            var phi_buf = std.ArrayListUnmanaged(u32).initCapacity(alloc, wc) catch {
+                result.appendSlice(alloc, words[pos..ie]) catch return words;
+                pos = ie;
+                continue;
+            };
+            phi_buf.appendAssumeCapacity(words[pos + 1]); // result type
+            phi_buf.appendAssumeCapacity(words[pos + 2]); // result id
+            var phi_ok = true;
+            var pi: u32 = pos + 3;
+            while (pi + 1 < ie) : (pi += 2) {
+                const val = words[pi];
+                const parent = words[pi + 1];
+                if (parent >= 1 and parent < bound and unreachable_labels.isSet(parent)) {
+                    continue; // parent removed, skip entry
+                }
+                phi_buf.append(alloc, val) catch { phi_ok = false; break; };
+                phi_buf.append(alloc, parent) catch { phi_ok = false; break; };
+            }
+            if (phi_ok and phi_buf.items.len >= 4) {
+                // Emit fixed OpPhi with only valid entries
+                const new_wc: u32 = @intCast(phi_buf.items.len + 1);
+                result.append(alloc, (new_wc << 16) | 245) catch return words;
+                result.appendSlice(alloc, phi_buf.items) catch return words;
+            } else if (!phi_ok) {
+                // OOM in phi_buf, emit original
+                result.appendSlice(alloc, words[pos..ie]) catch return words;
+            }
+            // If phi has no valid entries (phi_buf.items.len < 4), omit it (DCE will clean up)
+            phi_buf.deinit(alloc);
+            pos = ie;
+            continue;
         }
+
+        result.appendSlice(alloc, words[pos..ie]) catch return words;
         pos = ie;
     }
 
