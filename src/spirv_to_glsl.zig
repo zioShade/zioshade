@@ -267,7 +267,56 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
         if (inst.op == .Constant and inst.words.len > 3) { const rid = inst.words[2]; const ti = getDef(m, inst.words[1]); if (ti) |t| { const lit = constantLiteral(alloc, t, inst.words[3..]) catch continue; if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value); continue; } }
         if (inst.op == .ConstantTrue and inst.words.len > 2) { const l = alloc.dupe(u8, "true") catch continue; if (names.fetchPut(inst.words[2], l) catch null) |old| alloc.free(old.value); continue; }
         if (inst.op == .ConstantFalse and inst.words.len > 2) { const l = alloc.dupe(u8, "false") catch continue; if (names.fetchPut(inst.words[2], l) catch null) |old| alloc.free(old.value); continue; }
-        if (inst.op == .ConstantComposite and inst.words.len > 3) { const rid = inst.words[2]; const ti = getDef(m, inst.words[1]); if (ti) |t| { if (t.op == .TypeVector) { const st = tryResolveTypeName(m, t.words[2]); const cnt = t.words[3]; _ = cnt; var buf = std.ArrayList(u8).initCapacity(alloc, 64) catch continue; defer buf.deinit(alloc); buf.writer(alloc).print("{s}(", .{st}) catch continue; for(inst.words[3..], 0..)|cid,i|{ if(i>0) buf.writer(alloc).writeAll(", ") catch continue; buf.writer(alloc).writeAll(names.get(cid) orelse "0.0") catch continue; } buf.writer(alloc).writeAll(")") catch continue; const lit = buf.toOwnedSlice(alloc) catch continue; if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value); continue; } } }
+        if (inst.op == .ConstantComposite and inst.words.len > 3) {
+            const rid = inst.words[2];
+            const ti = getDef(m, inst.words[1]);
+            if (ti) |t| {
+                if (t.op == .TypeVector) {
+                    // Check if all constituents are the same (splat)
+                    const constituents = inst.words[3..];
+                    var all_same = true;
+                    if (constituents.len > 1) {
+                        const first = constituents[0];
+                        for (constituents[1..]) |c| {
+                            if (c != first) { all_same = false; break; }
+                        }
+                    }
+                    const vt = glslType(m, inst.words[1], names, alloc) catch "vec4";
+                    if (all_same and constituents.len > 0) {
+                        // Splat: vec3(1.0) instead of vec3(1.0, 1.0, 1.0)
+                        const val = names.get(constituents[0]) orelse "0.0";
+                        const lit = std.fmt.allocPrint(alloc, "{s}({s})", .{vt, val}) catch continue;
+                        if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
+                    } else {
+                        var buf = std.ArrayList(u8).initCapacity(alloc, 64) catch continue;
+                        defer buf.deinit(alloc);
+                        buf.writer(alloc).print("{s}(", .{vt}) catch continue;
+                        for (constituents, 0..) |cid, i| {
+                            if (i > 0) buf.writer(alloc).writeAll(", ") catch continue;
+                            buf.writer(alloc).writeAll(names.get(cid) orelse "0.0") catch continue;
+                        }
+                        buf.writer(alloc).writeAll(")") catch continue;
+                        const lit = buf.toOwnedSlice(alloc) catch continue;
+                        if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
+                    }
+                    continue;
+                } else if (t.op == .TypeMatrix) {
+                    // Matrix constants
+                    const mt = glslType(m, inst.words[1], names, alloc) catch "mat4";
+                    var buf = std.ArrayList(u8).initCapacity(alloc, 128) catch continue;
+                    defer buf.deinit(alloc);
+                    buf.writer(alloc).print("{s}(", .{mt}) catch continue;
+                    for (inst.words[3..], 0..) |cid, i| {
+                        if (i > 0) buf.writer(alloc).writeAll(", ") catch continue;
+                        buf.writer(alloc).writeAll(names.get(cid) orelse "0.0") catch continue;
+                    }
+                    buf.writer(alloc).writeAll(")") catch continue;
+                    const lit = buf.toOwnedSlice(alloc) catch continue;
+                    if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
+                    continue;
+                }
+            }
+        }
         if (resultIdFromOp(inst.op, inst.words)) |rid| { if (!names.contains(rid)) { const name = std.fmt.allocPrint(alloc, "v{}", .{counter}) catch continue; counter += 1; names.put(rid, name) catch {}; } }
     }
 }
@@ -311,12 +360,16 @@ fn detectOutParams(m: *const ParsedModule, entry_id: u32, opi: *std.AutoHashMap(
 // ---- Std450 → GLSL function name mapping ----
 fn std450ToGlsl(val: u32) ?[]const u8 {
     return switch (val) {
-        1 => "round", 3 => "trunc", 4, 5 => "abs", 6 => "sign", 10 => "fract",
+        1 => "round", 3 => "trunc", 4, 5 => "abs", 6 => "sign", 8 => "floor", 9 => "ceil",
+        10 => "fract",
         11 => "radians", 12 => "degrees", 13 => "sin", 14 => "cos", 15 => "tan",
-        25 => "atan2", 26 => "pow", 27 => "exp", 28 => "log", 29 => "exp2", 30 => "log2",
-        31 => "sqrt", 32 => "inversesqrt", 37 => "min", 38 => "max", 39 => "min",
+        16 => "asin", 17 => "acos", 18 => "atan", 19 => "sinh", 20 => "cosh", 21 => "tanh",
+        25 => "atan", 26 => "pow", 27 => "exp", 28 => "log", 29 => "exp2", 30 => "log2",
+        31 => "sqrt", 32 => "inversesqrt", 33 => "determinant",
+        37 => "min", 38 => "max", 39 => "min",
         40 => "max", 41 => "min", 42 => "max", 43 => "clamp", 44 => "clamp",
         45 => "clamp", 46 => "mix", 48 => "step", 49 => "smoothstep",
+        50 => "length", 51 => "distance", 52 => "cross", 53 => "normalize", 54 => "dot",
         73 => "findLSB", 74 => "findMSB", 75 => "findMSB",
         else => null,
     };
@@ -490,13 +543,27 @@ fn emitFunction(
         try w.print("{s} {s}", .{ pt2, pn });
     }
 
+    // For GLSL entry points: input vars are GLSL builtins (gl_FragCoord etc.),
+    // so we alias them by name instead of passing as parameters.
     if (is_frag) {
-        for (input_var_ids.items, 0..) |ivid, i| {
-            if (param_ids.items.len > 0 or i > 0) try w.writeAll(", ");
-            if (getDef(m, ivid)) |ivi| {
-                const ivn = names.get(ivid) orelse "input_var";
-                const ivt = try glslType(m, ivi.words[1], names, alloc);
-                try w.print("{s} {s}", .{ ivt, ivn });
+        for (input_var_ids.items) |ivid| {
+            const iv_name = names.get(ivid) orelse continue;
+            // Check if this input has a BuiltIn decoration
+            const builtin = getDecVal(decs, ivid, .built_in);
+            if (builtin) |bi| {
+                const builtin_name: []const u8 = switch (@as(spirv.BuiltIn, @enumFromInt(bi))) {
+                    .position => "gl_FragCoord",
+                    .frag_coord => "gl_FragCoord",
+                    .point_size => "gl_PointSize",
+                    .clip_distance => "gl_ClipDistance",
+                    .cull_distance => "gl_CullDistance",
+                    .front_facing => "gl_FrontFacing",
+                    else => iv_name,
+                };
+                if (!std.mem.eql(u8, iv_name, builtin_name)) {
+                    const a = alloc.dupe(u8, builtin_name) catch continue;
+                    if (names.fetchPut(ivid, a) catch null) |old| alloc.free(old.value);
+                }
             }
         }
     }
