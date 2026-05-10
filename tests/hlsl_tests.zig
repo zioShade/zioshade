@@ -9112,3 +9112,127 @@ test "T386.1: compute image processing (edge detect)" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T387.1: variance shadow map" {
+    // Variance shadow map: Chebyshev inequality
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D shadowMap;
+        \\void main() {
+        \\    vec2 moments = texture(shadowMap, uv).rg;
+        \\    float mean = moments.x;
+        \\    float variance = moments.y - mean * mean;
+        \\    float d = 0.5 - mean;
+        \\    float pMax = variance / (variance + d * d);
+        \\    fragColor = vec4(max(pMax, 0.0));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T388.1: screen space reflections" {
+    // Simplified SSR: ray march with depth comparison
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D depthTex;
+        \\layout(binding = 1) uniform sampler2D colorTex;
+        \\void main() {
+        \\    vec3 rayDir = normalize(vec3(uv * 2.0 - 1.0, -1.0));
+        \\    vec3 pos = vec3(uv, 0.0);
+        \\    vec4 reflected = vec4(0.0);
+        \\    for (int i = 0; i < 16; i++) {
+        \\        pos += rayDir * 0.05;
+        \\        float d = texture(depthTex, pos.xy).r;
+        \\        if (pos.z > d) {
+        \\            reflected = texture(colorTex, pos.xy);
+        \\            break;
+        \\        }
+        \\    }
+        \\    fragColor = reflected;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T389.1: FXAA edge detection" {
+    // FXAA-style luminance edge detection
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec2 texel = 1.0 / vec2(textureSize(tex, 0));
+        \\    float lN = dot(texture(tex, uv + vec2(0, texel.y)).rgb, vec3(0.299, 0.587, 0.114));
+        \\    float lS = dot(texture(tex, uv - vec2(0, texel.y)).rgb, vec3(0.299, 0.587, 0.114));
+        \\    float lW = dot(texture(tex, uv - vec2(texel.x, 0)).rgb, vec3(0.299, 0.587, 0.114));
+        \\    float lE = dot(texture(tex, uv + vec2(texel.x, 0)).rgb, vec3(0.299, 0.587, 0.114));
+        \\    float range = max(lN, lS) - min(lN, lS);
+        \\    range = max(range, max(lW, lE) - min(lW, lE));
+        \\    float edge = step(0.1, range);
+        \\    fragColor = vec4(vec3(1.0 - edge), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T390.1: compute radix sort bucket" {
+    // Compute radix sort: bucket counting phase
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 256) in;
+        \\layout(std430, binding = 0) readonly buffer Keys { uint keys[]; };
+        \\layout(std430, binding = 1) buffer Buckets { uint counts[]; };
+        \\shared uint local_counts[256];
+        \\void main() {
+        \\    uint lid = gl_LocalInvocationID.x;
+        \\    uint gid = gl_GlobalInvocationID.x;
+        \\    local_counts[lid] = 0u;
+        \\    barrier();
+        \\    uint key = keys[gid];
+        \\    uint bucket = key & 0xFFu;
+        \\    atomicAdd(local_counts[bucket], 1u);
+        \\    barrier();
+        \\    atomicAdd(counts[lid], local_counts[lid]);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "uint");
+}
+
+test "T391.1: multi-pass blur (separable)" {
+    // Separable Gaussian blur with configurable kernel
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D image;
+        \\uniform vec2 direction;
+        \\void main() {
+        \\    vec2 texel = direction / vec2(textureSize(image, 0));
+        \\    vec4 sum = texture(image, uv) * 0.227027;
+        \\    sum += texture(image, uv + texel) * 0.1945946;
+        \\    sum += texture(image, uv - texel) * 0.1945946;
+        \\    sum += texture(image, uv + texel * 2.0) * 0.1216216;
+        \\    sum += texture(image, uv - texel * 2.0) * 0.1216216;
+        \\    sum += texture(image, uv + texel * 3.0) * 0.0540540;
+        \\    sum += texture(image, uv - texel * 3.0) * 0.0540540;
+        \\    fragColor = sum;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
