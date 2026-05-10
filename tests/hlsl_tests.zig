@@ -7764,3 +7764,81 @@ test "T315.1: integer abs and sign chain" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T316.1: compute barrier and shared memory" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 4) in;
+        \\shared float s_data[4];
+        \\layout(std430, binding = 0) buffer Out { float result; };
+        \\void main() {
+        \\    uint id = gl_LocalInvocationID.x;
+        \\    s_data[id] = float(id);
+        \\    barrier();
+        \\    result = s_data[0] + s_data[1] + s_data[2] + s_data[3];
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T317.1: gl_NumWorkGroups compute" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer Out { vec4 result; };
+        \\void main() {
+        \\    result = vec4(gl_NumWorkGroups.x, gl_NumWorkGroups.y, gl_NumWorkGroups.z, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T318.1: transpose mat4" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat4 m; };
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 t = transpose(m);
+        \\    fragColor = t[0];
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T319.1: outerProduct vec3 vec3" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat3 m = outerProduct(a, vec3(1.0, 2.0, 3.0));
+        \\    fragColor = vec4(m[0], 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T320.1: matrixCompMult" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform U { mat4 m; };
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 r = matrixCompMult(m, m);
+        \\    fragColor = r[0];
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
