@@ -9716,3 +9716,105 @@ test "T416.1: mixed integer and float conversions" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T417.1: sampler2DMS sample" {
+    // Tests multisampled texture sampling
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2DMS msTex;
+        \\void main() {
+        \\    ivec2 coord = ivec2(uv * 256.0);
+        \\    vec4 s0 = texelFetch(msTex, coord, 0);
+        \\    vec4 s1 = texelFetch(msTex, coord, 1);
+        \\    fragColor = (s0 + s1) * 0.5;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T418.1: compute parallel reduction" {
+    // Parallel sum reduction in shared memory
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 256) in;
+        \\layout(std430, binding = 0) readonly buffer Input { float data[]; };
+        \\layout(std430, binding = 1) writeonly buffer Output { float result[]; };
+        \\shared float shared_data[256];
+        \\void main() {
+        \\    uint lid = gl_LocalInvocationID.x;
+        \\    shared_data[lid] = data[gl_GlobalInvocationID.x];
+        \\    barrier();
+        \\    for (uint s = 128u; s > 0u; s >>= 1u) {
+        \\        if (lid < s) shared_data[lid] += shared_data[lid + s];
+        \\        barrier();
+        \\    }
+        \\    if (lid == 0u) result[gl_WorkGroupID.x] = shared_data[0];
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T419.1: textureGrad with explicit gradients" {
+    // Tests texture sampling with explicit derivatives
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec2 dx = dFdx(uv);
+        \\    vec2 dy = dFdy(uv);
+        \\    vec4 c = textureGrad(tex, uv, dx * 2.0, dy * 2.0);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T420.1: multiple uniform blocks" {
+    // Tests multiple uniform blocks with different bindings
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform Camera { mat4 viewProj; vec3 camPos; };
+        \\layout(binding = 1) uniform Light { vec3 lightDir; float intensity; vec3 lightColor; };
+        \\layout(location = 0) in vec3 normal;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float NdotL = max(dot(normal, lightDir), 0.0);
+        \\    vec3 diffuse = lightColor * intensity * NdotL;
+        \\    fragColor = vec4(diffuse, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T421.1: conditional store to output" {
+    // Tests conditional writes to output variable
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(0.0);
+        \\    if (x > 0.5) {
+        \\        fragColor = vec4(1.0, 0.0, 0.0, 1.0);
+        \\    } else {
+        \\        fragColor = vec4(0.0, 1.0, 0.0, 1.0);
+        \\    }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
