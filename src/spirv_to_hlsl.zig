@@ -1430,6 +1430,10 @@ fn emitInstruction(
             const rt = try hlslType(module, inst.words[1], names, alloc);
             try w.print("    {s} {s} = countbits({s});\n", .{ rt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
         },
+        .BitReverse => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            try w.print("    {s} {s} = reversebits({s});\n", .{ rt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
+        },
 
         // Conversions
         .ConvertSToF, .ConvertUToF, .ConvertFToS, .ConvertFToU => {

@@ -168,6 +168,7 @@ pub const Op = enum(u16) {
     BitwiseAnd = 199,
     Not = 200,
     BitCount = 205,
+    BitReverse = 204,
     SubgroupAllKHR = 4428,
     SubgroupAnyKHR = 4429,
     SubgroupAllEqualKHR = 4430,
