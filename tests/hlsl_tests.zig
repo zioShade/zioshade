@@ -12166,3 +12166,120 @@ test "T546.1: struct return from function" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T547.1: textureSize query" {
+    // Tests textureSize for sampler2D
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    ivec2 size = textureSize(tex, 0);
+        \\    fragColor = vec4(float(size.x), float(size.y), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T548.1: multiple uniform blocks" {
+    // Tests multiple uniform blocks with different bindings
+    const source =
+        \\#version 450
+        \\layout(std140, binding = 0) uniform Camera { mat4 viewProj; vec3 camPos; };
+        \\layout(std140, binding = 1) uniform Object { mat4 model; vec4 color; };
+        \\layout(std140, binding = 2) uniform Light { vec3 lightDir; float intensity; };
+        \\layout(location = 0) in vec4 pos;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 world = model * pos;
+        \\    fragColor = viewProj * world * color * intensity;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T549.1: nested if-else with logical operators" {
+    // Tests deeply nested if-else with && || operators
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r = 0.0;
+        \\    if (x > 0.0 && x < 0.5) {
+        \\        r = 0.25;
+        \\    } else if (x >= 0.5 && x < 1.0) {
+        \\        r = 0.75;
+        \\    } else if (x < 0.0 || x >= 1.0) {
+        \\        r = 1.0;
+        \\    }
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T550.1: vertex with multiple outputs" {
+    // Tests vertex shader with multiple output varyings
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 pos;
+        \\layout(location = 1) in vec2 uv;
+        \\layout(location = 2) in vec3 norm;
+        \\layout(location = 0) out vec2 vUV;
+        \\layout(location = 1) out vec3 vNorm;
+        \\layout(location = 2) out vec3 vWorldPos;
+        \\void main() {
+        \\    gl_Position = vec4(pos, 1.0);
+        \\    vUV = uv;
+        \\    vNorm = norm;
+        \\    vWorldPos = pos * 10.0;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T551.1: compute bitonic sort" {
+    // Tests compute with bitonic sort pattern
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 256) in;
+        \\layout(std430, binding = 0) buffer Data { float data[]; };
+        \\shared float s[256];
+        \\void main() {
+        \\    uint id = gl_LocalInvocationID.x;
+        \\    s[id] = data[gl_GlobalInvocationID.x];
+        \\    barrier();
+        \\    for (uint k = 2u; k <= 256u; k *= 2u) {
+        \\        for (uint j = k / 2u; j > 0u; j /= 2u) {
+        \\            uint l = id ^ j;
+        \\            if (l > id) {
+        \\                if ((id & k) == 0u) {
+        \\                    if (s[id] > s[l]) {
+        \\                        float t = s[id]; s[id] = s[l]; s[l] = t;
+        \\                    }
+        \\                } else {
+        \\                    if (s[id] < s[l]) {
+        \\                        float t = s[id]; s[id] = s[l]; s[l] = t;
+        \\                    }
+        \\                }
+        \\            }
+        \\            barrier();
+        \\        }
+        \\    }
+        \\    data[gl_GlobalInvocationID.x] = s[id];
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
