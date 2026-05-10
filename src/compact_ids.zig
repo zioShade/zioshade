@@ -9554,3 +9554,156 @@ pub fn foldConstCompositeExtract(alloc: std.mem.Allocator, words: []const u32) e
     }
     return result.toOwnedSlice(alloc) catch return alloc.dupe(u32, words);
 }
+
+pub fn simplifyTrivialPhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find OpPhi instructions where all incoming values are the same ID
+    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // phi_result_id -> replacement_id
+    defer replacements.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // OpPhi: opcode 245, format: type result (value parent)+
+        // Minimum: wc=5 (type, result, value, parent)
+        if (opcode == 245 and wc >= 5) {
+            const result_id = words[pos + 2];
+            // Check if all values are the same
+            const first_val = words[pos + 3];
+            var all_same = true;
+            var pi: u32 = pos + 5; // skip first (value, parent) pair
+            while (pi + 1 < ie) : (pi += 2) {
+                if (words[pi] != first_val) {
+                    all_same = false;
+                    break;
+                }
+            }
+            if (all_same and first_val > 0 and first_val < bound) {
+                try replacements.put(alloc, result_id, first_val);
+            }
+        }
+        pos = ie;
+    }
+
+    if (replacements.count() == 0) return words;
+
+    // Resolve transitive chains (phi A -> phi B -> val)
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var it = replacements.iterator();
+        while (it.next()) |entry| {
+            if (replacements.get(entry.value_ptr.*)) |resolved| {
+                if (entry.value_ptr.* != resolved) {
+                    entry.value_ptr.* = resolved;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    // Phase 2: Rewrite -- skip eliminated phis, substitute references
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]);
+
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Skip eliminated phi instructions
+        if (opcode == 245 and wc >= 3 and replacements.contains(words[pos + 2])) {
+            pos = ie;
+            continue;
+        }
+
+        // Apply substitution to operands using getOpInfo
+        const info = getOpInfo(opcode) orelse {
+            // Unknown opcode: substitute all words
+            result.append(alloc, hdr) catch return words;
+            var wi2: u32 = pos + 1;
+            while (wi2 < ie) : (wi2 += 1) {
+                result.append(alloc, replacements.get(words[wi2]) orelse words[wi2]) catch return words;
+            }
+            pos = ie;
+            continue;
+        };
+
+        result.append(alloc, hdr) catch return words;
+        var wi: u32 = pos + 1;
+        switch (info.fixed) {
+            0 => {},
+            1 => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
+            2 => {
+                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+            },
+            3 => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
+            else => {},
+        }
+        for (info.ops) |ch| {
+            if (wi >= ie) break;
+            switch (ch) {
+                'i' => {
+                    result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                },
+                'I' => { while (wi < ie) : (wi += 1) {
+                    result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                }},
+                'l' => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
+                'L' => { wi = ie; },
+                's' => { wi = ie; },
+                'M' => {
+                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    while (wi < ie) : (wi += 1) {
+                        result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    }
+                },
+                'W' => {
+                    while (wi + 1 < ie) : (wi += 1) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                        result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    }
+                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                },
+                'E' => {
+                    while (wi < ie) {
+                        const w = words[wi];
+                        result.append(alloc, w) catch return words;
+                        wi += 1;
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                    }
+                    while (wi < ie) : (wi += 1) {
+                        result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    }
+                },
+                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+            }
+        }
+        // Copy any remaining words
+        while (wi < ie) : (wi += 1) {
+            result.append(alloc, words[wi]) catch return words;
+        }
+        pos = ie;
+    }
+
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
+    return result.toOwnedSlice(alloc) catch return alloc.dupe(u32, words);
+}
