@@ -10488,3 +10488,92 @@ test "T456.1: layout std140 uniform block" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T457.1: textureOffset" {
+    // Tests texture with texel offset
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec4 c = textureOffset(tex, uv, ivec2(1, 1));
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T458.1: texelFetchOffset" {
+    // Tests texelFetch with texel offset
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\void main() {
+        \\    vec4 c = texelFetchOffset(tex, ivec2(uv * 128.0), 0, ivec2(2, 0));
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T459.1: gl_SampleMask write" {
+    // Tests gl_SampleMask output in fragment shader
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    gl_SampleMask[0] = int(x > 0.5);
+        \\    fragColor = vec4(1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T460.1: compute mat4 storage" {
+    // Tests storing mat4 in SSBO from compute
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer Matrices { mat4 data[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    mat4 m = mat4(1.0);
+        \\    m[0][0] = 2.0;
+        \\    m[1][1] = 2.0;
+        \\    m[2][2] = 2.0;
+        \\    m[3][3] = 2.0;
+        \\    data[id] = m;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
+
+test "T461.1: vec4 from scalar broadcast" {
+    // Tests vec4(x) scalar broadcast constructor
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 a = vec4(x);
+        \\    vec4 b = vec4(x * 2.0);
+        \\    fragColor = a + b;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
