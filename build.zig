@@ -118,6 +118,21 @@ pub fn build(b: *std.Build) void {
     glsl_test_step.dependOn(&run_glsl_tests.step);
     test_step.dependOn(&run_glsl_tests.step);
 
+    // MSL backend tests — run with: zig build test-msl
+    const msl_test_step = b.step("test-msl", "Run MSL backend tests (GLSL → SPIR-V → MSL pipeline)");
+    const msl_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/msl_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    msl_test_mod.addImport("glslpp", glslpp_mod);
+    const run_msl_tests = b.addRunArtifact(b.addTest(.{
+        .name = "msl-tests",
+        .root_module = msl_test_mod,
+    }));
+    msl_test_step.dependOn(&run_msl_tests.step);
+    test_step.dependOn(&run_msl_tests.step);
+
     // Tool: dump CRT shader HLSL — run with: zig build dump-crt
     const dump_step = b.step("dump-crt", "Dump CRT shader HLSL output");
     const dump_mod = b.createModule(.{
