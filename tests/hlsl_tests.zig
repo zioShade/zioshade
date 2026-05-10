@@ -8990,3 +8990,125 @@ test "T381.1: gl_FragCoord in fragment shader" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T382.1: image2D read and write" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 8, local_size_y = 8) in;
+        \\layout(binding = 0, rgba8) uniform image2D img;
+        \\void main() {
+        \\    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+        \\    vec4 color = imageLoad(img, coord);
+        \\    imageStore(img, coord, color * 2.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T383.1: bilateral blur filter" {
+    // Edge-preserving blur: spatial + range weighting
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D image;
+        \\void main() {
+        \\    vec2 texel = 1.0 / vec2(textureSize(image, 0));
+        \\    vec4 center = texture(image, uv);
+        \\    vec4 sum = vec4(0.0);
+        \\    float totalWeight = 0.0;
+        \\    for (int x = -2; x <= 2; x++) {
+        \\        for (int y = -2; y <= 2; y++) {
+        \\            vec4 neighbor = texture(image, uv + vec2(x, y) * texel);
+        \\            float diff = length(neighbor.rgb - center.rgb);
+        \\            float weight = exp(-diff * 10.0);
+        \\            sum += neighbor * weight;
+        \\            totalWeight += weight;
+        \\        }
+        \\    }
+        \\    fragColor = sum / totalWeight;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T384.1: shader toy style procedural" {
+    // Shadertoy-like pattern with sin-based animation
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 p = uv * 2.0 - 1.0;
+        \\    float r = length(p);
+        \\    float a = atan(p.y, p.x);
+        \\    float v = sin(r * 10.0 - a * 3.0);
+        \\    vec3 col = vec3(0.5 + 0.5 * cos(v + vec3(0.0, 2.0, 4.0)));
+        \\    fragColor = vec4(col, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T385.1: deferred shading G-buffer decode" {
+    // Common deferred rendering pattern: reconstructing position from depth
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D depthTex;
+        \\layout(binding = 1) uniform sampler2D normalTex;
+        \\layout(binding = 2) uniform U {
+        \\    mat4 invProj;
+        \\    vec3 lightDir;
+        \\};
+        \\void main() {
+        \\    float depth = texture(depthTex, uv).r;
+        \\    vec3 normal = texture(normalTex, uv).xyz * 2.0 - 1.0;
+        \\    vec4 pos = invProj * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+        \\    pos /= pos.w;
+        \\    float NdotL = max(dot(normal, lightDir), 0.0);
+        \\    fragColor = vec4(vec3(NdotL), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T386.1: compute image processing (edge detect)" {
+    // Sobel edge detection as compute shader
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 16, local_size_y = 16) in;
+        \\layout(binding = 0) uniform sampler2D inputTex;
+        \\layout(std430, binding = 1) writeonly buffer Output { vec4 result[]; };
+        \\void main() {
+        \\    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+        \\    vec2 uv = (vec2(coord) + 0.5) / 512.0;
+        \\    float tl = texture(inputTex, uv + vec2(-1, -1) / 512.0).r;
+        \\    float t  = texture(inputTex, uv + vec2( 0, -1) / 512.0).r;
+        \\    float tr = texture(inputTex, uv + vec2( 1, -1) / 512.0).r;
+        \\    float l  = texture(inputTex, uv + vec2(-1,  0) / 512.0).r;
+        \\    float r  = texture(inputTex, uv + vec2( 1,  0) / 512.0).r;
+        \\    float bl = texture(inputTex, uv + vec2(-1,  1) / 512.0).r;
+        \\    float b  = texture(inputTex, uv + vec2( 0,  1) / 512.0).r;
+        \\    float br = texture(inputTex, uv + vec2( 1,  1) / 512.0).r;
+        \\    float gx = tl + 2.0*l + bl - tr - 2.0*r - br;
+        \\    float gy = tl + 2.0*t + tr - bl - 2.0*b - br;
+        \\    float edge = sqrt(gx * gx + gy * gy);
+        \\    uint idx = coord.y * 512u + uint(coord.x);
+        \\    result[idx] = vec4(vec3(edge), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
