@@ -10200,3 +10200,108 @@ test "T441.1: struct array in uniform block" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
+
+
+test "T442.1: interpolateAtCentroid" {
+    // Tests interpolation function at centroid
+    const source =
+        \\#version 450
+        \\centroid layout(location = 0) in vec4 color;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c = interpolateAtCentroid(color);
+        \\    fragColor = c;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T443.1: textureGatherOffsets" {
+    // Tests textureGatherOffsets with constant offsets
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\const ivec2 offsets[4] = ivec2[4](ivec2(0,0), ivec2(1,0), ivec2(0,1), ivec2(1,1));
+        \\void main() {
+        \\    vec4 g = textureGatherOffsets(tex, uv, offsets, 0);
+        \\    fragColor = g;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T444.1: compute scan prefix sum" {
+    // Blelloch-style prefix sum (exclusive scan)
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 256) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\shared float temp[256];
+        \\void main() {
+        \\    uint id = gl_LocalInvocationID.x;
+        \\    temp[id] = values[gl_GlobalInvocationID.x];
+        \\    barrier();
+        \\    uint offset = 1u;
+        \\    for (uint d = 128u; d > 0u; d >>= 1u) {
+        \\        if (id < d) {
+        \\            uint ai = offset * (2u * id + 1u) - 1u;
+        \\            uint bi = offset * (2u * id + 2u) - 1u;
+        \\            temp[bi] += temp[ai];
+        \\        }
+        \\        offset *= 2u;
+        \\        barrier();
+        \\    }
+        \\    if (id == 0u) temp[255] = 0.0;
+        \\    barrier();
+        \\    values[gl_GlobalInvocationID.x] = temp[id];
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float");
+}
+
+test "T445.1: multiple vertex attributes" {
+    // Tests vertex shader with many input attributes
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 position;
+        \\layout(location = 1) in vec3 normal;
+        \\layout(location = 2) in vec2 texcoord;
+        \\layout(location = 3) in vec4 color;
+        \\layout(location = 4) in vec3 tangent;
+        \\layout(location = 0) out vec2 vUV;
+        \\layout(location = 1) out vec4 vColor;
+        \\void main() {
+        \\    gl_Position = vec4(position, 1.0);
+        \\    vUV = texcoord;
+        \\    vColor = color;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T446.1: uint sampler texture fetch" {
+    // Tests usampler2D for unsigned integer texture reads
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform usampler2D uintTex;
+        \\void main() {
+        \\    uvec4 iv = texelFetch(uintTex, ivec2(uv * 128.0), 0);
+        \\    fragColor = vec4(iv) / 255.0;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
