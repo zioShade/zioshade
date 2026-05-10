@@ -1,32 +1,89 @@
-# glslpp build recipes
+# glslpp — CI-equivalent recipes
+# All recipes use `mise exec --` to ensure Zig 0.15.2 is used.
+# Run `just` or `just ci` to execute the full CI pipeline locally.
 
-# default: build and test
+set dotenv-load := false
+
+# zig wrapper — ensures Zig 0.15.2 via mise
+zig := "mise exec -- zig"
+
+# ── default ──────────────────────────────────────────────────────────
+
 default: test
 
-# build the library
+# ── build ────────────────────────────────────────────────────────────
+
+# build the library (debug)
 build:
-    zig build
-
-# run all tests
-test:
-    zig build test
-
-# run tests with verbose output
-test-verbose:
-    zig build test --summary all
-
-# clean build artifacts
-clean:
-    rm -rf zig-out zig-cache
+    {{zig}} build
 
 # build in release mode
 release:
-    zig build -Doptimize=ReleaseFast
+    {{zig}} build -Doptimize=ReleaseFast
 
-# check compilation without building
+# ── tests ────────────────────────────────────────────────────────────
+
+# run all unit tests (lexer, parser, semantic, codegen, spirv, ir, etc.)
+test:
+    {{zig}} build test --summary all
+
+# run HLSL backend tests (751 tests)
+test-hlsl:
+    {{zig}} build test-hlsl --summary all
+
+# run SPIR-V conformance tests against spirv-val (requires Vulkan SDK)
+test-conformance:
+    {{zig}} build conformance --summary all
+
+# run tests with verbose output
+test-verbose:
+    {{zig}} build test --summary all 2>&1 | grep -E "passed|failed|leaked|error:"
+
+# ── DXC validation ───────────────────────────────────────────────────
+
+# validate saved HLSL outputs with DXC (requires dxc.exe on PATH)
+validate-dxc: generate-outputs
+    dxc -T ps_6_0 -E main tests/wintty/crt_output.hlsl -Fo /dev/null
+    dxc -T ps_6_0 -E main tests/wintty/focus_output.hlsl -Fo /dev/null
+    @echo "DXC validation: ALL PASSED"
+
+# regenerate saved HLSL outputs from wintty shaders
+generate-outputs:
+    {{zig}} run -ODebug --dep glslpp -Mroot=tools/dump_crt_hlsl.zig -Mglslpp=src/root.zig
+
+# ── benchmarks ───────────────────────────────────────────────────────
+
+# run wintty shader benchmark (ReleaseFast, 50 iterations)
+bench:
+    {{zig}} build bench
+
+# ── lint / check ─────────────────────────────────────────────────────
+
+# check compilation without building (fast syntax/type check)
 check:
-    zig build 2>&1 | head -1
+    {{zig}} build 2>&1 | head -1
 
-# run a specific test by name filter
-filter name:
-    zig build test -Dtest-filter={{name}}
+# ── full CI pipeline ─────────────────────────────────────────────────
+
+# run everything CI would run
+ci: test test-hlsl validate-dxc
+    @echo ""
+    @echo "═══════════════════════════════════════"
+    @echo "  CI PASSED — all gates green"
+    @echo "═══════════════════════════════════════"
+
+# ── cleaning ─────────────────────────────────────────────────────────
+
+clean:
+    rm -rf zig-out .zig-cache
+
+# ── utilities ────────────────────────────────────────────────────────
+
+# verify zig version is 0.15.2
+check-zig:
+    @mise exec -- zig version | grep -q "0.15.2" && echo "Zig 0.15.2 ✓" || (echo "ERROR: expected Zig 0.15.2" && exit 1)
+
+# show test counts summary
+summary:
+    @echo "Unit tests:" && {{zig}} build test --summary all 2>&1 | grep "passed\|failed\|leaked" | head -1
+    @echo "HLSL tests:" && {{zig}} build test-hlsl --summary all 2>&1 | grep "passed" | head -1
