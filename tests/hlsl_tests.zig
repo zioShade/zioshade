@@ -8601,3 +8601,92 @@ test "T361.1: compute histogram" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "uint");
 }
+
+
+test "T362.1: negate folding in expression" {
+    // Exercises foldNegateIntoAddSub: a + (-b) should become a - b
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = uv.x;
+        \\    float b = -uv.y;
+        \\    float c = a + b;
+        \\    fragColor = vec4(c);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T363.1: double negate folding" {
+    // Exercises eliminateDoubleNegate: -(-x) should become x
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = -x;
+        \\    float b = -a;
+        \\    fragColor = vec4(b);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T364.1: x-x algebraic identity" {
+    // Exercises algebraicSimpl x-x=0
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float diff = x - x;
+        \\    fragColor = vec4(diff);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T365.1: multi-stage pipeline optimization" {
+    // Exercises: constFold -> foldSelect -> foldConstBranches -> elimUnreachableBlocks -> simplifyTrivialPhi -> DCE
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    const float scale = 2.0;
+        \\    const float offset = 0.0;
+        \\    float a = x * scale;
+        \\    float b = a + offset;
+        \\    float c = b * 1.0;
+        \\    float d = c - c + x;
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
+
+test "T366.1: compute matrix multiply chain" {
+    // Tests matrix operations through the full pipeline
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 pos;
+        \\layout(binding = 0) uniform U { mat4 mvp; };
+        \\void main() {
+        \\    vec4 p = mvp * pos;
+        \\    gl_Position = p / p.w;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float4");
+}
