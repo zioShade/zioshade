@@ -1677,6 +1677,75 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         if (!value_escapes) dead_loops.set(li);
     }
 
+    // Phase 2.5: Check if function-local vars stored in the loop are loaded after merge.
+    // This catches loops that accumulate into local vars which later flow to output.
+    // Only applies to loops currently marked dead (no value_escapes from Phase 3).
+    if (dead_loops.count() > 0) {
+        var dl_it = dead_loops.iterator(.{});
+        while (dl_it.next()) |li_raw| {
+            const li: u32 = @intCast(li_raw);
+            const loop_info = loops.items[li];
+
+            // Find the header label for this loop
+            var header_label_id: u32 = 0;
+            { var sp: u32 = 5; while (sp < loop_info.header_pos) {
+                const h = words[sp]; const w: u32 = h >> 16; if (w == 0) break;
+                if ((@as(u16, @truncate(h & 0xFFFF)) == 248) and w >= 2) header_label_id = words[sp + 1];
+                sp += w;
+            }}
+            if (header_label_id == 0) continue;
+
+            // Collect func-local vars stored inside the loop
+            var loop_stored_locals = std.DynamicBitSet.initEmpty(alloc, bound) catch continue;
+            defer loop_stored_locals.deinit();
+
+            var in_loop2 = false;
+            pos = 5;
+            while (pos < words.len) {
+                const hdr2 = words[pos]; const wc2: u32 = hdr2 >> 16; const op2: u16 = @truncate(hdr2 & 0xFFFF);
+                if (wc2 == 0) break;
+                if (op2 == 248 and wc2 >= 2) {
+                    const lbl = words[pos + 1];
+                    if (lbl == header_label_id) in_loop2 = true;
+                    if (lbl == loop_info.merge_id) in_loop2 = false;
+                }
+                if (in_loop2 and op2 == 62 and wc2 >= 3) { // OpStore
+                    const store_target = words[pos + 1];
+                    if (func_vars.contains(store_target)) {
+                        if (store_target < bound) loop_stored_locals.set(store_target);
+                    }
+                }
+                pos += wc2;
+            }
+
+            if (loop_stored_locals.count() == 0) continue;
+
+            // Check if any of these vars are loaded after the merge label
+            var local_value_escapes = false;
+            var past_merge2 = false;
+            pos = 5;
+            while (pos < words.len) {
+                const hdr2 = words[pos]; const wc2: u32 = hdr2 >> 16; const op2: u16 = @truncate(hdr2 & 0xFFFF);
+                if (wc2 == 0) break;
+                if (op2 == 248 and wc2 >= 2) {
+                    if (words[pos + 1] == loop_info.merge_id) past_merge2 = true;
+                }
+                if (past_merge2 and !local_value_escapes) {
+                    // Check OpLoad from a loop-stored-local
+                    if (op2 == 61 and wc2 >= 4) { // OpLoad
+                        const load_ptr = words[pos + 3];
+                        if (load_ptr < bound and loop_stored_locals.isSet(load_ptr)) {
+                            local_value_escapes = true;
+                        }
+                    }
+                }
+                pos += wc2;
+            }
+
+            if (local_value_escapes) dead_loops.unset(li);
+        }
+    }
+
     if (dead_loops.count() == 0) return words;
 
     // Filter inner loops contained within dead outer loops
@@ -2290,6 +2359,14 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
                     }
                 }
                 if (op2 == 246 or op2 == 247 or op2 == 254) structured2.set(cur_label);
+                // Also track loop merge/continue targets (for protection)
+                if (op2 == 246 and wc2 >= 4) { // OpLoopMerge
+                    structured2.set(dce_result[pos + 1]); // merge target
+                    if (dce_result[pos + 2] < dce_bound) structured2.set(dce_result[pos + 2]); // continue target
+                }
+                if (op2 == 247 and wc2 >= 3) { // OpSelectionMerge
+                    structured2.set(dce_result[pos + 1]); // merge target
+                }
                 pos += wc2;
             }
 
