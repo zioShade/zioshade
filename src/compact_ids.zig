@@ -3645,6 +3645,7 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                     },
                     131 => { // OpFSub
                         if (float_zero_ids.isSet(b)) try replacements.put(alloc, result_id, a);
+                        if (a == b) try replacements.put(alloc, result_id, b); // x - x = 0
                     },
                     136 => { // OpFDiv
                         if (float_one_ids.isSet(b)) try replacements.put(alloc, result_id, a);
@@ -3655,6 +3656,7 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                     },
                     130 => { // OpISub
                         if (int_zero_ids.isSet(b)) try replacements.put(alloc, result_id, a);
+                        if (a == b) try replacements.put(alloc, result_id, b); // x - x = 0
                     },
                     135 => { // OpSDiv
                         if (int_one_ids.isSet(b)) try replacements.put(alloc, result_id, a);
