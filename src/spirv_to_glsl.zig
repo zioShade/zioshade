@@ -257,9 +257,33 @@ fn getDecVal(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), 
 // ---- Public API ----
 pub const GlslCompileOptions = struct { version: u32 = 430, es: bool = false };
 
+// Thread-local parse cache to avoid re-parsing same SPIR-V across backends
+threadlocal var _cache_mod: ?ParsedModule = null;
+threadlocal var _cache_ptr: ?[*]const u32 = null;
+threadlocal var _cache_len: usize = 0;
+threadlocal var _cache_alloc: ?std.mem.Allocator = null;
+
+fn getCachedModule(alloc: std.mem.Allocator, spirv_words: []const u32) !ParsedModule {
+    if (_cache_ptr) |p| {
+        if (p == spirv_words.ptr and _cache_len == spirv_words.len and _cache_mod != null) {
+            return _cache_mod.?;
+        }
+    }
+    // Evict old cache
+    if (_cache_mod) |*old| {
+        if (_cache_alloc) |a| old.deinit(a);
+        _cache_mod = null;
+    }
+    const m = try parseModule(alloc, spirv_words);
+    _cache_mod = m;
+    _cache_ptr = spirv_words.ptr;
+    _cache_len = spirv_words.len;
+    _cache_alloc = alloc;
+    return m;
+}
+
 pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: GlslCompileOptions) ![]const u8 {
-    var module = try parseModule(alloc, spirv_words);
-    defer module.deinit(alloc);
+    var module = try getCachedModule(alloc, spirv_words);
     const entry_id = module.entry_point_id orelse return error.NoEntryPoint;
 
     // Arena allocator for all backend internals — eliminates individual free() overhead
