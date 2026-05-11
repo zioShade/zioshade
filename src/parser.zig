@@ -17,7 +17,7 @@ pub fn parse(alloc: std.mem.Allocator, source: [:0]const u8, tokens: []const lex
         .struct_names = .{},
     };
 
-    var body = std.ArrayListUnmanaged(ast.Node){};
+    var body = std.ArrayListUnmanaged(ast.Node).empty;
     errdefer {
         for (body.items) |*node| freeNode(alloc, node);
         body.deinit(alloc);
@@ -151,8 +151,8 @@ const Parser = struct {
     tokens: []const lexer.Token,
     pos: usize,
     struct_names: std.StringHashMapUnmanaged(void),
-    heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
-    heap_children: std.ArrayListUnmanaged([]const ast.Node) = .{},
+    heap_types: std.ArrayListUnmanaged(*ast.Type) = .empty,
+    heap_children: std.ArrayListUnmanaged([]const ast.Node) = .empty,
 
     // ── Navigation ────────────────────────────────────────────
 
@@ -350,7 +350,7 @@ const Parser = struct {
         var final_ty = ty;
         if (self.current().tag == .l_bracket) {
             // Parse array dimensions
-            var arr_dims: std.ArrayListUnmanaged(u32) = .{};
+            var arr_dims: std.ArrayListUnmanaged(u32) = .empty;
             defer arr_dims.deinit(self.alloc);
             while (self.current().tag == .l_bracket) {
                 _ = self.advance(); // [
@@ -662,7 +662,7 @@ const Parser = struct {
 
     fn parseFunctionDecl(self: *Parser, name_tok: lexer.Token, ret_type: ast.Type, qualifier: ?ast.Qualifier, layout: ?ast.Layout) Error!ast.Node {
         _ = try self.expect(.l_paren);
-        var params = std.ArrayListUnmanaged(ast.FunctionParam){};
+        var params = std.ArrayListUnmanaged(ast.FunctionParam).empty;
         defer params.deinit(self.alloc);
         // Handle 'void' as sole parameter (meaning no params)
         if (self.current().tag == .kw_void) {
@@ -747,7 +747,7 @@ const Parser = struct {
         // Handle array size suffix: float a[4]
         var ty = mut_ty;
         // Collect array dimensions (first dimension is outermost)
-        var arr_dims: std.ArrayListUnmanaged(u32) = .{};
+        var arr_dims: std.ArrayListUnmanaged(u32) = .empty;
         defer arr_dims.deinit(self.alloc);
         while (self.current().tag == .l_bracket) {
             _ = self.advance();
@@ -769,7 +769,7 @@ const Parser = struct {
                 ty = .{ .array = .{ .base = arr_base, .size = arr_dims.items[i] } };
             }
         }
-        var init_nodes = std.ArrayListUnmanaged(ast.Node){};
+        var init_nodes = std.ArrayListUnmanaged(ast.Node).empty;
         defer init_nodes.deinit(self.alloc);
         if (self.current().tag == .eq) {
             _ = self.advance();
@@ -811,7 +811,7 @@ const Parser = struct {
         }
 
         _ = try self.expect(.l_brace);
-        var members = std.ArrayListUnmanaged(ast.StructMember){};
+        var members = std.ArrayListUnmanaged(ast.StructMember).empty;
         defer members.deinit(self.alloc);
         while (self.current().tag != .r_brace and self.current().tag != .eof) {
             var member_layout: ?ast.Layout = null;
@@ -823,7 +823,7 @@ const Parser = struct {
             _ = self.advance();
             // Check for array size suffix: vec2 a[1] (supports multi-dim: vec2 a[2][3])
             var member_ty_final = member_ty;
-            var member_arr_dims: std.ArrayListUnmanaged(u32) = .{};
+            var member_arr_dims: std.ArrayListUnmanaged(u32) = .empty;
             defer member_arr_dims.deinit(self.alloc);
             while (self.current().tag == .l_bracket) {
                 _ = self.advance();
@@ -867,7 +867,7 @@ const Parser = struct {
 
     fn parseUniformBlock(self: *Parser, name_tok: lexer.Token, qualifier: ?ast.Qualifier, layout: ?ast.Layout) Error!ast.Node {
         _ = try self.expect(.l_brace);
-        var members = std.ArrayListUnmanaged(ast.StructMember){};
+        var members = std.ArrayListUnmanaged(ast.StructMember).empty;
         defer members.deinit(self.alloc);
         while (self.current().tag != .r_brace and self.current().tag != .eof) {
             var member_layout: ?ast.Layout = null;
@@ -879,7 +879,7 @@ const Parser = struct {
             _ = self.advance();
             // Check for array size suffix: vec2 a[1] (supports multi-dim: vec2 a[2][3])
             var member_ty_final = member_ty;
-            var member_arr_dims: std.ArrayListUnmanaged(u32) = .{};
+            var member_arr_dims: std.ArrayListUnmanaged(u32) = .empty;
             defer member_arr_dims.deinit(self.alloc);
             var member_arr_size_name: ?[]const u8 = null;
             while (self.current().tag == .l_bracket) {
@@ -938,7 +938,7 @@ const Parser = struct {
 
     fn parseBlock(self: *Parser) Error![]const ast.Node {
         _ = try self.expect(.l_brace);
-        var stmts = std.ArrayListUnmanaged(ast.Node){};
+        var stmts = std.ArrayListUnmanaged(ast.Node).empty;
         errdefer {
             for (stmts.items) |*node| freeNode(self.alloc, node);
             stmts.deinit(self.alloc);
@@ -1046,7 +1046,7 @@ const Parser = struct {
         if (name_tok.tag != .identifier) return error.UnexpectedToken;
         _ = self.advance();
         // Handle array size suffix: float a[4]
-        var local_arr_dims: std.ArrayListUnmanaged(u32) = .{};
+        var local_arr_dims: std.ArrayListUnmanaged(u32) = .empty;
         defer local_arr_dims.deinit(self.alloc);
         while (self.current().tag == .l_bracket) {
             _ = self.advance();
@@ -1068,7 +1068,7 @@ const Parser = struct {
             }
         }
 
-        var init_nodes = std.ArrayListUnmanaged(ast.Node){};
+        var init_nodes = std.ArrayListUnmanaged(ast.Node).empty;
         defer init_nodes.deinit(self.alloc);
         if (self.current().tag == .eq) {
             _ = self.advance();
@@ -1076,7 +1076,7 @@ const Parser = struct {
         }
 
         // Handle comma-separated declarations: int i = 1, j = 4;
-        var decl_children = std.ArrayListUnmanaged(ast.Node){};
+        var decl_children = std.ArrayListUnmanaged(ast.Node).empty;
         defer decl_children.deinit(self.alloc);
         try decl_children.append(self.alloc, .{
             .tag = .var_decl,
@@ -1093,7 +1093,7 @@ const Parser = struct {
             const next_name = self.current();
             if (next_name.tag != .identifier) break;
             _ = self.advance();
-            var next_init = std.ArrayListUnmanaged(ast.Node){};
+            var next_init = std.ArrayListUnmanaged(ast.Node).empty;
             defer next_init.deinit(self.alloc);
             if (self.current().tag == .eq) {
                 _ = self.advance();
@@ -1129,7 +1129,7 @@ const Parser = struct {
         const cond = try self.parseExpression();
         _ = try self.expect(.r_paren);
 
-        var children = std.ArrayListUnmanaged(ast.Node){};
+        var children = std.ArrayListUnmanaged(ast.Node).empty;
         defer children.deinit(self.alloc);
         try children.append(self.alloc, cond);
         try children.append(self.alloc, try self.parseStatement());
@@ -1150,7 +1150,7 @@ const Parser = struct {
         const tok = self.advance(); // 'for'
         _ = try self.expect(.l_paren);
 
-        var children = std.ArrayListUnmanaged(ast.Node){};
+        var children = std.ArrayListUnmanaged(ast.Node).empty;
         defer children.deinit(self.alloc);
 
         const empty_node = ast.Node{
@@ -1229,7 +1229,7 @@ const Parser = struct {
         _ = try self.expect(.l_brace);
 
         // Parse case/default blocks as children (selector is stored separately in ty field)
-        var children = std.ArrayListUnmanaged(ast.Node){};
+        var children = std.ArrayListUnmanaged(ast.Node).empty;
         defer children.deinit(self.alloc);
         // Store selector expression in the first child slot
         const expr_node = expr; // Capture before dupeNodes
@@ -1239,7 +1239,7 @@ const Parser = struct {
                 const val = try self.parseExpression();
                 _ = try self.expect(.colon);
                 // Parse statements until next case/default/}
-                var case_body = std.ArrayListUnmanaged(ast.Node){};
+                var case_body = std.ArrayListUnmanaged(ast.Node).empty;
                 defer case_body.deinit(self.alloc);
                 // Store case value expression as first child
                 try case_body.append(self.alloc, val);
@@ -1255,7 +1255,7 @@ const Parser = struct {
             } else if (self.current().tag == .kw_default) {
                 _ = self.advance();
                 _ = try self.expect(.colon);
-                var case_body = std.ArrayListUnmanaged(ast.Node){};
+                var case_body = std.ArrayListUnmanaged(ast.Node).empty;
                 defer case_body.deinit(self.alloc);
                 while (self.current().tag != .kw_case and self.current().tag != .kw_default and self.current().tag != .r_brace) {
                     try case_body.append(self.alloc, try self.parseStatement());
@@ -1270,7 +1270,7 @@ const Parser = struct {
         _ = try self.expect(.r_brace);
 
         // Store selector expression and case children
-        var all_children = std.ArrayListUnmanaged(ast.Node){};
+        var all_children = std.ArrayListUnmanaged(ast.Node).empty;
         defer all_children.deinit(self.alloc);
         try all_children.append(self.alloc, expr_node);
         for (children.items) |c| try all_children.append(self.alloc, c);
@@ -1317,7 +1317,7 @@ const Parser = struct {
     fn parseCommaExpression(self: *Parser) Error!ast.Node {
         const expr = try self.parseAssignment();
         if (self.current().tag != .comma) return expr;
-        var children = std.ArrayListUnmanaged(ast.Node){};
+        var children = std.ArrayListUnmanaged(ast.Node).empty;
         defer children.deinit(self.alloc);
         try children.append(self.alloc, expr);
         while (self.current().tag == .comma) {
@@ -1687,7 +1687,7 @@ const Parser = struct {
                     if (self.current().tag == .l_paren and dim_count > 0) {
                         // StructName[]...(args...) — struct array constructor
                         _ = self.advance(); // (
-                        var args = std.ArrayListUnmanaged(ast.Node){};
+                        var args = std.ArrayListUnmanaged(ast.Node).empty;
                         defer args.deinit(self.alloc);
                         while (self.current().tag != .r_paren and self.current().tag != .eof) {
                             try args.append(self.alloc, try self.parseExpression());
@@ -1706,7 +1706,7 @@ const Parser = struct {
                 }
                 if (self.current().tag == .l_paren) {
                     _ = self.advance();
-                    var args = std.ArrayListUnmanaged(ast.Node){};
+                    var args = std.ArrayListUnmanaged(ast.Node).empty;
                     defer args.deinit(self.alloc);
                     while (self.current().tag != .r_paren and self.current().tag != .eof) {
                         try args.append(self.alloc, try self.parseExpression());
@@ -1774,7 +1774,7 @@ const Parser = struct {
                     .loc = self.nodeLoc(tok),
                     .data = .{ .ty = ty },
                 };
-                var args = std.ArrayListUnmanaged(ast.Node){};
+                var args = std.ArrayListUnmanaged(ast.Node).empty;
                 defer args.deinit(self.alloc);
                 while (self.current().tag != .r_paren and self.current().tag != .eof) {
                     try args.append(self.alloc, try self.parseExpression());
@@ -1795,7 +1795,7 @@ const Parser = struct {
                 _ = self.advance();
                 if (self.current().tag == .l_paren) {
                     _ = self.advance(); // (
-                    var args = std.ArrayListUnmanaged(ast.Node){};
+                    var args = std.ArrayListUnmanaged(ast.Node).empty;
                     defer args.deinit(self.alloc);
                     while (self.current().tag != .r_paren and self.current().tag != .eof) {
                         try args.append(self.alloc, try self.parseExpression());

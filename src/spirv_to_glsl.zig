@@ -2,28 +2,20 @@
 //! SPIR-V binary → GLSL cross-compiler backend.
 //! Self-contained: includes its own parser, name resolver, and GLSL emitter.
 //! Will be deduplicated with spirv_to_hlsl.zig into a shared module later.
+const compat = @import("compat.zig");
 const std = @import("std");
 const spirv = @import("spirv.zig");
 const log = std.log.scoped(.spirv_to_glsl);
 
-const Instruction = struct { op: spirv.Op, words: []const u32 };
-const ParsedModule = struct {
-    instructions: []const Instruction,
-    id_defs: std.AutoHashMapUnmanaged(u32, usize),
-    entry_point_id: ?u32 = null,
-    execution_model: spirv.ExecutionModel = .Fragment,
-    local_size: [3]u32 = [3]u32{ 1, 1, 1 },
-    pub fn deinit(self: *ParsedModule, alloc: std.mem.Allocator) void {
-        if (self.instructions.len > 0) { const b = @constCast(self.instructions.ptr); alloc.free(b[0..self.instructions.len]); }
-        self.id_defs.deinit(alloc);
-    }
-};
+const common = @import("spirv_cross_common.zig");
+const Instruction = common.Instruction;
+const ParsedModule = common.ParsedModule;
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
 const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32 };
 const TextureDecl = struct { name: []const u8, binding: u32 };
 
 // ---- Helpers ----
-fn getDef(m: *const ParsedModule, id: u32) ?Instruction { const i = m.id_defs.get(id) orelse return null; if (i >= m.instructions.len) return null; return m.instructions[i]; }
+fn getDef(m: *const ParsedModule, id: u32) ?Instruction { if (id >= m.id_defs.len) return null; const i = m.id_defs[id] orelse return null; if (i >= m.instructions.len) return null; return m.instructions[i]; }
 fn getTypeOf(m: *const ParsedModule, id: u32) ?u32 { const inst = getDef(m, id) orelse return null; return switch (inst.op) { .TypeVoid,.TypeBool,.TypeInt,.TypeFloat,.TypeVector,.TypeMatrix,.TypeImage,.TypeSampler,.TypeSampledImage,.TypeArray,.TypeRuntimeArray,.TypeStruct,.TypePointer,.TypeFunction => null, else => if (inst.words.len > 1) inst.words[1] else null }; }
 fn swizzleChar(i: u32) []const u8 { return switch(i){ 0=>".x",1=>".y",2=>".z",3=>".w",else=>".x"}; }
 fn parseLitStr(alloc: std.mem.Allocator, words: []const u32) ![]const u8 { var buf = try std.ArrayList(u8).initCapacity(alloc, words.len*4); for(words)|word|{const bytes:[4]u8=@bitCast(word);for(bytes)|c|{if(c==0)break;buf.appendAssumeCapacity(c);}} return buf.toOwnedSlice(alloc); }
@@ -73,9 +65,9 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     if (indices.len == 0) return try alloc.dupe(u8, base_name);
     const base_is_cb = isUniformVar(m, base_id);
     const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
-    var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
-    defer buf.deinit(alloc);
-    if (!base_is_cb) try buf.writer(alloc).writeAll(base_name);
+    // Use a stack buffer to avoid heap allocation for typical access chains
+    var writer = compat.StackBufWriter(512).init();
+    if (!base_is_cb) writer.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
     for (indices) |index_id| {
         const idx_inst = getDef(m, index_id);
@@ -84,11 +76,11 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 const val = def.words[3];
                 const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
                 if (is_vector) {
-                    try buf.writer(alloc).writeAll(swizzleChar(val));
+                    writer.writeAll(swizzleChar(val));
                 } else if (base_is_cb) {
-                    try buf.writer(alloc).print("{s}_m{d}", .{cb_prefix, val});
+                    writer.print("{s}_m{d}", .{cb_prefix, val});
                 } else {
-                    try buf.writer(alloc).print("[{d}]", .{val});
+                    writer.print("[{d}]", .{val});
                 }
                 if (cur_type) |tid| {
                     const ti = getDef(m, tid);
@@ -104,10 +96,87 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                         }
                     }
                 }
-            } else { try buf.writer(alloc).print("[{s}]", .{names.get(index_id) orelse "i"}); }
-        } else { try buf.writer(alloc).print("[{s}]", .{names.get(index_id) orelse "i"}); }
+            } else { writer.print("[{s}]", .{names.get(index_id) orelse "i"}); }
+        } else { writer.print("[{s}]", .{names.get(index_id) orelse "i"}); }
+    }
+    if (!writer.overflowed()) {
+        const result = try alloc.dupe(u8, writer.written());
+        return result;
+    }
+    // Fallback to heap allocation for long chains
+    var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
+    defer buf.deinit(alloc);
+    if (!base_is_cb) try buf.appendSlice(alloc, base_name);
+    cur_type = resolvePointee(m, base_id);
+    for (indices) |index_id| {
+        const idx_inst = getDef(m, index_id);
+        if (idx_inst) |def| {
+            if (def.op == .Constant and def.words.len > 3) {
+                const val = def.words[3];
+                const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
+                if (is_vector) {
+                    try buf.appendSlice(alloc, swizzleChar(val));
+                } else if (base_is_cb) {
+                    try buf.print(alloc, "{s}_m{d}", .{cb_prefix, val});
+                } else {
+                    try buf.print(alloc, "[{d}]", .{val});
+                }
+                if (cur_type) |tid| {
+                    const ti = getDef(m, tid);
+                    if (ti) |tinst| {
+                        if (tinst.op == .TypeVector) { cur_type = tinst.words[2]; }
+                        else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur_type = tinst.words[val + 2]; }
+                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                        else { cur_type = null; }
+                    }
+                }
+            } else { try buf.print(alloc, "[{s}]", .{names.get(index_id) orelse "i"}); }
+        } else { try buf.print(alloc, "[{s}]", .{names.get(index_id) orelse "i"}); }
     }
     return buf.toOwnedSlice(alloc);
+}
+
+fn writeResolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32, w: anytype) !void {
+    const inst = getDef(m, ptr_id) orelse { try w.writeAll(names.get(ptr_id) orelse "var"); return; };
+    if (inst.op == .AccessChain) {
+        try writeAccessExpr(m, names, inst.words[3], inst.words[4..], w);
+        return;
+    }
+    try w.writeAll(names.get(ptr_id) orelse "var");
+}
+
+fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
+    const base_name = names.get(base_id) orelse "base";
+    if (indices.len == 0) { try w.writeAll(base_name); return; }
+    const base_is_cb = isUniformVar(m, base_id);
+    const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
+    if (!base_is_cb) try w.writeAll(base_name);
+    var cur_type: ?u32 = resolvePointee(m, base_id);
+    for (indices) |index_id| {
+        const idx_inst = getDef(m, index_id);
+        if (idx_inst) |def| {
+            if (def.op == .Constant and def.words.len > 3) {
+                const val = def.words[3];
+                const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
+                if (is_vector) {
+                    try w.writeAll(swizzleChar(val));
+                } else if (base_is_cb) {
+                    try w.print("{s}_m{d}", .{cb_prefix, val});
+                } else {
+                    try w.print("[{d}]", .{val});
+                }
+                if (cur_type) |tid| {
+                    const ti = getDef(m, tid);
+                    if (ti) |tinst| {
+                        if (tinst.op == .TypeVector) { cur_type = tinst.words[2]; }
+                        else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur_type = tinst.words[val + 2]; }
+                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                        else { cur_type = null; }
+                    }
+                }
+            } else { try w.print("[{s}]", .{names.get(index_id) orelse "i"}); }
+        } else { try w.print("[{s}]", .{names.get(index_id) orelse "i"}); }
+    }
 }
 
 fn resolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32, alloc: std.mem.Allocator) ![]const u8 {
@@ -176,33 +245,40 @@ fn getDecVal(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), 
 // ---- Public API ----
 pub const GlslCompileOptions = struct { version: u32 = 430, es: bool = false };
 
+// Use shared parse cache from root (avoids circular import — cache is passed via allocator context)
 pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: GlslCompileOptions) ![]const u8 {
     var module = try parseModule(alloc, spirv_words);
     defer module.deinit(alloc);
     const entry_id = module.entry_point_id orelse return error.NoEntryPoint;
 
-    var names = std.AutoHashMap(u32, []const u8).init(alloc);
-    defer { var it = names.iterator(); while(it.next())|e| alloc.free(e.value_ptr.*); names.deinit(); }
-    var decs = std.AutoHashMap(u32, std.ArrayList(DecorationEntry)).init(alloc);
-    defer { var it = decs.iterator(); while(it.next())|e| e.value_ptr.deinit(alloc); decs.deinit(); }
+    // Arena allocator for all backend internals — eliminates individual free() overhead
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
 
-    collectNames(alloc, &module, &names);
-    try collectDecorations(alloc, &module, &decs);
+    var names = std.AutoHashMap(u32, []const u8).init(aa);
+    defer names.deinit();
+    var decs = std.AutoHashMap(u32, std.ArrayList(DecorationEntry)).init(aa);
+    defer decs.deinit();
 
-    var cbuffers = std.ArrayList(CbufferDecl).initCapacity(alloc, 0) catch return error.OutOfMemory;
-    defer cbuffers.deinit(alloc);
-    var textures = std.ArrayList(TextureDecl).initCapacity(alloc, 0) catch return error.OutOfMemory;
-    defer textures.deinit(alloc);
-    collectResources(&module, &names, &decs, &cbuffers, &textures, alloc);
+    collectNames(aa, &module, &names);
+    try collectDecorations(aa, &module, &decs);
+
+    var cbuffers = std.ArrayList(CbufferDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
+    defer cbuffers.deinit(aa);
+    var textures = std.ArrayList(TextureDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
+    defer textures.deinit(aa);
+    collectResources(&module, &names, &decs, &cbuffers, &textures, aa);
 
     var output = std.ArrayList(u8).initCapacity(alloc, 4096) catch return error.OutOfMemory;
-    defer output.deinit(alloc);
-    const w = output.writer(alloc);
+    var output_owned = true;
+    defer if (output_owned) output.deinit(alloc);
+    const w = compat.listWriter(&output, alloc);
 
     try w.print("#version {d}\n\n", .{options.version});
     for (cbuffers.items) |cb| {
         try w.print("layout(binding = {d}, std140) uniform {s}\n{{\n", .{cb.binding, cb.name});
-        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, alloc);
+        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa);
         try w.print("}} {s}_1;\n\n", .{cb.name});
     }
     for (textures.items) |tex| {
@@ -210,16 +286,17 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
     if (textures.items.len > 0) try w.writeAll("\n");
 
-    var func_ids = std.ArrayList(u32).initCapacity(alloc, 8) catch return error.OutOfMemory;
-    defer func_ids.deinit(alloc);
-    for (module.instructions) |inst| { if (inst.op == .Function and inst.words.len > 2) try func_ids.append(alloc, inst.words[2]); }
+    var func_ids = std.ArrayList(u32).initCapacity(aa, 8) catch return error.OutOfMemory;
+    defer func_ids.deinit(aa);
+    for (module.instructions) |inst| { if (inst.op == .Function and inst.words.len > 2) try func_ids.append(aa, inst.words[2]); }
 
-    var out_param_info = std.AutoHashMap(u32, std.ArrayList(usize)).init(alloc);
-    defer { var it = out_param_info.iterator(); while(it.next())|e| e.value_ptr.deinit(alloc); out_param_info.deinit(); }
-    detectOutParams(&module, entry_id, &out_param_info, alloc);
+    var out_param_info = std.AutoHashMap(u32, std.ArrayList(usize)).init(aa);
+    defer { var it = out_param_info.iterator(); while(it.next())|e| e.value_ptr.deinit(aa); out_param_info.deinit(); }
+    detectOutParams(&module, entry_id, &out_param_info, aa);
 
-    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, alloc, false, &out_param_info); }
-    try emitFunction(&module, &names, &decs, entry_id, w, alloc, true, &out_param_info);
+    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info); }
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info);
+    output_owned = false;
     return output.toOwnedSlice(alloc);
 }
 
@@ -229,15 +306,17 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     if (words[0] != spirv.MAGIC) return error.InvalidSpirvMagic;
     var instructions = std.ArrayList(Instruction).initCapacity(alloc, words.len / 4) catch return error.OutOfMemory;
     errdefer instructions.deinit(alloc);
-    var id_defs = std.AutoHashMapUnmanaged(u32, usize){};
-    errdefer id_defs.deinit(alloc);
+    // Use flat array for ID lookups — O(1) without hashing
+    const bound = if (words.len > 3) words[3] else 0;
+    const id_defs = try alloc.alloc(?usize, bound);
+    @memset(id_defs, null);
     var i: usize = 5;
     while (i < words.len) {
         const hw = words[i]; const wc: u16 = @intCast(hw >> 16); const oc: u16 = @truncate(hw & 0xFFFF);
         if (wc == 0) return error.InvalidSpirv;
         if (i + wc > words.len) return error.InvalidSpirvTruncated;
         const op: spirv.Op = @enumFromInt(oc); const iw = words[i..i+wc];
-        if (resultIdFromOp(op, iw)) |id| { id_defs.put(alloc, id, instructions.items.len) catch return error.OutOfMemory; }
+        if (resultIdFromOp(op, iw)) |id| { if (id < bound) id_defs[id] = instructions.items.len; }
         instructions.append(alloc, .{.op=op,.words=iw}) catch return error.OutOfMemory;
         i += wc;
     }
@@ -290,12 +369,12 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
                     } else {
                         var buf = std.ArrayList(u8).initCapacity(alloc, 64) catch continue;
                         defer buf.deinit(alloc);
-                        buf.writer(alloc).print("{s}(", .{vt}) catch continue;
+                        buf.print(alloc, "{s}(", .{vt}) catch continue;
                         for (constituents, 0..) |cid, i| {
-                            if (i > 0) buf.writer(alloc).writeAll(", ") catch continue;
-                            buf.writer(alloc).writeAll(names.get(cid) orelse "0.0") catch continue;
+                            if (i > 0) buf.appendSlice(alloc, ", ") catch continue;
+                            buf.appendSlice(alloc, names.get(cid) orelse "0.0") catch continue;
                         }
-                        buf.writer(alloc).writeAll(")") catch continue;
+                        buf.appendSlice(alloc, ")") catch continue;
                         const lit = buf.toOwnedSlice(alloc) catch continue;
                         if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
                     }
@@ -305,12 +384,12 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
                     const mt = glslType(m, inst.words[1], names, alloc) catch "mat4";
                     var buf = std.ArrayList(u8).initCapacity(alloc, 128) catch continue;
                     defer buf.deinit(alloc);
-                    buf.writer(alloc).print("{s}(", .{mt}) catch continue;
+                    buf.print(alloc, "{s}(", .{mt}) catch continue;
                     for (inst.words[3..], 0..) |cid, i| {
-                        if (i > 0) buf.writer(alloc).writeAll(", ") catch continue;
-                        buf.writer(alloc).writeAll(names.get(cid) orelse "0.0") catch continue;
+                        if (i > 0) buf.appendSlice(alloc, ", ") catch continue;
+                        buf.appendSlice(alloc, names.get(cid) orelse "0.0") catch continue;
                     }
-                    buf.writer(alloc).writeAll(")") catch continue;
+                    buf.appendSlice(alloc, ")") catch continue;
                     const lit = buf.toOwnedSlice(alloc) catch continue;
                     if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
                     continue;
@@ -348,7 +427,7 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
 }
 
 fn detectOutParams(m: *const ParsedModule, entry_id: u32, opi: *std.AutoHashMap(u32, std.ArrayList(usize)), alloc: std.mem.Allocator) void {
-    const fi = m.id_defs.get(entry_id) orelse return;
+    const fi = if (entry_id < m.id_defs.len) m.id_defs[entry_id] orelse return else return;
     var ov = std.AutoHashMap(u32, void).init(alloc); defer ov.deinit();
     for (m.instructions) |inst| { if (inst.op == .Variable and inst.words.len >= 4) { const sc: spirv.StorageClass = @enumFromInt(inst.words[3]); if (sc == .Output) ov.put(inst.words[2], {}) catch {}; } }
     var lfo = std.AutoHashMap(u32, void).init(alloc); defer lfo.deinit();
@@ -370,6 +449,7 @@ fn std450ToGlsl(val: u32) ?[]const u8 {
         40 => "max", 41 => "min", 42 => "max", 43 => "clamp", 44 => "clamp",
         45 => "clamp", 46 => "mix", 48 => "step", 49 => "smoothstep",
         66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
+        70 => "faceforward", 71 => "reflect", 72 => "refract",
         73 => "findLSB", 74 => "findMSB", 75 => "findMSB",
         else => null,
     };
@@ -412,7 +492,7 @@ fn emitFunction(
         }
     }
 
-    const func_idx = m.id_defs.get(func_id) orelse return;
+    const func_idx = if (func_id < m.id_defs.len) m.id_defs[func_id] orelse return else return;
     const func_name = names.get(func_id) orelse "func";
 
     var param_ids = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;
@@ -761,23 +841,31 @@ fn emitInstruction(
                 if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
             } else {
                 const rtt = try glslType(m, inst.words[1], names, alloc);
-                const pe = try resolvePointer(m, names, pid, alloc);
-                try w.print("    {s} {s} = {s};\n", .{ rtt, rn, pe });
-                alloc.free(pe);
+                try w.print("    {s} {s} = ", .{ rtt, rn });
+                try writeResolvePointer(m, names, pid, w);
+                try w.writeAll(";\n");
             }
         },
         .Store => {
             if (inst.words.len < 3) return;
-            const pe = try resolvePointer(m, names, inst.words[1], alloc);
             const on = names.get(inst.words[2]) orelse "0";
-            try w.print("    {s} = {s};\n", .{ pe, on });
-            alloc.free(pe);
+            try w.writeAll("    ");
+            try writeResolvePointer(m, names, inst.words[1], w);
+            try w.print(" = {s};\n", .{on});
         },
         .CopyObject => {
             if (inst.words.len < 4) return;
             const sn = names.get(inst.words[3]) orelse "0";
             const a = try alloc.dupe(u8, sn);
             if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
+        },
+        .CopyMemory => {
+            if (inst.words.len < 3) return;
+            try w.writeAll("    ");
+            try writeResolvePointer(m, names, inst.words[1], w);
+            try w.writeAll(" = ");
+            try writeResolvePointer(m, names, inst.words[2], w);
+            try w.writeAll(";\n");
         },
         .Phi => {
             if (inst.words.len < 4) return;
@@ -832,6 +920,8 @@ fn emitInstruction(
         .BitwiseOr => try emitBinOp(m, names, inst, "|", w, alloc),
         .BitwiseXor => try emitBinOp(m, names, inst, "^", w, alloc),
         .BitwiseAnd => try emitBinOp(m, names, inst, "&", w, alloc),
+        .ShiftRightLogical, .ShiftRightArithmetic => try emitBinOp(m, names, inst, ">>", w, alloc),
+        .ShiftLeftLogical => try emitBinOp(m, names, inst, "<<", w, alloc),
         .Not => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = ~{s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
@@ -902,11 +992,25 @@ fn emitInstruction(
             const a = try alloc.dupe(u8, iname);
             if (names.fetchPut(ri, a) catch null) |old| alloc.free(old.value);
         },
+        .OpImage => {
+            // OpImage extracts image from sampled_image — in GLSL, combined sampler is passed directly
+            const ri = inst.words[2];
+            const iname = names.get(inst.words[3]) orelse "tex";
+            const a = try alloc.dupe(u8, iname);
+            if (names.fetchPut(ri, a) catch null) |old| alloc.free(old.value);
+        },
         .ImageSampleImplicitLod => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             try w.print("    {s} {s} = texture({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
+        },
+        .ImageSampleProjImplicitLod => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            // Projected: textureProj(sampler, vec4(xy, z, w)) divides xy by w
+            try w.print("    {s} {s} = textureProj({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
         },
         .ImageSampleExplicitLod => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
