@@ -34,11 +34,12 @@ cbuffer Globals : register(b0)
 Texture2D iChannel0 : register(t0);
 SamplerState iChannel0_sampler : register(s0);
 
+
 void mainImage(out float4 v28, float2 v29)
 {
     float3 v30;
     float2 v31;
-    float3 v33 = Globals[0];
+    float3 v33 = Globals_m0;
     float2 v34 = float2(v33.x, v33.y);
     float2 v35 = v29 / v34;
     float2 v36 = v35 - float2(0.5, 0.5);
@@ -65,7 +66,7 @@ void mainImage(out float4 v28, float2 v29)
     float2 v57 = v56 * 0.92;
     float2 v58 = v57 + float2(0.04, 0.04);
     v31 = v58;
-    float v61 = Globals[1];
+    float v61 = Globals_m1;
     float v62 = 0.3 * v61;
     float v63 = v58.y;
     float v64 = v63 * 21.0;
