@@ -1093,6 +1093,154 @@ fn emitInstruction(
         .Kill => try w.writeAll("    discard;\n"),
         .ControlBarrier => try w.writeAll("    barrier();\n    memoryBarrier();\n"),
         .MemoryBarrier => try w.writeAll("    memoryBarrier();\n"),
+
+        // Subgroup operations → GLSL subgroup* builtins
+        .GroupNonUniformElect => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            try w.print("    bool {s} = subgroupElect();\n", .{rn});
+        },
+        .GroupNonUniformAll => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupAll({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformAny => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupAny({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformAllEqual => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupAllEqual({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBroadcast => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const lane = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = subgroupBroadcast({s}, {s});\n", .{rtt, rn, val, lane});
+        },
+        .GroupNonUniformBroadcastFirst => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupBroadcastFirst({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBallot => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupBallot({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformShuffle => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const lane = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = subgroupShuffle({s}, {s});\n", .{rtt, rn, val, lane});
+        },
+        .GroupNonUniformShuffleXor => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const mask = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = subgroupShuffleXor({s}, {s});\n", .{rtt, rn, val, mask});
+        },
+        .GroupNonUniformShuffleUp => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const delta = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = subgroupShuffleUp({s}, {s});\n", .{rtt, rn, val, delta});
+        },
+        .GroupNonUniformShuffleDown => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const delta = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = subgroupShuffleDown({s}, {s});\n", .{rtt, rn, val, delta});
+        },
+        .GroupNonUniformIAdd => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupAdd({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformFAdd => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupAdd({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformIMul => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupMul({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformFMul => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupMul({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupMin({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupMax({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBitwiseAnd => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupAnd({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBitwiseOr => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupOr({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBitwiseXor => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupXor({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformLogicalAnd => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupAnd({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformLogicalOr => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = subgroupOr({s});\n", .{rtt, rn, val});
+        },
+        // SubgroupAllKHR / SubgroupAnyKHR
+        .SubgroupAllKHR => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[3]) orelse "x";
+            try w.print("    bool {s} = subgroupAll({s});\n", .{rn, val});
+        },
+        .SubgroupAnyKHR => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[3]) orelse "x";
+            try w.print("    bool {s} = subgroupAny({s});\n", .{rn, val});
+        },
         .Return => {
             if (!(is_frag and ovid != null)) try w.writeAll("    return;\n");
         },

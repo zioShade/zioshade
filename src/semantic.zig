@@ -4108,7 +4108,7 @@ const Analyzer = struct {
                             .ty = .bool,
                         });
                         return .{ .ty = .bool, .id = result_id };
-                    } else if (std.mem.eql(u8, node.data.name, "allInvocationsARB") or std.mem.eql(u8, node.data.name, "allInvocations") or std.mem.eql(u8, node.data.name, "allInvocationsEqualARB") or std.mem.eql(u8, node.data.name, "allInvocationsEqual")) {
+                    } else if (std.mem.eql(u8, node.data.name, "allInvocationsARB") or std.mem.eql(u8, node.data.name, "allInvocations") or std.mem.eql(u8, node.data.name, "allInvocationsEqualARB") or std.mem.eql(u8, node.data.name, "allInvocationsEqual") or std.mem.eql(u8, node.data.name, "subgroupAll")) {
                         // Group vote: allInvocations → OpGroupAll
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         operands[0] = .{ .id = arg_tids.items[0].id };
@@ -4120,7 +4120,7 @@ const Analyzer = struct {
                             .ty = .bool,
                         });
                         return .{ .ty = .bool, .id = result_id };
-                    } else if (std.mem.eql(u8, node.data.name, "anyInvocationARB") or std.mem.eql(u8, node.data.name, "anyInvocation")) {
+                    } else if (std.mem.eql(u8, node.data.name, "anyInvocationARB") or std.mem.eql(u8, node.data.name, "anyInvocation") or std.mem.eql(u8, node.data.name, "subgroupAny")) {
                         // Group vote: anyInvocation → OpGroupAny
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                         operands[0] = .{ .id = arg_tids.items[0].id };

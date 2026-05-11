@@ -1126,3 +1126,39 @@ test "T19.3: swizzle chain" {
     try assertContains(glsl, ".x");
     try assertContains(glsl, ".y");
 }
+
+// === Subgroup operation tests (Issue #3) ===
+
+test "subgroupAll compiles to GLSL with subgroupAll" {
+    const source =
+        \\#version 450
+        \\#extension GL_KHR_shader_subgroup_vote : enable
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint idx = gl_GlobalInvocationID.x;
+        \\    bool all_pos = subgroupAll(values[idx] > 0.0);
+        \\    if (all_pos) { values[idx] = 1.0; }
+        \\}
+    ;
+    const glsl = try compileToGlslStage(source, .compute);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "subgroupAll");
+}
+
+test "subgroupAny compiles to GLSL with subgroupAny" {
+    const source =
+        \\#version 450
+        \\#extension GL_KHR_shader_subgroup_vote : enable
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint idx = gl_GlobalInvocationID.x;
+        \\    bool any_pos = subgroupAny(values[idx] > 0.0);
+        \\    if (any_pos) { values[idx] = 1.0; }
+        \\}
+    ;
+    const glsl = try compileToGlslStage(source, .compute);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "subgroupAny");
+}
