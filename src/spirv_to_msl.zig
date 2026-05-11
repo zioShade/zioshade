@@ -172,11 +172,12 @@ fn mslType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []
         .TypeVoid => "void",
         .TypeBool => "bool",
         .TypeInt => if (inst.words.len > 3 and inst.words[3] != 0) "int" else "uint",
-        .TypeFloat => "float",
+        .TypeFloat => if (inst.words.len > 2 and inst.words[2] == 16) "half" else "float",
         .TypeVector => {
             const scalar = mslType(m, inst.words[2], names, alloc) catch "float";
             const count = inst.words[3];
             if (std.mem.eql(u8, scalar, "float")) { if(count>=1 and count<=4) return ([_][]const u8{"","float","float2","float3","float4"})[count]; }
+            else if (std.mem.eql(u8, scalar, "half")) { if(count>=1 and count<=4) return ([_][]const u8{"","half","half2","half3","half4"})[count]; }
             else if (std.mem.eql(u8, scalar, "int")) { if(count>=1 and count<=4) return ([_][]const u8{"","int","int2","int3","int4"})[count]; }
             else if (std.mem.eql(u8, scalar, "uint")) { if(count>=1 and count<=4) return ([_][]const u8{"","uint","uint2","uint3","uint4"})[count]; }
             else if (std.mem.eql(u8, scalar, "bool")) { if(count>=1 and count<=4) return ([_][]const u8{"","bool","bool2","bool3","bool4"})[count]; }

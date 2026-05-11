@@ -584,13 +584,16 @@ fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
             const signed = inst.words.len > 3 and inst.words[3] != 0;
             return if (signed) "int" else "uint";
         },
-        .TypeFloat => return "float",
+        .TypeFloat => return if (inst.words.len > 2 and inst.words[2] == 16) "half" else "float",
         .TypeVector => {
             const scalar = try hlslType(module, inst.words[2], names, alloc);
             const cols = inst.words[3];
             // Fast path for common types (avoid allocation)
             if (std.mem.eql(u8, scalar, "float")) {
                 const names_vec = [_][]const u8{ "", "float", "float2", "float3", "float4" };
+                if (cols >= 1 and cols <= 4) return names_vec[cols];
+            } else if (std.mem.eql(u8, scalar, "half")) {
+                const names_vec = [_][]const u8{ "", "half", "half2", "half3", "half4" };
                 if (cols >= 1 and cols <= 4) return names_vec[cols];
             } else if (std.mem.eql(u8, scalar, "int")) {
                 const names_vec = [_][]const u8{ "", "int", "int2", "int3", "int4" };

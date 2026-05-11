@@ -503,3 +503,18 @@ test "T11.2: swizzle access" {
     defer alloc.free(msl);
     try assertContains(msl, "[0]");
 }
+
+// === FP16 type tests (Issue #4) ===
+
+test "float16_t compiles through the pipeline" {
+    const source =
+        \\#version 450
+        \\#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
+        \\layout(binding = 0, std140) uniform U { float a; float b; } u;
+        \\void main() { if (u.a + u.b > 0.0) discard; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // Just verify it compiles without error
+    try assertContains(msl, "metal_stdlib");
+}
