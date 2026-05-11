@@ -13326,3 +13326,32 @@ test "subgroupAny compiles to HLSL with WaveActiveAnyTrue" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "WaveActiveAnyTrue");
 }
+
+// ---------------------------------------------------------------------------
+// Cbuffer member access tests
+// ---------------------------------------------------------------------------
+
+test "CBUFFER_ACCESS: cbuffer member access uses _mN suffix not array index" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform Globals {
+        \\    uniform vec3 iResolution;
+        \\    uniform float iTime;
+        \\    uniform float iFrameRate;
+        \\};
+        \\layout(location = 0) out vec4 _fragColor;
+        \\void main() {
+        \\    float t = iTime;
+        \\    _fragColor = vec4(t, t, t, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Must NOT use array indexing for cbuffer access
+    try assertNotContains(hlsl, "Globals[0]");
+    try assertNotContains(hlsl, "Globals[1]");
+    try assertNotContains(hlsl, "Globals[2]");
+    // Must use _mN member access
+    try assertContains(hlsl, "Globals_m0");
+    try assertContains(hlsl, "Globals_m1");
+}
