@@ -13,6 +13,7 @@ pub const spirv_to_hlsl = @import("spirv_to_hlsl.zig");
 pub const spirv_to_glsl = @import("spirv_to_glsl.zig");
 pub const spirv_to_msl = @import("spirv_to_msl.zig");
 pub const kernel_fusion = @import("kernel_fusion.zig");
+const compact_ids = @import("compact_ids.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -183,6 +184,196 @@ pub fn compileGlslToHlsl(
 
 
 
+/// Merge multiple SPIR-V modules into a single module with proper ID remapping.
+/// Uses compact_ids.getOpInfo to distinguish IDs from literals.
+fn linkSPIRVModules(alloc: std.mem.Allocator, modules: []const []const u32) Error![]const u32 {
+    if (modules.len == 0) return error.CodegenFailed;
+    if (modules.len == 1) {
+        return try alloc.dupe(u32, modules[0]);
+    }
+
+    // Calculate cumulative ID offsets for each module
+    var id_offsets = try alloc.alloc(u32, modules.len);
+    defer alloc.free(id_offsets);
+
+    var next_id: u32 = modules[0][3]; // bound of first module
+    id_offsets[0] = 0;
+    for (1..modules.len) |i| {
+        id_offsets[i] = next_id;
+        if (modules[i].len >= 4) {
+            next_id += modules[i][3]; // add bound of this module
+        }
+    }
+
+    var out = std.ArrayList(u32).initCapacity(alloc, modules[0].len) catch return error.OutOfMemory;
+    defer out.deinit(alloc);
+
+    // Copy first module as the base (with updated bound)
+    try out.appendSlice(alloc, modules[0]);
+    if (out.items.len >= 4) {
+        out.items[3] = next_id; // update bound
+    }
+
+    // For subsequent modules, remap IDs and append
+    for (modules[1..], 1..) |mod, mi| {
+        if (mod.len < 5) continue;
+        const offset = id_offsets[mi];
+        const mod_bound = mod[3];
+
+        var p: u32 = 5; // skip header
+        while (p < mod.len) {
+            const h = mod[p];
+            const wc: u32 = h >> 16;
+            const op: u16 = @truncate(h & 0xFFFF);
+            if (wc == 0) break;
+            const ie = p + wc;
+            if (ie > mod.len) break;
+
+            // Skip capabilities, memory model, and OpSource (already in first module)
+            if (op == 17 or op == 14 or op == 3) {
+                p = ie;
+                continue;
+            }
+
+            // Remap instruction using getOpInfo for proper ID/literal distinction
+            const info = compact_ids.getOpInfo(op) orelse {
+                // Unknown opcode — copy as-is
+                try out.appendSlice(alloc, mod[p..ie]);
+                p = ie;
+                continue;
+            };
+
+            const remap = struct {
+                fn remapId(word: u32, off: u32, bnd: u32) u32 {
+                    return if (word > 0 and word < bnd) word + off else word;
+                }
+            }.remapId;
+
+            try out.ensureUnusedCapacity(alloc, wc);
+            try out.append(alloc, h); // instruction header — no remap
+
+            var wi: u32 = p + 1; // start after header
+
+            // Fixed part
+            switch (info.fixed) {
+                1 => { // result_type (ID)
+                    if (wi < ie) {
+                        try out.append(alloc, remap(mod[wi], offset, mod_bound));
+                        wi += 1;
+                    }
+                },
+                2 => { // result_type (ID), result (ID — definition)
+                    if (wi < ie) {
+                        try out.append(alloc, remap(mod[wi], offset, mod_bound));
+                        wi += 1;
+                    }
+                    if (wi < ie) {
+                        try out.append(alloc, remap(mod[wi], offset, mod_bound));
+                        wi += 1;
+                    }
+                },
+                3 => { // result only (definition)
+                    if (wi < ie) {
+                        try out.append(alloc, remap(mod[wi], offset, mod_bound));
+                        wi += 1;
+                    }
+                },
+                else => {},
+            }
+
+            // Variable operands
+            for (info.ops) |ch| {
+                if (wi >= ie) break;
+                switch (ch) {
+                    'i' => {
+                        try out.append(alloc, remap(mod[wi], offset, mod_bound));
+                        wi += 1;
+                    },
+                    'I' => {
+                        while (wi < ie) : (wi += 1) {
+                            try out.append(alloc, remap(mod[wi], offset, mod_bound));
+                        }
+                    },
+                    'l', 'L' => {
+                        while (wi < ie) : (wi += 1) {
+                            try out.append(alloc, mod[wi]);
+                        }
+                    },
+                    's' => {
+                        while (wi < ie) : (wi += 1) {
+                            try out.append(alloc, mod[wi]);
+                        }
+                    },
+                    'M' => {
+                        if (wi < ie) {
+                            try out.append(alloc, mod[wi]); // mask literal
+                            wi += 1;
+                        }
+                        while (wi < ie) : (wi += 1) {
+                            try out.append(alloc, remap(mod[wi], offset, mod_bound));
+                        }
+                    },
+                    'W' => {
+                        while (wi + 1 < ie) {
+                            try out.append(alloc, mod[wi]); // literal
+                            wi += 1;
+                            try out.append(alloc, remap(mod[wi], offset, mod_bound)); // ID
+                            wi += 1;
+                        }
+                        if (wi < ie) {
+                            try out.append(alloc, mod[wi]);
+                            wi += 1;
+                        }
+                    },
+                    'E' => {
+                        // OpEntryPoint: model(lit), func-id, name-string, interface-ids...
+                        if (wi < ie) {
+                            try out.append(alloc, mod[wi]); // execution model literal
+                            wi += 1;
+                        }
+                        if (wi < ie) {
+                            try out.append(alloc, remap(mod[wi], offset, mod_bound)); // func-id
+                            wi += 1;
+                        }
+                        // Copy name string words until null terminator found
+                        while (wi < ie) {
+                            const w = mod[wi];
+                            try out.append(alloc, w);
+                            wi += 1;
+                            if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) {
+                                break;
+                            }
+                        }
+                        // Rest are interface IDs
+                        while (wi < ie) : (wi += 1) {
+                            try out.append(alloc, remap(mod[wi], offset, mod_bound));
+                        }
+                    },
+                    else => {
+                        if (wi < ie) {
+                            try out.append(alloc, mod[wi]);
+                            wi += 1;
+                        }
+                    },
+                }
+            }
+
+            // Copy any remaining words (for cases where getOpInfo doesn't cover all operands)
+            while (wi < ie) : (wi += 1) {
+                try out.append(alloc, mod[wi]);
+            }
+
+            p = ie;
+        }
+    }
+
+    // Compact IDs to clean up gaps
+    const result = try out.toOwnedSlice(alloc);
+    const compacted = compact_ids.compactIds(alloc, result) catch return result;
+    if (compacted.ptr != result.ptr) alloc.free(result);
+    return compacted;
+}
+
 /// Compile GLSL source to SPIR-V with kernel fusion optimization.
 /// Compiles multiple GLSL compute shaders, then fuses consecutive
 /// elementwise kernels to reduce memory bandwidth and launch overhead.
@@ -203,89 +394,21 @@ pub fn compileToSPIRVWithFusion(
         return fused;
     }
 
-    // Multiple sources — compile each and link (merge SPIR-V modules)
-    var merged = std.ArrayList(u32).initCapacity(alloc, 1024) catch return error.OutOfMemory;
-    defer merged.deinit(alloc);
-
-    // Collect all compiled SPIR-V modules
+    // Multiple sources — compile each and merge SPIR-V modules
     var modules = std.ArrayList([]const u32).initCapacity(alloc, sources.len) catch return error.OutOfMemory;
     defer {
         for (modules.items) |m| alloc.free(m);
         modules.deinit(alloc);
     }
 
-    var max_id: u32 = 0;
-    var total_instr_count: u32 = 0;
-
     for (sources) |src| {
         const spirv_words = try compileToSPIRV(alloc, src, options);
         try modules.append(alloc, spirv_words);
-        if (spirv_words.len >= 4 and spirv_words[3] > max_id) {
-            max_id = spirv_words[3];
-        }
-        total_instr_count += @intCast(spirv_words.len);
     }
 
-    // Simple merge strategy: take first module as base, then append
-    // remapped functions from subsequent modules.
-    // For proper multi-module linking, we'd need full SPIR-V linking.
-    // Here we use the first module and append the rest with ID offset.
-    if (modules.items.len > 0) {
-        const first = modules.items[0];
-        try merged.appendSlice(alloc, first);
-
-        // For subsequent modules, we need to merge them
-        // Simple approach: just append with ID remapping
-        // (This is a simplified implementation - a full linker would be more complex)
-        var current_id_offset: u32 = max_id;
-
-        for (modules.items[1..]) |mod| {
-            if (mod.len < 5) continue;
-            const mod_bound = mod[3];
-
-            // Skip header (5 words) and capabilities/memory model of subsequent modules
-            // Copy instructions starting from entry points
-            var p: u32 = 5;
-            while (p < mod.len) {
-                const h = mod[p];
-                const wc: u32 = h >> 16;
-                const op: u16 = @truncate(h & 0xFFFF);
-                if (wc == 0) break;
-                const ie = p + wc;
-                if (ie > mod.len) break;
-
-                // Skip capabilities and memory model (already in first module)
-                if (op == 17 or op == 14) {
-                    p = ie;
-                    continue;
-                }
-
-                // Remap all IDs in the instruction by current_id_offset
-                for (p..ie) |wi| {
-                    var word = mod[wi];
-                    // For non-header words that are IDs, add offset
-                    if (wi > p) {
-                        // Simple heuristic: if the word looks like an ID (< mod_bound), remap it
-                        if (word > 0 and word < mod_bound) {
-                            word += current_id_offset;
-                        }
-                    }
-                    try merged.append(alloc, word);
-                }
-
-                p = ie;
-            }
-
-            current_id_offset += mod_bound;
-        }
-
-        // Update bound in header
-        if (merged.items.len >= 4) {
-            merged.items[3] = current_id_offset;
-        }
-    }
-
-    const merged_words = try merged.toOwnedSlice(alloc);
+    // Use proper ID-aware merge: remap IDs (not literals) using getOpInfo
+    const merged_words = try linkSPIRVModules(alloc, modules.items);
+    errdefer alloc.free(merged_words);
 
     // Apply fusion pass
     const fused = kernel_fusion.fuseKernels(alloc, merged_words, fusion) catch return merged_words;
