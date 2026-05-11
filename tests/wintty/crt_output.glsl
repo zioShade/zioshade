@@ -33,6 +33,7 @@ layout(binding = 1, std140) uniform Globals
 
 layout(binding = 0) uniform sampler2D iChannel0;
 
+
 void mainImage(out vec4 v28, vec2 v29)
 {
     vec3 v30;
