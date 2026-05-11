@@ -482,19 +482,19 @@ const Analyzer = struct {
         if (ty == .named) {
             if (self.types.get(ty.named)) |td| {
                 for (td.members) |member| {
-                    key = key *% 31 +% @intFromEnum(member.ty);
+                    key = key *% 0x5bd1e995 ^ @intFromEnum(member.ty);
                 }
             } else {
                 // Fallback to name hash if type not found
                 for (ty.named) |ch| {
-                    key = key *% 31 +% @as(u64, ch);
+                    key = key *% 0x5bd1e995 ^ @as(u64, ch);
                 }
             }
         }
         // For array types, include size and base type hash
         if (ty == .array) {
-            key = key *% 31 +% @as(u64, ty.array.size);
-            key = key *% 31 +% @intFromEnum(ty.array.base.*);
+            key = key *% 0x5bd1e995 ^ @as(u64, ty.array.size);
+            key = key *% 0x5bd1e995 ^ @intFromEnum(ty.array.base.*);
         }
         for (operands) |op| {
             const op_val: u64 = switch (op) {
@@ -502,7 +502,7 @@ const Analyzer = struct {
                 .literal_int => |v| v,
                 else => 0,
             };
-            key = key *% 31 +% op_val;
+            key = key *% 0x5bd1e995 ^ op_val;
         }
         return key;
     }
@@ -603,7 +603,7 @@ const Analyzer = struct {
                 .literal_int => |v| v | (@as(u64, 1) << 62),
                 else => 0,
             };
-            key = key *% 31 +% op_val;
+            key = key *% 0x5bd1e995 ^ op_val;
         }
         // Check local cache first
         if (self.pure_op_cache.get(key)) |existing_id| {
@@ -2565,9 +2565,13 @@ const Analyzer = struct {
                 } else final_result_ty;
                 {
                     var cache_key: u64 = @intFromEnum(cacheable_ty) *% 37 +% @intFromEnum(tag);
-                    cache_key = cache_key *% 31 +% @as(u64, left_id);
-                    cache_key = cache_key *% 31 +% @as(u64, right_id);
+                    cache_key = cache_key *% 0x5bd1e995 ^ @as(u64, left_id);
+                    cache_key = cache_key *% 0x5bd1e995 ^ @as(u64, right_id);
                     if (self.pure_op_cache.get(cache_key)) |existing_id| {
+                        self.alloc.free(operands);
+                        return .{ .ty = cacheable_ty, .id = existing_id };
+                    }
+                    if (self.global_pure_op_cache.get(cache_key)) |existing_id| {
                         self.alloc.free(operands);
                         return .{ .ty = cacheable_ty, .id = existing_id };
                     }
@@ -2613,8 +2617,8 @@ const Analyzer = struct {
                 }
                 // Cache for dedup (comparisons are pure too — same inputs = same output)
                 var cache_key: u64 = @intFromEnum(cacheable_ty) *% 37 +% @intFromEnum(tag);
-                cache_key = cache_key *% 31 +% @as(u64, left_id);
-                cache_key = cache_key *% 31 +% @as(u64, right_id);
+                cache_key = cache_key *% 0x5bd1e995 ^ @as(u64, left_id);
+                cache_key = cache_key *% 0x5bd1e995 ^ @as(u64, right_id);
                 self.pure_op_cache.put(self.alloc, cache_key, result_id) catch {};
                 return .{ .ty = cacheable_ty, .id = result_id };
             },
@@ -3029,19 +3033,7 @@ const Analyzer = struct {
                     .ty = result_ty_2,
                 });
                 // Store back
-                const store_operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                store_operands[0] = .{ .id = target.id };
-                store_operands[1] = .{ .id = computed_id };
-                _ = self.load_cache.remove(target.id);
-                _ = self.global_load_cache.remove(target.id);
-                self.load_cache.put(self.alloc, target.id, computed_id) catch {}; // Forward stored value
-        try self.instructions.append(self.alloc, .{
-                    .tag = .store,
-                    .result_type = null,
-                    .result_id = null,
-                    .operands = store_operands,
-                    .ty = .void,
-                });
+                try self.emitStore(target.id, computed_id);
                 return .{ .ty = .void, .id = 0 };
             },
             .func_call => {
@@ -3150,7 +3142,7 @@ const Analyzer = struct {
                     if (std.mem.eql(u8, node.data.name, "transpose")) {
                         var key: u64 = @intFromEnum(result_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.transpose);
                         for (arg_tids.items) |tid| {
-                            key = key *% 31 +% tid.id;
+                            key = key *% 0x5bd1e995 ^ tid.id;
                         }
                         if (self.pure_op_cache.get(key)) |existing_id| {
                             break :blk existing_id;
@@ -3191,7 +3183,7 @@ const Analyzer = struct {
                             break :blk2 result_ty;
                         };
                         var key: u64 = @intFromEnum(bitcast_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.bitcast);
-                        key = key *% 31 +% @as(u64, arg_tids.items[0].id);
+                        key = key *% 0x5bd1e995 ^ @as(u64, arg_tids.items[0].id);
                         if (self.pure_op_cache.get(key)) |existing_id| {
                             break :blk existing_id;
                         }
@@ -4042,7 +4034,7 @@ const Analyzer = struct {
                         // Cache for dedup
                         var key: u64 = @intFromEnum(result_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.transpose);
                         for (arg_tids.items) |tid| {
-                            key = key *% 31 +% tid.id;
+                            key = key *% 0x5bd1e995 ^ tid.id;
                         }
                         self.pure_op_cache.put(self.alloc, key, result_id) catch {};
                     } else if (std.mem.eql(u8, node.data.name, "dFdx") or std.mem.eql(u8, node.data.name, "dFdy") or
@@ -4424,7 +4416,7 @@ const Analyzer = struct {
                         };
                         // Check pure_op_cache for dedup before emitting
                         var bc_key: u64 = @intFromEnum(bitcast_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.bitcast);
-                        bc_key = bc_key *% 31 +% @as(u64, arg_tids.items[0].id);
+                        bc_key = bc_key *% 0x5bd1e995 ^ @as(u64, arg_tids.items[0].id);
                         if (self.pure_op_cache.get(bc_key)) |existing_id| {
                             return .{ .ty = bitcast_ty, .id = existing_id };
                         }
@@ -4641,7 +4633,7 @@ const Analyzer = struct {
                     if (std.mem.eql(u8, node.data.name, "transpose")) {
                         var key: u64 = @intFromEnum(result_ty) *% 37 +% @intFromEnum(ir.Instruction.Tag.transpose);
                         for (arg_tids.items) |tid| {
-                            key = key *% 31 +% tid.id;
+                            key = key *% 0x5bd1e995 ^ tid.id;
                         }
                         if (self.pure_op_cache.get(key)) |existing_id| {
                             break :blk existing_id;
