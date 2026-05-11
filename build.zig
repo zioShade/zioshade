@@ -197,4 +197,26 @@ pub fn build(b: *std.Build) void {
         for (a) |arg| run_dump_spv.addArg(arg);
     }
     dump_spv_step.dependOn(&run_dump_spv.step);
+
+    // DXC HLSL validation — run with: zig build validate-hlsl
+    // Requires dxc.exe on PATH (from Vulkan SDK or Windows SDK)
+    const validate_hlsl_step = b.step("validate-hlsl", "Validate wintty shader HLSL output with DXC");
+    const dxc_run = b.addSystemCommand(&.{"dxc"});
+    dxc_run.addArgs(&.{
+        "-T", "ps_6_0",
+        "-E", "main",
+        "-Wno-ignored-attributes",
+        "tests/wintty/crt_output.hlsl",
+    });
+    validate_hlsl_step.dependOn(&dxc_run.step);
+
+    // Validate focus shader too
+    const dxc_focus = b.addSystemCommand(&.{"dxc"});
+    dxc_focus.addArgs(&.{
+        "-T", "ps_6_0",
+        "-E", "main",
+        "-Wno-ignored-attributes",
+        "tests/wintty/focus_output.hlsl",
+    });
+    validate_hlsl_step.dependOn(&dxc_focus.step);
 }
