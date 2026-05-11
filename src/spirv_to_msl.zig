@@ -169,6 +169,29 @@ fn resolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
     return try alloc.dupe(u8, n);
 }
 
+/// MSL type for uniform buffer struct members.
+/// Uses packed_float3 instead of float3 to match SPIR-V offset layout.
+fn mslPackedType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
+    const inst = getDef(m, type_id) orelse return "float4";
+    if (inst.op == .TypeVector) {
+        const count = inst.words[3];
+        const scalar = mslType(m, inst.words[2], names, alloc) catch "float";
+        // 3-component vectors need packed_ prefix for tight packing in UBO structs
+        if (count == 3) {
+            if (std.mem.eql(u8, scalar, "float")) return "packed_float3";
+            if (std.mem.eql(u8, scalar, "half")) return "packed_half3";
+            if (std.mem.eql(u8, scalar, "int")) return "packed_int3";
+            if (std.mem.eql(u8, scalar, "uint")) return "packed_uint3";
+        }
+    }
+    if (inst.op == .TypeMatrix) {
+        const cols = inst.words[3];
+        // packed float3xN for 3-row matrices
+        if (cols == 3) return "packed_float3x3"; // uncommon but handle
+    }
+    return try mslType(m, type_id, names, alloc);
+}
+
 // ---- MSL type resolution ----
 fn mslType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
     const inst = getDef(m, type_id) orelse return "float4";
@@ -455,8 +478,8 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
     _ = cb_name;
     const inst = getDef(m, struct_id) orelse return; if (inst.op != .TypeStruct) return;
     for (inst.words[2..], 0..) |mt_id, mi| {
-        const mti = getDef(m, mt_id); if (mti) |mi2| { if (mi2.op == .TypeArray and mi2.words.len > 3) { const et = try mslType(m, mi2.words[2], names, alloc); const li = getDef(m, mi2.words[3]); const lv: u32 = if(li)|l| l.words[3] else 1; try w.print("    {s} _m{d}[{d}];\n", .{et, mi, lv}); continue; } }
-        const mt = try mslType(m, mt_id, names, alloc); try w.print("    {s} _m{d};\n", .{mt, mi});
+        const mti = getDef(m, mt_id); if (mti) |mi2| { if (mi2.op == .TypeArray and mi2.words.len > 3) { const et = try mslPackedType(m, mi2.words[2], names, alloc); const li = getDef(m, mi2.words[3]); const lv: u32 = if(li)|l| l.words[3] else 1; try w.print("    {s} _m{d}[{d}];\n", .{et, mi, lv}); continue; } }
+        const mt = try mslPackedType(m, mt_id, names, alloc); try w.print("    {s} _m{d};\n", .{mt, mi});
     }
 }
 
