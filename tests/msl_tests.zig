@@ -580,3 +580,35 @@ test "CBUFFER_ACCESS: MSL struct member access uses _mN suffix not array index" 
     try assertContains(msl, "_m1");
 }
 
+test "msl: bitfieldReverse -> reverse_bits" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint a = bitfieldReverse(1u);
+        \\    fragColor = vec4(float(a));
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const msl = try glslpp.spirvToMSL(alloc, spv, .{});
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "reverse_bits") != null);
+}
+
+test "msl: bitCount -> popcount" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = bitCount(1u);
+        \\    fragColor = vec4(float(a));
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const msl = try glslpp.spirvToMSL(alloc, spv, .{});
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "popcount") != null);
+}
+

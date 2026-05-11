@@ -13368,3 +13368,35 @@ test "CBUFFER_ACCESS: cbuffer member access uses _mN suffix not array index" {
 
 // ---------------------------------------------------------------------------
 // wintty integration tests — real shadertoy shaders
+
+test "hlsl: bitfieldReverse -> reversebits" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint a = bitfieldReverse(1u);
+        \\    fragColor = vec4(float(a));
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "reversebits") != null);
+}
+
+test "hlsl: bitCount -> countbits" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = bitCount(1u);
+        \\    fragColor = vec4(float(a));
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "countbits") != null);
+}

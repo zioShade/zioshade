@@ -1206,3 +1206,35 @@ test "GLSL_CB: uniform block member access uses instance.member format" {
     try assertNotContains(glsl, "= Globals_m1;");
 }
 
+test "glsl: bitfieldReverse roundtrip" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint a = bitfieldReverse(1u);
+        \\    fragColor = vec4(float(a));
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const glsl_out = try glslpp.spirvToGLSL(alloc, spv, .{});
+    defer alloc.free(glsl_out);
+    try std.testing.expect(std.mem.indexOf(u8, glsl_out, "bitfieldReverse") != null);
+}
+
+test "glsl: bitCount roundtrip" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = bitCount(1u);
+        \\    fragColor = vec4(float(a));
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const glsl_out = try glslpp.spirvToGLSL(alloc, spv, .{});
+    defer alloc.free(glsl_out);
+    try std.testing.expect(std.mem.indexOf(u8, glsl_out, "bitCount") != null);
+}
+
