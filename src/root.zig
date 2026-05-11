@@ -448,7 +448,13 @@ pub fn linkSPIRVModules(alloc: std.mem.Allocator, modules: []const []const u32) 
                             try out.append(alloc, remap(mod[wi], offset, mod_bound));
                         }
                     },
-                    'l', 'L' => {
+                    'l' => {
+                        if (wi < ie) {
+                            try out.append(alloc, mod[wi]);
+                            wi += 1;
+                        }
+                    },
+                    'L' => {
                         while (wi < ie) : (wi += 1) {
                             try out.append(alloc, mod[wi]);
                         }
@@ -480,15 +486,7 @@ pub fn linkSPIRVModules(alloc: std.mem.Allocator, modules: []const []const u32) 
                         }
                     },
                     'E' => {
-                        // OpEntryPoint: model(lit), func-id, name-string, interface-ids...
-                        if (wi < ie) {
-                            try out.append(alloc, mod[wi]); // execution model literal
-                            wi += 1;
-                        }
-                        if (wi < ie) {
-                            try out.append(alloc, remap(mod[wi], offset, mod_bound)); // func-id
-                            wi += 1;
-                        }
+                        // OpEntryPoint: name-string + interface-ids (model and func-id already handled by 'l' and 'i')
                         // Copy name string words until null terminator found
                         while (wi < ie) {
                             const w = mod[wi];
