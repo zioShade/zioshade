@@ -242,6 +242,12 @@ fn getDecVal(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), 
     return null;
 }
 
+fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, dec: spirv.Decoration) bool {
+    const list = decs.get(id) orelse return false;
+    for (list.items) |e| { if (e.decoration == dec) return true; }
+    return false;
+}
+
 // ---- Public API ----
 pub const GlslCompileOptions = struct { version: u32 = 430, es: bool = false };
 
@@ -296,18 +302,19 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         for (module.instructions) |inst| {
             if (inst.op == .Variable and inst.words.len >= 4) {
                 const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-                if (sc == .Uniform) {
-                    const rid = inst.words[2];
-                    const binding = getDecVal(&decs, rid, .binding) orelse continue;
-                    const name = names.get(rid) orelse continue;
-                    try w.print("layout(std430, binding = {d}) buffer {s}\n{{\n", .{binding, name});
-                    // Emit struct members from the pointee type
-                    const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
-                    if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
-                        try emitStructMembers(&module, &names, ptr_inst.words[3], name, w, aa);
-                    }
-                    try w.print("}} {s};\n\n", .{name});
+                // SSBOs use StorageBuffer storage class (SPIR-V 1.3+) or Uniform + BufferBlock decoration
+                const is_ssbo = sc == .StorageBuffer or (sc == .Uniform and hasDec(&decs, inst.words[2], .buffer_block));
+                if (!is_ssbo) continue;
+                const rid = inst.words[2];
+                const binding = getDecVal(&decs, rid, .binding) orelse continue;
+                const name = names.get(rid) orelse continue;
+                try w.print("layout(std430, binding = {d}) buffer {s}\n{{\n", .{binding, name});
+                // Emit struct members from the pointee type
+                const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
+                if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
+                    try emitStructMembers(&module, &names, ptr_inst.words[3], name, w, aa);
                 }
+                try w.print("}} {s};\n\n", .{name});
             }
         }
     }
@@ -441,7 +448,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pi = getDef(m, rt) orelse continue; if (pi.op != .TypePointer or pi.words.len < 4) continue;
         const pt = pi.words[3];
         switch (sc) {
-            .Uniform => { const binding = getDecVal(decs, rid, .binding) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding}) catch {}; },
+            .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding}) catch {}; },
             .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const name = names.get(rid) orelse "tex"; switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding}) catch {};}, else=>{}} },
             else => {},
         }

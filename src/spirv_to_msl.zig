@@ -226,6 +226,12 @@ fn getDecVal(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), 
     return null;
 }
 
+fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, dec: spirv.Decoration) bool {
+    const list = decs.get(id) orelse return false;
+    for (list.items) |e| { if (e.decoration == dec) return true; }
+    return false;
+}
+
 // ---- Public API ----
 pub const MslCompileOptions = struct { metal_version: u32 = 21 };
 
@@ -271,21 +277,21 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         try w.writeAll("};\n\n");
     }
 
-    // Collect SSBO-style storage buffers (Uniform storage class with BufferBlock decoration)
+    // Collect SSBO-style storage buffers (StorageBuffer storage class or Uniform + BufferBlock decoration)
     var storage_buffers = std.ArrayList(CbufferDecl).initCapacity(aa, 8) catch return error.OutOfMemory;
     for (module.instructions) |inst| {
         if (inst.op == .Variable and inst.words.len >= 4) {
             const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-            if (sc == .Uniform) {
-                const rid = inst.words[2];
-                const binding = getDecVal(&decs, rid, .binding) orelse continue;
-                const name = names.get(rid) orelse continue;
-                const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
-                if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
-                    const ptid = ptr_inst.words[3];
-                    // For compute shaders, treat Uniform storage class vars as storage buffers
-                    storage_buffers.append(aa, .{ .name = name, .type_id = ptid, .binding = binding }) catch {};
-                }
+            const rid = inst.words[2];
+            // SSBOs use StorageBuffer storage class (SPIR-V 1.3+) or Uniform + BufferBlock decoration
+            const is_ssbo = sc == .StorageBuffer or (sc == .Uniform and hasDec(&decs, rid, .buffer_block));
+            if (!is_ssbo) continue;
+            const binding = getDecVal(&decs, rid, .binding) orelse continue;
+            const name = names.get(rid) orelse continue;
+            const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
+            if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
+                const ptid = ptr_inst.words[3];
+                storage_buffers.append(aa, .{ .name = name, .type_id = ptid, .binding = binding }) catch {};
             }
         }
     }
@@ -406,7 +412,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pi = getDef(m, rt) orelse continue; if (pi.op != .TypePointer or pi.words.len < 4) continue;
         const pt = pi.words[3];
         switch (sc) {
-            .Uniform => { const binding = getDecVal(decs, rid, .binding) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding}) catch {}; },
+            .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding}) catch {}; },
             .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const name = names.get(rid) orelse "tex"; switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding}) catch {};}, else=>{}} },
             else => {},
         }
@@ -644,7 +650,6 @@ fn emitFunction(
 
     // Compute kernel entry point
     if (is_entry and is_compute) {
-        _ = m.local_size;
         try w.writeAll("kernel void ");
         try w.writeAll(func_name);
         try w.writeAll("(");
