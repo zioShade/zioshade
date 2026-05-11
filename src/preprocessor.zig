@@ -16,11 +16,11 @@ pub const Preprocessor = struct {
     pub fn init(alloc: std.mem.Allocator) Preprocessor {
         return .{
             .alloc = alloc,
-            .defines = .{},
-            .if_stack = .{},
-            .output = .{},
-            .expanding = .{},
-            .extra_strings = .{},
+            .defines = .empty,
+            .if_stack = .empty,
+            .output = .empty,
+            .expanding = .empty,
+            .extra_strings = .empty,
         };
     }
 
@@ -96,7 +96,7 @@ pub const Preprocessor = struct {
         if (index.* < tokens.len and tokens[index.*].tag == .l_paren) {
             index.* += 1; // skip '('
 
-            var params = std.ArrayListUnmanaged([]const u8){};
+            var params = std.ArrayListUnmanaged([]const u8).empty;
             defer params.deinit(self.alloc);
 
             const is_variadic = false;
@@ -123,7 +123,7 @@ pub const Preprocessor = struct {
             }
 
             // Parse body until end of line
-            var body = std.ArrayListUnmanaged(lexer.Token){};
+            var body = std.ArrayListUnmanaged(lexer.Token).empty;
             defer {
                 for (body.items) |t| {
                     _ = t;
@@ -157,7 +157,7 @@ pub const Preprocessor = struct {
             });
         } else {
             // Object-like macro
-            var body = std.ArrayListUnmanaged(lexer.Token){};
+            var body = std.ArrayListUnmanaged(lexer.Token).empty;
             defer {
                 for (body.items) |t| {
                     _ = t;
@@ -285,9 +285,9 @@ pub const Preprocessor = struct {
     }
 
     fn parseMacroArguments(self: *Preprocessor, tokens: []const lexer.Token, index: *usize) ![][]lexer.Token {
-        var args = std.ArrayListUnmanaged([]lexer.Token){};
+        var args = std.ArrayListUnmanaged([]lexer.Token).empty;
 
-        var current_arg = std.ArrayListUnmanaged(lexer.Token){};
+        var current_arg = std.ArrayListUnmanaged(lexer.Token).empty;
         var paren_depth: u32 = 1;
 
         while (index.* < tokens.len) : (index.* += 1) {

@@ -2039,7 +2039,7 @@ const test_focus = @embedFile("wintty/test_focus.glsl");
 /// Helper: prepend shadertoy prefix + compile to HLSL
 fn compileShadertoy(body: []const u8) ![]const u8 {
     // Build full source: prefix + body
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(alloc);
     try buf.appendSlice(alloc, shadertoy_prefix);
     try buf.appendSlice(alloc, "\n\n");
@@ -2084,16 +2084,10 @@ test "WIN-DXC: dump HLSL for DXC validation" {
     const hlsl_focus = try compileShadertoy(test_focus);
     defer alloc.free(hlsl_focus);
 
-    const focus_file = try std.fs.cwd().createFile("tests/wintty/focus_output.hlsl", .{});
-    defer focus_file.close();
-    try focus_file.writeAll(hlsl_focus);
 
     const hlsl_crt = try compileShadertoy(test_crt);
     defer alloc.free(hlsl_crt);
 
-    const crt_file = try std.fs.cwd().createFile("tests/wintty/crt_output.hlsl", .{});
-    defer crt_file.close();
-    try crt_file.writeAll(hlsl_crt);
 
     // Basic structural checks
     try assertContains(hlsl_focus, "Texture2D");
