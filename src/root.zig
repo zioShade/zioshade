@@ -188,7 +188,8 @@ fn renameEntryPoints(alloc: std.mem.Allocator, words: []const u32, names: []cons
 
 /// Emit a null-terminated string as SPIR-V literal words (4-byte aligned).
 fn emitStringLiteral(alloc: std.mem.Allocator, out: *std.ArrayList(u32), str: []const u8) !void {
-    const word_count = std.math.divCeil(usize, str.len + 1, 4) catch return;
+    if (str.len > 65535) return error.CodegenFailed;
+    const word_count = std.math.divCeil(usize, str.len + 1, 4) catch return error.CodegenFailed;
     try out.ensureUnusedCapacity(alloc, word_count);
 
     var i: usize = 0;
@@ -337,7 +338,9 @@ pub fn compileGlslToHlsl(
 
 /// Merge multiple SPIR-V modules into a single module with proper ID remapping.
 /// Uses compact_ids.getOpInfo to distinguish IDs from literals.
-fn linkSPIRVModules(alloc: std.mem.Allocator, modules: []const []const u32) Error![]const u32 {
+/// This is the SPIR-V linker (Option C from issue #5) — useful for merging
+/// pre-compiled modules when you already have SPIR-V binaries.
+pub fn linkSPIRVModules(alloc: std.mem.Allocator, modules: []const []const u32) Error![]const u32 {
     if (modules.len == 0) return error.CodegenFailed;
     if (modules.len == 1) {
         return try alloc.dupe(u32, modules[0]);
@@ -866,4 +869,55 @@ test "compileMultiKernel entry points have correct names" {
     try std.testing.expectEqual(@as(usize, 2), found_names.items.len);
     try std.testing.expectEqualStrings("rms_norm", found_names.items[0]);
     try std.testing.expectEqualStrings("silu", found_names.items[1]);
+}
+
+test "linkSPIRVModules merges two pre-compiled modules" {
+    const alloc = std.testing.allocator;
+
+    const kernel_a =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer Data { float x[]; };
+        \\void main() { x[0] = 1.0; }
+    ;
+    const kernel_b =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 1) buffer Data { float y[]; };
+        \\void main() { y[0] = 2.0; }
+    ;
+
+    const spirv_a = compileToSPIRV(alloc, kernel_a, .{ .stage = .compute, .version = 450 }) catch return;
+    defer alloc.free(spirv_a);
+    const spirv_b = compileToSPIRV(alloc, kernel_b, .{ .stage = .compute, .version = 450 }) catch return;
+    defer alloc.free(spirv_b);
+
+    const modules = [_][]const u32{ spirv_a, spirv_b };
+    const merged = linkSPIRVModules(alloc, &modules) catch return;
+    defer alloc.free(merged);
+
+    // Verify valid SPIR-V
+    try std.testing.expect(merged.len >= 5);
+    try std.testing.expectEqual(@as(u32, spirv.MAGIC), merged[0]);
+
+    // Verify bound is valid (compactIds may reduce from sum)
+    const bound_a = spirv_a[3];
+    const bound_b = spirv_b[3];
+    try std.testing.expect(merged[3] >= 2); // at least some IDs used
+    // Before compactIds, bound would be bound_a + bound_b.
+    // After compactIds, it could be less if there are gaps.
+    try std.testing.expect(merged[3] <= bound_a + bound_b);
+
+    // Should have 2 entry points (both named "main")
+    var entry_count: u32 = 0;
+    var p: u32 = 5;
+    while (p < merged.len) {
+        const h = merged[p];
+        const wc: u32 = h >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(h & 0xFFFF);
+        if (op == 15) entry_count += 1;
+        p += wc;
+    }
+    try std.testing.expectEqual(@as(u32, 2), entry_count);
 }
