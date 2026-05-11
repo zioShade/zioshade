@@ -49,11 +49,11 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
     var analyzer = Analyzer{
         .alloc = alloc,
         .scopes = .empty,
-        .globals = .{},
-        .functions = .{},
+        .globals = .empty,
+        .functions = .empty,
         .types = .empty,
-        .instructions = .{},
-        .errors = .{},
+        .instructions = .empty,
+        .errors = .empty,
         .loop_stack = .empty,
         .overloads = .empty,
         .tolerate_errors = options.tolerate_errors,
@@ -104,9 +104,9 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
 
     // Clear transferred fields before defer deinit runs
     analyzer.types = .{};
-    analyzer.functions = .{};
-    analyzer.globals = .{};
-    analyzer.heap_types = .{};
+    analyzer.functions = .empty;
+    analyzer.globals = .empty;
+    analyzer.heap_types = .empty;
     analyzer.spec_constants = .{};
     for (analyzer.instructions.items) |inst| {
         if (inst.operands.len > 0) {
@@ -158,7 +158,7 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) !ir.Module {
     const mi = main_idx orelse return mod;
 
     // Build map from function result_id → function index
-    var id_to_idx = std.AutoHashMapUnmanaged(u32, usize){};
+    var id_to_idx = std.AutoHashMapUnmanaged(u32, usize).empty;
     defer id_to_idx.deinit(alloc);
     for (functions, 0..) |func, i| {
         if (func.result_id != 0) {
@@ -169,7 +169,7 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) !ir.Module {
     // BFS from main to find all reachable function indices
     var reachable = std.DynamicBitSet.initEmpty(alloc, functions.len) catch return mod;
     defer reachable.deinit();
-    var queue = std.ArrayListUnmanaged(usize){};
+    var queue = std.ArrayListUnmanaged(usize).empty;
     defer queue.deinit(alloc);
     queue.append(alloc, mi) catch return mod;
     reachable.set(mi);
@@ -199,7 +199,7 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) !ir.Module {
     // Collect constant instructions from eliminated functions.
     // These may be referenced by surviving functions due to const_cache reuse.
     // Only rescue constants that aren't already defined in surviving functions.
-    var defined_ids = std.AutoHashMapUnmanaged(u32, void){};
+    var defined_ids = std.AutoHashMapUnmanaged(u32, void).empty;
     defer defined_ids.deinit(alloc);
     for (functions, 0..) |func, i| {
         if (reachable.isSet(i)) {
@@ -210,7 +210,7 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) !ir.Module {
             }
         }
     }
-    var rescued_constants = std.ArrayListUnmanaged(ir.Instruction){};
+    var rescued_constants = std.ArrayListUnmanaged(ir.Instruction).empty;
     defer rescued_constants.deinit(alloc);
     for (functions, 0..) |func, i| {
         if (!reachable.isSet(i)) {
@@ -228,7 +228,7 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) !ir.Module {
     }
 
     // Filter to only reachable functions
-    var kept = std.ArrayListUnmanaged(ir.Function){};
+    var kept = std.ArrayListUnmanaged(ir.Function).empty;
     kept.ensureTotalCapacity(alloc, reachable_count) catch return mod;
     var fi: usize = 0;
     while (fi < functions.len) : (fi += 1) {
@@ -302,23 +302,23 @@ const Analyzer = struct {
     overloads: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(OverloadEntry)),
     tolerate_errors: bool = false,
     has_returned: bool = false, // Dead code suppression after return
-    if_insert_points: std.ArrayListUnmanaged(usize) = .{}, // stack of instruction indices before each if's SelectionMerge
+    if_insert_points: std.ArrayListUnmanaged(usize) = .empty, // stack of instruction indices before each if's SelectionMerge
     next_id: u32 = 1,
     // Constant dedup: (type_tag << 32 | value_bits) -> ir_id
-    const_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
-    const_composite_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
-    access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
-    global_access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .{}, // key -> ptr_id (persists across blocks, populated from entry block)
-    load_cache: std.AutoHashMapUnmanaged(u32, u32) = .{}, // ptr_id -> loaded_value_id (cleared at labels)
-    global_load_cache: std.AutoHashMapUnmanaged(u32, u32) = .{}, // ptr_id -> loaded_value_id (persists across blocks)
-    global_ptr_ids: std.AutoHashMapUnmanaged(u32, void) = .{}, // set of ptr_ids that point into global (Input/Uniform/Output) variables
+    const_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    const_composite_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    global_access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty, // key -> ptr_id (persists across blocks, populated from entry block)
+    load_cache: std.AutoHashMapUnmanaged(u32, u32) = .empty, // ptr_id -> loaded_value_id (cleared at labels)
+    global_load_cache: std.AutoHashMapUnmanaged(u32, u32) = .empty, // ptr_id -> loaded_value_id (persists across blocks)
+    global_ptr_ids: std.AutoHashMapUnmanaged(u32, void) = .empty, // set of ptr_ids that point into global (Input/Uniform/Output) variables
     in_entry_block: bool = true,
     cache_globals: bool = true, // true in entry block and loop headers (blocks that dominate subsequent blocks)
-    pure_op_cache: std.AutoHashMapUnmanaged(u64, u32) = .{}, // hash(type, op, operands) -> result_id
-    global_pure_op_cache: std.AutoHashMapUnmanaged(u64, u32) = .{}, // persists across blocks, populated from entry/loop-header blocks
+    pure_op_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty, // hash(type, op, operands) -> result_id
+    global_pure_op_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty, // persists across blocks, populated from entry/loop-header blocks
     local_size: ?ir.LocalSize = null,
     // Heap-allocated AST types that transfer to Module for cleanup
-    heap_types: std.ArrayListUnmanaged(*ast.Type) = .{},
+    heap_types: std.ArrayListUnmanaged(*ast.Type) = .empty,
     spec_constants: std.StringHashMapUnmanaged(ir.SpecConstant) = .{},
     // Fragment execution mode flags
     has_early_fragment_tests: bool = false,
@@ -1218,7 +1218,7 @@ const Analyzer = struct {
             .function_decl, .function_prototype => {
                 const func_ir_id = self.allocId();
                 // Collect parameter types
-                var param_types = std.ArrayListUnmanaged(ast.Type){};
+                var param_types = std.ArrayListUnmanaged(ast.Type).empty;
                 for (node.data.params) |param| {
                     try param_types.append(self.alloc, param.ty);
                 }
@@ -1230,7 +1230,7 @@ const Analyzer = struct {
                     if (gop.found_existing) {
                         self.alloc.free(owned_name);
                     } else {
-                        gop.value_ptr.* = .{};
+                        gop.value_ptr.* = .empty;
                         // Store the original function with its param types from the first declaration
                         // We need to recover the original param types — but we don't have them
                         // Use the scope symbol's ir_id
@@ -1264,7 +1264,7 @@ const Analyzer = struct {
                     if (gop.found_existing) {
                         self.alloc.free(owned_name);
                     } else {
-                        gop.value_ptr.* = .{};
+                        gop.value_ptr.* = .empty;
                     }
                     const owned_pts = try self.alloc.dupe(ast.Type, param_types.items);
                     var mutable_buf2 = try self.alloc.alloc(bool, node.data.params.len);
@@ -1340,7 +1340,7 @@ const Analyzer = struct {
         // If a constant is needed but its definition is in a different function,
         // the codegen must re-emit it.
 
-        var param_ids = std.ArrayListUnmanaged(u32){};
+        var param_ids = std.ArrayListUnmanaged(u32).empty;
         defer param_ids.deinit(self.alloc);
         for (node.data.params) |param| {
             const pid = self.allocId();
@@ -1645,7 +1645,7 @@ const Analyzer = struct {
                 // Build OpSwitch: allocate a label per case + default
                 // First, collect case values by evaluating case expressions
                 const CaseInfo = struct { value: ?i64, label: u32, body_idx: usize };
-                var case_infos = std.ArrayListUnmanaged(CaseInfo){};
+                var case_infos = std.ArrayListUnmanaged(CaseInfo).empty;
                 defer case_infos.deinit(self.alloc);
 
                 for (cases, 0..) |case_node, ci| {
@@ -1673,7 +1673,7 @@ const Analyzer = struct {
                 try self.emitSelectionMerge(merge_label);
 
                 // Build OpSwitch operands
-                var switch_ops = std.ArrayListUnmanaged(ir.Instruction.Operand){};
+                var switch_ops = std.ArrayListUnmanaged(ir.Instruction.Operand).empty;
                 defer switch_ops.deinit(self.alloc);
 
                 // Default target
@@ -3036,7 +3036,7 @@ const Analyzer = struct {
                 return .{ .ty = .void, .id = 0 };
             },
             .func_call => {
-                var arg_tids = std.ArrayListUnmanaged(TypedId){};
+                var arg_tids = std.ArrayListUnmanaged(TypedId).empty;
                 defer arg_tids.deinit(self.alloc);
                 const is_atomic_fn = std.mem.eql(u8, node.data.name, "atomicAdd") or
                     std.mem.eql(u8, node.data.name, "atomicAnd") or
@@ -4595,7 +4595,7 @@ const Analyzer = struct {
                 return .{ .ty = result_ty, .id = result_id };
             },
             .type_constructor => {
-                var arg_tids = std.ArrayListUnmanaged(TypedId){};
+                var arg_tids = std.ArrayListUnmanaged(TypedId).empty;
                 defer arg_tids.deinit(self.alloc);
                 for (node.data.children) |arg| {
                     var tid = try self.analyzeExpression(arg);

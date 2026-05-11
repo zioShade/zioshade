@@ -52,3 +52,25 @@
 
 ### uaddCarry, usubBorrow unimplemented
 - These return structs (carry + result) making them more complex to implement
+
+### Performance optimization: reached practical floor at ~540µs cross-compilation
+- **Journey**: 756ms → 18ms → 12ms → 11ms (Debug) → 2ms → 0ms (ReleaseFast, ms rounding) → 540µs (µs metric)
+- **Key wins**: id_defs flat array (756→18ms), direct-write access expressions (18→12ms), ReleaseFast build (11→2ms), arena allocator (2ms→885µs)
+- **Floor analysis at 540µs** (HLSL~350µs, GLSL~270µs, MSL~260µs):
+  - Parse per backend: ~10µs (3× = ~30µs)
+  - collectNames per backend: ~100µs (3× = ~300µs)
+  - Emit per backend: ~50-150µs (3× = ~300µs)
+  - Other passes (collectDecorations, collectResources, detectOutParams): ~30µs total
+- **Attempted and failed (all within noise floor of ±50µs)**:
+  - HashMap pre-sizing (AutoHashMap doesn't have initCapacity)
+  - Output ArrayList pre-sizing
+  - switch-based collectNames dispatch
+  - Parse cache
+  - FixedBufferAllocator for output
+  - Type name caching
+  - Removing alloc.free() calls in arena mode
+- **Remaining architectural opportunities (high effort, moderate reward)**:
+  - **Shared SPIR-V parse across backends**: All 3 ParsedModule types are identical. Extract to shared module, parse once. Saves ~20µs (2 parse passes). Also deduplicates ~60 lines of code.
+  - **Parallel compilation**: Run 3 backends in parallel threads with separate allocators. Reduces wall-clock from 540µs to ~350µs (time of slowest backend). No library code changes needed, just caller-side threading.
+  - **Single-pass emit**: Merge collectNames + collectDecorations + collectResources into a single pass. Saves ~12µs (2 full instruction iterations).
+  - **Merged backend**: Produce GLSL+MSL output simultaneously (they share ~80% of emit logic). Saves ~260µs (eliminates one backend). Very high refactoring risk.

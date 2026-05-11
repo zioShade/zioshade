@@ -1,59 +1,53 @@
-# Autoresearch: Replace glslang C++ with Pure Zig in deblasis/wintty
+# Autoresearch: glslpp correctness and performance
 
-## Phased Approach
+## Objective
+Make glslpp's SPIR-V cross-compilation backends (HLSL, GLSL, MSL) 100% correct
+for all shaders in the reference test suite, then optimize for performance.
 
-### Phase 1: Reduce Output Store Mismatches (CURRENT)
-**Metric**: `output_store_mismatches` (lower is better) — count of shaders where our OpStore count to Output/StorageBuffer variables differs from glslang's.
-**Baseline**: 40/199 mismatches (159/199 match = 79.9%)
-**Constraint**: 199/199 spirv-val conformance must be maintained.
-
-**Breakdown of 22 real mismatches:**
-- 14 shaders: we emit 0 output stores (out=0/ref=N) — missing features
-- 8 shaders: different output store counts (logic differences like swizzle writes, struct flattening)
-
-**Plus 18 false positives** (gl_PerVertex block wrapping — we use gl_Position directly, glslang wraps in gl_PerVertex. Structurally different but functionally equivalent.)
-
-### Phase 2: Normalized Instruction Comparison
-**Metric**: `struct_match_rate` — percentage of shaders where normalized SPIR-V instruction sequence matches glslang.
-**Tool**: Normalize disassembly (strip IDs, debug info), compare instruction-by-instruction.
-
-### Phase 3: GPU Visual Correctness (FUTURE)
-**Metric**: `pixel_diff` — percentage of pixels that differ when rendering with our SPIR-V vs glslang's.
-**Setup needed**: Headless Vulkan renderer that:
-1. Renders a fullscreen triangle with known uniforms/textures
-2. Captures framebuffer for both SPIR-V binaries
-3. Computes per-pixel diff
-4. Reports match percentage
-
-### Phase 4: Performance Optimization (AFTER 100% correctness)
-**Metric**: `compile_time_us` or `total_bound` (SPIR-V output size)
-**Constraint**: Zero correctness regression (store_mismatches must not increase).
+## Metrics
+- **Primary**: `test_failures` (unitless, lower is better) — count of failing reference tests
+- **Secondary**: `build_ms` — time to run full test suite (milliseconds)
 
 ## How to Run
-`bash autoresearch.sh` — outputs METRIC lines.
+`mise exec -- bash autoresearch.sh` — outputs `METRIC` lines.
 
 ## Files in Scope
-- `src/parser.zig`: Pratt parser
-- `src/semantic.zig`: Symbol resolution, type checking, IR emission
-- `src/codegen.zig`: IR → SPIR-V binary emission
-- `src/preprocessor.zig`: #define, #ifdef, macro expansion
-- `src/lexer.zig`: Tokenizer
-- `src/ast.zig`: AST node definitions, type system
-- `src/ir.zig`: IR instruction tags and Module/Function/Global definitions
-- `src/spirv.zig`: SPIR-V opcodes, capabilities, decorations
+- `src/spirv_to_hlsl.zig` — HLSL backend (2077 lines)
+- `src/spirv_to_glsl.zig` — GLSL backend (self-contained parser + emitter)
+- `src/spirv_to_glsl_emit.zig` — GLSL emit functions
+- `src/spirv_to_msl.zig` — MSL backend (self-contained parser + emitter)
+- `src/spirv_cross_common.zig` — shared parser/helpers
+- `src/spirv.zig` — SPIR-V enum definitions
+- `tests/reference_tests.zig` — the correctness test suite (76 tests)
 
 ## Off Limits
-- `src/root.zig` public API (`compileToSPIRV` signature) — don't break callers
-- Don't run `zig build test` — causes OOM
-- Don't modify the test shader files in tests/
+- `src/root.zig` public API (don't change signatures)
+- `src/codegen.zig` (frontend compiler — not our target)
+- `src/semantic.zig` (frontend — not our target)
+- `build.zig` (build config — stable)
 
 ## Constraints
-- All changes must compile with Zig 0.15.2
-- Must not introduce regressions on already-passing shaders
-- Must maintain 199/199 spirv-val conformance
+- All existing tests must continue passing: core (76), HLSL (751), GLSL (91), MSL (39)
+- No memory leaks
+- No new dependencies
+- Keep code simple and readable — prefer clear patterns over cleverness
 
-## Build
-```bash
-ZIG=/c/Users/Alessandro/zig-0.15.2-extracted/zig-x86_64-windows-0.15.2/zig.exe
-$ZIG build-exe -OReleaseSafe --dep glslpp -Mroot=tests/runner.zig -Mglslpp=src/root.zig --cache-dir .zig-cache -femit-bin=.zig-cache/bin/conformance-runner.exe
-```
+## Known Issues (as of commit d21b5df)
+10 reference tests fail due to missing opcodes:
+- **Op 63 (CopyMemory)** — GLSL backend, used for struct copies in swizzle/front-facing
+- **Op 100 (OpImage)** — GLSL backend, extracts image from sampled_image for texelFetch
+- **Op 194 (ShiftRightLogical)** — GLSL backend
+- **Op 196 (ShiftLeftLogical)** — GLSL backend  
+- **std450 #33 (Determinant)** — MSL backend (MSL std450ToMsl needs #33 => "determinant")
+- **Various file tests** fail due to above opcodes + potentially more
+
+## Architecture Notes
+- GLSL and MSL backends are self-contained (own parser, own emitter) — not shared
+- HLSL backend uses spirv_cross_common.zig for parsing
+- All backends follow the same pattern: parse SPIR-V → collect names/decorations → emit target language
+- The `resultIdFromOp` function in each backend defines which opcodes produce named results
+- The `emitInstruction` switch handles opcode emission — add missing cases there
+- std450 function mapping uses numeric IDs matching the SPIR-V GLSLstd450 enum (see spirv.zig)
+
+## What's Been Tried
+(autoresearch will fill this in)
