@@ -166,15 +166,13 @@ fn collectIdsFromInstruction(words: []const u32, start: u32, end: u32, id_set: *
                     id_set.set(words[pos]); // func-id
                     pos += 1;
                 }
-                // Skip name string: find null terminator
-                while (pos + 1 < end) {
+                // Skip name string: check each word individually for null byte
+                while (pos < end) {
                     const w = words[pos];
-                    const w2 = words[pos + 1];
-                    pos += 2;
-                    if (w == 0 or w2 == 0) break;
-                    // Check for null byte in either word
-                    if ((w & 0xFF) == 0 or (w & 0xFF00) == 0 or (w & 0xFF0000) == 0 or (w & 0xFF000000) == 0) break;
-                    if ((w2 & 0xFF) == 0 or (w2 & 0xFF00) == 0 or (w2 & 0xFF0000) == 0 or (w2 & 0xFF000000) == 0) break;
+                    pos += 1;
+                    if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) {
+                        break;
+                    }
                 }
                 // Rest are interface IDs
                 while (pos < end) {
