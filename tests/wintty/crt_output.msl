@@ -10,8 +10,8 @@ struct Globals
     float _m2;
     float _m3;
     int _m4;
-    float _m5[4];
-    packed_float3 _m6[4];
+    float4 _m5[4];
+    float3 _m6[4];
     float4 _m7;
     float4 _m8;
     float _m9;
@@ -25,7 +25,7 @@ struct Globals
     float _m17;
     float _m18;
     int _m19;
-    packed_float3 _m20[256];
+    float3 _m20[256];
     packed_float3 _m21;
     packed_float3 _m22;
     packed_float3 _m23;
