@@ -43,21 +43,54 @@ func createTestTexture(device: MTLDevice, w: Int, h: Int) -> MTLTexture {
     return texture
 }
 
-// Globals buffer — uses packed_float3 layout (12 bytes), matching both
-// spirv-cross and glslpp (now fixed to emit packed_float3).
-func makeGlobalsBuffer(device: MTLDevice, screenW: Int, screenH: Int) -> MTLBuffer {
+// Globals buffer for glslpp layout (packed_float3, float[4] arrays)
+func makeGlobalsBuffer_glslpp(device: MTLDevice, screenW: Int, screenH: Int) -> MTLBuffer {
+    // glslpp struct: packed_float3 _m0(12), float _m1.._m3(12), int _m4(4), float _m5[4](16), packed_float3 _m6[4](48), ...
+    // Total before _m7: 12 + 4 + 4 + 4 + 4 + 16 + 48 = 92 -> padded to 96 for next vec4
+    // SPIR-V offsets: _m0=0, _m1=12, _m2=16, _m3=20, _m4=24, _m5=32, _m6=96, _m7=160
     let size = 4492
     var data = [UInt8](repeating: 0, count: size)
     data.withUnsafeMutableBytes { ptr in
         let f = ptr.bindMemory(to: Float.self)
-        f[0] = Float(screenW)   // resolution.x
-        f[1] = Float(screenH)   // resolution.y
-        f[2] = 1.0              // resolution.z
-        f[3] = 0.5              // time
-        f[4] = 1.0/60.0         // time_delta
-        f[5] = 60.0             // frame_rate
+        f[0] = Float(screenW)   // _m0.x (packed_float3, offset 0)
+        f[1] = Float(screenH)   // _m0.y
+        f[2] = 1.0              // _m0.z
+        f[3] = 0.5              // _m1 (offset 12)
+        f[4] = 1.0/60.0         // _m2 (offset 16)
+        f[5] = 60.0             // _m3 (offset 20)
         let i32 = ptr.bindMemory(to: Int32.self)
-        i32[6] = 1              // frame
+        i32[6] = 1              // _m4 (offset 24)
+        // _m5 = float[4] at offset 32: just zeros (channel times not used by CRT shader)
+        // _m6 = packed_float3[4] at offset 96: zeros
+        // _m7 = float4 at offset 160: mouse
+        f[40] = 128.0  // mouse.x
+        f[41] = 128.0  // mouse.y
+    }
+    return device.makeBuffer(bytes: data, length: size)!
+}
+
+// Globals buffer for spirv-cross layout (packed_float3, float4[4] widened arrays)
+func makeGlobalsBuffer_spirvcross(device: MTLDevice, screenW: Int, screenH: Int) -> MTLBuffer {
+    // spirv-cross struct: packed_float3(12), float(4), float(4), float(4), int(4),
+    //   float4[4](64), float3[4](48), float4(16), ...
+    // Key difference: iChannelTime is float4[4] (64 bytes) not float[4] (16 bytes)
+    let size = 4492
+    var data = [UInt8](repeating: 0, count: size)
+    data.withUnsafeMutableBytes { ptr in
+        let f = ptr.bindMemory(to: Float.self)
+        f[0] = Float(screenW)   // iResolution.x (packed_float3)
+        f[1] = Float(screenH)   // iResolution.y
+        f[2] = 1.0              // iResolution.z
+        f[3] = 0.5              // iTime
+        f[4] = 1.0/60.0         // iTimeDelta
+        f[5] = 60.0             // iFrameRate
+        let i32 = ptr.bindMemory(to: Int32.self)
+        i32[6] = 1              // iFrame
+        // iChannelTime = float4[4] at offset 32 (64 bytes, widened): zeros
+        // iChannelResolution = float3[4] at offset 96 (48 bytes): zeros  
+        // iMouse = float4 at offset 160
+        f[40] = 128.0  // mouse.x
+        f[41] = 128.0  // mouse.y
     }
     return device.makeBuffer(bytes: data, length: size)!
 }
@@ -168,13 +201,14 @@ let lib2 = try device.makeLibrary(source: msl2, options: nil)
 print("  Functions: \(lib2.functionNames)")
 
 let texture = createTestTexture(device: device, w: W, h: H)
-let globals = makeGlobalsBuffer(device: device, screenW: W, screenH: H)
+let globals1 = makeGlobalsBuffer_glslpp(device: device, screenW: W, screenH: H)
+let globals2 = makeGlobalsBuffer_spirvcross(device: device, screenW: W, screenH: H)
 
 print("Rendering glslpp...")
-let px1 = renderFrame(device: device, vertLib: vertLib, fragLib: lib1, texture: texture, globalsBuf: globals, w: W, h: H)
+let px1 = renderFrame(device: device, vertLib: vertLib, fragLib: lib1, texture: texture, globalsBuf: globals1, w: W, h: H)
 
 print("Rendering spirv-cross...")
-let px2 = renderFrame(device: device, vertLib: vertLib, fragLib: lib2, texture: texture, globalsBuf: globals, w: W, h: H)
+let px2 = renderFrame(device: device, vertLib: vertLib, fragLib: lib2, texture: texture, globalsBuf: globals2, w: W, h: H)
 
 try savePPM(px1, w: W, h: H, path: "\(prefix)_glslpp.ppm")
 try savePPM(px2, w: W, h: H, path: "\(prefix)_spirvcross.ppm")
