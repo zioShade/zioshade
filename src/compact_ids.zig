@@ -4839,7 +4839,24 @@ pub fn fixEarlyAccessVars(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
         // Need fix if AccessChain appears before first Store
         if (first_ac_pos > 0 and (first_store_pos == 0 or first_store_pos > first_ac_pos)) {
+            // Build set of load result IDs from this variable (to avoid circular: storing load-of-self)
+            var loads_from_self = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+            defer loads_from_self.deinit();
+            pos = 5;
+            while (pos < words.len) {
+                const wc_l: u32 = words[pos] >> 16;
+                if (wc_l == 0) break;
+                const ie_l = pos + wc_l;
+                if (ie_l > words.len) break;
+                const op_l: u16 = @truncate(words[pos] & 0xFFFF);
+                if (op_l == 61 and wc_l >= 4 and words[pos + 3] == var_id) { // OpLoad from this var
+                    const rid_l = words[pos + 2];
+                    if (rid_l > 0 and rid_l < bound) loads_from_self.set(rid_l);
+                }
+                pos = ie_l;
+            }
             // Find the last instruction before first_ac_pos that produces a value of pointee_type
+            // Don't use results of loads from the same variable (circular)
             var best_val_id: u32 = 0;
             pos = 5;
             while (pos < words.len and pos < first_ac_pos) {
@@ -4849,9 +4866,11 @@ pub fn fixEarlyAccessVars(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 if (ie > words.len) break;
                 if (wc >= 3) {
                     const result_id = words[pos + 2];
-                    if (id_types.get(result_id)) |tid| {
-                        if (tid == pointee_type and result_id != var_id) {
-                            best_val_id = result_id;
+                    if (result_id > 0 and result_id < bound and !loads_from_self.isSet(result_id)) {
+                        if (id_types.get(result_id)) |tid| {
+                            if (tid == pointee_type and result_id != var_id) {
+                                best_val_id = result_id;
+                            }
                         }
                     }
                 }
