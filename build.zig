@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
         "semantic",
         "codegen",
         "diagnostic",
+        "kernel_fusion",
     };
 
     inline for (module_files) |name| {
