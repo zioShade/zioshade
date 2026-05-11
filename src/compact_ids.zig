@@ -7765,7 +7765,46 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
 
         const src_ptr = words[lpos + 3]; // OpLoad: type, result, ptr
 
+        // Check if src_ptr was modified between the initial store and the load
+        // by an AccessChain+Store pattern (e.g., v.x = expr modifies v)
+        // Also check if any variable is modified via AC+Store (copyMemoryOpt is only
+        // safe when both src and dst pointers are unmodified between store and load)
+        var src_modified_by_ac = false;
+        var ac_results_src = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+        defer ac_results_src.deinit();
+        pos = 5;
+        while (pos < words.len) {
+            const wc_ac: u32 = words[pos] >> 16;
+            const op_ac: u16 = @truncate(words[pos] & 0xFFFF);
+            if (wc_ac == 0) break;
+            const ie_ac = pos + wc_ac;
+            if (ie_ac > words.len) break;
+            if (op_ac == 65 and wc_ac >= 4 and words[pos + 3] == src_ptr) { // AccessChain base=src_ptr
+                const ac_rid = words[pos + 2];
+                if (ac_rid > 0 and ac_rid < bound) ac_results_src.set(ac_rid);
+            }
+            pos = ie_ac;
+        }
+        pos = 5;
+        while (pos < words.len) {
+            const wc_s: u32 = words[pos] >> 16;
+            const op_s: u16 = @truncate(words[pos] & 0xFFFF);
+            if (wc_s == 0) break;
+            const ie_s = pos + wc_s;
+            if (ie_s > words.len) break;
+            if (op_s == 62 and wc_s >= 2) { // OpStore
+                const store_target = words[pos + 1];
+                if (store_target > 0 and store_target < bound and ac_results_src.isSet(store_target)) {
+                    src_modified_by_ac = true;
+                    break;
+                }
+            }
+            pos = ie_s;
+        }
+        if (src_modified_by_ac) continue;
+
         // Find the OpStore that uses this value
+        // NOTE: pos is reused from outer scope
         pos = 5;
         while (pos < words.len) {
             const wc2: u32 = words[pos] >> 16;
@@ -7779,6 +7818,45 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
                 if (stored_val == rid) {
                     // Don't replace self-copies (Load(X) -> Store(X))
                     if (dst_ptr == src_ptr) break;
+
+                    // Also check: don't replace if dst_ptr has AC+Store children
+                    // (the stored value was computed from a modified variable)
+                    var dst_has_ac_stores = false;
+                    var ac_results_dst = std.DynamicBitSet.initEmpty(alloc, bound) catch break;
+                    defer ac_results_dst.deinit();
+                    var p3: u32 = 5;
+                    while (p3 < words.len) {
+                        const wc3: u32 = words[p3] >> 16;
+                        const op3: u16 = @truncate(words[p3] & 0xFFFF);
+                        if (wc3 == 0) break;
+                        const ie3 = p3 + wc3;
+                        if (ie3 > words.len) break;
+                        if (op3 == 65 and wc3 >= 4 and words[p3 + 3] == dst_ptr) {
+                            const ac_rid3 = words[p3 + 2];
+                            if (ac_rid3 > 0 and ac_rid3 < bound) ac_results_dst.set(ac_rid3);
+                        }
+                        p3 = ie3;
+                    }
+                    p3 = 5;
+                    while (p3 < words.len) {
+                        const wc4: u32 = words[p3] >> 16;
+                        const op4: u16 = @truncate(words[p3] & 0xFFFF);
+                        if (wc4 == 0) break;
+                        const ie4 = p3 + wc4;
+                        if (ie4 > words.len) break;
+                        if (op4 == 62 and wc4 >= 2) {
+                            const st4 = words[p3 + 1];
+                            if (st4 > 0 and st4 < bound and ac_results_dst.isSet(st4)) {
+                                dst_has_ac_stores = true;
+                                break;
+                            }
+                        }
+                        p3 = ie4;
+                    }
+                    if (dst_has_ac_stores) break;
+
+                    try replacements.put(alloc, pos, .{ .load_pos = lpos, .src_ptr = src_ptr });
+                    try dead_loads.put(alloc, lpos, {});
                     try replacements.put(alloc, pos, .{ .load_pos = lpos, .src_ptr = src_ptr });
                     try dead_loads.put(alloc, lpos, {});
                     break;
