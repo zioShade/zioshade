@@ -7734,6 +7734,57 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
 
     if (replacements.count() == 0) return words;
 
+    // Validate: build set of valid pointer IDs (defined by OpVariable or OpAccessChain)
+    // CopyMemoryOpt can produce invalid IDs if earlier passes remapped or removed IDs
+    var valid_ptr_ids = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
+    defer valid_ptr_ids.deinit();
+    pos = 5;
+    while (pos < words.len) {
+        const wc3: u32 = words[pos] >> 16;
+        const op3: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc3 == 0) break;
+        const ie3 = pos + wc3;
+        if (ie3 > words.len) break;
+        if ((op3 == 59 or op3 == 65) and wc3 >= 4) { // OpVariable or OpAccessChain
+            const rid3 = words[pos + 2];
+            if (rid3 > 0 and rid3 < bound) valid_ptr_ids.set(rid3);
+        }
+        pos = ie3;
+    }
+    // Also add function parameters that are pointers (from OpFunctionParameter)
+    pos = 5;
+    while (pos < words.len) {
+        const wc3: u32 = words[pos] >> 16;
+        const op3: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc3 == 0) break;
+        const ie3 = pos + wc3;
+        if (ie3 > words.len) break;
+        if (op3 == 55 and wc3 >= 3) { // OpFunctionParameter
+            const rid3 = words[pos + 2];
+            if (rid3 > 0 and rid3 < bound) valid_ptr_ids.set(rid3);
+        }
+        pos = ie3;
+    }
+    // Remove replacements where src_ptr or dst_ptr are not valid pointers
+    var invalid_reps = std.ArrayList(u32).initCapacity(alloc, replacements.count()) catch return words;
+    defer invalid_reps.deinit(alloc);
+    var ri = replacements.iterator();
+    while (ri.next()) |entry| {
+        const sp = entry.value_ptr.src_ptr;
+        const dp = words[entry.key_ptr.* + 1]; // dst_ptr from the OpStore
+        const sp_valid = sp > 0 and sp < bound and valid_ptr_ids.isSet(sp);
+        const dp_valid = dp > 0 and dp < bound and valid_ptr_ids.isSet(dp);
+        if (!sp_valid or !dp_valid) {
+            invalid_reps.appendAssumeCapacity(entry.key_ptr.*);
+            // Also remove from dead_loads since we won't be removing this load
+            _ = dead_loads.remove(entry.value_ptr.load_pos);
+        }
+    }
+    for (invalid_reps.items) |store_pos| {
+        _ = replacements.remove(store_pos);
+    }
+    if (replacements.count() == 0) return words;
+
     // Build set of PhysicalStorageBuffer pointer IDs to add Aligned operand
     var phys_sb_ids = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
     defer phys_sb_ids.deinit();
