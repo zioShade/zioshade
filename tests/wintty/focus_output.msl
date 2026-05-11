@@ -1,0 +1,111 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct Globals
+{
+    float3 _m0;
+    float _m1;
+    float _m2;
+    float _m3;
+    int _m4;
+    float _m5[4];
+    float3 _m6[4];
+    float4 _m7;
+    float4 _m8;
+    float _m9;
+    float4 _m10;
+    float4 _m11;
+    float4 _m12;
+    float4 _m13;
+    int _m14;
+    int _m15;
+    int _m16;
+    float _m17;
+    float _m18;
+    int _m19;
+    float3 _m20[256];
+    float3 _m21;
+    float3 _m22;
+    float3 _m23;
+    float3 _m24;
+    float3 _m25;
+    float3 _m26;
+};
+
+struct main0_out
+{
+    float4 _fragColor [[color(0)]];
+};
+
+
+void mainImage(thread float4& v27, float2 v28, constant Globals& Globals_1, texture2d<float> iChannel0, sampler iChannel0Smplr)
+{
+    float3 v29;
+    float3 v31 = Globals_1._m0;
+    float2 v32 = float2(v31[0], v31[1]);
+    float2 v33 = v28 / v32;
+    float4 v35 = iChannel0.sample(iChannel0Smplr, v33);
+    float3 v36 = float3(v35[0], v35[1], v35[2]);
+    int v38 = Globals_1._m19;
+    bool v39 = v38 > 0;
+    v29 = v36;
+    if (v39)
+    {
+    float v41 = Globals_1._m1;
+    float v43 = Globals_1._m18;
+    float v44 = v41 - v43;
+    float v45 = v44 / 3.0;
+    float v46 = 1.0 - v45;
+    float v47 = max(0.0, v46);
+    float v48 = v47 * 0.4;
+    float3 v49 = float3(v48, v48, v48);
+    float3 v50 = mix(v36, float3(0.0, 1.0, 0.0), v49);
+    v29 = v50;
+    float v51 = v28[0];
+    bool v52 = v51 < 5.0;
+    float v53 = v31[0];
+    float v54 = v53 - 5.0;
+    bool v55 = v51 > v54;
+    bool v56 = v52 || v55;
+    float v57 = v28[1];
+    bool v58 = v57 < 5.0;
+    bool v59 = v56 || v58;
+    float v60 = v31[1];
+    float v61 = v60 - 5.0;
+    bool v62 = v57 > v61;
+    bool v63 = v59 || v62;
+        if (v63)
+        {
+    float v64 = v44 * 2.0;
+    float v65 = sin(v64);
+    float v66 = v65 * 0.1;
+    float v67 = v66 + 0.9;
+    float3 v68 = float3(0.0, 1.0, 1.0) * v67;
+    v29 = v68;
+        }
+    } else {
+    float3 v69 = v29;
+    float3 v70 = float3(0.3, 0.3, 0.3);
+    float3 v71 = mix(v69, float3(1.0, 0.0, 0.0), v70);
+    v29 = v71;
+    }
+    float3 v72 = v29;
+    float4 v73 = float4(v72, 1.0);
+    v27 = v73;
+    return;
+}
+static inline __attribute__((always_inline))
+void main0_impl(thread float4& _fragColor, float2 _fragCoord, constant Globals& Globals_1, texture2d<float> iChannel0, sampler iChannel0Smplr)
+{
+    float2 v25 = float2(_fragCoord[0], _fragCoord[1]);
+    mainImage(_fragColor, v25, Globals_1, iChannel0, iChannel0Smplr);
+}
+
+fragment main0_out main0(constant Globals& Globals_1 [[buffer(1)]], texture2d<float> iChannel0 [[texture(0)]], sampler iChannel0Smplr [[sampler(0)]], float4 gl_FragCoord [[position]])
+{
+    main0_out out = {};
+    main0_impl(out._fragColor, gl_FragCoord.xy, Globals_1, iChannel0, iChannel0Smplr);
+    return out;
+}

@@ -40,11 +40,11 @@ struct main0_out
 };
 
 
-void mainImage(thread float4& v28, float2 v29)
+void mainImage(thread float4& v28, float2 v29, constant Globals& Globals_1, texture2d<float> iChannel0, sampler iChannel0Smplr)
 {
     float3 v30;
     float2 v31;
-    float3 v33 = Globals_m0;
+    float3 v33 = Globals_1._m0;
     float2 v34 = float2(v33[0], v33[1]);
     float2 v35 = v29 / v34;
     float2 v36 = v35 - float2(0.5);
@@ -71,7 +71,7 @@ void mainImage(thread float4& v28, float2 v29)
     float2 v57 = v56 * 0.92;
     float2 v58 = v57 + float2(0.04);
     v31 = v58;
-    float v61 = Globals_m1;
+    float v61 = Globals_1._m1;
     float v62 = 0.3 * v61;
     float v63 = v58[1];
     float v64 = v63 * 21.0;
@@ -198,7 +198,7 @@ void mainImage(thread float4& v28, float2 v29)
     v30 = v177;
     }
     float v178 = v29[0];
-    float v179 = v178 % 2.0;
+    float v179 = fmod(v178, 2.0);
     float v180 = v179 - 1.0;
     float v181 = v180 * 2.0;
     float v182 = clamp(v181, 0.0, 1.0);
@@ -215,8 +215,8 @@ void mainImage(thread float4& v28, float2 v29)
 static inline __attribute__((always_inline))
 void main0_impl(thread float4& _fragColor, float2 _fragCoord, constant Globals& Globals_1, texture2d<float> iChannel0, sampler iChannel0Smplr)
 {
-    float2 v26 = float2(gl_FragCoord[0], gl_FragCoord[1]);
-    mainImage(_fragColor, v26);
+    float2 v26 = float2(_fragCoord[0], _fragCoord[1]);
+    mainImage(_fragColor, v26, Globals_1, iChannel0, iChannel0Smplr);
 }
 
 fragment main0_out main0(constant Globals& Globals_1 [[buffer(1)]], texture2d<float> iChannel0 [[texture(0)]], sampler iChannel0Smplr [[sampler(0)]], float4 gl_FragCoord [[position]])

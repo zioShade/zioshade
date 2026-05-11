@@ -144,7 +144,7 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 if (is_vector) {
                     try w.writeAll(swizzleChar(val));
                 } else if (base_is_cb) {
-                    try w.print("{s}_m{d}", .{cb_prefix, val});
+                    try w.print("{s}_1._m{d}", .{cb_prefix, val});
                 } else {
                     try w.print("[{d}]", .{val});
                 }
@@ -600,11 +600,29 @@ fn emitFunction(
 
         // Determine return type and params
         var output_var_id: ?u32 = null;
+        var frag_coord_var_id: ?u32 = null;
         for (m.instructions) |inst| {
             if (inst.op == .Variable and inst.words.len >= 4) {
                 const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                 if (sc == .Output) output_var_id = inst.words[2];
+                if (sc == .Input) {
+                    // Check if this is FragCoord built-in
+                    const vid = inst.words[2];
+                    if (decs.get(vid)) |dlist| {
+                        for (dlist.items) |de| {
+                            if (de.decoration == .built_in and de.extra.len > 0 and de.extra[0] == @intFromEnum(spirv.BuiltIn.frag_coord)) {
+                                frag_coord_var_id = vid;
+                            }
+                        }
+                    }
+                }
             }
+        }
+
+        // Rename the FragCoord input variable so the body uses _fragCoord parameter
+        if (frag_coord_var_id) |fcvid| {
+            const pa = alloc.dupe(u8, "_fragCoord") catch unreachable;
+            if (names.fetchPut(fcvid, pa) catch null) |old| alloc.free(old.value);
         }
 
         // Helper function signature: void mainImage(thread float4& out, float2 fragCoord, ...)
@@ -645,7 +663,7 @@ fn emitFunction(
         }
 
         try w.writeAll(")\n{\n");
-        try emitBody(m, names, decs, func_idx, w, alloc, is_frag, output_var_id);
+        try emitBody(m, names, decs, func_idx, w, alloc, is_frag, output_var_id, cbuffers, textures);
         try w.writeAll("}\n\n");
 
         // Now emit the entry wrapper
@@ -723,20 +741,23 @@ fn emitFunction(
             }
         }
 
-        try emitBody(m, names, decs, func_idx, w, alloc, false, null);
+        try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures);
         try w.writeAll("}\n");
         return;
     }
 
-    // Non-entry function
+    // Non-entry function — append cbuffer and texture/sampler params
+    // so the function body can access Globals_1, iChannel0, etc.
     if (std.mem.eql(u8, rt, "void")) {
         try w.print("void {s}(", .{func_name});
     } else {
         try w.print("{s} {s}(", .{rt, func_name});
     }
 
+    var first_param = true;
     for (param_ids.items, 0..) |pid, i| {
-        if (i > 0) try w.writeAll(", ");
+        if (!first_param) try w.writeAll(", ");
+        first_param = false;
         const pi = getDef(m, pid).?;
         const pn = names.get(pid) orelse "p";
         const pti = getDef(m, pi.words[1]);
@@ -766,8 +787,22 @@ fn emitFunction(
         }
     }
 
+    // Add cbuffer params to non-entry functions
+    for (cbuffers.items) |cb| {
+        if (!first_param) try w.writeAll(", ");
+        first_param = false;
+        try w.print("constant {s}& {s}_1", .{cb.name, cb.name});
+    }
+    // Add texture + sampler params to non-entry functions
+    for (textures.items) |tex| {
+        if (!first_param) try w.writeAll(", ");
+        first_param = false;
+        try w.print("texture2d<float> {s}", .{tex.name});
+        try w.print(", sampler {s}Smplr", .{tex.name});
+    }
+
     try w.writeAll(")\n{\n");
-    try emitBody(m, names, decs, func_idx, w, alloc, false, null);
+    try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures);
     try w.writeAll("}\n");
 }
 
@@ -782,6 +817,8 @@ fn emitBody(
     alloc: std.mem.Allocator,
     is_frag: bool,
     output_var_id: ?u32,
+    cbuffers: *const std.ArrayList(CbufferDecl),
+    textures: *const std.ArrayList(TextureDecl),
 ) !void {
     var label_map = std.AutoHashMap(u32, usize).init(alloc);
     defer label_map.deinit();
@@ -817,10 +854,10 @@ fn emitBody(
             if (ml) |mval| {
                 const he = fl != null and fl.? != mval;
                 try w.print("    if ({s})\n    {{\n", .{cn});
-                idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ");
+                idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures);
                 if (he) {
                     try w.writeAll("    } else {\n");
-                    idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ");
+                    idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures);
                 }
                 try w.writeAll("    }\n");
                 if (label_map.get(mval)) |mi| { idx = mi; }
@@ -839,7 +876,7 @@ fn emitBody(
                 try w.print("    switch ({s}) {{\n", .{sn});
                 if (dl != mval) {
                     try w.writeAll("    default:\n");
-                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ");
+                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures);
                 }
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
@@ -847,7 +884,7 @@ fn emitBody(
                     const target = inst.words[wi + 1];
                     if (target == mval) continue;
                     try w.print("    case {d}:\n", .{cv});
-                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ");
+                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures);
                 }
                 try w.writeAll("    }\n");
                 if (label_map.get(mval)) |mi| { idx = mi; }
@@ -857,7 +894,7 @@ fn emitBody(
             continue;
         }
 
-        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, output_var_id);
+        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, output_var_id, cbuffers, textures);
     }
 }
 
@@ -870,6 +907,8 @@ fn emitBlock(
     bm: *const std.AutoHashMap(usize, u32),
     w: anytype, alloc: std.mem.Allocator,
     is_frag: bool, ovid: ?u32, indent: []const u8,
+    cbuffers: *const std.ArrayList(CbufferDecl),
+    textures: *const std.ArrayList(TextureDecl),
 ) !usize {
     const si = lm.get(label) orelse return error.InvalidSpirv;
     var i: usize = si + 1;
@@ -888,10 +927,10 @@ fn emitBlock(
             if (nm) |nmv| {
                 const he = fl != null and fl.? != nmv;
                 try w.print("{s}    if ({s})\n{s}    {{\n", .{indent, cn, indent});
-                i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent);
+                i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures);
                 if (he) {
                     try w.print("{s}    }} else {{\n", .{indent});
-                    i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent);
+                    i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures);
                 }
                 try w.print("{s}    }}\n", .{indent});
                 if (lm.get(nmv)) |nmi| { i = nmi; }
@@ -900,7 +939,7 @@ fn emitBlock(
             }
             continue;
         }
-        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid);
+        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid, cbuffers, textures);
     }
     return i;
 }
@@ -919,6 +958,8 @@ fn emitInstruction(
     inst: Instruction,
     w: anytype, alloc: std.mem.Allocator,
     is_frag: bool, ovid: ?u32,
+    cbuffers: *const std.ArrayList(CbufferDecl),
+    textures: *const std.ArrayList(TextureDecl),
 ) !void {
     _ = decs;
     switch (inst.op) {
@@ -1000,7 +1041,15 @@ fn emitInstruction(
         .FSub, .ISub => try emitBinOp(m, names, inst, "-", w, alloc),
         .FMul, .IMul => try emitBinOp(m, names, inst, "*", w, alloc),
         .FDiv, .SDiv, .UDiv => try emitBinOp(m, names, inst, "/", w, alloc),
-        .FMod, .UMod, .SRem, .FRem => try emitBinOp(m, names, inst, "%", w, alloc),
+        .UMod, .SRem => try emitBinOp(m, names, inst, "%", w, alloc),
+        .FMod, .FRem => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const lhs = try resolvePointer(m, names, inst.words[3], alloc);
+            defer alloc.free(lhs);
+            const rhs = try resolvePointer(m, names, inst.words[4], alloc);
+            defer alloc.free(rhs);
+            try w.print("    {s} {s} = fmod({s}, {s});\n", .{rtt, names.get(inst.words[2]) orelse "r", lhs, rhs});
+        },
         .FNegate, .SNegate => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = -{s};\n", .{rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0"});
@@ -1313,9 +1362,23 @@ fn emitInstruction(
                 const rtt = try mslType(m, inst.words[1], names, alloc);
                 try w.print("    {s} {s} = {s}(", .{rtt, rn, cfn});
             }
-            for (inst.words[4..], 0..) |aid, i| {
-                if (i > 0) try w.writeAll(", ");
+            var first_arg = true;
+            for (inst.words[4..]) |aid| {
+                if (!first_arg) try w.writeAll(", ");
+                first_arg = false;
                 try w.writeAll(names.get(aid) orelse "0");
+            }
+            // Pass cbuffer and texture/sampler args to function calls
+            // (all non-entry functions now have these as extra params)
+            for (cbuffers.items) |cb| {
+                if (!first_arg) try w.writeAll(", ");
+                first_arg = false;
+                try w.print("{s}_1", .{cb.name});
+            }
+            for (textures.items) |tex| {
+                if (!first_arg) try w.writeAll(", ");
+                first_arg = false;
+                try w.print("{s}, {s}Smplr", .{tex.name, tex.name});
             }
             try w.writeAll(");\n");
         },
