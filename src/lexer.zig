@@ -441,7 +441,7 @@ const pp_directive_map = makePPDirectiveMap();
 pub fn tokenize(alloc: std.mem.Allocator, source: [:0]const u8) Error![]const Token {
     var tokenizer = Tokenizer{
         .source = source,
-        .tokens = .{},
+        .tokens = .empty,
         .loc = .{ .line = 1, .column = 1 },
     };
     try tokenizer.run(alloc);
