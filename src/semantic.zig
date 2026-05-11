@@ -309,6 +309,7 @@ const Analyzer = struct {
     const_composite_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty,
     access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty,
     global_access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty, // key -> ptr_id (persists across blocks, populated from entry block)
+    ac_result_to_base: std.AutoHashMapUnmanaged(u32, u32) = .empty, // AccessChain result_id -> base var_id (for store invalidation)
     load_cache: std.AutoHashMapUnmanaged(u32, u32) = .empty, // ptr_id -> loaded_value_id (cleared at labels)
     global_load_cache: std.AutoHashMapUnmanaged(u32, u32) = .empty, // ptr_id -> loaded_value_id (persists across blocks)
     global_ptr_ids: std.AutoHashMapUnmanaged(u32, void) = .empty, // set of ptr_ids that point into global (Input/Uniform/Output) variables
@@ -357,6 +358,7 @@ const Analyzer = struct {
         self.const_composite_cache.deinit(self.alloc);
         self.access_chain_cache.deinit(self.alloc);
         self.global_access_chain_cache.deinit(self.alloc);
+        self.ac_result_to_base.deinit(self.alloc);
         self.load_cache.deinit(self.alloc);
         self.global_load_cache.deinit(self.alloc);
         self.global_ptr_ids.deinit(self.alloc);
@@ -540,6 +542,8 @@ const Analyzer = struct {
             .ty = result_ty,
         });
         self.access_chain_cache.put(self.alloc, key, ptr_id) catch {};
+        // Track AC result -> base variable for store invalidation
+        self.ac_result_to_base.put(self.alloc, ptr_id, base_id) catch {};
         // Populate global cache from dominating blocks (entry + loop headers)
         if (self.cache_globals) {
             self.global_access_chain_cache.put(self.alloc, key, ptr_id) catch {};
@@ -624,13 +628,16 @@ const Analyzer = struct {
     }
 
     fn emitStore(self: *Analyzer, ptr_id: u32, val_id: u32) !void {
-        // Only invalidate load cache for the stored-to pointer.
-        // Conservative: also invalidate any AccessChain-derived pointers that
-        // start with this ptr_id. Simplest approach: just remove this ptr_id
-        // from the cache, as loads from the exact same pointer are the most
-        // common case and other aliases are rare within a basic block.
+        // Invalidate load cache for this pointer AND any base variable it might be derived from.
+        // When storing to a component (e.g., uv.x), we must also invalidate the whole variable (uv)
+        // so that subsequent loads of uv don't return a stale cached value.
         _ = self.load_cache.remove(ptr_id);
         _ = self.global_load_cache.remove(ptr_id);
+        // Check if ptr_id is an AccessChain result — if so, invalidate the base variable too
+        if (self.ac_result_to_base.get(ptr_id)) |base_id| {
+            _ = self.load_cache.remove(base_id);
+            _ = self.global_load_cache.remove(base_id);
+        }
         // Store-to-load forwarding: within the same basic block, a load of the
         // same pointer after this store can use the stored value directly.
         self.load_cache.put(self.alloc, ptr_id, val_id) catch {};
@@ -750,6 +757,7 @@ const Analyzer = struct {
         self.in_entry_block = false;
         self.cache_globals = false; // Only re-enable in loop headers
         self.access_chain_cache.clearRetainingCapacity();
+        self.ac_result_to_base.clearRetainingCapacity();
         self.load_cache.clearRetainingCapacity();
         self.pure_op_cache.clearRetainingCapacity();
         // Note: global_load_cache is NOT cleared — it persists across blocks
@@ -1292,6 +1300,7 @@ const Analyzer = struct {
         self.in_entry_block = true;
         self.cache_globals = true;
         self.access_chain_cache.clearRetainingCapacity();
+        self.ac_result_to_base.clearRetainingCapacity();
         self.load_cache.clearRetainingCapacity();
         self.pure_op_cache.clearRetainingCapacity();
         self.global_load_cache.clearRetainingCapacity();
