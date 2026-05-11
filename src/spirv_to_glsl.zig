@@ -324,6 +324,35 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
     if (textures.items.len > 0) try w.writeAll("\n");
 
+    // Emit specialization constants as layout(constant_id = N) const declarations
+    for (module.instructions) |inst| {
+        if (inst.op == .SpecConstant and inst.words.len > 3) {
+            const result_id = inst.words[2];
+            const name = names.get(result_id) orelse continue;
+            const type_id = inst.words[1];
+            const type_str = try glslType(&module, type_id, &names, aa);
+            // Find SpecId decoration
+            const spec_id: ?u32 = blk: {
+                const dec_list = decs.get(result_id) orelse break :blk null;
+                for (dec_list.items) |d| {
+                    if (d.decoration == .spec_id and d.extra.len > 0) break :blk d.extra[0];
+                }
+                break :blk null;
+            };
+            if (spec_id) |sid| {
+                // Get default value from constant words
+                const default_val = if (inst.words.len > 3) inst.words[3] else 0;
+                if (std.mem.eql(u8, type_str, "float")) {
+                    const fv: f32 = @bitCast(default_val);
+                    try w.print("layout(constant_id = {d}) const {s} {s} = {d};\n", .{sid, type_str, name, fv});
+                } else {
+                    try w.print("layout(constant_id = {d}) const {s} {s} = {d};\n", .{sid, type_str, name, default_val});
+                }
+            }
+        }
+    }
+    try w.writeAll("\n");
+
     var func_ids = std.ArrayList(u32).initCapacity(aa, 8) catch return error.OutOfMemory;
     defer func_ids.deinit(aa);
     for (module.instructions) |inst| { if (inst.op == .Function and inst.words.len > 2) try func_ids.append(aa, inst.words[2]); }
