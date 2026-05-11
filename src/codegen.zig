@@ -313,7 +313,7 @@ pub fn generate(
     if (compact6.ptr != dce6.ptr) alloc.free(dce6);
     const no_id_stores3 = compact_ids.elimIdentityStores(alloc, compact6) catch return compact6;
     if (no_id_stores3.ptr != compact6.ptr) alloc.free(compact6);
-    const copy_mem2 = compact_ids.copyMemoryOpt(alloc, no_id_stores3) catch return no_id_stores3;
+    const copy_mem2 = no_id_stores3; // TEMP DISABLED: compact_ids.copyMemoryOpt(alloc, no_id_stores3) catch return no_id_stores3;
     if (copy_mem2.ptr != no_id_stores3.ptr) alloc.free(no_id_stores3);
     const dce7 = compact_ids.deadCodeElim(alloc, copy_mem2) catch return copy_mem2;
     if (dce7.ptr != copy_mem2.ptr) alloc.free(copy_mem2);
