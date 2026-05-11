@@ -13,15 +13,15 @@ pub fn foldExtractConstructToShuffle(alloc: std.mem.Allocator, words: []const u3
     if (bound <= 1) return words;
 
     // Phase 1: Build maps
-    var extract_sources = std.AutoHashMapUnmanaged(u32, u32){}; // extract result -> source
+    var extract_sources = std.AutoHashMapUnmanaged(u32, u32).empty; // extract result -> source
     defer extract_sources.deinit(alloc);
-    var extract_indices = std.AutoHashMapUnmanaged(u32, u32){}; // extract result -> index
+    var extract_indices = std.AutoHashMapUnmanaged(u32, u32).empty; // extract result -> index
     defer extract_indices.deinit(alloc);
 
-    var float_const_vals = std.AutoHashMapUnmanaged(u32, u32){}; // const result -> value_bits
+    var float_const_vals = std.AutoHashMapUnmanaged(u32, u32).empty; // const result -> value_bits
     defer float_const_vals.deinit(alloc);
 
-    var cc_constituents = std.AutoHashMapUnmanaged(u32, []const u32){};
+    var cc_constituents = std.AutoHashMapUnmanaged(u32, []const u32).empty;
     defer {
         var it = cc_constituents.iterator();
         while (it.next()) |entry| alloc.free(entry.value_ptr.*);
@@ -29,7 +29,7 @@ pub fn foldExtractConstructToShuffle(alloc: std.mem.Allocator, words: []const u3
     }
 
     // Zero vector constants: result_id -> num_components
-    var zero_vecs = std.AutoHashMapUnmanaged(u32, u32){}; // result -> num_comps
+    var zero_vecs = std.AutoHashMapUnmanaged(u32, u32).empty; // result -> num_comps
     defer zero_vecs.deinit(alloc);
 
     var pos: u32 = 5;
@@ -80,7 +80,7 @@ pub fn foldExtractConstructToShuffle(alloc: std.mem.Allocator, words: []const u3
     if (zero_vecs.count() == 0) return words;
 
     // Phase 2: Use counts for extract results (skip result_id position at offset 2)
-    var use_counts = std.AutoHashMapUnmanaged(u32, u32){};
+    var use_counts = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer use_counts.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
@@ -107,14 +107,14 @@ pub fn foldExtractConstructToShuffle(alloc: std.mem.Allocator, words: []const u3
 
     // Phase 3: Find replacements
     const Replacement = struct { source: u32, zero_vec: u32, indices: []const u32, source_len: u32 };
-    var replacements = std.AutoHashMapUnmanaged(u32, Replacement){};
+    var replacements = std.AutoHashMapUnmanaged(u32, Replacement).empty;
     defer {
         var rit = replacements.iterator();
         while (rit.next()) |entry| alloc.free(entry.value_ptr.indices);
         replacements.deinit(alloc);
     }
 
-    var extracts_to_remove = std.AutoHashMapUnmanaged(u32, void){};
+    var extracts_to_remove = std.AutoHashMapUnmanaged(u32, void).empty;
     defer extracts_to_remove.deinit(alloc);
 
     var cc_it = cc_constituents.iterator();
