@@ -504,7 +504,6 @@ test "T11.2: swizzle access" {
     try assertContains(msl, "[0]");
 }
 
-<<<<<<< HEAD
 // === Subgroup operation tests (Issue #3) ===
 
 test "subgroupAll compiles to MSL with simd_all" {
@@ -541,7 +540,6 @@ test "subgroupAny compiles to MSL with simd_any" {
     try assertContains(msl, "simd_any");
 }
 
-=======
 // === FP16 type tests (Issue #4) ===
 
 test "float16_t compiles through the pipeline" {
@@ -556,4 +554,4 @@ test "float16_t compiles through the pipeline" {
     // Just verify it compiles without error
     try assertContains(msl, "metal_stdlib");
 }
->>>>>>> 8d612fd (feat: add FP16 (half) type support in cross-compiler backends (Issue #4 Phase 1))
+
