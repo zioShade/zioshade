@@ -895,9 +895,33 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     // Store-to-load forwarding within basic blocks
     // For each block: track last store per pointer. When OpLoad is seen for a stored pointer,
     // replace all uses of the load result with the stored value.
+    // IMPORTANT: when a store targets an AccessChain result (component store), invalidate
+    // the forwarding for the base variable, since the variable's value has changed.
     {
         const fwd_bound = current_words[3];
         if (fwd_bound > 1) {
+            // Build AC result -> base var map for invalidation
+            var ac_to_base = std.AutoHashMapUnmanaged(u32, u32).empty; // ac_result -> base_var
+            defer ac_to_base.deinit(alloc);
+            pos = 5;
+            while (pos < current_words.len) {
+                const hdr = current_words[pos];
+                const wc: u32 = hdr >> 16;
+                const opcode: u16 = @truncate(hdr & 0xFFFF);
+                if (wc == 0) break;
+                const ie = pos + wc;
+                if (ie > current_words.len) break;
+                if (opcode == 65 and wc >= 5) { // OpAccessChain
+                    const ac_result = current_words[pos + 2];
+                    const ac_base = current_words[pos + 3];
+                    // Resolve transitive: if base is itself an AC result, follow chain
+                    var resolved_base = ac_base;
+                    while (ac_to_base.get(resolved_base)) |deeper| resolved_base = deeper;
+                    try ac_to_base.put(alloc, ac_result, resolved_base);
+                }
+                pos = ie;
+            }
+
             // Build result_id -> position map for quick replacement
             // Also build a replacement map: old_id -> new_id
             var replacements = std.AutoHashMapUnmanaged(u32, u32).empty;
@@ -928,6 +952,10 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                             const ptr = current_words[pos + 1];
                             const val = current_words[pos + 2];
                             last_store.put(alloc, ptr, val) catch {};
+                            // If storing to an AC result, invalidate forwarding for the base variable
+                            if (ac_to_base.get(ptr)) |base_var| {
+                                _ = last_store.remove(base_var);
+                            }
                         }
                     },
                     // OpLoad: check if we have a forwarded value
