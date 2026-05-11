@@ -226,6 +226,12 @@ fn getDecVal(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), 
     return null;
 }
 
+fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, dec: spirv.Decoration) bool {
+    const list = decs.get(id) orelse return false;
+    for (list.items) |e| { if (e.decoration == dec) return true; }
+    return false;
+}
+
 // ---- Public API ----
 pub const MslCompileOptions = struct { metal_version: u32 = 21 };
 
@@ -258,6 +264,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     defer if (output_owned) output.deinit(alloc);
     const w = compat.listWriter(&output, alloc);
 
+    const is_compute = module.execution_model == .GLCompute;
+    const is_frag = module.execution_model == .Fragment;
+
     // MSL header
     try w.writeAll("#include <metal_stdlib>\n#include <simd/simd.h>\n\nusing namespace metal;\n\n");
 
@@ -268,8 +277,35 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         try w.writeAll("};\n\n");
     }
 
+    // Collect SSBO-style storage buffers (StorageBuffer storage class or Uniform + BufferBlock decoration)
+    var storage_buffers = std.ArrayList(CbufferDecl).initCapacity(aa, 8) catch return error.OutOfMemory;
+    for (module.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            const rid = inst.words[2];
+            // SSBOs use StorageBuffer storage class (SPIR-V 1.3+) or Uniform + BufferBlock decoration
+            const is_ssbo = sc == .StorageBuffer or (sc == .Uniform and hasDec(&decs, rid, .buffer_block));
+            if (!is_ssbo) continue;
+            const binding = getDecVal(&decs, rid, .binding) orelse continue;
+            const name = names.get(rid) orelse continue;
+            const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
+            if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
+                const ptid = ptr_inst.words[3];
+                storage_buffers.append(aa, .{ .name = name, .type_id = ptid, .binding = binding }) catch {};
+            }
+        }
+    }
+
+    // Emit storage buffer structs for compute
+    if (storage_buffers.items.len > 0) {
+        for (storage_buffers.items) |sb| {
+            try w.print("struct {s}\n{{\n", .{sb.name});
+            try emitStructMembers(&module, &names, sb.type_id, sb.name, w, aa);
+            try w.writeAll("};\n\n");
+        }
+    }
+
     // Output struct for fragment
-    const is_frag = module.execution_model == .Fragment;
     if (is_frag) {
         try w.writeAll("struct main0_out\n{\n    float4 _fragColor [[color(0)]];\n};\n\n");
     }
@@ -283,9 +319,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     detectOutParams(&module, entry_id, &out_param_info, aa);
 
     // Emit non-entry functions first
-    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures); }
+    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute); }
     // Emit entry function last
-    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures);
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -376,7 +412,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pi = getDef(m, rt) orelse continue; if (pi.op != .TypePointer or pi.words.len < 4) continue;
         const pt = pi.words[3];
         switch (sc) {
-            .Uniform => { const binding = getDecVal(decs, rid, .binding) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding}) catch {}; },
+            .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding}) catch {}; },
             .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const name = names.get(rid) orelse "tex"; switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding}) catch {};}, else=>{}} },
             else => {},
         }
@@ -434,6 +470,8 @@ fn emitFunction(
     opi: *const std.AutoHashMap(u32, std.ArrayList(usize)),
     cbuffers: *const std.ArrayList(CbufferDecl),
     textures: *const std.ArrayList(TextureDecl),
+    storage_buffers: *const std.ArrayList(CbufferDecl),
+    is_compute: bool,
 ) !void {
     const fi = getDef(m, func_id) orelse return;
     if (fi.op != .Function or fi.words.len < 5) return;
@@ -607,6 +645,54 @@ fn emitFunction(
             try w.print(", {s}, {s}Smplr", .{tex.name, tex.name});
         }
         try w.writeAll(");\n    return out;\n}\n");
+        return;
+    }
+
+    // Compute kernel entry point
+    if (is_entry and is_compute) {
+        try w.writeAll("kernel void ");
+        try w.writeAll(func_name);
+        try w.writeAll("(");
+
+        var first_param = true;
+
+        // Emit storage buffers as device pointers
+        for (storage_buffers.items) |sb| {
+            if (!first_param) try w.writeAll(", ");
+            try w.print("device {s}* {s} [[buffer({d})]]", .{sb.name, sb.name, sb.binding});
+            first_param = false;
+        }
+
+        // Emit uniform buffers
+        for (cbuffers.items) |cb| {
+            if (!first_param) try w.writeAll(", ");
+            try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb.binding});
+            first_param = false;
+        }
+
+        // Thread position
+        if (!first_param) try w.writeAll(", ");
+        try w.writeAll("uint3 gl_GlobalInvocationID [[thread_position_in_grid]]");
+
+        try w.writeAll(")\n{\n");
+
+        // Emit workgroup (shared) variables
+        var idx = func_idx + 1;
+        while (idx < m.instructions.len) : (idx += 1) {
+            const inst = m.instructions[idx];
+            if (inst.op == .FunctionEnd) break;
+            if (inst.op == .Variable and inst.words.len >= 4) {
+                const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+                if (sc == .Workgroup) {
+                    const ri = inst.words[2];
+                    const tn = try mslType(m, inst.words[1], names, alloc);
+                    try w.print("    threadgroup {s} {s};\n", .{tn, names.get(ri) orelse "shared_var"});
+                }
+            }
+        }
+
+        try emitBody(m, names, decs, func_idx, w, alloc, false, null);
+        try w.writeAll("}\n");
         return;
     }
 
@@ -813,7 +899,7 @@ fn emitInstruction(
                 try w.print("    {s} {s};\n", .{tn, names.get(ri) orelse "var"});
                 return;
             }
-            if (sc == .Input or sc == .Output or sc == .Uniform or sc == .UniformConstant) return;
+            if (sc == .Input or sc == .Output or sc == .Uniform or sc == .UniformConstant or sc == .Workgroup) return;
             const ri = inst.words[2];
             const tn = try mslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s};\n", .{tn, names.get(ri) orelse "var"});
@@ -1017,6 +1103,12 @@ fn emitInstruction(
             try w.print("    {s} {s} = {s}.read({s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, names.get(inst.words[4]) orelse "0"});
         },
         .Kill => try w.writeAll("    discard_fragment();\n"),
+        .ControlBarrier => {
+            try w.writeAll("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+        },
+        .MemoryBarrier => {
+            try w.writeAll("    threadgroup_barrier(mem_flags::mem_device);\n");
+        },
         .Return => {
             if (!(is_frag and ovid != null)) try w.writeAll("    return;\n");
         },
