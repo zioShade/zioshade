@@ -49,6 +49,7 @@ pub const Op = enum(u16) {
     VectorShuffle = 79,
     CompositeConstruct = 80,
     CompositeExtract = 81,
+    CompositeInsert = 82,
     SampledImage = 86,
     ImageSampleImplicitLod = 87,
     ImageSampleExplicitLod = 88,

@@ -237,9 +237,12 @@ pub fn generate(
     // Forward constant stores to function-local vars
     const const_fwd = compact_ids.constStoreForward(alloc, no_uninit) catch return no_uninit;
     if (const_fwd.ptr != no_uninit.ptr) alloc.free(no_uninit);
+    // Fix variables accessed before first store (inserts OpUndef initializers)
+    const fixed_early = compact_ids.fixEarlyAccessVars(alloc, const_fwd) catch const_fwd;
+    if (fixed_early.ptr != const_fwd.ptr) alloc.free(const_fwd);
     // Scatter-store to CompositeConstruct
-    const scattered = compact_ids.scatterStoreToComposite(alloc, const_fwd) catch return const_fwd;
-    if (scattered.ptr != const_fwd.ptr) alloc.free(const_fwd);
+    const scattered = compact_ids.scatterStoreToComposite(alloc, fixed_early) catch return fixed_early;
+    if (scattered.ptr != fixed_early.ptr) alloc.free(fixed_early);
     // Store-forward extract: replace store+AC+load with CompositeExtract
     const forwarded = compact_ids.storeForwardExtract(alloc, scattered) catch return scattered;
     if (forwarded.ptr != scattered.ptr) alloc.free(scattered);

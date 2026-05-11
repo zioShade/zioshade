@@ -4684,6 +4684,154 @@ pub fn elimUninitVars(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     return result.toOwnedSlice(alloc) catch return words;
 }
 
+/// Fix function-local variables that are accessed (via AccessChain + Load) before their first Store.
+/// This can happen when the optimizer eliminates an initial store whose value is used
+/// directly as an SSA value, but later component-wise operations still read from the variable.
+/// The pass finds the SSA value of the correct type computed right before the first AccessChain
+/// and inserts an OpStore to initialize the variable.
+pub fn fixEarlyAccessVars(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Phase 1: Find function-local variables (storage class 7)
+    var func_vars = std.AutoHashMapUnmanaged(u32, void).empty;
+    defer func_vars.deinit(alloc);
+    // map: var_id -> pointee_type_id
+    var var_types = std.AutoHashMapUnmanaged(u32, u32).empty;
+    defer var_types.deinit(alloc);
+    // map: ptr_type_id -> pointee_type_id
+    var ptr_pointee = std.AutoHashMapUnmanaged(u32, u32).empty;
+    defer ptr_pointee.deinit(alloc);
+    // map: id -> type_id (for result-producing instructions)
+    var id_types = std.AutoHashMapUnmanaged(u32, u32).empty;
+    defer id_types.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        if (opcode == 32 and wc >= 4) { // OpTypePointer
+            ptr_pointee.put(alloc, words[pos + 1], words[pos + 3]) catch {};
+        }
+        if (opcode == 59 and wc >= 4 and words[pos + 3] == 7) { // OpVariable Function
+            const var_id = words[pos + 2];
+            const ptr_type = words[pos + 1];
+            func_vars.put(alloc, var_id, {}) catch {};
+            if (ptr_pointee.get(ptr_type)) |pt| {
+                var_types.put(alloc, var_id, pt) catch {};
+            }
+        }
+        pos = ie;
+    }
+    if (func_vars.count() == 0) return words;
+
+    // Build id -> type map for all result-producing instructions
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        // Most result instructions have type at words[pos+1] and result at words[pos+2]
+        if (wc >= 3) {
+            switch (opcode) {
+                4,5,11,12,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200 => {
+                    id_types.put(alloc, words[pos + 2], words[pos + 1]) catch {};
+                },
+                else => {},
+            }
+        }
+        pos = ie;
+    }
+
+    // Phase 2: For each function-local var, find if AccessChain appears before any Store
+    const Insertion = struct { before_pos: u32, var_id: u32, value_id: u32 };
+    var insertions = std.ArrayListUnmanaged(Insertion).empty;
+    defer insertions.deinit(alloc);
+
+    var fit = func_vars.iterator();
+    while (fit.next()) |entry| {
+        const var_id = entry.key_ptr.*;
+        const pointee_type = var_types.get(var_id) orelse continue;
+        var first_ac_pos: u32 = 0;
+        var first_store_pos: u32 = 0;
+
+        pos = 5;
+        while (pos < words.len) {
+            const wc: u32 = words[pos] >> 16;
+            if (wc == 0) break;
+            const ie = pos + wc;
+            if (ie > words.len) break;
+            const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+
+            if (opcode == 65 and wc >= 4 and words[pos + 3] == var_id) { // AccessChain base=var
+                if (first_ac_pos == 0) first_ac_pos = pos;
+            }
+            if (opcode == 62 and wc >= 3 and words[pos + 1] == var_id) { // Store to var
+                if (first_store_pos == 0) first_store_pos = pos;
+            }
+            pos = ie;
+        }
+
+        // Need fix if AccessChain appears before first Store
+        if (first_ac_pos > 0 and (first_store_pos == 0 or first_store_pos > first_ac_pos)) {
+            // Find the last instruction before first_ac_pos that produces a value of pointee_type
+            var best_val_id: u32 = 0;
+            pos = 5;
+            while (pos < words.len and pos < first_ac_pos) {
+                const wc: u32 = words[pos] >> 16;
+                if (wc == 0) break;
+                const ie = pos + wc;
+                if (ie > words.len) break;
+                if (wc >= 3) {
+                    const result_id = words[pos + 2];
+                    if (id_types.get(result_id)) |tid| {
+                        if (tid == pointee_type and result_id != var_id) {
+                            best_val_id = result_id;
+                        }
+                    }
+                }
+                pos = ie;
+            }
+            if (best_val_id != 0) {
+                insertions.append(alloc, .{ .before_pos = first_ac_pos, .var_id = var_id, .value_id = best_val_id }) catch {};
+            }
+        }
+    }
+    if (insertions.items.len == 0) return words;
+
+    // Phase 3: Insert OpStore before the AccessChain positions
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len + insertions.items.len * 3) catch return words;
+    result.appendSliceAssumeCapacity(words[0..5]); // header
+
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        // Check if we need to insert before this position
+        for (insertions.items) |ins| {
+            if (ins.before_pos == pos) {
+                // OpStore: (3 << 16) | 62, ptr_id, value_id
+                result.append(alloc, (3 << 16) | 62) catch return words;
+                result.append(alloc, ins.var_id) catch return words;
+                result.append(alloc, ins.value_id) catch return words;
+            }
+        }
+
+        result.appendSlice(alloc, words[pos..ie]) catch return words;
+        pos = ie;
+    }
+
+    return result.toOwnedSlice(alloc) catch return words;
+}
+
 /// Redundant load elimination for read-only variables.
 /// Input, UniformConstant, and Uniform storage class variables are never stored to
 /// within a shader, so multiple loads of the same variable produce the same value.
