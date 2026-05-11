@@ -11,7 +11,7 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
     if (bound <= 1) return words;
 
     // Phase 1: Find loop headers via OpLoopMerge (opcode 246)
-    var loop_info = std.AutoHashMapUnmanaged(u32, u32){}; // header_label -> continue_label
+    var loop_info = std.AutoHashMapUnmanaged(u32, u32).empty; // header_label -> continue_label
     defer loop_info.deinit(alloc);
     var cur_label: u32 = 0;
     var pos: u32 = 5;
@@ -39,7 +39,7 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
         stores: std.ArrayListUnmanaged(StoreInfo),
         loads: std.ArrayListUnmanaged(LoadInfo),
     };
-    var vars = std.ArrayListUnmanaged(VarInfo){};
+    var vars = std.ArrayListUnmanaged(VarInfo).empty;
     defer {
         for (vars.items) |*v| {
             v.stores.deinit(alloc);
@@ -75,8 +75,8 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
                 try vars.append(alloc, .{
                     .var_id = var_id,
                     .pointee_type = pointee_type,
-                    .stores = .{},
-                    .loads = .{},
+                    .stores = .empty,
+                    .loads = .empty,
                 });
             }
         }
@@ -114,11 +114,11 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
     }
 
     // Phase 3: Identify convertible variables
-    var sub_map = std.AutoHashMapUnmanaged(u32, u32){}; // load_result -> phi_result
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32).empty; // load_result -> phi_result
     defer sub_map.deinit(alloc);
-    var remove_store_positions = std.AutoHashMapUnmanaged(u32, void){};
+    var remove_store_positions = std.AutoHashMapUnmanaged(u32, void).empty;
     defer remove_store_positions.deinit(alloc);
-    var remove_var_ids = std.AutoHashMapUnmanaged(u32, void){};
+    var remove_var_ids = std.AutoHashMapUnmanaged(u32, void).empty;
     defer remove_var_ids.deinit(alloc);
 
     const PhiInsert = struct {
@@ -130,7 +130,7 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
         new_val: u32,
         cont_block: u32,
     };
-    var phi_inserts = std.ArrayListUnmanaged(PhiInsert){};
+    var phi_inserts = std.ArrayListUnmanaged(PhiInsert).empty;
     defer phi_inserts.deinit(alloc);
 
     for (vars.items) |v| {
@@ -261,7 +261,7 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
     }
     for (phi_inserts.items) |phi| {
         const gop = try phis_by_label.getOrPut(alloc, phi.label_id);
-        if (!gop.found_existing) gop.value_ptr.* = .{};
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
         try gop.value_ptr.append(alloc, phi);
     }
 

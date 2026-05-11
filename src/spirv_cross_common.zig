@@ -427,3 +427,34 @@ pub fn collectResources(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Shared Parse Cache
+// ---------------------------------------------------------------------------
+// Avoids re-parsing the same SPIR-V binary when multiple backends are called
+// sequentially (e.g., spirvToHLSL → spirvToGLSL → spirvToMSL).
+// Thread-local for safety. Keyed on words pointer + length.
+
+threadlocal var _shared_cache_mod: ?ParsedModule = null;
+threadlocal var _shared_cache_ptr: ?[*]const u32 = null;
+threadlocal var _shared_cache_len: usize = 0;
+threadlocal var _shared_cache_alloc: ?std.mem.Allocator = null;
+
+pub fn getCachedParse(alloc: std.mem.Allocator, spirv_words: []const u32) !ParsedModule {
+    if (_shared_cache_ptr) |p| {
+        if (p == spirv_words.ptr and _shared_cache_len == spirv_words.len and _shared_cache_mod != null) {
+            return _shared_cache_mod.?;
+        }
+    }
+    // Evict old cache
+    if (_shared_cache_mod) |*old| {
+        if (_shared_cache_alloc) |a| old.deinit(a);
+        _shared_cache_mod = null;
+    }
+    const m = try parseModule(alloc, spirv_words);
+    _shared_cache_mod = m;
+    _shared_cache_ptr = spirv_words.ptr;
+    _shared_cache_len = spirv_words.len;
+    _shared_cache_alloc = alloc;
+    return m;
+}
