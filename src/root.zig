@@ -12,6 +12,7 @@ pub const codegen = @import("codegen.zig");
 pub const spirv_to_hlsl = @import("spirv_to_hlsl.zig");
 pub const spirv_to_glsl = @import("spirv_to_glsl.zig");
 pub const spirv_to_msl = @import("spirv_to_msl.zig");
+pub const kernel_fusion = @import("kernel_fusion.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -51,6 +52,9 @@ pub const CrossCompileOptions = struct {
     glsl_version: u32 = 430,
     flatten_ubos: bool = false,
 };
+
+/// Options for SPIR-V kernel fusion optimization pass.
+pub const FusionOptions = kernel_fusion.FusionOptions;
 
 /// Compile GLSL source to SPIR-V binary words.
 pub fn compileToSPIRV(
@@ -178,6 +182,116 @@ pub fn compileGlslToHlsl(
 }
 
 
+
+/// Compile GLSL source to SPIR-V with kernel fusion optimization.
+/// Compiles multiple GLSL compute shaders, then fuses consecutive
+/// elementwise kernels to reduce memory bandwidth and launch overhead.
+pub fn compileToSPIRVWithFusion(
+    alloc: std.mem.Allocator,
+    sources: []const [:0]const u8,
+    options: CompileOptions,
+    fusion: FusionOptions,
+) Error![]const u32 {
+    if (sources.len == 0) return error.CodegenFailed;
+
+    // Single source — just compile and return
+    if (sources.len == 1) {
+        const spirv_words = try compileToSPIRV(alloc, sources[0], options);
+        // Still apply fusion pass (it's a no-op for single kernel)
+        const fused = kernel_fusion.fuseKernels(alloc, spirv_words, fusion) catch return spirv_words;
+        if (fused.ptr != spirv_words.ptr) alloc.free(spirv_words);
+        return fused;
+    }
+
+    // Multiple sources — compile each and link (merge SPIR-V modules)
+    var merged = std.ArrayList(u32).initCapacity(alloc, 1024) catch return error.OutOfMemory;
+    defer merged.deinit(alloc);
+
+    // Collect all compiled SPIR-V modules
+    var modules = std.ArrayList([]const u32).initCapacity(alloc, sources.len) catch return error.OutOfMemory;
+    defer {
+        for (modules.items) |m| alloc.free(m);
+        modules.deinit(alloc);
+    }
+
+    var max_id: u32 = 0;
+    var total_instr_count: u32 = 0;
+
+    for (sources) |src| {
+        const spirv_words = try compileToSPIRV(alloc, src, options);
+        try modules.append(alloc, spirv_words);
+        if (spirv_words.len >= 4 and spirv_words[3] > max_id) {
+            max_id = spirv_words[3];
+        }
+        total_instr_count += @intCast(spirv_words.len);
+    }
+
+    // Simple merge strategy: take first module as base, then append
+    // remapped functions from subsequent modules.
+    // For proper multi-module linking, we'd need full SPIR-V linking.
+    // Here we use the first module and append the rest with ID offset.
+    if (modules.items.len > 0) {
+        const first = modules.items[0];
+        try merged.appendSlice(alloc, first);
+
+        // For subsequent modules, we need to merge them
+        // Simple approach: just append with ID remapping
+        // (This is a simplified implementation - a full linker would be more complex)
+        var current_id_offset: u32 = max_id;
+
+        for (modules.items[1..]) |mod| {
+            if (mod.len < 5) continue;
+            const mod_bound = mod[3];
+
+            // Skip header (5 words) and capabilities/memory model of subsequent modules
+            // Copy instructions starting from entry points
+            var p: u32 = 5;
+            while (p < mod.len) {
+                const h = mod[p];
+                const wc: u32 = h >> 16;
+                const op: u16 = @truncate(h & 0xFFFF);
+                if (wc == 0) break;
+                const ie = p + wc;
+                if (ie > mod.len) break;
+
+                // Skip capabilities and memory model (already in first module)
+                if (op == 17 or op == 14) {
+                    p = ie;
+                    continue;
+                }
+
+                // Remap all IDs in the instruction by current_id_offset
+                for (p..ie) |wi| {
+                    var word = mod[wi];
+                    // For non-header words that are IDs, add offset
+                    if (wi > p) {
+                        // Simple heuristic: if the word looks like an ID (< mod_bound), remap it
+                        if (word > 0 and word < mod_bound) {
+                            word += current_id_offset;
+                        }
+                    }
+                    try merged.append(alloc, word);
+                }
+
+                p = ie;
+            }
+
+            current_id_offset += mod_bound;
+        }
+
+        // Update bound in header
+        if (merged.items.len >= 4) {
+            merged.items[3] = current_id_offset;
+        }
+    }
+
+    const merged_words = try merged.toOwnedSlice(alloc);
+
+    // Apply fusion pass
+    const fused = kernel_fusion.fuseKernels(alloc, merged_words, fusion) catch return merged_words;
+    if (fused.ptr != merged_words.ptr) alloc.free(merged_words);
+    return fused;
+}
 
 /// Validate a SPIR-V binary using spirv-val. Returns true if validation passed,
 /// false if spirv-val is not found on PATH.
