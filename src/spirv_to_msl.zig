@@ -319,6 +319,33 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     defer { var it = out_param_info.iterator(); while(it.next())|e| e.value_ptr.deinit(aa); out_param_info.deinit(); }
     detectOutParams(&module, entry_id, &out_param_info, aa);
 
+    // Emit specialization constants as MSL constant declarations
+    for (module.instructions) |inst| {
+        if (inst.op == .SpecConstant and inst.words.len > 3) {
+            const result_id = inst.words[2];
+            const name = names.get(result_id) orelse continue;
+            const type_id = inst.words[1];
+            const type_str = try mslType(&module, type_id, &names, aa);
+            const spec_id: ?u32 = blk: {
+                const dec_list = decs.get(result_id) orelse break :blk null;
+                for (dec_list.items) |d| {
+                    if (d.decoration == .spec_id and d.extra.len > 0) break :blk d.extra[0];
+                }
+                break :blk null;
+            };
+            if (spec_id) |sid| {
+                const default_val = if (inst.words.len > 3) inst.words[3] else 0;
+                if (std.mem.eql(u8, type_str, "float")) {
+                    const fv: f32 = @bitCast(default_val);
+                    try w.print("constant {s} {s} [[function_constant({d})]] = {d};\n", .{type_str, name, sid, fv});
+                } else {
+                    try w.print("constant {s} {s} [[function_constant({d})]] = {d};\n", .{type_str, name, sid, default_val});
+                }
+            }
+        }
+    }
+    try w.writeAll("\n");
+
     // Emit non-entry functions first
     for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute); }
     // Emit entry function last
