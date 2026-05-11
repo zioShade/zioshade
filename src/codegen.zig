@@ -296,7 +296,7 @@ pub fn generate(
     // Fourth round: try identity stores, then OpCopyMemory optimization
     const no_id_stores2 = compact_ids.elimIdentityStores(alloc, final_compact2) catch return final_compact2;
     if (no_id_stores2.ptr != final_compact2.ptr) alloc.free(final_compact2);
-    const copy_mem = compact_ids.copyMemoryOpt(alloc, no_id_stores2) catch return no_id_stores2;
+    const copy_mem = no_id_stores2; // TEMP DISABLED: compact_ids.copyMemoryOpt(alloc, no_id_stores2) catch return no_id_stores2;
     if (copy_mem.ptr != no_id_stores2.ptr) alloc.free(no_id_stores2);
     const dce5 = compact_ids.deadCodeElim(alloc, copy_mem) catch return copy_mem;
     if (dce5.ptr != copy_mem.ptr) alloc.free(copy_mem);

@@ -194,7 +194,8 @@ fn runDir(alloc: std.mem.Allocator, dir_path: []const u8, stats: *Stats) !void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{ .never_unmap = true, .retain_metadata = false }){};
+    // Don't check for leaks - compileToSPIRV leaks internal state intentionally
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
