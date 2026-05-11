@@ -131,7 +131,9 @@ fn writeResolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []co
 fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) { try w.writeAll(base_name); return; }
-    try w.writeAll(base_name);
+    const base_is_cb = isUniformVar(m, base_id);
+    const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
+    if (!base_is_cb) try w.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
     for (indices) |index_id| {
         const idx_inst = getDef(m, index_id);
@@ -141,6 +143,8 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
                 if (is_vector) {
                     try w.writeAll(swizzleChar(val));
+                } else if (base_is_cb) {
+                    try w.print("{s}_m{d}", .{cb_prefix, val});
                 } else {
                     try w.print("[{d}]", .{val});
                 }
