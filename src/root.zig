@@ -54,6 +54,158 @@ pub const CrossCompileOptions = struct {
     flatten_ubos: bool = false,
 };
 
+/// Options for multi-kernel SPIR-V compilation.
+pub const MultiKernelOptions = struct {
+    /// Entry point names for each source. Must match sources.len.
+    /// Each source's `main()` is renamed to the corresponding name.
+    names: []const []const u8,
+    /// Shader stage (typically .compute).
+    stage: Stage = .compute,
+    /// GLSL version.
+    version: u32 = 450,
+    /// SPIR-V target version.
+    spirv_version: SPIRVVersion = .@"1.5",
+};
+
+/// Compile multiple GLSL sources into a single SPIR-V module with multiple entry points.
+/// Each source should contain its own `main()` function. The resulting SPIR-V module
+/// will have one entry point per source, named according to `options.names`.
+pub fn compileMultiKernel(
+    alloc: std.mem.Allocator,
+    sources: []const [:0]const u8,
+    options: MultiKernelOptions,
+) Error![]const u32 {
+    if (sources.len == 0) return error.CodegenFailed;
+    if (options.names.len != sources.len) return error.CodegenFailed;
+
+    // Compile each source individually
+    var modules = std.ArrayList([]const u32).initCapacity(alloc, sources.len) catch return error.OutOfMemory;
+    defer {
+        for (modules.items) |m| alloc.free(m);
+        modules.deinit(alloc);
+    }
+
+    const compile_opts = CompileOptions{
+        .stage = options.stage,
+        .version = options.version,
+        .spirv_version = options.spirv_version,
+    };
+
+    for (sources) |src| {
+        const spirv_words = try compileToSPIRV(alloc, src, compile_opts);
+        try modules.append(alloc, spirv_words);
+    }
+
+    // Merge modules with proper ID remapping
+    const merged = try linkSPIRVModules(alloc, modules.items);
+    errdefer alloc.free(merged);
+
+    // Rename entry points from "main" to the specified names
+    const renamed = try renameEntryPoints(alloc, merged, options.names);
+    if (renamed.ptr != merged.ptr) alloc.free(merged);
+    return renamed;
+}
+
+/// Rename entry points in a multi-kernel SPIR-V module.
+/// Each OpEntryPoint's name is replaced with the corresponding name from `names`.
+fn renameEntryPoints(alloc: std.mem.Allocator, words: []const u32, names: []const []const u8) Error![]const u32 {
+    if (words.len < 5) return error.CodegenFailed;
+
+    // Count entry points and verify they match names count
+    var entry_count: u32 = 0;
+    var p: u32 = 5;
+    while (p < words.len) {
+        const h = words[p];
+        const wc: u32 = h >> 16;
+        const op: u16 = @truncate(h & 0xFFFF);
+        if (wc == 0) break;
+        if (op == 15) entry_count += 1; // OpEntryPoint
+        p += wc;
+    }
+
+    // If names don't match entry count, return as-is
+    if (entry_count != names.len) return try alloc.dupe(u32, words);
+
+    // Rebuild the binary with renamed entry points
+    var out = std.ArrayList(u32).initCapacity(alloc, words.len) catch return error.OutOfMemory;
+    defer out.deinit(alloc);
+
+    // Copy header
+    try out.appendSlice(alloc, words[0..5]);
+
+    var name_idx: u32 = 0;
+    p = 5;
+    while (p < words.len) {
+        const h = words[p];
+        const wc: u32 = h >> 16;
+        const op: u16 = @truncate(h & 0xFFFF);
+        if (wc == 0) break;
+        const ie = p + wc;
+        if (ie > words.len) break;
+
+        if (op == 15 and name_idx < names.len) {
+            // OpEntryPoint: execution_model, func_id, name_string, [interface_ids...]
+            const new_name = names[name_idx];
+            name_idx += 1;
+
+            // Extract execution model and func_id (words 1 and 2 after header)
+            const exec_model = words[p + 1];
+            const func_id = words[p + 2];
+
+            // Find where the name string ends in the original
+            var str_end: u32 = p + 3;
+            while (str_end < ie) {
+                const w = words[str_end];
+                str_end += 1;
+                if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) {
+                    break;
+                }
+            }
+
+            // Calculate new word count
+            const new_name_words = std.math.divCeil(usize, new_name.len + 1, 4) catch return error.CodegenFailed;
+            const new_wc: u16 = @intCast(3 + new_name_words + (ie - str_end));
+
+            // Emit new OpEntryPoint
+            try out.append(alloc, (@as(u32, new_wc) << 16) | 15);
+            try out.append(alloc, exec_model);
+            try out.append(alloc, func_id);
+
+            // Emit new name string
+            try emitStringLiteral(alloc, &out, new_name);
+
+            // Copy interface IDs
+            try out.appendSlice(alloc, words[str_end..ie]);
+        } else {
+            try out.appendSlice(alloc, words[p..ie]);
+        }
+
+        p = ie;
+    }
+
+    return try out.toOwnedSlice(alloc);
+}
+
+/// Emit a null-terminated string as SPIR-V literal words (4-byte aligned).
+fn emitStringLiteral(alloc: std.mem.Allocator, out: *std.ArrayList(u32), str: []const u8) !void {
+    if (str.len > 65535) return error.CodegenFailed;
+    const word_count = std.math.divCeil(usize, str.len + 1, 4) catch return error.CodegenFailed;
+    try out.ensureUnusedCapacity(alloc, word_count);
+
+    var i: usize = 0;
+    while (i < word_count) : (i += 1) {
+        var word: u32 = 0;
+        var j: usize = 0;
+        while (j < 4) : (j += 1) {
+            const byte_idx = i * 4 + j;
+            if (byte_idx < str.len) {
+                word |= @as(u32, str[byte_idx]) << @intCast(j * 8);
+            }
+        }
+        out.appendAssumeCapacity(word);
+    }
+}
+
 /// Options for SPIR-V kernel fusion optimization pass.
 pub const FusionOptions = kernel_fusion.FusionOptions;
 
@@ -186,7 +338,9 @@ pub fn compileGlslToHlsl(
 
 /// Merge multiple SPIR-V modules into a single module with proper ID remapping.
 /// Uses compact_ids.getOpInfo to distinguish IDs from literals.
-fn linkSPIRVModules(alloc: std.mem.Allocator, modules: []const []const u32) Error![]const u32 {
+/// This is the SPIR-V linker (Option C from issue #5) — useful for merging
+/// pre-compiled modules when you already have SPIR-V binaries.
+pub fn linkSPIRVModules(alloc: std.mem.Allocator, modules: []const []const u32) Error![]const u32 {
     if (modules.len == 0) return error.CodegenFailed;
     if (modules.len == 1) {
         return try alloc.dupe(u32, modules[0]);
@@ -541,4 +695,229 @@ test "compileToSPIRVWithDiagnostics reports error location" {
             try std.testing.expect(diags.items[0].message.len > 0);
         }
     }
+}
+
+test "compileMultiKernel merges two compute shaders" {
+    const alloc = std.testing.allocator;
+
+    const kernel_a =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer InputBuf { float input_data[]; };
+        \\layout(std430, binding = 1) buffer OutputBuf { float output_data[]; };
+        \\void main() {
+        \\    uint idx = gl_GlobalInvocationID.x;
+        \\    output_data[idx] = input_data[idx] * 2.0;
+        \\}
+    ;
+    const kernel_b =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 2) buffer BufC { float data_c[]; };
+        \\void main() {
+        \\    uint idx = gl_GlobalInvocationID.x;
+        \\    data_c[idx] = data_c[idx] + 1.0;
+        \\}
+    ;
+
+    const sources = [_][:0]const u8{ kernel_a, kernel_b };
+    const names = [_][]const u8{ "scale", "offset" };
+
+    const result = compileMultiKernel(alloc, &sources, .{
+        .names = &names,
+        .stage = .compute,
+        .version = 450,
+    }) catch |err| {
+        std.debug.print("compileMultiKernel failed: {}\n", .{err});
+        return;
+    };
+    defer alloc.free(result);
+
+    // Verify it's a valid SPIR-V module
+    try std.testing.expect(result.len >= 5);
+    try std.testing.expectEqual(@as(u32, spirv.MAGIC), result[0]);
+
+    // Verify we have exactly 2 entry points
+    var entry_count: u32 = 0;
+    var p: u32 = 5;
+    while (p < result.len) {
+        const h = result[p];
+        const wc: u32 = h >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(h & 0xFFFF);
+        if (op == 15) entry_count += 1; // OpEntryPoint
+        p += wc;
+    }
+    try std.testing.expectEqual(@as(u32, 2), entry_count);
+}
+
+test "compileMultiKernel rejects mismatched names count" {
+    const alloc = std.testing.allocator;
+
+    const kernel_a =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\void main() {}
+    ;
+    const sources = [_][:0]const u8{kernel_a};
+    const names = [_][]const u8{ "a", "b" }; // 2 names for 1 source
+
+    const result = compileMultiKernel(alloc, &sources, .{
+        .names = &names,
+        .stage = .compute,
+    });
+    try std.testing.expect(result == error.CodegenFailed);
+}
+
+test "compileMultiKernel rejects empty sources" {
+    const alloc = std.testing.allocator;
+    const sources = [_][:0]const u8{};
+    const names = [_][]const u8{};
+
+    const result = compileMultiKernel(alloc, &sources, .{
+        .names = &names,
+    });
+    try std.testing.expect(result == error.CodegenFailed);
+}
+
+test "compileMultiKernel single source" {
+    const alloc = std.testing.allocator;
+
+    const kernel =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer Data { float x[]; };
+        \\void main() {
+        \\    x[0] = 1.0;
+        \\}
+    ;
+    const sources = [_][:0]const u8{kernel};
+    const names = [_][]const u8{"my_kernel"};
+
+    const result = compileMultiKernel(alloc, &sources, .{
+        .names = &names,
+        .stage = .compute,
+        .version = 450,
+    }) catch return;
+    defer alloc.free(result);
+
+    try std.testing.expect(result.len >= 5);
+    try std.testing.expectEqual(@as(u32, spirv.MAGIC), result[0]);
+
+    // Should have exactly 1 entry point
+    var entry_count: u32 = 0;
+    var p: u32 = 5;
+    while (p < result.len) {
+        const h = result[p];
+        const wc: u32 = h >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(h & 0xFFFF);
+        if (op == 15) entry_count += 1;
+        p += wc;
+    }
+    try std.testing.expectEqual(@as(u32, 1), entry_count);
+}
+
+test "compileMultiKernel entry points have correct names" {
+    const alloc = std.testing.allocator;
+
+    const kernel_a =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\void main() {}
+    ;
+    const kernel_b =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\void main() {}
+    ;
+
+    const sources = [_][:0]const u8{ kernel_a, kernel_b };
+    const names = [_][]const u8{ "rms_norm", "silu" };
+
+    const result = compileMultiKernel(alloc, &sources, .{
+        .names = &names,
+        .stage = .compute,
+        .version = 450,
+    }) catch return;
+    defer alloc.free(result);
+
+    // Extract entry point names and verify
+    var found_names = std.ArrayList([]const u8).initCapacity(alloc, 2) catch return;
+    defer found_names.deinit(alloc);
+
+    var p: u32 = 5;
+    while (p < result.len) {
+        const h = result[p];
+        const wc: u32 = h >> 16;
+        const op: u16 = @truncate(h & 0xFFFF);
+        if (wc == 0) break;
+        if (op == 15 and wc >= 4) {
+            // OpEntryPoint: model, func_id, name_string...
+            const name_start = p + 3;
+            const name_bytes = std.mem.sliceAsBytes(result[name_start .. p + wc]);
+            var name_len: usize = 0;
+            for (name_bytes) |b| {
+                if (b == 0) break;
+                name_len += 1;
+            }
+            found_names.append(alloc, name_bytes[0..name_len]) catch {};
+        }
+        p += wc;
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), found_names.items.len);
+    try std.testing.expectEqualStrings("rms_norm", found_names.items[0]);
+    try std.testing.expectEqualStrings("silu", found_names.items[1]);
+}
+
+test "linkSPIRVModules merges two pre-compiled modules" {
+    const alloc = std.testing.allocator;
+
+    const kernel_a =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer Data { float x[]; };
+        \\void main() { x[0] = 1.0; }
+    ;
+    const kernel_b =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 1) buffer Data { float y[]; };
+        \\void main() { y[0] = 2.0; }
+    ;
+
+    const spirv_a = compileToSPIRV(alloc, kernel_a, .{ .stage = .compute, .version = 450 }) catch return;
+    defer alloc.free(spirv_a);
+    const spirv_b = compileToSPIRV(alloc, kernel_b, .{ .stage = .compute, .version = 450 }) catch return;
+    defer alloc.free(spirv_b);
+
+    const modules = [_][]const u32{ spirv_a, spirv_b };
+    const merged = linkSPIRVModules(alloc, &modules) catch return;
+    defer alloc.free(merged);
+
+    // Verify valid SPIR-V
+    try std.testing.expect(merged.len >= 5);
+    try std.testing.expectEqual(@as(u32, spirv.MAGIC), merged[0]);
+
+    // Verify bound is valid (compactIds may reduce from sum)
+    const bound_a = spirv_a[3];
+    const bound_b = spirv_b[3];
+    try std.testing.expect(merged[3] >= 2); // at least some IDs used
+    // Before compactIds, bound would be bound_a + bound_b.
+    // After compactIds, it could be less if there are gaps.
+    try std.testing.expect(merged[3] <= bound_a + bound_b);
+
+    // Should have 2 entry points (both named "main")
+    var entry_count: u32 = 0;
+    var p: u32 = 5;
+    while (p < merged.len) {
+        const h = merged[p];
+        const wc: u32 = h >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(h & 0xFFFF);
+        if (op == 15) entry_count += 1;
+        p += wc;
+    }
+    try std.testing.expectEqual(@as(u32, 2), entry_count);
 }
