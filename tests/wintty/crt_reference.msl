@@ -1,0 +1,91 @@
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+// Implementation of the GLSL mod() function, which is slightly different than Metal fmod()
+template<typename Tx, typename Ty>
+inline Tx mod(Tx x, Ty y)
+{
+    return x - y * floor(x / y);
+}
+
+struct Globals
+{
+    packed_float3 iResolution;
+    float iTime;
+    float iTimeDelta;
+    float iFrameRate;
+    int iFrame;
+    float4 iChannelTime[4];
+    float3 iChannelResolution[4];
+    float4 iMouse;
+    float4 iDate;
+    float iSampleRate;
+    float4 iCurrentCursor;
+    float4 iPreviousCursor;
+    float4 iCurrentCursorColor;
+    float4 iPreviousCursorColor;
+    int iCurrentCursorStyle;
+    int iPreviousCursorStyle;
+    int iCursorVisible;
+    float iTimeCursorChange;
+    float iTimeFocus;
+    int iFocus;
+    float3 iPalette[256];
+    float3 iBackgroundColor;
+    float3 iForegroundColor;
+    float3 iCursorColor;
+    float3 iCursorText;
+    float3 iSelectionForegroundColor;
+    float3 iSelectionBackgroundColor;
+};
+
+struct main0_out
+{
+    float4 _fragColor [[color(0)]];
+};
+
+static inline __attribute__((always_inline))
+void mainImage(thread float4& _21, float2 _22, constant Globals& Globals_1, texture2d<float> iChannel0, sampler iChannel0Smplr)
+{
+    float2 _233 = (((_22 / float2(Globals_1.iResolution[0], Globals_1.iResolution[1])) - float2(0.5)) * 2.0) * 1.10000002384185791015625;
+    float2 _230;
+    _230.x *= (1.0 + powr(abs(_233.y) / 5.0, 2.0));
+    _230.y *= (1.0 + powr(abs(_233.x) / 4.0, 2.0));
+    float2 _27 = (((_233 / float2(2.0)) + float2(0.5)) * 0.920000016689300537109375) + float2(0.039999999105930328369140625);
+    _230 = _27;
+    float _34 = _27.y;
+    float _55 = ((sin((0.300000011920928955078125 * Globals_1.iTime) + (_34 * 21.0)) * sin((0.699999988079071044921875 * Globals_1.iTime) + (_34 * 29.0))) * sin((0.300000011920928955078125 + (0.3300000131130218505859375 * Globals_1.iTime)) + (_34 * 31.0))) * 0.001700000022538006305694580078125;
+    float _56 = _27.x;
+    float _57 = _55 + _56;
+    float _60 = _34 + 0.001000000047497451305389404296875;
+    float3 _29;
+    float _69 = _34 - 0.00200000009499490261077880859375;
+    _29.x = (iChannel0.sample(iChannel0Smplr, float2(_57 + 0.001000000047497451305389404296875, _60)).x + 0.0500000007450580596923828125) + (0.07999999821186065673828125 * iChannel0.sample(iChannel0Smplr, ((float2(_55 + 0.02500000037252902984619140625, -0.02700000070035457611083984375) * 0.75) + float2(_56 + 0.001000000047497451305389404296875, _60))).x);
+    _29.y = (iChannel0.sample(iChannel0Smplr, float2(_57, _69)).y + 0.0500000007450580596923828125) + (0.0500000007450580596923828125 * iChannel0.sample(iChannel0Smplr, ((float2(_55 - 0.02199999988079071044921875, -0.0199999995529651641845703125) * 0.75) + float2(_56, _69))).y);
+    _29.z = (iChannel0.sample(iChannel0Smplr, float2(_57 - 0.00200000009499490261077880859375, _34)).z + 0.0500000007450580596923828125) + (0.07999999821186065673828125 * iChannel0.sample(iChannel0Smplr, ((float2(_55 - 0.0199999995529651641845703125, -0.017999999225139617919921875) * 0.75) + float2(_56 - 0.00200000009499490261077880859375, _34))).z);
+    _29 = ((((fast::clamp((_29 * 0.60000002384185791015625) + ((_29 * 0.4000000059604644775390625) * _29), 0.0, 1.0) * float3(powr((((16.0 * _56) * _34) * (1.0 - _56)) * (1.0 - _34), 0.300000011920928955078125))) * float3(0.949999988079071044921875, 1.0499999523162841796875, 0.949999988079071044921875)) * 2.7999999523162841796875) * float3(0.4000000059604644775390625 + (0.699999988079071044921875 * powr(fast::clamp(0.3499999940395355224609375 + (0.3499999940395355224609375 * sin((3.5 * Globals_1.iTime) + ((_34 * Globals_1.iResolution[1]) * 1.5))), 0.0, 1.0), 1.7000000476837158203125)))) * (1.0 + (0.00999999977648258209228515625 * sin(110.0 * Globals_1.iTime)));
+    if ((_56 < 0.0) || (_56 > 1.0))
+    {
+        _29 *= 0.0;
+    }
+    if ((_34 < 0.0) || (_34 > 1.0))
+    {
+        _29 *= 0.0;
+    }
+    float3 _193 = _29;
+    float3 _194 = _193 * (float3(1.0) - (float3(fast::clamp((mod(_22.x, 2.0) - 1.0) * 2.0, 0.0, 1.0)) * 0.64999997615814208984375));
+    _29 = _194;
+    _21 = float4(_194, 1.0);
+}
+
+fragment main0_out main0(constant Globals& Globals_1 [[buffer(0)]], texture2d<float> iChannel0 [[texture(0)]], sampler iChannel0Smplr [[sampler(0)]], float4 gl_FragCoord [[position]])
+{
+    main0_out out = {};
+    mainImage(out._fragColor, gl_FragCoord.xy, Globals_1, iChannel0, iChannel0Smplr);
+    return out;
+}
+
