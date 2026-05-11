@@ -297,7 +297,7 @@ pub fn generate(
     // Fourth round: try identity stores, then OpCopyMemory optimization
     const no_id_stores2 = compact_ids.elimIdentityStores(alloc, final_compact2) catch return final_compact2;
     if (no_id_stores2.ptr != final_compact2.ptr) alloc.free(final_compact2);
-    const copy_mem = no_id_stores2; // TEMP DISABLED: compact_ids.copyMemoryOpt(alloc, no_id_stores2) catch return no_id_stores2;
+    const copy_mem = compact_ids.copyMemoryOpt(alloc, no_id_stores2) catch return no_id_stores2;
     if (copy_mem.ptr != no_id_stores2.ptr) alloc.free(no_id_stores2);
     const dce5 = compact_ids.deadCodeElim(alloc, copy_mem) catch return copy_mem;
     if (dce5.ptr != copy_mem.ptr) alloc.free(copy_mem);
@@ -314,7 +314,7 @@ pub fn generate(
     if (compact6.ptr != dce6.ptr) alloc.free(dce6);
     const no_id_stores3 = compact_ids.elimIdentityStores(alloc, compact6) catch return compact6;
     if (no_id_stores3.ptr != compact6.ptr) alloc.free(compact6);
-    const copy_mem2 = no_id_stores3; // TEMP DISABLED: compact_ids.copyMemoryOpt(alloc, no_id_stores3) catch return no_id_stores3;
+    const copy_mem2 = compact_ids.copyMemoryOpt(alloc, no_id_stores3) catch return no_id_stores3;
     if (copy_mem2.ptr != no_id_stores3.ptr) alloc.free(no_id_stores3);
     const dce7 = compact_ids.deadCodeElim(alloc, copy_mem2) catch return copy_mem2;
     if (dce7.ptr != copy_mem2.ptr) alloc.free(copy_mem2);
