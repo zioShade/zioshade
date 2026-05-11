@@ -334,6 +334,42 @@ pub fn compileGlslToHlsl(
     return try alloc.dupeZ(u8, hlsl);
 }
 
+/// One-shot GLSL -> MSL compilation.
+/// Takes GLSL source (with shadertoy prefix already prepended) and returns
+/// a null-terminated MSL string.
+/// Caller must free with alloc.free().
+pub fn compileGlslToMsl(
+    alloc: std.mem.Allocator,
+    glsl_source: [:0]const u8,
+    stage: Stage,
+) ![:0]const u8 {
+    const spirv_words = try compileToSPIRV(alloc, glsl_source, .{
+        .stage = stage,
+        .version = 430,
+    });
+    defer alloc.free(spirv_words);
+
+    const msl = try spirvToMSL(alloc, spirv_words, .{});
+    return try alloc.dupeZ(u8, msl);
+}
+
+/// One-shot GLSL -> GLSL compilation (round-trip / decompiled).
+/// Takes GLSL source and returns a null-terminated GLSL string.
+/// Caller must free with alloc.free().
+pub fn compileGlslToGlsl(
+    alloc: std.mem.Allocator,
+    glsl_source: [:0]const u8,
+    stage: Stage,
+) ![:0]const u8 {
+    const spirv_words = try compileToSPIRV(alloc, glsl_source, .{
+        .stage = stage,
+        .version = 430,
+    });
+    defer alloc.free(spirv_words);
+
+    const glsl = try spirvToGLSL(alloc, spirv_words, .{ .version = 430 });
+    return try alloc.dupeZ(u8, glsl);
+}
 
 
 /// Merge multiple SPIR-V modules into a single module with proper ID remapping.
