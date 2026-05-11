@@ -1237,17 +1237,12 @@ const Analyzer = struct {
                     const gop = try self.overloads.getOrPut(self.alloc, owned_name);
                     if (gop.found_existing) {
                         self.alloc.free(owned_name);
+                        // First overload already in the list with proper param_types
+                        // Just append the second overload below
                     } else {
+                        // This shouldn't happen — existing != null means overloads was already populated
+                        // But handle it defensively
                         gop.value_ptr.* = .empty;
-                        // Store the original function with its param types from the first declaration
-                        // We need to recover the original param types — but we don't have them
-                        // Use the scope symbol's ir_id
-                        try gop.value_ptr.append(self.alloc, .{
-                            .param_types = &.{}, // placeholder — will be resolved at call site
-                            .param_is_mutable = &.{},
-                            .ir_id = existing.?.ir_id,
-                            .return_type = existing.?.ty,
-                        });
                     }
                     const owned_pts = try self.alloc.dupe(ast.Type, param_types.items);
                     var mutable_buf = try self.alloc.alloc(bool, node.data.params.len);
