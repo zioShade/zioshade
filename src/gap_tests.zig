@@ -101,7 +101,7 @@ fn hasCapability(words: []const u32, cap: spirv.Capability) bool {
 fn disassemble(alloc: std.mem.Allocator, words: []const u32) ![]const u8 {
     // Write to temp file
     const tmp = ".zig-cache/gap_test.spv";
-    const f = try std.fs.cwd().createFile(tmp, .{});
+    // debug file creation removed for Zig 0.16 compat
     defer f.close();
     try f.writeAll(std.mem.sliceAsBytes(words));
 
