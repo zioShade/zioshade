@@ -150,20 +150,44 @@ pub fn build(b: *std.Build) void {
     reference_test_step.dependOn(&run_reference_tests.step);
     test_step.dependOn(&run_reference_tests.step);
 
-    // Tool: dump CRT shader HLSL — run with: zig build dump-crt
-    const dump_step = b.step("dump-crt", "Dump CRT shader HLSL output");
-    const dump_mod = b.createModule(.{
-        .root_source_file = b.path("tools/dump_crt_hlsl.zig"),
+    // Tool: dump any shader — run with: zig build dump-shader -- <prefix.glsl> <shader.glsl> <output_prefix>
+    // Generates .hlsl, .glsl, .msl, .spv
+    const dump_shader_step = b.step("dump-shader", "Dump shader to all output formats (HLSL/GLSL/MSL/SPIR-V)");
+    const dump_shader_mod = b.createModule(.{
+        .root_source_file = b.path("tools/dump_shader.zig"),
         .target = target,
         .optimize = optimize,
     });
-    dump_mod.addImport("glslpp", glslpp_mod);
-    const dump_exe = b.addExecutable(.{
-        .name = "dump-crt",
-        .root_module = dump_mod,
+    dump_shader_mod.addImport("glslpp", glslpp_mod);
+    const dump_shader_exe = b.addExecutable(.{
+        .name = "dump-shader",
+        .root_module = dump_shader_mod,
     });
-    const run_dump = b.addRunArtifact(dump_exe);
-    dump_step.dependOn(&run_dump.step);
+    const run_dump_shader = b.addRunArtifact(dump_shader_exe);
+    if (b.args) |a| {
+        for (a) |arg| run_dump_shader.addArg(arg);
+    }
+    dump_shader_step.dependOn(&run_dump_shader.step);
+
+    // Convenience: dump CRT shader (all formats)
+    const dump_crt_all_step = b.step("dump-crt", "Dump CRT shader to HLSL/GLSL/MSL/SPIR-V");
+    const run_dump_crt = b.addRunArtifact(dump_shader_exe);
+    run_dump_crt.addArgs(&.{
+        "tests/wintty/shadertoy_prefix.glsl",
+        "tests/wintty/test_crt.glsl",
+        "tests/wintty/crt_output",
+    });
+    dump_crt_all_step.dependOn(&run_dump_crt.step);
+
+    // Convenience: dump focus shader (all formats)
+    const dump_focus_step = b.step("dump-focus", "Dump focus shader to HLSL/GLSL/MSL/SPIR-V");
+    const run_dump_focus = b.addRunArtifact(dump_shader_exe);
+    run_dump_focus.addArgs(&.{
+        "tests/wintty/shadertoy_prefix.glsl",
+        "tests/wintty/test_focus.glsl",
+        "tests/wintty/focus_output",
+    });
+    dump_focus_step.dependOn(&run_dump_focus.step);
 
     // Benchmark — run with: zig build bench
     const bench_step = b.step("bench", "Run wintty shader benchmark");
