@@ -315,7 +315,7 @@ test "T4.9: modulo" {
     ;
     const glsl = try compileToGlsl(source);
     defer alloc.free(glsl);
-    try assertContains(glsl, "%");
+    try assertContains(glsl, "mod(");
 }
 
 // ---------------------------------------------------------------------------
@@ -1181,3 +1181,28 @@ test "specialization constant compiles to GLSL with layout constant_id" {
     defer alloc.free(glsl);
     try assertContains(glsl, "constant_id");
 }
+
+// === GLSL cbuffer member access tests ===
+
+test "GLSL_CB: uniform block member access uses instance.member format" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform Globals {
+        \\    uniform vec3 iResolution;
+        \\    uniform float iTime;
+        \\};
+        \\layout(location = 0) out vec4 _fragColor;
+        \\void main() {
+        \\    float t = iTime;
+        \\    _fragColor = vec4(t, t, t, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // Must use instance.member format (e.g. Globals_1.Globals_m0) not bare Globals_m0
+    try assertContains(glsl, "Globals_1.");
+    // Must NOT use bare member name without instance prefix in function bodies
+    try assertNotContains(glsl, "= Globals_m0;");
+    try assertNotContains(glsl, "= Globals_m1;");
+}
+
