@@ -219,4 +219,18 @@ pub fn build(b: *std.Build) void {
         "tests/wintty/focus_output.hlsl",
     });
     validate_hlsl_step.dependOn(&dxc_focus.step);
+
+    // glslangValidator GLSL validation — run with: zig build validate-glsl
+    const validate_glsl_step = b.step("validate-glsl", "Validate wintty shader GLSL output with glslangValidator");
+    const glsl_val_crt = b.addSystemCommand(&.{"glslangValidator", "-S", "frag", "tests/wintty/crt_output.glsl"});
+    validate_glsl_step.dependOn(&glsl_val_crt.step);
+    const glsl_val_focus = b.addSystemCommand(&.{"glslangValidator", "-S", "frag", "tests/wintty/focus_output.glsl"});
+    validate_glsl_step.dependOn(&glsl_val_focus.step);
+
+    // Run all validations — run with: zig build validate
+    const validate_all_step = b.step("validate-all", "Validate all shader outputs (HLSL + GLSL)");
+    validate_all_step.dependOn(&dxc_run.step);
+    validate_all_step.dependOn(&dxc_focus.step);
+    validate_all_step.dependOn(&glsl_val_crt.step);
+    validate_all_step.dependOn(&glsl_val_focus.step);
 }
