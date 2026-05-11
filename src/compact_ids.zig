@@ -734,7 +734,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
 
                 // Phase 2: Track AccessChain results transitively
                 // Build map: AC_result_id -> root_var_id (the function-local var it ultimately derives from)
-                var ac_to_root = std.AutoHashMapUnmanaged(u32, u32){};
+                var ac_to_root = std.AutoHashMapUnmanaged(u32, u32).empty;
                 defer ac_to_root.deinit(alloc);
 
                 // Build AC result -> root var map (transitive)
@@ -900,12 +900,12 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         if (fwd_bound > 1) {
             // Build result_id -> position map for quick replacement
             // Also build a replacement map: old_id -> new_id
-            var replacements = std.AutoHashMapUnmanaged(u32, u32){};
+            var replacements = std.AutoHashMapUnmanaged(u32, u32).empty;
             defer replacements.deinit(alloc);
 
             // First pass: find forwarding opportunities
             // Track stores per block (cleared at OpLabel)
-            var last_store = std.AutoHashMapUnmanaged(u32, u32){}; // ptr -> val
+            var last_store = std.AutoHashMapUnmanaged(u32, u32).empty; // ptr -> val
             defer last_store.deinit(alloc);
 
             pos = 5;
@@ -1120,9 +1120,9 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
 
             if (xb_func_vars.count() > 0) {
                 // For each function-local var, count ALL stores and record the entry-block store value
-                var xb_total_stores = std.AutoHashMapUnmanaged(u32, u32){}; // var_id -> total store count
+                var xb_total_stores = std.AutoHashMapUnmanaged(u32, u32).empty; // var_id -> total store count
                 defer xb_total_stores.deinit(alloc);
-                var xb_entry_store_val = std.AutoHashMapUnmanaged(u32, u32){}; // var_id -> value (only if 1 entry store)
+                var xb_entry_store_val = std.AutoHashMapUnmanaged(u32, u32).empty; // var_id -> value (only if 1 entry store)
                 defer xb_entry_store_val.deinit(alloc);
 
                 // Also check for unsafe uses (AccessChain, CopyMemory, ExtInst, FunctionCall)
@@ -1196,7 +1196,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 }
 
                 // Identify forwardable vars: exactly 1 total store, stored in entry, no unsafe uses
-                var xb_var_to_value = std.AutoHashMapUnmanaged(u32, u32){};
+                var xb_var_to_value = std.AutoHashMapUnmanaged(u32, u32).empty;
                 defer xb_var_to_value.deinit(alloc);
 
                 var evi = xb_entry_store_val.iterator();
@@ -1210,7 +1210,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
 
                 if (xb_var_to_value.count() > 0) {
                     // Build load result -> forwarded value map
-                    var xb_load_fwd = std.AutoHashMapUnmanaged(u32, u32){};
+                    var xb_load_fwd = std.AutoHashMapUnmanaged(u32, u32).empty;
                     defer xb_load_fwd.deinit(alloc);
                     pos = 5;
                     while (pos < current_words.len) {
@@ -1310,7 +1310,7 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
 
     // Build result_id -> instruction position map for AccessChains
     const AC = struct { pos: u32, base_id: u32, indices_start: u32, indices_count: u32, result_id: u32 };
-    var ac_map = std.AutoHashMapUnmanaged(u32, AC){}; // result_id -> AC info
+    var ac_map = std.AutoHashMapUnmanaged(u32, AC).empty; // result_id -> AC info
     defer ac_map.deinit(alloc);
 
     // First pass: find all AccessChains
@@ -1338,7 +1338,7 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
     }
 
     // Build reference count for AccessChain results
-    var ref_count = std.AutoHashMapUnmanaged(u32, u32){};
+    var ref_count = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer ref_count.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
@@ -1430,7 +1430,7 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
     // Second pass: merge AccessChains
     // For single-use bases: merge as before
     // For multi-use bases where ALL users are ACs: merge all users with the base
-    var result = std.ArrayListUnmanaged(u32){};
+    var result = std.ArrayListUnmanaged(u32).empty;
     try result.appendSlice(alloc, words[0..5]); // copy header
 
     pos = 5;
@@ -1447,7 +1447,7 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
 
             // Try to merge with base AccessChain
             // Collect index groups from innermost to outermost
-            var index_groups = std.ArrayListUnmanaged(struct { start: u32, count: u32 }){};
+            var index_groups = std.ArrayListUnmanaged(struct { start: u32, count: u32 }).empty;
             defer index_groups.deinit(alloc);
             
             // Our own indices first (innermost)
@@ -1513,7 +1513,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     if (bound <= 1) return words;
 
     // Collect function-local variable IDs
-    var func_vars = std.AutoHashMapUnmanaged(u32, void){};
+    var func_vars = std.AutoHashMapUnmanaged(u32, void).empty;
     defer func_vars.deinit(alloc);
 
     var pos: u32 = 5;
@@ -1530,7 +1530,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
 
     // Find all OpLoopMerge instructions
     const LI = struct { header_pos: u32, merge_id: u32 };
-    var loops = std.ArrayListUnmanaged(LI){};
+    var loops = std.ArrayListUnmanaged(LI).empty;
     defer loops.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
@@ -1818,7 +1818,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     if (dead_loops.count() == 0) return words;
 
     // Filter inner loops contained within dead outer loops
-    var dead_ranges = std.ArrayListUnmanaged(struct { header_label: u32, merge_label: u32, hdr_pos: u32, mrg_pos: u32 }){};
+    var dead_ranges = std.ArrayListUnmanaged(struct { header_label: u32, merge_label: u32, hdr_pos: u32, mrg_pos: u32 }).empty;
     defer dead_ranges.deinit(alloc);
     for (loops.items, 0..) |li, idx| {
         if (!dead_loops.isSet(idx)) continue;
@@ -1848,7 +1848,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         }
     }
 
-    var dead_header_labels = std.AutoHashMapUnmanaged(u32, u32){};
+    var dead_header_labels = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer dead_header_labels.deinit(alloc);
     for (dead_ranges.items, 0..) |dr, idx| {
         if (outermost.isSet(idx)) dead_header_labels.put(alloc, dr.header_label, dr.merge_label) catch {};
@@ -1995,7 +1995,7 @@ pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
     }
 
     // Phase 2: Find empty passthrough blocks (OpLabel + OpBranch only, not protected)
-    var empty_targets = std.AutoHashMapUnmanaged(u32, u32){}; // label -> branch target
+    var empty_targets = std.AutoHashMapUnmanaged(u32, u32).empty; // label -> branch target
     defer empty_targets.deinit(alloc);
 
     pos = 5;
@@ -2138,11 +2138,11 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
     if (bound <= 1) return words;
 
     // Pass 1: Build label -> position map and count predecessors
-    var label_pos = std.AutoHashMapUnmanaged(u32, u32){}; // label_id -> pos of OpLabel
+    var label_pos = std.AutoHashMapUnmanaged(u32, u32).empty; // label_id -> pos of OpLabel
     defer label_pos.deinit(alloc);
-    var predecessors = std.AutoHashMapUnmanaged(u32, u32){}; // label_id -> count
+    var predecessors = std.AutoHashMapUnmanaged(u32, u32).empty; // label_id -> count
     defer predecessors.deinit(alloc);
-    var branch_target = std.AutoHashMapUnmanaged(u32, u32){}; // label_id -> branch target (only for OpBranch)
+    var branch_target = std.AutoHashMapUnmanaged(u32, u32).empty; // label_id -> branch target (only for OpBranch)
     defer branch_target.deinit(alloc);
 
     // Also track which labels are function entry points (first label in each function)
@@ -2374,11 +2374,11 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
         const dce_bound = dce_result[3];
         if (dce_bound > 1) {
             // Rebuild label_pos and predecessors for the DCE'd output
-            var lp2 = std.AutoHashMapUnmanaged(u32, u32){};
+            var lp2 = std.AutoHashMapUnmanaged(u32, u32).empty;
             defer lp2.deinit(alloc);
-            var preds2 = std.AutoHashMapUnmanaged(u32, u32){};
+            var preds2 = std.AutoHashMapUnmanaged(u32, u32).empty;
             defer preds2.deinit(alloc);
-            var bt2 = std.AutoHashMapUnmanaged(u32, u32){}; // from_label -> to_label
+            var bt2 = std.AutoHashMapUnmanaged(u32, u32).empty; // from_label -> to_label
             defer bt2.deinit(alloc);
             var func_entries2 = try std.DynamicBitSet.initEmpty(alloc, dce_bound);
             defer func_entries2.deinit();
@@ -2440,7 +2440,7 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
             }
 
             // Find mergeable empty predecessors
-            var empty_preds = std.AutoHashMapUnmanaged(u32, u32){}; // from_label -> to_label
+            var empty_preds = std.AutoHashMapUnmanaged(u32, u32).empty; // from_label -> to_label
             defer empty_preds.deinit(alloc);
 
             var bt_iter2 = bt2.iterator();
@@ -2554,11 +2554,11 @@ pub fn mergeNonEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
     if (bound <= 1) return words;
 
     // Build label -> position map
-    var label_pos = std.AutoHashMapUnmanaged(u32, u32){};
+    var label_pos = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer label_pos.deinit(alloc);
-    var predecessors = std.AutoHashMapUnmanaged(u32, u32){}; // label -> predecessor count
+    var predecessors = std.AutoHashMapUnmanaged(u32, u32).empty; // label -> predecessor count
     defer predecessors.deinit(alloc);
-    var branch_from = std.AutoHashMapUnmanaged(u32, u32){}; // to_label -> from_label (only OpBranch)
+    var branch_from = std.AutoHashMapUnmanaged(u32, u32).empty; // to_label -> from_label (only OpBranch)
     defer branch_from.deinit(alloc);
 
     // Track blocks with structured CF, OpPhi, and merge targets
@@ -2651,7 +2651,7 @@ pub fn mergeNonEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
     var mergeable = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
     defer mergeable.deinit();
     // Map: merged_label -> predecessor_label
-    var merge_map = std.AutoHashMapUnmanaged(u32, u32){};
+    var merge_map = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer merge_map.deinit(alloc);
 
     var bf_iter = branch_from.iterator();
@@ -2813,7 +2813,7 @@ pub fn foldSelect(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemor
     if (true_id == 0 and false_id == 0) return words;
 
     // Build replacement map: select_result -> replacement value
-    var replacements = std.AutoHashMapUnmanaged(u32, u32){};
+    var replacements = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer replacements.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
@@ -2890,11 +2890,11 @@ pub fn dedupStructTypes(alloc: std.mem.Allocator, words: []const u32) error{OutO
 
     // Collect struct types: map (member_type_0, member_type_1, ...) → first result_id
     // Use a simple approach: hash the member types, store in a HashMap
-    var structs = std.AutoHashMapUnmanaged(u64, u32){}; // hash -> first_id
+    var structs = std.AutoHashMapUnmanaged(u64, u32).empty; // hash -> first_id
     defer structs.deinit(alloc);
 
     // Also build a replacement map for duplicate struct ids
-    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // dup_id -> first_id
+    var replacements = std.AutoHashMapUnmanaged(u32, u32).empty; // dup_id -> first_id
     defer replacements.deinit(alloc);
 
     // First pass: find duplicate struct types
@@ -3016,9 +3016,9 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
     const bound = words[3];
     if (bound <= 1) return words;
 
-    var arrays = std.AutoHashMapUnmanaged(u64, u32){}; // hash -> first_id
+    var arrays = std.AutoHashMapUnmanaged(u64, u32).empty; // hash -> first_id
     defer arrays.deinit(alloc);
-    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // dup_id -> first_id
+    var replacements = std.AutoHashMapUnmanaged(u32, u32).empty; // dup_id -> first_id
     defer replacements.deinit(alloc);
 
     // First pass: find duplicate array types
@@ -3047,7 +3047,7 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
     if (replacements.count() == 0) return words;
 
     // Track seen decorations to skip duplicates caused by dedup
-    var seen_decorations = std.AutoHashMapUnmanaged(u64, void){}; // hash -> {}
+    var seen_decorations = std.AutoHashMapUnmanaged(u64, void).empty; // hash -> {}
     defer seen_decorations.deinit(alloc);
 
     // Second pass: skip duplicate arrays and replace references
@@ -3146,9 +3146,9 @@ pub fn dedupPointerTypes(alloc: std.mem.Allocator, words: []const u32) error{Out
     const bound = words[3];
     if (bound <= 1) return words;
 
-    var pointers = std.AutoHashMapUnmanaged(u64, u32){}; // hash(sc, pointee) -> first_id
+    var pointers = std.AutoHashMapUnmanaged(u64, u32).empty; // hash(sc, pointee) -> first_id
     defer pointers.deinit(alloc);
-    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // dup_id -> first_id
+    var replacements = std.AutoHashMapUnmanaged(u32, u32).empty; // dup_id -> first_id
     defer replacements.deinit(alloc);
 
     // First pass: find duplicate pointer types (OpTypePointer = opcode 32)
@@ -3278,7 +3278,7 @@ pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error
 
     // Collect negate instructions: map result_id -> (opcode, operand_id)
     // OpFNegate = 127, OpSNegate = 128, OpLogicalNot = 133, OpNot (bitwise) = 131
-    var neg_ops = std.AutoHashMapUnmanaged(u32, struct { opcode: u16, operand: u32 }){};
+    var neg_ops = std.AutoHashMapUnmanaged(u32, struct { opcode: u16, operand: u32 }).empty;
     defer neg_ops.deinit(alloc);
 
     var pos: u32 = 5;
@@ -3294,7 +3294,7 @@ pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error
     }
 
     // Find double negations: negate(negate(x)) → x
-    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> inner_operand
+    var replacements = std.AutoHashMapUnmanaged(u32, u32).empty; // result_id -> inner_operand
     defer replacements.deinit(alloc);
 
     var it = neg_ops.iterator();
@@ -3379,7 +3379,7 @@ pub fn foldNegateIntoAddSub(alloc: std.mem.Allocator, words: []const u32) error{
 
     // Phase 1: Build map of negate results: result_id -> operand_id
     // FNegate=127, SNegate=126
-    var neg_map = std.AutoHashMapUnmanaged(u32, struct { operand: u32, is_float: bool }){};
+    var neg_map = std.AutoHashMapUnmanaged(u32, struct { operand: u32, is_float: bool }).empty;
     defer neg_map.deinit(alloc);
 
     var pos: u32 = 5;
@@ -3512,11 +3512,11 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
     // We need to also track AccessChain results derived from func-local vars
     // Stores to AccessChain results also invalidate the var
-    var dead_stores = std.AutoHashMapUnmanaged(u32, void){}; // pos -> dead store
+    var dead_stores = std.AutoHashMapUnmanaged(u32, void).empty; // pos -> dead store
     defer dead_stores.deinit(alloc);
 
     // Track AC results derived from func-local vars
-    var ac_from_func = std.AutoHashMapUnmanaged(u32, void){}; // ac_result_id -> void
+    var ac_from_func = std.AutoHashMapUnmanaged(u32, void).empty; // ac_result_id -> void
     defer ac_from_func.deinit(alloc);
 
     // Seed with func-local var ids
@@ -3546,7 +3546,7 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
     }
 
     // Scan per-block
-    var last_store_pos = std.AutoHashMapUnmanaged(u32, u32){}; // ptr -> last store pos
+    var last_store_pos = std.AutoHashMapUnmanaged(u32, u32).empty; // ptr -> last store pos
     defer last_store_pos.deinit(alloc);
 
     pos = 5;
@@ -3733,7 +3733,7 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     }
 
     // Phase 3: Find identity operations and build replacement map
-    var replacements = std.AutoHashMapUnmanaged(u32, u32){};
+    var replacements = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer replacements.deinit(alloc);
 
     pos = 5;
@@ -3923,7 +3923,7 @@ pub fn elimUnreachableCalls(alloc: std.mem.Allocator, words: []const u32) error{
     if (bound <= 1) return words;
 
     // Collect entry point function IDs (never remove these)
-    var entry_point_funcs = std.AutoHashMapUnmanaged(u32, void){};
+    var entry_point_funcs = std.AutoHashMapUnmanaged(u32, void).empty;
     defer entry_point_funcs.deinit(alloc);
     {
         var p: u32 = 5;
@@ -3942,11 +3942,11 @@ pub fn elimUnreachableCalls(alloc: std.mem.Allocator, words: []const u32) error{
 
     // Phase 1: Find functions whose body (after OpLabel) is only OpUnreachable
     // Skip entry point functions even if body is unreachable
-    var unreachable_funcs = std.AutoHashMapUnmanaged(u32, void){};
+    var unreachable_funcs = std.AutoHashMapUnmanaged(u32, void).empty;
     defer unreachable_funcs.deinit(alloc);
 
     var cur_func: u32 = 0;
-    var body_after_label = std.ArrayListUnmanaged(u16){};
+    var body_after_label = std.ArrayListUnmanaged(u16).empty;
     defer body_after_label.deinit(alloc);
     var in_body = false;
 
@@ -4081,9 +4081,9 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
         return_value_id: u32, // the ID used in OpReturnValue (0 if void)
         is_inlineable: bool,
     };
-    var funcs = std.ArrayListUnmanaged(FuncInfo){};
+    var funcs = std.ArrayListUnmanaged(FuncInfo).empty;
     defer funcs.deinit(alloc);
-    var param_slices = std.ArrayListUnmanaged([]const u32){};
+    var param_slices = std.ArrayListUnmanaged([]const u32).empty;
     defer {
         for (param_slices.items) |sl| alloc.free(sl);
         param_slices.deinit(alloc);
@@ -4105,7 +4105,7 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
             var has_call_or_cf = false; // calls, branch, merge — prevents inlining
             var has_var = false; // OpVariable in body — allowed but needs var reordering
             var return_value_id: u32 = 0;
-            var param_ids = std.ArrayListUnmanaged(u32){};
+            var param_ids = std.ArrayListUnmanaged(u32).empty;
 
             var fp = ie;
             while (fp < words.len) {
@@ -4140,7 +4140,7 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
     }
 
     // Build inlineable set
-    var inlineable = std.AutoHashMapUnmanaged(u32, *const FuncInfo){};
+    var inlineable = std.AutoHashMapUnmanaged(u32, *const FuncInfo).empty;
     defer inlineable.deinit(alloc);
     for (funcs.items) |*fi| {
         if (fi.is_inlineable) try inlineable.put(alloc, fi.func_id, fi);
@@ -4161,7 +4161,7 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
     // Helper: collect result IDs from a body range and allocate fresh IDs
     const allocFreshIds = struct {
         fn run(allocator: std.mem.Allocator, w: []const u32, bs: u32, be: u32, ret_id: u32, bnd: *u32) !std.AutoHashMapUnmanaged(u32, u32) {
-            var result_ids = std.AutoHashMapUnmanaged(u32, u32){};
+            var result_ids = std.AutoHashMapUnmanaged(u32, u32).empty;
             var bp: u32 = bs;
             while (bp < be) {
                 const bh = w[bp]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
@@ -4262,7 +4262,7 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
     // Persistent substitution map: for non-void inlines where return value is
     // not a body-defined ID (e.g., a constant), replace call_result with return
     // value in all subsequent instructions.
-    var sub_map = std.AutoHashMapUnmanaged(u32, u32){};
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer sub_map.deinit(alloc);
 
     // Helper: apply sub_map to a single instruction and append to result
@@ -4341,7 +4341,7 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
         if (opcode == 57 and wc >= 4) {
             if (inlineable.get(words[pos + 3])) |fi| {
                 // Build replacement map for body copying
-                var repl = std.AutoHashMapUnmanaged(u32, u32){};
+                var repl = std.AutoHashMapUnmanaged(u32, u32).empty;
                 errdefer repl.deinit(alloc);
 
                 // Param -> arg
@@ -4523,7 +4523,7 @@ pub fn elimUninitVars(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     defer stored_vars.deinit();
 
     // Track load result -> var_id mapping (for replacing loads with undef)
-    var load_to_var = std.AutoHashMapUnmanaged(u32, u32){};
+    var load_to_var = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer load_to_var.deinit(alloc);
 
     var pos: u32 = 5;
@@ -4619,7 +4619,7 @@ pub fn elimUninitVars(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
 
     // Phase 2: Build result instruction map for loads (need their type)
     // We already have load_to_var. Also need load_result -> type_id.
-    var load_type = std.AutoHashMapUnmanaged(u32, u32){};
+    var load_type = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer load_type.deinit(alloc);
 
     pos = 5;
@@ -4732,7 +4732,7 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
     if (readonly_vars.count() == 0) return words;
 
     // Phase 1b: Also identify AccessChain results from read-only variables.
-    var readonly_ac = std.AutoHashMapUnmanaged(u32, void){};
+    var readonly_ac = std.AutoHashMapUnmanaged(u32, void).empty;
     defer readonly_ac.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
@@ -4756,7 +4756,7 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
     // Phase 2: Build substitution map for redundant loads
     // Track first load result per read-only var/AC, per function
-    var sub_map = std.AutoHashMapUnmanaged(u32, u32){}; // redundant_load_result -> first_load_result
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32).empty; // redundant_load_result -> first_load_result
     defer sub_map.deinit(alloc);
 
     pos = 5;
@@ -4770,7 +4770,7 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
         // On OpFunction, scan the function body for redundant loads
         if (opcode == 54) { // OpFunction
-            var first_loads = std.AutoHashMapUnmanaged(u32, u32){}; // var_id -> first_load_result
+            var first_loads = std.AutoHashMapUnmanaged(u32, u32).empty; // var_id -> first_load_result
             defer first_loads.deinit(alloc);
             var in_entry_block = true; // entry block dominates all others
 
@@ -4931,7 +4931,7 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
 
         if (opcode == 80 and wc >= 3) { // OpCompositeConstruct
             const result_id = words[pos + 2];
-            var components = std.ArrayListUnmanaged(u32){};
+            var components = std.ArrayListUnmanaged(u32).empty;
             var ci: u32 = pos + 3;
             while (ci < ie) : (ci += 1) {
                 components.append(alloc, words[ci]) catch return words;
@@ -4943,7 +4943,7 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
         // Also handle OpConstantComposite (44): same format, constituents are constants
         if (opcode == 44 and wc >= 4) { // OpConstantComposite
             const result_id = words[pos + 2];
-            var components = std.ArrayListUnmanaged(u32){};
+            var components = std.ArrayListUnmanaged(u32).empty;
             var ci: u32 = pos + 3;
             while (ci < ie) : (ci += 1) {
                 components.append(alloc, words[ci]) catch return words;
@@ -4976,7 +4976,7 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
             const result_id = words[pos + 2];
             const vec1_id = words[pos + 3];
             const vec2_id = words[pos + 4];
-            var indices = std.ArrayListUnmanaged(u32){};
+            var indices = std.ArrayListUnmanaged(u32).empty;
             var si: u32 = pos + 5;
             while (si < ie) : (si += 1) {
                 indices.append(alloc, words[si]) catch return words;
@@ -4987,7 +4987,7 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
     }
 
     // Phase 2: Find OpCompositeExtract that can be folded
-    var sub_map = std.AutoHashMapUnmanaged(u32, u32){};
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer sub_map.deinit(alloc);
 
     pos = 5;
@@ -5028,7 +5028,7 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
     }
 
     // Phase 2b: Build shuffle-extract rewrite map
-    var shuffle_extract_map = std.AutoHashMapUnmanaged(u32, struct { composite: u32, index: u32 }){}; // extract_result_id -> (new_composite, new_index)
+    var shuffle_extract_map = std.AutoHashMapUnmanaged(u32, struct { composite: u32, index: u32 }).empty; // extract_result_id -> (new_composite, new_index)
     defer shuffle_extract_map.deinit(alloc);
 
     pos = 5;
@@ -5162,18 +5162,18 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
     if (bound <= 1) return words;
 
     // Phase 1: Build substitution map per-function for duplicate AccessChains
-    var sub_map = std.AutoHashMapUnmanaged(u32, u32){};
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer sub_map.deinit(alloc);
 
     // Phase 1b: For each AccessChain, store its signature words so we can dedup
     // Per-block: track signatures and their first result IDs (must be same block for dominance)
     // Also track entry-block AccessChains for cross-block dedup (entry block dominates all)
     const SigEntry = struct { result_id: u32, sig_start: u32, sig_len: u32 };
-    var block_sigs = std.ArrayListUnmanaged(SigEntry){}; // entries for current block
+    var block_sigs = std.ArrayListUnmanaged(SigEntry).empty; // entries for current block
     defer block_sigs.deinit(alloc);
-    var entry_block_sigs = std.ArrayListUnmanaged(SigEntry){}; // entries from function entry block
+    var entry_block_sigs = std.ArrayListUnmanaged(SigEntry).empty; // entries from function entry block
     defer entry_block_sigs.deinit(alloc);
-    var all_sig_words = std.ArrayListUnmanaged(u32){}; // packed signature words
+    var all_sig_words = std.ArrayListUnmanaged(u32).empty; // packed signature words
     defer all_sig_words.deinit(alloc);
     var is_entry_block = true; // track if we're in the function entry block
     var seen_first_label = false;
@@ -5471,14 +5471,14 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
     // Phase 2: Find qualifying function-local vars
     var func_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
     defer func_vars.deinit();
-    var store_count = std.AutoHashMapUnmanaged(u32, u32){};
+    var store_count = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer store_count.deinit(alloc);
-    var load_count = std.AutoHashMapUnmanaged(u32, u32){};
+    var load_count = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer load_count.deinit(alloc);
-    var const_store_val = std.AutoHashMapUnmanaged(u32, u32){};
+    var const_store_val = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer const_store_val.deinit(alloc);
     // Also track non-constant 1-store vars for 1-load forwarding
-    var single_store_val = std.AutoHashMapUnmanaged(u32, u32){}; // var_id -> store_value (for 1-store vars)
+    var single_store_val = std.AutoHashMapUnmanaged(u32, u32).empty; // var_id -> store_value (for 1-store vars)
     defer single_store_val.deinit(alloc);
     var unsafe_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
     defer unsafe_vars.deinit();
@@ -5565,7 +5565,7 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
     // With dominance check: only forward if store and load are in the same basic block.
     {
         // Build store position map for qualifying vars
-        var store_pos_map = std.AutoHashMapUnmanaged(u32, u32){}; // var_id -> store position
+        var store_pos_map = std.AutoHashMapUnmanaged(u32, u32).empty; // var_id -> store position
         defer store_pos_map.deinit(alloc);
         var sit = single_store_val.iterator();
         while (sit.next()) |entry| {
@@ -5642,7 +5642,7 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
     if (const_store_val.count() == 0) return words;
 
     // Phase 3: Build load result -> const value substitution map
-    var load_fwd = std.AutoHashMapUnmanaged(u32, u32){};
+    var load_fwd = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer load_fwd.deinit(alloc);
     var vars_to_remove = try std.DynamicBitSet.initEmpty(alloc, bound);
     defer vars_to_remove.deinit();
@@ -5753,9 +5753,9 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
     if (bound <= 1) return words;
 
     // Phase 1: Build constant value map: result_id -> (type_id, value)
-    var const_types = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> type_id
+    var const_types = std.AutoHashMapUnmanaged(u32, u32).empty; // result_id -> type_id
     defer const_types.deinit(alloc);
-    var const_vals = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> literal_value
+    var const_vals = std.AutoHashMapUnmanaged(u32, u32).empty; // result_id -> literal_value
     defer const_vals.deinit(alloc);
     // Track float vs int types
     var float_types = try std.DynamicBitSet.initEmpty(alloc, bound);
@@ -5808,11 +5808,11 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
     }
 
     // Track bool replacements: comparison result_id -> true_id or false_id
-    var bool_replacements = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> true_id or false_id
+    var bool_replacements = std.AutoHashMapUnmanaged(u32, u32).empty; // result_id -> true_id or false_id
     defer bool_replacements.deinit(alloc);
 
     // Phase 2: Find foldable ops and compute replacement values
-    var fold_map = std.AutoHashMapUnmanaged(u32, struct { rtype: u32, val: u32 }){};
+    var fold_map = std.AutoHashMapUnmanaged(u32, struct { rtype: u32, val: u32 }).empty;
     defer fold_map.deinit(alloc);
     var to_skip = try std.DynamicBitSet.initEmpty(alloc, bound);
     defer to_skip.deinit();
@@ -6176,11 +6176,11 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
     const bound = words[3];
     if (bound <= 1) return words;
 
-    var vec_sizes = std.AutoHashMapUnmanaged(u32, u32){};
+    var vec_sizes = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer vec_sizes.deinit(alloc);
-    var array_sizes = std.AutoHashMapUnmanaged(u32, u32){}; // array_type_id -> element_count
+    var array_sizes = std.AutoHashMapUnmanaged(u32, u32).empty; // array_type_id -> element_count
     defer array_sizes.deinit(alloc);
-    var ptr_pointee = std.AutoHashMapUnmanaged(u32, u32){};
+    var ptr_pointee = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer ptr_pointee.deinit(alloc);
 
     var pos: u32 = 5;
@@ -6197,7 +6197,7 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
     }
 
     // Build constant map
-    var const_vals = std.AutoHashMapUnmanaged(u32, u32){};
+    var const_vals = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer const_vals.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
@@ -6221,7 +6221,7 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
     }
 
     const VarInfo = struct { var_id: u32, comp_count: u32, vec_type: u32 };
-    var var_infos = std.ArrayListUnmanaged(VarInfo){};
+    var var_infos = std.ArrayListUnmanaged(VarInfo).empty;
     defer var_infos.deinit(alloc);
 
     pos = 5;
@@ -6256,7 +6256,7 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
         ac_positions: std.ArrayListUnmanaged(u32),
         store_positions: std.ArrayListUnmanaged(u32),
     };
-    var replacements = std.ArrayListUnmanaged(Replacement){};
+    var replacements = std.ArrayListUnmanaged(Replacement).empty;
     defer {
         for (replacements.items) |*r| {
             r.ac_positions.deinit(alloc);
@@ -6266,11 +6266,11 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
     }
 
     for (var_infos.items) |vi| {
-        var ac_results = std.AutoHashMapUnmanaged(u32, void){};
+        var ac_results = std.AutoHashMapUnmanaged(u32, void).empty;
         defer ac_results.deinit(alloc);
-        var ac_positions = std.ArrayListUnmanaged(u32){};
+        var ac_positions = std.ArrayListUnmanaged(u32).empty;
         defer ac_positions.deinit(alloc);
-        var store_positions = std.ArrayListUnmanaged(u32){};
+        var store_positions = std.ArrayListUnmanaged(u32).empty;
         defer store_positions.deinit(alloc);
         var load_pos: u32 = 0;
         var load_result: u32 = 0;
@@ -6312,8 +6312,8 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
         if (ac_results.count() != vi.comp_count) continue;
         if (@as(u32, @intCast(store_positions.items.len)) != vi.comp_count) continue;
 
-        var my_ac = std.ArrayListUnmanaged(u32){};
-        var my_st = std.ArrayListUnmanaged(u32){};
+        var my_ac = std.ArrayListUnmanaged(u32).empty;
+        var my_st = std.ArrayListUnmanaged(u32).empty;
         try my_ac.appendSlice(alloc, ac_positions.items);
         try my_st.appendSlice(alloc, store_positions.items);
         try replacements.append(alloc, .{
@@ -6332,7 +6332,7 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
     defer remove_set.deinit();
 
     const CompRep = struct { load_pos: u32, vec_type: u32, load_result: u32, comp_vals: []u32 };
-    var comp_reps = std.ArrayListUnmanaged(CompRep){};
+    var comp_reps = std.ArrayListUnmanaged(CompRep).empty;
     defer {
         for (comp_reps.items) |cr| alloc.free(cr.comp_vals);
         comp_reps.deinit(alloc);
@@ -6382,7 +6382,7 @@ for (replacements.items, 0..) |rep, rep_idx| {
         }
     }
 
-    var load_map = std.AutoHashMapUnmanaged(u32, u32){};
+    var load_map = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer load_map.deinit(alloc);
     for (comp_reps.items, 0..) |cr, i| {
         try load_map.put(alloc, cr.load_pos, @intCast(i));
@@ -6436,7 +6436,7 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
     if (bound <= 1) return words;
 
     // Build constant map for resolving AC index IDs
-    var const_vals = std.AutoHashMapUnmanaged(u32, u32){};
+    var const_vals = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer const_vals.deinit(alloc);
     var pos: u32 = 5;
     while (pos < words.len) {
@@ -6453,7 +6453,7 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
     }
 
     // Find function-local variables (any type)
-    var func_var_set = std.AutoHashMapUnmanaged(u32, void){};
+    var func_var_set = std.AutoHashMapUnmanaged(u32, void).empty;
     defer func_var_set.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
@@ -6481,7 +6481,7 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
         store_pos: u32,
         var_pos: u32,
     };
-    var analyses = std.ArrayListUnmanaged(VarAnalysis){};
+    var analyses = std.ArrayListUnmanaged(VarAnalysis).empty;
     defer {
         for (analyses.items) |*a| {
             a.member_reads.deinit(alloc);
@@ -6500,13 +6500,13 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
         var whole_loads: u32 = 0;
 
         // Track AC results into this var
-        var ac_to_var = std.AutoHashMapUnmanaged(u32, void){};
+        var ac_to_var = std.AutoHashMapUnmanaged(u32, void).empty;
         defer ac_to_var.deinit(alloc);
-        var ac_positions = std.ArrayListUnmanaged(u32){};
+        var ac_positions = std.ArrayListUnmanaged(u32).empty;
         defer ac_positions.deinit(alloc);
 
         // Track loads from AC results: load_result -> (ac_result, ac_index, load_type)
-        var member_reads = std.ArrayListUnmanaged(MemberRead){};
+        var member_reads = std.ArrayListUnmanaged(MemberRead).empty;
         defer member_reads.deinit(alloc);
 
         // Also track if any AC result is used in something other than a load (e.g., store target)
@@ -6633,9 +6633,9 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
             if (!all_ac_loaded) continue;
 
             // Copy positions and member reads
-            var my_ac_pos = std.ArrayListUnmanaged(u32){};
+            var my_ac_pos = std.ArrayListUnmanaged(u32).empty;
             try my_ac_pos.appendSlice(alloc, ac_positions.items);
-            var my_reads = std.ArrayListUnmanaged(MemberRead){};
+            var my_reads = std.ArrayListUnmanaged(MemberRead).empty;
             try my_reads.appendSlice(alloc, member_reads.items);
 
             try analyses.append(alloc, .{
@@ -6655,11 +6655,11 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
     defer remove_set.deinit();
 
     const Extract = struct { load_result: u32, load_type: u32, stored_val: u32, ac_idx: u32 };
-    var extracts = std.ArrayListUnmanaged(Extract){};
+    var extracts = std.ArrayListUnmanaged(Extract).empty;
     defer extracts.deinit(alloc);
 
     // Map: load_result -> extracts index
-    var load_result_map = std.AutoHashMapUnmanaged(u32, u32){};
+    var load_result_map = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer load_result_map.deinit(alloc);
 
     for (analyses.items) |a| {
@@ -6679,7 +6679,7 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
 
     // Build set of load positions to remove (we'll replace the load with extract)
     // We need to find the load instruction position for each member read
-    var load_positions = std.AutoHashMapUnmanaged(u32, u32){}; // load_result -> load_pos
+    var load_positions = std.AutoHashMapUnmanaged(u32, u32).empty; // load_result -> load_pos
     defer load_positions.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
@@ -6945,7 +6945,7 @@ pub fn elimIdentityShuffle(alloc: std.mem.Allocator, words: []const u32) error{O
 
     // Phase 0: Build type map for verifying identity shuffles
     // Map: result_id -> result_type_id for vector ops
-    var type_map = std.AutoHashMapUnmanaged(u32, u32){}; // id -> type_id
+    var type_map = std.AutoHashMapUnmanaged(u32, u32).empty; // id -> type_id
     defer type_map.deinit(alloc);
     var tpos: u32 = 5;
     while (tpos < words.len) {
@@ -6968,7 +6968,7 @@ pub fn elimIdentityShuffle(alloc: std.mem.Allocator, words: []const u32) error{O
     }
 
     // Phase 1: Find identity shuffles (same vec twice, indices = 0,1,...,N-1, same type)
-    var sub_map = std.AutoHashMapUnmanaged(u32, u32){}; // shuffle_result -> source_vec
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32).empty; // shuffle_result -> source_vec
     defer sub_map.deinit(alloc);
 
     var pos: u32 = 5;
@@ -7103,7 +7103,7 @@ pub fn foldShuffleFromComposite(alloc: std.mem.Allocator, words: []const u32) er
     if (bound <= 1) return words;
 
     // Phase 1: Build map of CompositeConstruct (80) and ConstantComposite (44): result_id -> []constituent_ids
-    var cc_map = std.AutoHashMapUnmanaged(u32, []const u32){};
+    var cc_map = std.AutoHashMapUnmanaged(u32, []const u32).empty;
     defer {
         var it = cc_map.iterator();
         while (it.next()) |entry| alloc.free(entry.value_ptr.*);
@@ -7129,7 +7129,7 @@ pub fn foldShuffleFromComposite(alloc: std.mem.Allocator, words: []const u32) er
     if (cc_map.count() == 0) return words;
 
     // Phase 2: Find VectorShuffle where vec1 is a known composite and all indices select from vec1
-    var shuffle_fwd = std.AutoHashMapUnmanaged(u32, []const u32){};
+    var shuffle_fwd = std.AutoHashMapUnmanaged(u32, []const u32).empty;
     defer {
         var it2 = shuffle_fwd.iterator();
         while (it2.next()) |entry| alloc.free(entry.value_ptr.*);
@@ -7159,7 +7159,7 @@ pub fn foldShuffleFromComposite(alloc: std.mem.Allocator, words: []const u32) er
                 }
 
                 if (all_from_vec1 and indices.len > 0) {
-                    var new_constituents = std.ArrayListUnmanaged(u32){};
+                    var new_constituents = std.ArrayListUnmanaged(u32).empty;
                     for (indices) |idx| {
                         try new_constituents.append(alloc, cs[idx]);
                     }
@@ -7230,7 +7230,7 @@ pub fn elimDeadVoidCalls(alloc: std.mem.Allocator, words: []const u32) error{Out
     }
 
     // Phase 2: Find pure functions (no stores, no calls, no atomics/barriers)
-    var pure_funcs = std.AutoHashMapUnmanaged(u32, void){};
+    var pure_funcs = std.AutoHashMapUnmanaged(u32, void).empty;
     defer pure_funcs.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
@@ -7263,7 +7263,7 @@ pub fn elimDeadVoidCalls(alloc: std.mem.Allocator, words: []const u32) error{Out
 
     // Phase 3: Find void-returning calls to pure functions
     // Only remove the call, not the function definition (callee might be an entry point)
-    var dead_calls = std.AutoHashMapUnmanaged(u32, void){}; // position -> void
+    var dead_calls = std.AutoHashMapUnmanaged(u32, void).empty; // position -> void
     defer dead_calls.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
@@ -7392,13 +7392,13 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
     if (bound <= 1) return words;
 
     // Phase 1: Find OpLoad instructions whose result is used exactly once in an OpStore
-    var load_info = std.AutoHashMapUnmanaged(u32, struct { pos: u32, src_ptr: u32, store_pos: u32, dst_ptr: u32 }){};
+    var load_info = std.AutoHashMapUnmanaged(u32, struct { pos: u32, src_ptr: u32, store_pos: u32, dst_ptr: u32 }).empty;
     defer load_info.deinit(alloc);
 
     // First pass: collect load result IDs and their usage count
-    var load_positions = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> pos
+    var load_positions = std.AutoHashMapUnmanaged(u32, u32).empty; // result_id -> pos
     defer load_positions.deinit(alloc);
-    var use_count = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> count
+    var use_count = std.AutoHashMapUnmanaged(u32, u32).empty; // result_id -> count
     defer use_count.deinit(alloc);
 
     var pos: u32 = 5;
@@ -7489,9 +7489,9 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
 
     // Phase 2: Find loads used exactly once, and that use is in an OpStore
     // Build a map: store_pos -> (load_pos, src_ptr, dst_ptr)
-    var replacements = std.AutoHashMapUnmanaged(u32, struct { load_pos: u32, src_ptr: u32 }){}; // store_pos -> load_info
+    var replacements = std.AutoHashMapUnmanaged(u32, struct { load_pos: u32, src_ptr: u32 }).empty; // store_pos -> load_info
     defer replacements.deinit(alloc);
-    var dead_loads = std.AutoHashMapUnmanaged(u32, void){}; // load pos to skip
+    var dead_loads = std.AutoHashMapUnmanaged(u32, void).empty; // load pos to skip
     defer dead_loads.deinit(alloc);
 
     // For each load with exactly 1 use, find the OpStore that uses it
@@ -7672,9 +7672,9 @@ pub fn elimIdentityStores(alloc: std.mem.Allocator, words: []const u32) error{Ou
     if (bound <= 1) return words;
 
     // Phase 1: Find loads whose result is used exactly once, and that use is in an OpStore to the SAME pointer
-    var load_positions = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> pos
+    var load_positions = std.AutoHashMapUnmanaged(u32, u32).empty; // result_id -> pos
     defer load_positions.deinit(alloc);
-    var use_count = std.AutoHashMapUnmanaged(u32, u32){}; // result_id -> count
+    var use_count = std.AutoHashMapUnmanaged(u32, u32).empty; // result_id -> count
     defer use_count.deinit(alloc);
 
     var pos: u32 = 5;
@@ -7760,7 +7760,7 @@ pub fn elimIdentityStores(alloc: std.mem.Allocator, words: []const u32) error{Ou
     }
 
     // Phase 2: Find identity stores (Load(P) -> Store(P, load_result)) with load used exactly once
-    var remove_positions = std.AutoHashMapUnmanaged(u32, void){}; // positions to skip
+    var remove_positions = std.AutoHashMapUnmanaged(u32, void).empty; // positions to skip
     defer remove_positions.deinit(alloc);
 
     var li = load_positions.iterator();
@@ -7830,7 +7830,7 @@ pub fn elimDeadFunctions(alloc: std.mem.Allocator, words: []const u32) error{Out
     var func_ids = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
     defer func_ids.deinit();
     // Count OpFunctionCall references per function
-    var call_count = std.AutoHashMapUnmanaged(u32, u32){};
+    var call_count = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer call_count.deinit(alloc);
 
     var pos: u32 = 5;
@@ -8015,11 +8015,11 @@ pub fn hoistInvariantACs(alloc: std.mem.Allocator, words: []const u32) error{Out
         dup_results: []u32,    // AC result IDs to replace with ac_result
     };
 
-    var targets = std.ArrayListUnmanaged(HoistTarget){};
+    var targets = std.ArrayListUnmanaged(HoistTarget).empty;
     defer targets.deinit(alloc);
-    var indices_buf = std.ArrayListUnmanaged(u32){};
+    var indices_buf = std.ArrayListUnmanaged(u32).empty;
     defer indices_buf.deinit(alloc);
-    var dup_buf = std.ArrayListUnmanaged(u32){};
+    var dup_buf = std.ArrayListUnmanaged(u32).empty;
     defer dup_buf.deinit(alloc);
 
     var pos: u32 = 5;
@@ -8049,9 +8049,9 @@ pub fn hoistInvariantACs(alloc: std.mem.Allocator, words: []const u32) error{Out
                     // True block starts at the OpLabel with true_label
                     // False block starts at the OpLabel with false_label
                     const TrueFalseACs = struct { result: u32, result_type: u32, base: u32, idx_start: u32, idx_len: u32 };
-                    var true_acs = std.ArrayListUnmanaged(TrueFalseACs){};
+                    var true_acs = std.ArrayListUnmanaged(TrueFalseACs).empty;
                     defer true_acs.deinit(alloc);
-                    var false_acs = std.ArrayListUnmanaged(TrueFalseACs){};
+                    var false_acs = std.ArrayListUnmanaged(TrueFalseACs).empty;
                     defer false_acs.deinit(alloc);
 
                     // Scan for blocks after the branch
@@ -8146,10 +8146,10 @@ pub fn hoistInvariantACs(alloc: std.mem.Allocator, words: []const u32) error{Out
     if (targets.items.len == 0) return words;
 
     // Build substitution map
-    var sub_map = std.AutoHashMapUnmanaged(u32, u32){};
+    var sub_map = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer sub_map.deinit(alloc);
     // Set of positions to skip (duplicate AC definitions)
-    var skip_set = std.AutoHashMapUnmanaged(u32, void){};
+    var skip_set = std.AutoHashMapUnmanaged(u32, void).empty;
     defer skip_set.deinit(alloc);
 
     for (targets.items) |t| {
@@ -8172,7 +8172,7 @@ pub fn hoistInvariantACs(alloc: std.mem.Allocator, words: []const u32) error{Out
     // remove all duplicate ACs, and substitute all uses.
 
     // Find positions of ACs to skip: both hoisted originals and duplicates
-    var hoisted_results = std.AutoHashMapUnmanaged(u32, void){};
+    var hoisted_results = std.AutoHashMapUnmanaged(u32, void).empty;
     defer hoisted_results.deinit(alloc);
     for (targets.items) |t| {
         try hoisted_results.put(alloc, t.ac_result, {});
@@ -8307,7 +8307,7 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         stores: std.AutoHashMapUnmanaged(u32, u32),
         loads: std.AutoHashMapUnmanaged(u32, u32),
     };
-    var block_map = std.AutoHashMapUnmanaged(u32, BlockInfo){};
+    var block_map = std.AutoHashMapUnmanaged(u32, BlockInfo).empty;
     defer {
         var it = block_map.iterator();
         while (it.next()) |e| {
@@ -8329,7 +8329,7 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         if (op == 248) {
             cur_block = words[pos + 1];
             const gop = try block_map.getOrPut(alloc, cur_block);
-            if (!gop.found_existing) gop.value_ptr.* = .{ .preds = .{}, .succs = .{}, .stores = .{}, .loads = .{} };
+            if (!gop.found_existing) gop.value_ptr.* = .{ .preds = .empty, .succs = .empty, .stores = .empty, .loads = .empty };
         }
         if (block_map.getPtr(cur_block)) |b| {
             if (op == 62 and wc >= 3) try b.stores.put(alloc, words[pos + 1], words[pos + 2]);
@@ -8347,14 +8347,14 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     // The variable must be loaded somewhere (not necessarily in the merge block).
     // No other block may store the variable.
     const Cand = struct { merge_block: u32, var_id: u32, first_load_result: u32, result_type: u32, pred_count: u32, all_load_results: std.ArrayListUnmanaged(u32) };
-    var cands = std.ArrayListUnmanaged(Cand){};
+    var cands = std.ArrayListUnmanaged(Cand).empty;
     defer {
         for (cands.items) |*c| c.all_load_results.deinit(alloc);
         cands.deinit(alloc);
     }
     {
         // Collect all function-scope variable IDs
-        var func_var_ids = std.AutoHashMapUnmanaged(u32, void){};
+        var func_var_ids = std.AutoHashMapUnmanaged(u32, void).empty;
         defer func_var_ids.deinit(alloc);
         pos = 5;
         while (pos < words.len) {
@@ -8372,7 +8372,7 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
             if (block.preds.items.len < 2) continue;
 
             // For each predecessor, get the set of stored variables
-            var pred_stored = std.AutoHashMapUnmanaged(u32, void){};
+            var pred_stored = std.AutoHashMapUnmanaged(u32, void).empty;
             defer pred_stored.deinit(alloc);
             var first = true;
             for (block.preds.items) |pred| {
@@ -8386,7 +8386,7 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                         first = false;
                     } else {
                         // Remove variables not stored in this pred
-                        var to_remove = std.ArrayListUnmanaged(u32){};
+                        var to_remove = std.ArrayListUnmanaged(u32).empty;
                         defer to_remove.deinit(alloc);
                         var psi = pred_stored.iterator();
                         while (psi.next()) |pe| {
@@ -8415,7 +8415,7 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                 if (bad) continue;
 
                 // Find ALL loads of this variable across all blocks
-                var all_loads = std.ArrayListUnmanaged(u32){};
+                var all_loads = std.ArrayListUnmanaged(u32).empty;
                 var rtype: u32 = 0;
                 var ait = block_map.iterator();
                 while (ait.next()) |ae| {
@@ -8446,13 +8446,13 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     if (cands.items.len == 0) return words;
 
     // ---- Phase 3: Build maps ----
-    var load_map = std.AutoHashMapUnmanaged(u32, u32){};
+    var load_map = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer load_map.deinit(alloc);
-    var remove_vars = std.AutoHashMapUnmanaged(u32, void){};
+    var remove_vars = std.AutoHashMapUnmanaged(u32, void).empty;
     defer remove_vars.deinit(alloc);
-    var remove_stores = std.AutoHashMapUnmanaged(u64, void){};
+    var remove_stores = std.AutoHashMapUnmanaged(u64, void).empty;
     defer remove_stores.deinit(alloc);
-    var phi_blocks = std.AutoHashMapUnmanaged(u32, u32){}; // merge_block -> index in cands
+    var phi_blocks = std.AutoHashMapUnmanaged(u32, u32).empty; // merge_block -> index in cands
     defer phi_blocks.deinit(alloc);
     var next_id: u32 = bound;
     for (cands.items, 0..) |c, ci| {
@@ -8578,7 +8578,7 @@ pub fn elimUnusedImports(alloc: std.mem.Allocator, words: []const u32) error{Out
     if (bound <= 1) return words;
 
     // Find all OpExtInstImport (opcode 11) result IDs
-    var imports = std.AutoHashMapUnmanaged(u32, void){};
+    var imports = std.AutoHashMapUnmanaged(u32, void).empty;
     defer imports.deinit(alloc);
     var pos: u32 = 5;
     while (pos < words.len) {
@@ -8642,11 +8642,11 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
     if (bound <= 1) return words;
 
     // Phase 1: Find global OpVariable IDs (outside functions)
-    var global_vars = std.AutoHashMapUnmanaged(u32, void){};
+    var global_vars = std.AutoHashMapUnmanaged(u32, void).empty;
     defer global_vars.deinit(alloc);
     // Track which globals are output variables (storage class 3 = Output)
     // These should never be removed as they're used by the fixed-function pipeline
-    var output_vars = std.AutoHashMapUnmanaged(u32, void){};
+    var output_vars = std.AutoHashMapUnmanaged(u32, void).empty;
     defer output_vars.deinit(alloc);
     var in_func = false;
     var pos: u32 = 5;
@@ -8697,7 +8697,7 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
         pos = ie;
     }
     // Find OpEntryPoint interface IDs that have no definition
-    var orphaned = std.AutoHashMapUnmanaged(u32, void){};
+    var orphaned = std.AutoHashMapUnmanaged(u32, void).empty;
     defer orphaned.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
@@ -8727,7 +8727,7 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
     }
 
     // Phase 2: Count real uses — only count actual ID operand positions using getOpInfo
-    var use_count = std.AutoHashMapUnmanaged(u32, u32){};
+    var use_count = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer use_count.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
@@ -8843,7 +8843,7 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
     }
 
     // Build unused set (but never remove output variables)
-    var unused = std.AutoHashMapUnmanaged(u32, void){};
+    var unused = std.AutoHashMapUnmanaged(u32, void).empty;
     defer unused.deinit(alloc);
     var it = global_vars.iterator();
     while (it.next()) |entry| {
@@ -8883,7 +8883,7 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
             if (!found_null) str_end = ie;
 
             // Collect filtered interface IDs
-            var filtered_ids = std.ArrayListUnmanaged(u32){};
+            var filtered_ids = std.ArrayListUnmanaged(u32).empty;
             defer filtered_ids.deinit(alloc);
             var ip: u32 = str_end;
             while (ip < ie) : (ip += 1) {
@@ -9006,9 +9006,9 @@ pub fn dedupFunctionTypes(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
     // Use a simple map: signature hash -> first result ID
     // Since signatures can be variable length, hash the full tuple
-    var seen = std.AutoHashMapUnmanaged(u64, u32){}; // hash -> first_id
+    var seen = std.AutoHashMapUnmanaged(u64, u32).empty; // hash -> first_id
     defer seen.deinit(alloc);
-    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // dup_id -> first_id
+    var replacements = std.AutoHashMapUnmanaged(u32, u32).empty; // dup_id -> first_id
     defer replacements.deinit(alloc);
 
     // First pass: find duplicate function types (OpTypeFunction = opcode 33)
@@ -9200,10 +9200,10 @@ pub fn foldConstBranches(alloc: std.mem.Allocator, words: []const u32) error{Out
     // Phase 2: Find foldable OpBranchConditional instructions
     // An OpBranchConditional with constant condition can become OpBranch.
     // Build set of positions to fold.
-    var fold_positions = std.AutoHashMapUnmanaged(u32, u32){}; // position -> target label
+    var fold_positions = std.AutoHashMapUnmanaged(u32, u32).empty; // position -> target label
     defer fold_positions.deinit(alloc);
     // Also track associated SelectionMerge positions to remove
-    var merge_positions = std.AutoHashMapUnmanaged(u32, void){}; // position of SelectionMerge to remove
+    var merge_positions = std.AutoHashMapUnmanaged(u32, void).empty; // position of SelectionMerge to remove
     defer merge_positions.deinit(alloc);
 
     pos = 5;
@@ -9308,7 +9308,7 @@ pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error
     if (bound <= 1) return words;
 
     // Phase 1: Build map of label_id -> position of OpLabel instruction
-    var label_pos = std.AutoHashMapUnmanaged(u32, u32){};
+    var label_pos = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer label_pos.deinit(alloc);
     // Also collect function entry labels
     var func_entries = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
@@ -9524,7 +9524,7 @@ pub fn foldConstCompositeExtract(alloc: std.mem.Allocator, words: []const u32) e
     if (bound <= 1) return words;
 
     // Phase 1: Build map of OpConstantComposite: result_id -> start_pos, component_count
-    var const_comp = std.AutoHashMapUnmanaged(u32, struct { start: u32, count: u32 }){};
+    var const_comp = std.AutoHashMapUnmanaged(u32, struct { start: u32, count: u32 }).empty;
     defer const_comp.deinit(alloc);
 
     var pos: u32 = 5;
@@ -9546,7 +9546,7 @@ pub fn foldConstCompositeExtract(alloc: std.mem.Allocator, words: []const u32) e
     if (const_comp.count() == 0) return words;
 
     // Phase 2: Find OpCompositeExtract from constant composites and build replacement map
-    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // extract_result_id -> component_id
+    var replacements = std.AutoHashMapUnmanaged(u32, u32).empty; // extract_result_id -> component_id
     defer replacements.deinit(alloc);
     var to_skip = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
     defer to_skip.deinit();
@@ -9670,7 +9670,7 @@ pub fn simplifyTrivialPhi(alloc: std.mem.Allocator, words: []const u32) error{Ou
     if (bound <= 1) return words;
 
     // Phase 1: Find OpPhi instructions where all incoming values are the same ID
-    var replacements = std.AutoHashMapUnmanaged(u32, u32){}; // phi_result_id -> replacement_id
+    var replacements = std.AutoHashMapUnmanaged(u32, u32).empty; // phi_result_id -> replacement_id
     defer replacements.deinit(alloc);
 
     var pos: u32 = 5;

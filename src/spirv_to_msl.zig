@@ -2,6 +2,7 @@
 //! SPIR-V binary → MSL (Metal Shading Language) cross-compiler backend.
 //! Self-contained: includes its own parser, name resolver, and MSL emitter.
 
+const compat = @import("compat.zig");
 const std = @import("std");
 const spirv = @import("spirv.zig");
 
@@ -61,11 +62,8 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) return try alloc.dupe(u8, base_name);
     // Use a stack buffer to avoid heap allocation for typical access chains
-    var stack_buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&stack_buf);
-    var writer = fbs.writer();
-    var overflow = false;
-    writer.writeAll(base_name) catch { overflow = true; };
+    var writer = compat.StackBufWriter(512).init();
+    writer.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
     for (indices) |index_id| {
         const idx_inst = getDef(m, index_id);
@@ -74,9 +72,9 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 const val = def.words[3];
                 const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
                 if (is_vector) {
-                    writer.writeAll(swizzleChar(val)) catch { overflow = true; };
+                    writer.writeAll(swizzleChar(val));
                 } else {
-                    writer.print("[{d}]", .{val}) catch { overflow = true; };
+                    writer.print("[{d}]", .{val});
                 }
                 if (cur_type) |tid| {
                     const ti = getDef(m, tid);
@@ -87,17 +85,16 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                         else { cur_type = null; }
                     }
                 }
-            } else { writer.print("[{s}]", .{names.get(index_id) orelse "i"}) catch { overflow = true; }; }
-        } else { writer.print("[{s}]", .{names.get(index_id) orelse "i"}) catch { overflow = true; }; }
+            } else { writer.print("[{s}]", .{names.get(index_id) orelse "i"}); }
+        } else { writer.print("[{s}]", .{names.get(index_id) orelse "i"}); }
     }
-    if (!overflow) {
-        const len = fbs.pos;
-        return try alloc.dupe(u8, stack_buf[0..len]);
+    if (!writer.overflowed()) {
+            return try alloc.dupe(u8, writer.written());
     }
     // Fallback to heap for long chains
     var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
     defer buf.deinit(alloc);
-    try buf.writer(alloc).writeAll(base_name);
+    try buf.appendSlice(alloc, base_name);
     cur_type = resolvePointee(m, base_id);
     for (indices) |index_id| {
         const idx_inst = getDef(m, index_id);
@@ -105,8 +102,8 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
             if (def.op == .Constant and def.words.len > 3) {
                 const val = def.words[3];
                 const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
-                if (is_vector) { try buf.writer(alloc).writeAll(swizzleChar(val)); }
-                else { try buf.writer(alloc).print("[{d}]", .{val}); }
+                if (is_vector) { try buf.appendSlice(alloc, swizzleChar(val)); }
+                else { try buf.print(alloc, "[{d}]", .{val}); }
                 if (cur_type) |tid| {
                     const ti = getDef(m, tid);
                     if (ti) |tinst| {
@@ -116,8 +113,8 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                         else { cur_type = null; }
                     }
                 }
-            } else { try buf.writer(alloc).print("[{s}]", .{names.get(index_id) orelse "i"}); }
-        } else { try buf.writer(alloc).print("[{s}]", .{names.get(index_id) orelse "i"}); }
+            } else { try buf.print(alloc, "[{s}]", .{names.get(index_id) orelse "i"}); }
+        } else { try buf.print(alloc, "[{s}]", .{names.get(index_id) orelse "i"}); }
     }
     return buf.toOwnedSlice(alloc);
 }
@@ -259,7 +256,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     var output = std.ArrayList(u8).initCapacity(alloc, 4096) catch return error.OutOfMemory;
     var output_owned = true;
     defer if (output_owned) output.deinit(alloc);
-    const w = output.writer(alloc);
+    const w = compat.listWriter(&output, alloc);
 
     // MSL header
     try w.writeAll("#include <metal_stdlib>\n#include <simd/simd.h>\n\nusing namespace metal;\n\n");
@@ -354,9 +351,9 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
                     } else {
                         var buf = std.ArrayList(u8).initCapacity(alloc, 64) catch continue;
                         defer buf.deinit(alloc);
-                        buf.writer(alloc).print("{s}(", .{vt}) catch continue;
-                        for (constituents, 0..) |cid, i| { if (i > 0) buf.writer(alloc).writeAll(", ") catch continue; buf.writer(alloc).writeAll(names.get(cid) orelse "0.0") catch continue; }
-                        buf.writer(alloc).writeAll(")") catch continue;
+                        buf.print(alloc, "{s}(", .{vt}) catch continue;
+                        for (constituents, 0..) |cid, i| { if (i > 0) buf.appendSlice(alloc, ", ") catch continue; buf.appendSlice(alloc, names.get(cid) orelse "0.0") catch continue; }
+                        buf.appendSlice(alloc, ")") catch continue;
                         const lit = buf.toOwnedSlice(alloc) catch continue;
                         if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
                     }

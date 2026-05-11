@@ -8,23 +8,23 @@ pub fn optimizeMatVecMul(alloc: std.mem.Allocator, words: []const u32) error{Out
     if (bound <= 1) return words;
 
     // Phase 1: Build instruction maps
-    var extract_src = std.AutoHashMapUnmanaged(u32, u32){};
+    var extract_src = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer extract_src.deinit(alloc);
-    var extract_idx = std.AutoHashMapUnmanaged(u32, u32){};
+    var extract_idx = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer extract_idx.deinit(alloc);
-    var vts_vec = std.AutoHashMapUnmanaged(u32, u32){};
+    var vts_vec = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer vts_vec.deinit(alloc);
-    var vts_scalar = std.AutoHashMapUnmanaged(u32, u32){};
+    var vts_scalar = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer vts_scalar.deinit(alloc);
-    var vts_type = std.AutoHashMapUnmanaged(u32, u32){};
+    var vts_type = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer vts_type.deinit(alloc);
-    var fadd_a = std.AutoHashMapUnmanaged(u32, u32){};
+    var fadd_a = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer fadd_a.deinit(alloc);
-    var fadd_b = std.AutoHashMapUnmanaged(u32, u32){};
+    var fadd_b = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer fadd_b.deinit(alloc);
-    var use_count = std.AutoHashMapUnmanaged(u32, u32){};
+    var use_count = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer use_count.deinit(alloc);
-    var float_const_val = std.AutoHashMapUnmanaged(u32, u32){};
+    var float_const_val = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer float_const_val.deinit(alloc);
 
     var pos: u32 = 5;
@@ -97,7 +97,7 @@ pub fn optimizeMatVecMul(alloc: std.mem.Allocator, words: []const u32) error{Out
     var chains = std.ArrayList(Chain).initCapacity(alloc, 4) catch return words;
     defer chains.deinit(alloc);
 
-    var to_remove = std.AutoHashMapUnmanaged(u32, void){};
+    var to_remove = std.AutoHashMapUnmanaged(u32, void).empty;
     defer to_remove.deinit(alloc);
 
     var sit = src_groups.iterator();
@@ -157,14 +157,14 @@ pub fn optimizeMatVecMul(alloc: std.mem.Allocator, words: []const u32) error{Out
         if (!all_ok or num_rows < 3) continue;
 
         // Build set of VTS IDs
-        var vts_set = std.AutoHashMapUnmanaged(u32, void){};
+        var vts_set = std.AutoHashMapUnmanaged(u32, void).empty;
         defer vts_set.deinit(alloc);
         for (chain_vts[0..num_rows]) |vid| {
             if (vid != 0) try vts_set.put(alloc, vid, {});
         }
 
         // Find FAdds connecting VTS results
-        var fadd_set = std.AutoHashMapUnmanaged(u32, void){};
+        var fadd_set = std.AutoHashMapUnmanaged(u32, void).empty;
         defer fadd_set.deinit(alloc);
 
         var changed = true;
@@ -303,7 +303,7 @@ pub fn optimizeMatVecMul(alloc: std.mem.Allocator, words: []const u32) error{Out
     }
 
     // Substitution map
-    var subs = std.AutoHashMapUnmanaged(u32, u32){};
+    var subs = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer subs.deinit(alloc);
     for (chains.items, 0..) |ch, ci| {
         try subs.put(alloc, ch.final_result_id, chain_allocs.items[ci].matmul_id);

@@ -19,7 +19,7 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
         n_blk: u32,
         has_fvars: bool,
     };
-    var funcs = std.ArrayListUnmanaged(FI){};
+    var funcs = std.ArrayListUnmanaged(FI).empty;
     defer {
         for (funcs.items) |f| alloc.free(f.params);
         funcs.deinit(alloc);
@@ -35,7 +35,7 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
             const fid = words[p + 2];
             var fend: u32 = ie;
             var lbl_pos: u32 = 0;
-            var params = std.ArrayListUnmanaged(u32){};
+            var params = std.ArrayListUnmanaged(u32).empty;
             var ret_id: u32 = 0;
             var n_ret: u32 = 0;
             var n_blk: u32 = 0;
@@ -65,7 +65,7 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
     }
 
     // Phase 2: Find entry points, call counts
-    var eps = std.AutoHashMapUnmanaged(u32, void){};
+    var eps = std.AutoHashMapUnmanaged(u32, void).empty;
     defer eps.deinit(alloc);
     p = 5;
     while (p < words.len) {
@@ -75,9 +75,9 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
         p += wc;
     }
 
-    var ccounts = std.AutoHashMapUnmanaged(u32, u32){};
+    var ccounts = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer ccounts.deinit(alloc);
-    var csites = std.AutoHashMapUnmanaged(u32, u32){};
+    var csites = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer csites.deinit(alloc);
     p = 5;
     while (p < words.len) {
@@ -112,7 +112,7 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
 
     // Safety check: verify no ID defined in the callee body is referenced
     // by other functions (outside the callee). If so, we can't safely inline.
-    var callee_defs = std.AutoHashMapUnmanaged(u32, void){};
+    var callee_defs = std.AutoHashMapUnmanaged(u32, void).empty;
     defer callee_defs.deinit(alloc);
     var bp2: u32 = fi.body_after_entry;
     while (bp2 < fi.body_end) {
@@ -156,7 +156,7 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
     }
 
     // Phase 4: Build ID remap
-    var idmap = std.AutoHashMapUnmanaged(u32, u32){};
+    var idmap = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer idmap.deinit(alloc);
 
     const cwc: u32 = words[cpos] >> 16;

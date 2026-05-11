@@ -280,7 +280,7 @@ test "compile shader with uniforms" {
 
 test "compileToSPIRVWithDiagnostics reports error location" {
     const alloc = std.testing.allocator;
-    var diags = std.ArrayListUnmanaged(diagnostic.Diagnostic){};
+    var diags = std.ArrayListUnmanaged(diagnostic.Diagnostic).empty;
     defer {
         for (diags.items) |d| alloc.free(d.message);
         diags.deinit(alloc);
