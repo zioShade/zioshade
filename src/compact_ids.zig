@@ -119,6 +119,8 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         136 => rt(2, "ii"),        // OpFDiv
         137 => rt(2, "ii"),        // OpUMod
         138 => rt(2, "ii"),        // OpSRem
+        139 => rt(2, "ii"),        // OpSMod
+        140 => rt(2, "ii"),        // OpFRem
         141 => rt(2, "ii"),        // OpFMod
         142 => rt(2, "ii"),        // OpVectorTimesScalar
         143 => rt(2, "ii"),        // OpMatrixTimesScalar
