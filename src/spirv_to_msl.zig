@@ -12,6 +12,7 @@ const ParsedModule = common.ParsedModule;
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
 const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32 };
 const TextureDecl = struct { name: []const u8, binding: u32 };
+const MemberKey = struct { struct_id: u32, member_index: u32 };
 
 // ---- Helpers ----
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction { if (id >= m.id_defs.len) return null; const i = m.id_defs[id] orelse return null; if (i >= m.instructions.len) return null; return m.instructions[i]; }
@@ -281,6 +282,10 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     collectNames(aa, &module, &names);
     try collectDecorations(aa, &module, &decs);
 
+    var member_offsets = std.AutoHashMap(MemberKey, u32).init(aa);
+    defer member_offsets.deinit();
+    collectMemberOffsets(&module, &member_offsets);
+
     var cbuffers = std.ArrayList(CbufferDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
     defer cbuffers.deinit(aa);
     var textures = std.ArrayList(TextureDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
@@ -301,7 +306,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // Emit uniform blocks as structs
     for (cbuffers.items) |cb| {
         try w.print("struct {s}\n{{\n", .{cb.name});
-        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa);
+        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa, &member_offsets);
         try w.writeAll("};\n\n");
     }
 
@@ -328,7 +333,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     if (storage_buffers.items.len > 0) {
         for (storage_buffers.items) |sb| {
             try w.print("struct {s}\n{{\n", .{sb.name});
-            try emitStructMembers(&module, &names, sb.type_id, sb.name, w, aa);
+            try emitStructMembers(&module, &names, sb.type_id, sb.name, w, aa, &member_offsets);
             try w.writeAll("};\n\n");
         }
     }
@@ -460,6 +465,20 @@ fn collectDecorations(alloc: std.mem.Allocator, m: *const ParsedModule, decs: *s
     for (m.instructions) |inst| { if (inst.op == .Decorate and inst.words.len >= 3) { const id = inst.words[1]; const dec: spirv.Decoration = @enumFromInt(inst.words[2]); const extra = if(inst.words.len>3) inst.words[3..] else &[_]u32{}; const gop = try decs.getOrPut(id); if(!gop.found_existing) gop.value_ptr.* = std.ArrayList(DecorationEntry).empty; try gop.value_ptr.append(alloc, .{.decoration=dec,.extra=extra}); } }
 }
 
+/// Collect OpMemberDecorate offset decorations into a map: (struct_id, member_index) -> byte_offset.
+fn collectMemberOffsets(m: *const ParsedModule, offsets: *std.AutoHashMap(MemberKey, u32)) void {
+    for (m.instructions) |inst| {
+        // OpMemberDecorate: [opcode+count, struct_id, member_index, decoration, extra...]
+        if (inst.op == .MemberDecorate and inst.words.len >= 5) {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[3]);
+            if (dec == .offset) {
+                const key = MemberKey{ .struct_id = inst.words[1], .member_index = inst.words[2] };
+                offsets.put(key, inst.words[4]) catch {};
+            }
+        }
+    }
+}
+
 fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), cb: *std.ArrayList(CbufferDecl), tex: *std.ArrayList(TextureDecl), alloc: std.mem.Allocator) void {
     for (m.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
@@ -474,12 +493,21 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
     }
 }
 
-fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, cb_name: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
+fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, cb_name: []const u8, w: anytype, alloc: std.mem.Allocator, member_offsets: *const std.AutoHashMap(MemberKey, u32)) !void {
     _ = cb_name;
+    _ = member_offsets;
     const inst = getDef(m, struct_id) orelse return; if (inst.op != .TypeStruct) return;
     for (inst.words[2..], 0..) |mt_id, mi| {
-        const mti = getDef(m, mt_id); if (mti) |mi2| { if (mi2.op == .TypeArray and mi2.words.len > 3) { const et = try mslPackedType(m, mi2.words[2], names, alloc); const li = getDef(m, mi2.words[3]); const lv: u32 = if(li)|l| l.words[3] else 1; try w.print("    {s} _m{d}[{d}];\n", .{et, mi, lv}); continue; } }
-        const mt = try mslPackedType(m, mt_id, names, alloc); try w.print("    {s} _m{d};\n", .{mt, mi});
+        const mti = getDef(m, mt_id);
+        if (mti) |mi2| { if (mi2.op == .TypeArray and mi2.words.len > 3) {
+            const et = try mslPackedType(m, mi2.words[2], names, alloc);
+            const li = getDef(m, mi2.words[3]);
+            const lv: u32 = if(li)|l| l.words[3] else 1;
+            try w.print("    {s} _m{d}[{d}];\n", .{et, mi, lv});
+            continue;
+        } }
+        const mt = try mslPackedType(m, mt_id, names, alloc);
+        try w.print("    {s} _m{d};\n", .{mt, mi});
     }
 }
 
