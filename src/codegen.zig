@@ -112,6 +112,7 @@ pub fn generate(
     cg.words.items[3] = cg.next_id;
 
     const raw = try cg.words.toOwnedSlice(alloc);
+    // DEBUG: dump raw SPIR-V before optimization
     const merged = compact_ids.mergeAccessChains(alloc, raw) catch raw;
     if (merged.ptr != raw.ptr) alloc.free(raw);
     const dce = compact_ids.deadCodeElim(alloc, merged) catch return merged;
