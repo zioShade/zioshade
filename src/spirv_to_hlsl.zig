@@ -123,7 +123,7 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         => if (words.len > 2) words[2] else null,
 
         // Most computation ops: type=word[1], result=word[2]
-        .Load, .AccessChain, .CompositeConstruct, .CompositeExtract,
+        .Load, .AccessChain, .CompositeConstruct, .CompositeExtract, .CompositeInsert,
         .VectorShuffle, .SampledImage, .ImageSampleImplicitLod,
         .ImageSampleExplicitLod, .ImageFetch, .ImageGather,
         .ImageQuerySizeLod, .ImageQuerySize,
@@ -1513,6 +1513,31 @@ fn emitInstruction(
                 }
             }
             try w.writeAll(";\n");
+        },
+        .CompositeInsert => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const rname = names.get(inst.words[2]) orelse "v";
+            const object = names.get(inst.words[3]) orelse "obj";
+            const composite = names.get(inst.words[4]) orelse "comp";
+            // Copy composite, then overwrite the indexed member with object
+            try w.print("    {s} {s} = {s};\n", .{ rt, rname, composite });
+            // Determine if parent is vector (use .xyzw) or struct (use _mN)
+            const parent_type = getTypeOf(module, inst.words[4]);
+            const is_vec = if (parent_type) |pt| blk: {
+                const pt_inst = getDef(module, pt);
+                break :blk pt_inst != null and pt_inst.?.op == .TypeVector;
+            } else false;
+            try w.print("    {s}", .{rname});
+            for (inst.words[5..]) |index| {
+                if (is_vec) {
+                    try w.writeAll(switch (index) {
+                        0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
+                    });
+                } else {
+                    try w.print("._m{d}", .{index});
+                }
+            }
+            try w.print(" = {s};\n", .{object});
         },
         .VectorShuffle => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
