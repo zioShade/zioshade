@@ -267,6 +267,33 @@ pub fn spirvToHLSL(
     }
     detectOutParams(&module, entry_id, &out_param_info, aa);
 
+    // Emit specialization constants as HLSL static const declarations
+    for (module.instructions) |inst| {
+        if (inst.op == .SpecConstant and inst.words.len > 3) {
+            const result_id = inst.words[2];
+            const name = names.get(result_id) orelse continue;
+            const type_id = inst.words[1];
+            const type_str = try hlslType(&module, type_id, &names, aa);
+            const spec_id: ?u32 = blk: {
+                const dec_list = decorations.get(result_id) orelse break :blk null;
+                for (dec_list.items) |d| {
+                    if (d.decoration == .spec_id and d.extra.len > 0) break :blk d.extra[0];
+                }
+                break :blk null;
+            };
+            if (spec_id) |sid| {
+                const default_val = if (inst.words.len > 3) inst.words[3] else 0;
+                if (std.mem.eql(u8, type_str, "float")) {
+                    const fv: f32 = @bitCast(default_val);
+                    try w.print("// specialization constant {d}\nstatic const {s} {s} = {d};\n", .{sid, type_str, name, fv});
+                } else {
+                    try w.print("// specialization constant {d}\nstatic const {s} {s} = {d};\n", .{sid, type_str, name, default_val});
+                }
+            }
+        }
+    }
+    try w.writeAll("\n");
+
     // Emit non-entry functions first (user-defined functions)
     for (func_ids.items) |fid| {
         if (fid == entry_id) continue; // emit entry last

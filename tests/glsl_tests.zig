@@ -1126,3 +1126,22 @@ test "T19.3: swizzle chain" {
     try assertContains(glsl, ".x");
     try assertContains(glsl, ".y");
 }
+
+// === Specialization constant tests (Issue #6) ===
+
+test "specialization constant compiles to GLSL with layout constant_id" {
+    const source =
+        \\#version 450
+        \\layout(constant_id = 0) const uint WORKGROUP_SIZE = 64;
+        \\layout(constant_id = 1) const float SCALE = 1.0;
+        \\layout(local_size_x = WORKGROUP_SIZE) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint idx = gl_GlobalInvocationID.x;
+        \\    values[idx] = values[idx] * SCALE;
+        \\}
+    ;
+    const glsl = try compileToGlslStage(source, .compute);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "constant_id");
+}
