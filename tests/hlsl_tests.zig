@@ -2057,10 +2057,17 @@ test "WIN1: wintty CRT shader compiles to HLSL" {
     // Must produce valid HLSL structure
     try assertContains(hlsl, "main");
     try assertContains(hlsl, "mainImage");
-    // Must have cbuffer with binding remapped to b0
+    // Must have cbuffer with binding
     try assertContains(hlsl, "cbuffer");
+    try assertContains(hlsl, "register(b");
     // Must have texture sampling
     try assertContains(hlsl, "Sample");
+    // Must NOT use array indexing for cbuffer access (DXC rejects this)
+    try assertNotContains(hlsl, "Globals[0]");
+    try assertNotContains(hlsl, "Globals[1]");
+    // Must use proper _mN member access
+    try assertContains(hlsl, "Globals_m");
+    try assertNotContains(hlsl, "unhandled");
 }
 
 test "WIN2: wintty focus shader compiles to HLSL" {
@@ -2077,6 +2084,9 @@ test "WIN2: wintty focus shader compiles to HLSL" {
     try assertContains(hlsl, "Texture2D");
     try assertContains(hlsl, ".Sample(");
     try assertContains(hlsl, "lerp"); // mix() → lerp()
+    // Must NOT use array indexing for cbuffer access
+    try assertNotContains(hlsl, "Globals[0]");
+    try assertNotContains(hlsl, "unhandled");
 }
 
 test "WIN-DXC: dump HLSL for DXC validation" {
@@ -13355,3 +13365,6 @@ test "CBUFFER_ACCESS: cbuffer member access uses _mN suffix not array index" {
     try assertContains(hlsl, "Globals_m0");
     try assertContains(hlsl, "Globals_m1");
 }
+
+// ---------------------------------------------------------------------------
+// wintty integration tests — real shadertoy shaders
