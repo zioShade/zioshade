@@ -193,11 +193,12 @@ fn glslType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, [
         .TypeVoid => "void",
         .TypeBool => "bool",
         .TypeInt => if (inst.words.len > 3 and inst.words[3] != 0) "int" else "uint",
-        .TypeFloat => "float",
+        .TypeFloat => if (inst.words.len > 2 and inst.words[2] == 16) "float16_t" else "float",
         .TypeVector => {
             const s = try glslType(m, inst.words[2], names, alloc);
             const c = inst.words[3];
             if (std.mem.eql(u8,s,"float")) { if(c>=1 and c<=4) return ([_][]const u8{"","float","vec2","vec3","vec4"})[c]; }
+            else if (std.mem.eql(u8,s,"float16_t")) { if(c>=1 and c<=4) return ([_][]const u8{"","float16_t","f16vec2","f16vec3","f16vec4"})[c]; }
             else if (std.mem.eql(u8,s,"int")) { if(c>=1 and c<=4) return ([_][]const u8{"","int","ivec2","ivec3","ivec4"})[c]; }
             else if (std.mem.eql(u8,s,"uint")) { if(c>=1 and c<=4) return ([_][]const u8{"","uint","uvec2","uvec3","uvec4"})[c]; }
             else if (std.mem.eql(u8,s,"bool")) { if(c>=1 and c<=4) return ([_][]const u8{"","bool","bvec2","bvec3","bvec4"})[c]; }
