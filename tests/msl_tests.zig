@@ -503,3 +503,40 @@ test "T11.2: swizzle access" {
     defer alloc.free(msl);
     try assertContains(msl, "[0]");
 }
+
+// === Subgroup operation tests (Issue #3) ===
+
+test "subgroupAll compiles to MSL with simd_all" {
+    const source =
+        \\#version 450
+        \\#extension GL_KHR_shader_subgroup_vote : enable
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint idx = gl_GlobalInvocationID.x;
+        \\    bool all_pos = subgroupAll(values[idx] > 0.0);
+        \\    if (all_pos) { values[idx] = 1.0; }
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "simd_all");
+}
+
+test "subgroupAny compiles to MSL with simd_any" {
+    const source =
+        \\#version 450
+        \\#extension GL_KHR_shader_subgroup_vote : enable
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint idx = gl_GlobalInvocationID.x;
+        \\    bool any_pos = subgroupAny(values[idx] > 0.0);
+        \\    if (any_pos) { values[idx] = 1.0; }
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "simd_any");
+}
+

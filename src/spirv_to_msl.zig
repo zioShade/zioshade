@@ -1109,6 +1109,154 @@ fn emitInstruction(
         .MemoryBarrier => {
             try w.writeAll("    threadgroup_barrier(mem_flags::mem_device);\n");
         },
+
+        // Subgroup operations → MSL simd_* functions
+        .GroupNonUniformElect => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            try w.print("    bool {s} = simd_is_first();\n", .{rn});
+        },
+        .GroupNonUniformAll => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_all({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformAny => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_any({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformAllEqual => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_all({s} == simd_broadcast({s}, 0));\n", .{rtt, rn, val, val});
+        },
+        .GroupNonUniformBroadcast => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const lane = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = simd_broadcast({s}, {s});\n", .{rtt, rn, val, lane});
+        },
+        .GroupNonUniformBroadcastFirst => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_broadcast({s}, 0);\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBallot => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_ballot({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformShuffle => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const lane = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = simd_shuffle({s}, {s});\n", .{rtt, rn, val, lane});
+        },
+        .GroupNonUniformShuffleXor => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const mask = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = simd_shuffle_xor({s}, {s});\n", .{rtt, rn, val, mask});
+        },
+        .GroupNonUniformShuffleUp => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const delta = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = simd_shuffle_up({s}, {s});\n", .{rtt, rn, val, delta});
+        },
+        .GroupNonUniformShuffleDown => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const delta = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = simd_shuffle_down({s}, {s});\n", .{rtt, rn, val, delta});
+        },
+        .GroupNonUniformIAdd => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_sum({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformFAdd => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_sum({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformIMul => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_product({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformFMul => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_product({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_min({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_max({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBitwiseAnd => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_and({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBitwiseOr => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_or({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBitwiseXor => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_xor({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformLogicalAnd => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_all({s}) ? true : false;\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformLogicalOr => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = simd_any({s}) ? true : false;\n", .{rtt, rn, val});
+        },
+        // SubgroupAllKHR / SubgroupAnyKHR (older extension equivalents)
+        .SubgroupAllKHR => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[3]) orelse "x";
+            try w.print("    bool {s} = simd_all({s});\n", .{rn, val});
+        },
+        .SubgroupAnyKHR => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[3]) orelse "x";
+            try w.print("    bool {s} = simd_any({s});\n", .{rn, val});
+        },
         .Return => {
             if (!(is_frag and ovid != null)) try w.writeAll("    return;\n");
         },
