@@ -1773,6 +1773,153 @@ fn emitInstruction(
         .ControlBarrier => try w.writeAll("    GroupMemoryBarrierWithGroupSync();\n"),
         .MemoryBarrier => try w.writeAll("    DeviceMemoryBarrier();\n"),
 
+        // Subgroup operations → HLSL Wave* intrinsics (SM6.0+)
+        .GroupNonUniformElect => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            try w.print("    bool {s} = WaveIsFirstLane();\n", .{rn});
+        },
+        .GroupNonUniformAll => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveAllTrue({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformAny => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveAnyTrue({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformAllEqual => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveAllEqual({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBroadcast => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const lane = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, {s});\n", .{rtt, rn, val, lane});
+        },
+        .GroupNonUniformBroadcastFirst => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveReadLaneFirst({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBallot => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveBallot({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformShuffle => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const lane = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, {s});\n", .{rtt, rn, val, lane});
+        },
+        .GroupNonUniformShuffleXor => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const mask = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID ^ {s});\n", .{rtt, rn, val, mask});
+        },
+        .GroupNonUniformShuffleUp => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const delta = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID - {s});\n", .{rtt, rn, val, delta});
+        },
+        .GroupNonUniformShuffleDown => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            const delta = names.get(inst.words[5]) orelse "0";
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID + {s});\n", .{rtt, rn, val, delta});
+        },
+        .GroupNonUniformIAdd => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveSum({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformFAdd => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveSum({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformIMul => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveProduct({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformFMul => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveProduct({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveMin({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveMax({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBitwiseAnd => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveBitAnd({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBitwiseOr => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveBitOr({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformBitwiseXor => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveBitXor({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformLogicalAnd => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveAllTrue({s});\n", .{rtt, rn, val});
+        },
+        .GroupNonUniformLogicalOr => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[4]) orelse "x";
+            try w.print("    {s} {s} = WaveActiveAnyTrue({s});\n", .{rtt, rn, val});
+        },
+        .SubgroupAllKHR => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[3]) orelse "x";
+            try w.print("    bool {s} = WaveActiveAllTrue({s});\n", .{rn, val});
+        },
+        .SubgroupAnyKHR => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[3]) orelse "x";
+            try w.print("    bool {s} = WaveActiveAnyTrue({s});\n", .{rn, val});
+        },
+
         // Skip non-code-emitting ops
         .Constant, .ConstantTrue, .ConstantFalse, .ConstantComposite, .SpecConstant, .Undef => {},
         .Function, .FunctionParameter, .FunctionEnd => {},

@@ -13290,3 +13290,39 @@ test "T596.1: tessellation evaluation triangle" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "main");
 }
+
+// === Subgroup operation tests (Issue #3) ===
+
+test "subgroupAll compiles to HLSL with WaveActiveAllTrue" {
+    const source =
+        \\#version 450
+        \\#extension GL_KHR_shader_subgroup_vote : enable
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint idx = gl_GlobalInvocationID.x;
+        \\    bool all_pos = subgroupAll(values[idx] > 0.0);
+        \\    if (all_pos) { values[idx] = 1.0; }
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "WaveActiveAllTrue");
+}
+
+test "subgroupAny compiles to HLSL with WaveActiveAnyTrue" {
+    const source =
+        \\#version 450
+        \\#extension GL_KHR_shader_subgroup_vote : enable
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint idx = gl_GlobalInvocationID.x;
+        \\    bool any_pos = subgroupAny(values[idx] > 0.0);
+        \\    if (any_pos) { values[idx] = 1.0; }
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "WaveActiveAnyTrue");
+}
