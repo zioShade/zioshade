@@ -114,7 +114,7 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         // --- Arithmetic ---
         126 => rt(2, "i"),         // OpSNegate
         127 => rt(2, "i"),         // OpFNegate
-        128...133 => rt(2, "ii"),  // OpIAdd..OpFMul
+        128...134 => rt(2, "ii"),  // OpIAdd..OpUDiv
         135 => rt(2, "ii"),        // OpSDiv
         136 => rt(2, "ii"),        // OpFDiv
         137 => rt(2, "ii"),        // OpUMod
