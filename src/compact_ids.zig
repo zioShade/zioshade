@@ -30,6 +30,7 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
     // fixed: 0=none, 1=result_type, 2=result_type+result, 3=result_only
     return switch (opcode) {
         // --- Core ---
+        0 => rt(0, ""),           // OpNop
         1 => rt(2, ""),          // OpUndef: result_type, result
         3 => rt(0, "lls"),         // OpSource: lang, ver, [file(id), source(str)] -- simplified: treat file as lit
         5 => rt(0, "is"),          // OpName
@@ -84,6 +85,8 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         79 => rt(2, "iiL"),        // OpVectorShuffle: vec1, vec2, literal-components...
         80 => rt(2, "I"),          // OpCompositeConstruct: constituents...
         81 => rt(2, "iL"),         // OpCompositeExtract: composite, literal-indexes...
+        82 => rt(2, "iiL"),        // OpCompositeInsert: object, composite, literal-indexes...
+        83 => rt(2, "i"),          // OpCopyObject
         // --- Image ---
         84 => rt(2, "i"),          // OpTranspose
         86 => rt(2, "ii"),         // OpSampledImage
@@ -92,7 +95,9 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         89 => rt(2, "iiiM"),       // OpImageSampleDrefImplicitLod: sampled, coord, dref, [img-ops]
         90 => rt(2, "iiiM"),        // OpImageSampleDrefExplicitLod: sampled, coord, dref, img-ops
         91 => rt(2, "iiM"),        // OpImageSampleProjImplicitLod
+        92 => rt(2, "iiM"),        // OpImageSampleProjExplicitLod
         93 => rt(2, "iiii"),       // OpImageSampleProjDrefImplicitLod
+        94 => rt(2, "iiiiM"),      // OpImageSampleProjDrefExplicitLod
         95 => rt(2, "iiM"),        // OpImageFetch: image, coord, [img-ops]
         96 => rt(2, "iii"),        // OpImageGather: sampled, coord, component
         97 => rt(2, "iiii"),       // OpImageDrefGather
@@ -109,7 +114,9 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         110 => rt(2, "i"),         // OpConvertFToS
         111 => rt(2, "i"),         // OpConvertSToF
         112 => rt(2, "i"),         // OpConvertUToF
+        113 => rt(2, "i"),         // OpUConvert
         114 => rt(2, "i"),         // OpSConvert
+        115 => rt(2, "i"),         // OpFConvert
         124 => rt(2, "i"),         // OpBitcast
         // --- Arithmetic ---
         126 => rt(2, "i"),         // OpSNegate
@@ -147,8 +154,11 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         190 => rt(2, "ii"),        // OpFOrdGreaterThanEqual
         // --- Bit ---
         194 => rt(2, "ii"),        // OpShiftRightLogical
+        195 => rt(2, "ii"),        // OpShiftRightArithmetic
         196 => rt(2, "ii"),        // OpShiftLeftLogical
+        197 => rt(2, "ii"),        // OpBitwiseOr
         198...199 => rt(2, "ii"),  // OpBitwiseXor, OpBitwiseAnd
+        204...205 => rt(2, "i"),   // OpBitReverse, OpBitCount
         200 => rt(2, "i"),         // OpNot
         // --- Derivatives ---
         207...215 => rt(2, "i"),   // OpDPdx..OpFwidthCoarse
@@ -158,6 +168,7 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         229 => rt(2, "iiii"),      // OpAtomicExchange: ptr, scope, semantics, value
         230 => rt(2, "iiiiii"),    // OpAtomicCompareExchange: ptr, scope, eq-sem, neq-sem, val, cmp
         234 => rt(2, "iiii"),      // OpAtomicIAdd: ptr, scope, sem, value
+        235 => rt(2, "iiii"),      // OpAtomicISub: ptr, scope, sem, value
         236...242 => rt(2, "iiii"),// OpAtomicSMin..OpAtomicXor
         // --- Control Flow ---
         245 => rt(2, "I"),          // OpPhi: result_type, result, (value, parent)...
@@ -175,7 +186,23 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         4163 => rt(3, "iii"),       // OpTypeTensorARM
         4164 => rt(2, "iil"),       // OpTensorReadARM
         4166 => rt(2, "ii"),        // OpTensorQuerySizeARM
-        4428...4429 => rt(2, "i"),  // OpSubgroupAllKHR, OpSubgroupAnyKHR
+        // --- GroupNonUniform ---
+        333 => rt(2, "i"),       // OpGroupNonUniformElect: scope
+        334...336 => rt(2, "ii"), // OpGroupNonUniformAll..AllEqual: scope, value
+        337 => rt(2, "iii"),      // OpGroupNonUniformBroadcast: scope, value, id
+        338 => rt(2, "ii"),       // OpGroupNonUniformBroadcastFirst: scope, value
+        339...340 => rt(2, "ii"), // OpGroupNonUniformBallot, ReverseBallot: scope, value
+        341 => rt(2, "iii"),      // OpGroupNonUniformBallotBitExtract: scope, value, index
+        342...344 => rt(2, "ili"), // OpGroupNonUniformBallotBitCount..Exclusive: scope, group_op(lit), value
+        345...346 => rt(2, "ii"), // OpGroupNonUniformBallotFindLSB/MSB: scope, value
+        347...350 => rt(2, "iii"), // OpGroupNonUniformShuffle..Down: scope, value, index
+        351...354 => rt(2, "ili"), // OpGroupNonUniformIAdd..FMul: scope, group_op(lit), value
+        355...360 => rt(2, "ili"), // OpGroupNonUniformSMin..FMax: scope, group_op(lit), value
+        361...363 => rt(2, "ili"), // OpGroupNonUniformBitwiseAnd..Xor: scope, group_op(lit), value
+        364...366 => rt(2, "ili"), // OpGroupNonUniformLogicalAnd..Xor: scope, group_op(lit), value
+        367...368 => rt(2, "iii"), // OpGroupNonUniformQuadBroadcast/Swap: scope, value, index
+        4428...4430 => rt(2, "i"),  // OpSubgroupAllKHR, OpSubgroupAnyKHR, OpSubgroupAllEqualKHR
+        4432 => rt(2, "ii"),       // OpGroupNonUniformRotate
         4472 => rt(3, ""),           // OpTypeRayQueryKHR (result_only)
         4473 => rt(0, "iiiiiiii"),   // OpRayQueryInitializeKHR
         4477 => rt(2, "i"),          // OpRayQueryProceedKHR
