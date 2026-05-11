@@ -555,3 +555,28 @@ test "float16_t compiles through the pipeline" {
     try assertContains(msl, "metal_stdlib");
 }
 
+test "CBUFFER_ACCESS: MSL struct member access uses _mN suffix not array index" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform Globals {
+        \\    uniform vec3 iResolution;
+        \\    uniform float iTime;
+        \\};
+        \\layout(location = 0) out vec4 _fragColor;
+        \\void main() {
+        \\    float t = iTime;
+        \\    _fragColor = vec4(t, t, t, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const msl = try glslpp.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    // Must NOT use array indexing for struct member access
+    try assertNotContains(msl, "Globals[0]");
+    try assertNotContains(msl, "Globals[1]");
+    // Must use _mN member access
+    try assertContains(msl, "_m0");
+    try assertContains(msl, "_m1");
+}
+
