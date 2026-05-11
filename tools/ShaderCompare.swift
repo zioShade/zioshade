@@ -106,7 +106,8 @@ func renderFrame(device: MTLDevice, vertLib: MTLLibrary, fragLib: MTLLibrary, te
     sampDesc.minFilter = .linear; sampDesc.magFilter = .linear
     encoder.setFragmentSamplerState(device.makeSamplerState(descriptor: sampDesc)!, index: 0)
 
-    encoder.setFragmentBuffer(globalsBuf, offset: 0, index: 1)
+    encoder.setFragmentBuffer(globalsBuf, offset: 0, index: 0)
+    encoder.setFragmentBuffer(globalsBuf, offset: 0, index: 1)  // glslpp uses binding=1 from wintty shaders
     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     encoder.endEncoding()
 
