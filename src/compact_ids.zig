@@ -4449,6 +4449,10 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
         }
 
         // Apply persistent substitution to non-inlined instructions
+        // Clear sub_map at function boundaries to prevent cross-function substitutions
+        if (opcode == 54) { // OpFunction
+            sub_map.clearRetainingCapacity();
+        }
         if (sub_map.count() > 0) {
             try applySub(alloc, words, pos, ie, sub_map, &result);
         } else {
@@ -4839,11 +4843,41 @@ pub fn fixEarlyAccessVars(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
         // Need fix if AccessChain appears before first Store
         if (first_ac_pos > 0 and (first_store_pos == 0 or first_store_pos > first_ac_pos)) {
+            // Find the function boundary containing this variable
+            // Search backward from var definition for the OpFunction header
+            var func_start: u32 = 5;
+            pos = 5;
+            while (pos < words.len) {
+                const wc_f: u32 = words[pos] >> 16;
+                if (wc_f == 0) break;
+                const ie_f = pos + wc_f;
+                if (ie_f > words.len) break;
+                const op_f: u16 = @truncate(words[pos] & 0xFFFF);
+                if (op_f == 54) func_start = ie_f; // OpFunction — track last function start
+                if (op_f == 56) { // OpFunctionEnd
+                    if (pos > first_ac_pos) break; // past our target
+                }
+                pos = ie_f;
+            }
+            // func_start now points to the first instruction after the OpFunction header
+            // (past the parameters). The entry label is at func_start.
+            // Find the function end (OpFunctionEnd)
+            var func_end: u32 = @intCast(words.len);
+            pos = func_start;
+            while (pos < words.len) {
+                const wc_f2: u32 = words[pos] >> 16;
+                if (wc_f2 == 0) break;
+                const ie_f2 = pos + wc_f2;
+                if (ie_f2 > words.len) break;
+                const op_f2: u16 = @truncate(words[pos] & 0xFFFF);
+                if (op_f2 == 56) { func_end = pos; break; } // OpFunctionEnd
+                pos = ie_f2;
+            }
             // Build set of load result IDs from this variable (to avoid circular: storing load-of-self)
             var loads_from_self = std.DynamicBitSet.initEmpty(alloc, bound) catch return words;
             defer loads_from_self.deinit();
-            pos = 5;
-            while (pos < words.len) {
+            pos = func_start;
+            while (pos < func_end) {
                 const wc_l: u32 = words[pos] >> 16;
                 if (wc_l == 0) break;
                 const ie_l = pos + wc_l;
@@ -4858,8 +4892,8 @@ pub fn fixEarlyAccessVars(alloc: std.mem.Allocator, words: []const u32) error{Ou
             // Find the last instruction before first_ac_pos that produces a value of pointee_type
             // Don't use results of loads from the same variable (circular)
             var best_val_id: u32 = 0;
-            pos = 5;
-            while (pos < words.len and pos < first_ac_pos) {
+            pos = func_start;
+            while (pos < func_end and pos < first_ac_pos) {
                 const wc: u32 = words[pos] >> 16;
                 if (wc == 0) break;
                 const ie = pos + wc;
