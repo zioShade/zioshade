@@ -191,7 +191,7 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
 /// Compact IDs in a SPIR-V binary. Eliminates gaps in the ID space.
 pub fn compactIds(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
     const bound = words[3];
-    if (bound <= 1) return alloc.dupe(u32, words);
+    if (bound <= 1) return words;
 
     // Phase 1: Walk all instructions, collect IDs at known-ID positions.
     // Use a bitset: bit N is set if ID N is used (defined or referenced) in the binary.
@@ -313,8 +313,8 @@ pub fn compactIds(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemor
         }
     }
 
-    // If nothing to compact, return original
-    if (next_new == bound) return alloc.dupe(u32, words);
+    // If nothing to compact, return original (no allocation needed)
+    if (next_new == bound) return words;
 
     // Phase 3: Rewrite the binary
     var result = try std.ArrayList(u32).initCapacity(alloc, words.len);
