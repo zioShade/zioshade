@@ -306,7 +306,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // Emit uniform blocks as structs
     for (cbuffers.items) |cb| {
         try w.print("struct {s}\n{{\n", .{cb.name});
-        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa, &member_offsets);
+        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa, &member_offsets, &decs);
         try w.writeAll("};\n\n");
     }
 
@@ -333,7 +333,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     if (storage_buffers.items.len > 0) {
         for (storage_buffers.items) |sb| {
             try w.print("struct {s}\n{{\n", .{sb.name});
-            try emitStructMembers(&module, &names, sb.type_id, sb.name, w, aa, &member_offsets);
+            try emitStructMembers(&module, &names, sb.type_id, sb.name, w, aa, &member_offsets, &decs);
             try w.writeAll("};\n\n");
         }
     }
@@ -493,16 +493,75 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
     }
 }
 
-fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, cb_name: []const u8, w: anytype, alloc: std.mem.Allocator, member_offsets: *const std.AutoHashMap(MemberKey, u32)) !void {
+/// Compute natural byte size of a SPIR-V scalar/vector type.
+fn typeNatSize(m: *const ParsedModule, type_id: u32) u32 {
+    const inst = getDef(m, type_id) orelse return 4;
+    return switch (inst.op) {
+        .TypeFloat => 4,
+        .TypeInt => 4,
+        .TypeVector => v: {
+            const count = inst.words[3];
+            const elem_sz = typeNatSize(m, inst.words[2]);
+            break :v count * elem_sz;
+        },
+        .TypeMatrix => v: {
+            const cols = inst.words[3];
+            const rows = getDef(m, inst.words[2]) orelse break :v 16;
+            const row_count = if (rows.op == .TypeVector) rows.words[3] else 1;
+            break :v cols * row_count * 4;
+        },
+        else => 4,
+    };
+}
+
+/// Return the widened Metal element type for an array in a UBO struct,
+/// given the SPIR-V ArrayStride. If stride > natural element size, we widen
+/// to match (e.g. float -> float4 for stride=16).
+fn mslWidenedElementType(m: *const ParsedModule, elem_type_id: u32, stride: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
+    const nat = typeNatSize(m, elem_type_id);
+    if (stride <= nat) return try mslPackedType(m, elem_type_id, names, alloc);
+    // Need to widen. Determine the padded vector type.
+    const elem_inst = getDef(m, elem_type_id) orelse return try mslPackedType(m, elem_type_id, names, alloc);
+    if (elem_inst.op == .TypeFloat or elem_inst.op == .TypeInt) {
+        // Scalar: widen to vecN where N = stride / 4
+        const n = stride / 4;
+        if (n == 4) {
+            if (elem_inst.op == .TypeInt) {
+                const signed = elem_inst.words.len > 3 and elem_inst.words[3] != 0;
+                if (!signed) return "uint4";
+            }
+            return "float4";
+        }
+        if (n == 3) return "float3";
+        if (n == 2) return "float2";
+    }
+    if (elem_inst.op == .TypeVector) {
+        const count = elem_inst.words[3];
+        if (count == 3 and stride == 16) {
+            // packed_float3 (12 bytes) widened to float3 (16 bytes in Metal)
+            return "float3";
+        }
+    }
+    // Fallback: use packed type as-is
+    return try mslPackedType(m, elem_type_id, names, alloc);
+}
+
+fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, cb_name: []const u8, w: anytype, alloc: std.mem.Allocator, member_offsets: *const std.AutoHashMap(MemberKey, u32), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry))) !void {
     _ = cb_name;
     _ = member_offsets;
     const inst = getDef(m, struct_id) orelse return; if (inst.op != .TypeStruct) return;
     for (inst.words[2..], 0..) |mt_id, mi| {
         const mti = getDef(m, mt_id);
         if (mti) |mi2| { if (mi2.op == .TypeArray and mi2.words.len > 3) {
-            const et = try mslPackedType(m, mi2.words[2], names, alloc);
+            const elem_type_id = mi2.words[2];
             const li = getDef(m, mi2.words[3]);
             const lv: u32 = if(li)|l| l.words[3] else 1;
+            // Check for ArrayStride decoration on the array type
+            const stride = getDecVal(decs, mt_id, .array_stride);
+            const et = if (stride) |s|
+                try mslWidenedElementType(m, elem_type_id, s, names, alloc)
+            else
+                try mslPackedType(m, elem_type_id, names, alloc);
             try w.print("    {s} _m{d}[{d}];\n", .{et, mi, lv});
             continue;
         } }
