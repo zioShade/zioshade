@@ -161,7 +161,8 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 if (is_vector) {
                     try w.writeAll(swizzleChar(val));
                 } else if (base_is_cb) {
-                    try w.print("{s}_m{d}", .{cb_prefix, val});
+                    // GLSL: use instance.member format — instance is "{cb_prefix}_1", member is "{cb_prefix}_m{val}"
+                    try w.print("{s}_1.{s}_m{d}", .{cb_prefix, cb_prefix, val});
                 } else {
                     try w.print("[{d}]", .{val});
                 }
@@ -973,7 +974,17 @@ fn emitInstruction(
         .FSub, .ISub => try emitBinOp(m, names, inst, "-", w, alloc),
         .FMul, .IMul => try emitBinOp(m, names, inst, "*", w, alloc),
         .FDiv, .SDiv, .UDiv => try emitBinOp(m, names, inst, "/", w, alloc),
-        .FMod, .UMod, .SRem, .FRem => try emitBinOp(m, names, inst, "%", w, alloc),
+        .FMod, .FRem => {
+            // GLSL float modulo uses mod() function, not % operator
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            try w.print("    {s} {s} = mod({s}, {s});\n", .{
+                rtt,
+                names.get(inst.words[2]) orelse "v",
+                names.get(inst.words[3]) orelse "a",
+                names.get(inst.words[4]) orelse "b",
+            });
+        },
+        .UMod, .SRem => try emitBinOp(m, names, inst, "%", w, alloc),
         .FNegate, .SNegate => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = -{s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });

@@ -38,7 +38,7 @@ void mainImage(out vec4 v28, vec2 v29)
 {
     vec3 v30;
     vec2 v31;
-    vec3 v33 = Globals_m0;
+    vec3 v33 = Globals_1.Globals_m0;
     vec2 v34 = vec2(v33.x, v33.y);
     vec2 v35 = v29 / v34;
     vec2 v36 = v35 - vec2(0.5);
@@ -65,7 +65,7 @@ void mainImage(out vec4 v28, vec2 v29)
     vec2 v57 = v56 * 0.92;
     vec2 v58 = v57 + vec2(0.04);
     v31 = v58;
-    float v61 = Globals_m1;
+    float v61 = Globals_1.Globals_m1;
     float v62 = 0.3 * v61;
     float v63 = v58.y;
     float v64 = v63 * 21.0;
@@ -192,7 +192,7 @@ void mainImage(out vec4 v28, vec2 v29)
     v30 = v177;
     }
     float v178 = v29.x;
-    float v179 = v178 % 2.0;
+    float v179 = mod(v178, 2.0);
     float v180 = v179 - 1.0;
     float v181 = v180 * 2.0;
     float v182 = clamp(v181, 0.0, 1.0);
