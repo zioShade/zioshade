@@ -275,11 +275,41 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     defer if (output_owned) output.deinit(alloc);
     const w = compat.listWriter(&output, alloc);
 
+    const is_compute = module.execution_model == .GLCompute;
+
     try w.print("#version {d}\n\n", .{options.version});
+
+    // For compute shaders: emit local_size and SSBO declarations
+    if (is_compute) {
+        const ls = module.local_size;
+        try w.print("layout(local_size_x = {d}, local_size_y = {d}, local_size_z = {d}) in;\n\n", .{ls[0], ls[1], ls[2]});
+    }
+
     for (cbuffers.items) |cb| {
         try w.print("layout(binding = {d}, std140) uniform {s}\n{{\n", .{cb.binding, cb.name});
         try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa);
         try w.print("}} {s}_1;\n\n", .{cb.name});
+    }
+
+    // For compute shaders: emit SSBO (storage buffer) declarations
+    if (is_compute) {
+        for (module.instructions) |inst| {
+            if (inst.op == .Variable and inst.words.len >= 4) {
+                const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+                if (sc == .Uniform) {
+                    const rid = inst.words[2];
+                    const binding = getDecVal(&decs, rid, .binding) orelse continue;
+                    const name = names.get(rid) orelse continue;
+                    try w.print("layout(std430, binding = {d}) buffer {s}\n{{\n", .{binding, name});
+                    // Emit struct members from the pointee type
+                    const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
+                    if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
+                        try emitStructMembers(&module, &names, ptr_inst.words[3], name, w, aa);
+                    }
+                    try w.print("}} {s};\n\n", .{name});
+                }
+            }
+        }
     }
     for (textures.items) |tex| {
         try w.print("layout(binding = {d}) uniform sampler2D {s};\n", .{tex.binding, tex.name});
@@ -649,6 +679,24 @@ fn emitFunction(
     }
 
     try w.writeAll(")\n{\n");
+
+    // For compute shaders: emit shared variable declarations
+    if (is_entry and m.execution_model == .GLCompute) {
+        var si = func_idx + 1;
+        while (si < m.instructions.len) : (si += 1) {
+            const inst = m.instructions[si];
+            if (inst.op == .FunctionEnd) break;
+            if (inst.op == .Variable and inst.words.len >= 4) {
+                const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+                if (sc == .Workgroup) {
+                    const ri = inst.words[2];
+                    const tn = try glslType(m, inst.words[1], names, alloc);
+                    try w.print("    shared {s} {s};\n", .{tn, names.get(ri) orelse "shared_var"});
+                }
+            }
+        }
+    }
+
     try emitBody(m, names, decs, func_idx, w, alloc, is_frag, output_var_id);
     try w.writeAll("}\n");
 }
@@ -806,7 +854,7 @@ fn emitInstruction(
                 try w.print("    {s} {s};\n", .{ tn, names.get(ri) orelse "var" });
                 return;
             }
-            if (sc == .Input or sc == .Output or sc == .Uniform or sc == .UniformConstant) return;
+            if (sc == .Input or sc == .Output or sc == .Uniform or sc == .UniformConstant or sc == .Workgroup) return;
             const ri = inst.words[2];
             const tn = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s};\n", .{ tn, names.get(ri) orelse "var" });
@@ -1036,6 +1084,8 @@ fn emitInstruction(
             try w.print("    {s} {s} = texelFetch({s}, {s}, 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0" });
         },
         .Kill => try w.writeAll("    discard;\n"),
+        .ControlBarrier => try w.writeAll("    barrier();\n    memoryBarrier();\n"),
+        .MemoryBarrier => try w.writeAll("    memoryBarrier();\n"),
         .Return => {
             if (!(is_frag and ovid != null)) try w.writeAll("    return;\n");
         },
