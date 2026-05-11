@@ -7855,8 +7855,25 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
                     }
                     if (dst_has_ac_stores) break;
 
-                    try replacements.put(alloc, pos, .{ .load_pos = lpos, .src_ptr = src_ptr });
-                    try dead_loads.put(alloc, lpos, {});
+                    // Also reject if dst is an AC result (CopyMemory to AC result
+                    // is problematic because DCE may remove the AC instruction)
+                    if (ac_results_src.isSet(dst_ptr)) break;
+                    // Also check a broader set: is dst_ptr an AC result at all?
+                    var dst_is_ac_result = false;
+                    var pac: u32 = 5;
+                    while (pac < words.len) {
+                        const pac_h = words[pac]; const pac_wc: u32 = pac_h >> 16; const pac_op: u16 = @truncate(pac_h & 0xFFFF);
+                        if (pac_wc == 0) break;
+                        const pac_ie = pac + pac_wc;
+                        if (pac_ie > words.len) break;
+                        if (pac_op == 65 and pac_wc >= 3 and words[pac + 2] == dst_ptr) {
+                            dst_is_ac_result = true;
+                            break;
+                        }
+                        pac = pac_ie;
+                    }
+                    if (dst_is_ac_result) break;
+
                     try replacements.put(alloc, pos, .{ .load_pos = lpos, .src_ptr = src_ptr });
                     try dead_loads.put(alloc, lpos, {});
                     break;
