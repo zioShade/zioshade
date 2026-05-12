@@ -417,6 +417,13 @@ const Parser = struct {
                     _ = self.advance(); found = true;
                 },
                 .kw_shared => { q.is_shared = true; _ = self.advance(); found = true; },
+                .identifier => {
+                    const ident_text = self.text(self.current());
+                    if (std.mem.eql(u8, ident_text, "taskPayloadSharedEXT")) {
+                        q.is_task_payload_shared = true;
+                        _ = self.advance(); found = true;
+                    } else break;
+                },
                 else => break,
             }
         }
@@ -455,6 +462,12 @@ const Parser = struct {
                     layout.depth_less = true;
                 } else if (std.mem.eql(u8, ident_text, "depth_unchanged")) {
                     layout.depth_unchanged = true;
+                } else if (std.mem.eql(u8, ident_text, "triangles")) {
+                    layout.output_topology = .triangles;
+                } else if (std.mem.eql(u8, ident_text, "lines")) {
+                    layout.output_topology = .lines;
+                } else if (std.mem.eql(u8, ident_text, "points")) {
+                    layout.output_topology = .points;
                 } else if (self.current().tag == .eq) {
                     _ = self.advance();
                     const val_text = self.text(self.current());
@@ -475,6 +488,10 @@ const Parser = struct {
                         layout.input_attachment_index = std.fmt.parseInt(u32, val_text, 10) catch null;
                     } else if (std.mem.eql(u8, ident_text, "constant_id")) {
                         layout.constant_id = std.fmt.parseInt(u32, val_text, 10) catch null;
+                    } else if (std.mem.eql(u8, ident_text, "max_vertices")) {
+                        layout.max_vertices = std.fmt.parseInt(u32, val_text, 10) catch null;
+                    } else if (std.mem.eql(u8, ident_text, "max_primitives")) {
+                        layout.max_primitives = std.fmt.parseInt(u32, val_text, 10) catch null;
                     }
                 }
             } else {
