@@ -27,8 +27,13 @@ pub const Module = struct {
     uses_ray_query: bool = false,
     uses_ray_query_position_fetch: bool = false,
     uses_arm_tensors: bool = false,
+    uses_ext_mesh_shader: bool = false,
     qcom_block_match_textures: []const u32 = &.{},
     qcom_weight_textures: []const u32 = &.{},
+    // Mesh shader layout parameters
+    mesh_max_vertices: ?u32 = null,
+    mesh_max_primitives: ?u32 = null,
+    mesh_output_topology: ?ast.OutputTopology = null,
 
     pub fn deinit(self: *Module) void {
         for (self.functions) |func| {
@@ -248,6 +253,8 @@ pub const Instruction = struct {
         function_call,
         group_all,
         group_any,
+        set_mesh_outputs,
+        emit_mesh_tasks,
     };
 
     pub const Operand = union(enum) {
@@ -270,4 +277,5 @@ pub const SPIRVStorageClass = enum(u32) {
     physical_storage_buffer = 5349,
     storage_buffer = 12,
     image = 11,
+    task_payload_workgroup = 5402,
 };

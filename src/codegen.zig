@@ -4757,6 +4757,12 @@ const Codegen = struct {
                 try self.emitWord(result_id);
                 try self.emitWord(predicate_id);
             },
+            .set_mesh_outputs => {
+                // OpSetMeshOutputsEXT: handled in emitMeshTaskOps
+            },
+            .emit_mesh_tasks => {
+                // OpEmitMeshTasksEXT: handled in emitMeshTaskOps
+            },
         }
     }
 

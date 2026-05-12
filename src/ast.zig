@@ -440,7 +440,10 @@ pub const Qualifier = packed struct {
     is_restrict: bool = false,
     is_volatile: bool = false,
     is_invariant: bool = false,
+    is_task_payload_shared: bool = false,
 };
+
+pub const OutputTopology = enum { triangles, lines, points };
 
 pub const Layout = struct {
     location: ?u32 = null,
@@ -462,6 +465,9 @@ pub const Layout = struct {
     depth_greater: bool = false,
     depth_less: bool = false,
     depth_unchanged: bool = false,
+    max_vertices: ?u32 = null,
+    max_primitives: ?u32 = null,
+    output_topology: ?OutputTopology = null,
 };
 
 pub const StructMember = struct {
