@@ -6138,6 +6138,32 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
             }
         }
 
+        // Unary constant folding: SNegate (126), FNegate (127)
+        if (wc >= 4) {
+            const rtype = words[pos + 1];
+            const rid = words[pos + 2];
+            const operand = words[pos + 3];
+            if (rid >= 1 and rid < bound) {
+                if (const_vals.get(operand)) |val| {
+                    if (const_types.get(operand)) |_| {
+                        var result_val: ?u32 = null;
+                        if (opcode == 127 and float_types.isSet(rtype)) { // FNegate
+                            const fv: f32 = @bitCast(val);
+                            result_val = @bitCast(-fv);
+                        } else if (opcode == 126 and (int_signed.isSet(rtype) or int_unsigned.isSet(rtype))) { // SNegate
+                            result_val = ~val +% 1; // two's complement negation
+                        }
+                        if (result_val) |rv| {
+                            if (rtype < bound and defined_types.isSet(rtype)) {
+                                try fold_map.put(alloc, rid, .{ .rtype = rtype, .val = rv });
+                                to_skip.set(rid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Constant comparison folding: both operands are constants -> boolean result
         if (bool_type != 0 and (true_id != 0 or false_id != 0) and wc >= 5) {
             const rid = words[pos + 2];
