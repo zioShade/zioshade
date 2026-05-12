@@ -13,6 +13,7 @@ pub const Preprocessor = struct {
     expanding: std.ArrayListUnmanaged([]const u8),
     extra_strings: std.ArrayListUnmanaged(u8),
     has_ext_mesh_shader: bool = false,
+    has_ext_ray_tracing: bool = false,
 
     pub fn init(alloc: std.mem.Allocator) Preprocessor {
         return .{
@@ -648,10 +649,14 @@ pub const Preprocessor = struct {
                                     const behavior = self.getTokenText(tokens[i]);
                                     if ((std.mem.eql(u8, behavior, "enable") or std.mem.eql(u8, behavior, "require")) and
                                         (std.mem.eql(u8, ext_name, "GL_EXT_null_initializer") or
-                                         std.mem.eql(u8, ext_name, "GL_EXT_mesh_shader")))
+                                         std.mem.eql(u8, ext_name, "GL_EXT_mesh_shader") or
+                                         std.mem.eql(u8, ext_name, "GL_KHR_ray_tracing")))
                                     {
                                         if (std.mem.eql(u8, ext_name, "GL_EXT_mesh_shader")) {
                                             self.has_ext_mesh_shader = true;
+                                        }
+                                        if (std.mem.eql(u8, ext_name, "GL_KHR_ray_tracing")) {
+                                            self.has_ext_ray_tracing = true;
                                         }
                                         const name_dup = try self.alloc.dupe(u8, ext_name);
                                         const one_tok = lexer.Token{ .tag = .int_literal, .loc = tokens[i].loc, .start = 0, .len = 1 };

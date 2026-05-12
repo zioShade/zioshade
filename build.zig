@@ -182,6 +182,21 @@ pub fn build(b: *std.Build) void {
     mesh_task_test_step.dependOn(&run_mesh_task_tests.step);
     test_step.dependOn(&run_mesh_task_tests.step);
 
+    // Ray tracing pipeline tests
+    const ray_tracing_test_step = b.step("test-ray-tracing", "Run ray tracing pipeline tests");
+    const ray_tracing_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/ray_tracing_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ray_tracing_test_mod.addImport("glslpp", glslpp_mod);
+    const run_ray_tracing_tests = b.addRunArtifact(b.addTest(.{
+        .name = "ray-tracing-tests",
+        .root_module = ray_tracing_test_mod,
+    }));
+    ray_tracing_test_step.dependOn(&run_ray_tracing_tests.step);
+    test_step.dependOn(&run_ray_tracing_tests.step);
+
     // Tool: dump any shader — run with: zig build dump-shader -- <prefix.glsl> <shader.glsl> <output_prefix>
     // Generates .hlsl, .glsl, .msl, .spv
     const dump_shader_step = b.step("dump-shader", "Dump shader to all output formats (HLSL/GLSL/MSL/SPIR-V)");

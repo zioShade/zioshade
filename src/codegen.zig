@@ -12,7 +12,7 @@ const loop_phi = @import("loop_counter_phi.zig");
 const fold_ec = @import("fold_extract_construct.zig");
 const inline_mb = @import("inline_multiblock.zig");
 
-pub const Stage = enum { vertex, fragment, compute, geometry, tessellation_control, tessellation_evaluation, mesh, task };
+pub const Stage = enum { vertex, fragment, compute, geometry, tessellation_control, tessellation_evaluation, mesh, task, raygen, closesthit, miss, intersection, anyhit, callable };
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
 
 fn spirv_versionOrdinal(v: SPIRVVersion) u32 {
@@ -86,7 +86,7 @@ pub fn generate(
     defer cg.deinit();
 
     // Mesh/task shaders require SPIR-V 1.4+
-    if ((stage == .mesh or stage == .task) and spirv_versionOrdinal(spirv_version) < spirv_versionOrdinal(.@"1.4")) {
+    if ((stage == .mesh or stage == .task or stage == .raygen or stage == .closesthit or stage == .miss or stage == .intersection or stage == .anyhit or stage == .callable) and spirv_versionOrdinal(spirv_version) < spirv_versionOrdinal(.@"1.4")) {
         return error.CodegenFailed;
     }
 
@@ -525,6 +525,11 @@ const Codegen = struct {
         if (self.stage == .mesh or self.stage == .task) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.mesh_shading_ext));
+        }
+        if (self.stage == .raygen or self.stage == .closesthit or self.stage == .miss or
+            self.stage == .intersection or self.stage == .anyhit or self.stage == .callable) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.ray_tracing_khr));
         }
 
         // Only emit additional capabilities if the module actually uses them
@@ -1026,6 +1031,12 @@ const Codegen = struct {
             .tessellation_evaluation => .TessellationEvaluation,
             .mesh => .MeshEXT,
             .task => .TaskEXT,
+            .raygen => .RayGenerationKHR,
+            .closesthit => .ClosestHitKHR,
+            .miss => .MissKHR,
+            .intersection => .IntersectionKHR,
+            .anyhit => .AnyHitKHR,
+            .callable => .CallableKHR,
         };
         const entry = self.findEntryPoint() orelse return;
         const entry_id = if (entry.result_id != 0) entry.result_id else self.allocId();
@@ -1146,6 +1157,18 @@ const Codegen = struct {
                 try self.emitWord(entry_id);
                 try self.emitWord(@intFromEnum(spirv.ExecutionMode.OutputPrimitivesEXT));
                 try self.emitWord(mp);
+            }
+        }
+        // Ray tracing stages use LocalSize like compute
+        if (stage == .raygen or stage == .closesthit or stage == .miss or
+            stage == .intersection or stage == .anyhit or stage == .callable) {
+            if (self.module.local_size) |ls| {
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.LocalSize));
+                try self.emitWord(ls.x);
+                try self.emitWord(ls.y);
+                try self.emitWord(ls.z);
             }
         }
     }
@@ -2588,6 +2611,40 @@ const Codegen = struct {
             }
             if (std.mem.eql(u8, global.name, "gl_LocalInvocationIndex")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.local_invocation_index));
+            }
+            // KHR_ray_tracing builtin decorations
+            if (std.mem.eql(u8, global.name, "gl_LaunchIDEXT")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.launch_id_khr));
+            }
+            if (std.mem.eql(u8, global.name, "gl_LaunchSizeEXT")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.launch_size_khr));
+            }
+            if (std.mem.eql(u8, global.name, "gl_WorldRayOriginEXT")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.world_ray_origin_khr));
+            }
+            if (std.mem.eql(u8, global.name, "gl_WorldRayDirectionEXT")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.world_ray_direction_khr));
+            }
+            if (std.mem.eql(u8, global.name, "gl_ObjectRayOriginEXT")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.object_ray_origin_khr));
+            }
+            if (std.mem.eql(u8, global.name, "gl_ObjectRayDirectionEXT")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.object_ray_direction_khr));
+            }
+            if (std.mem.eql(u8, global.name, "gl_RayTminEXT")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.ray_tmin_khr));
+            }
+            if (std.mem.eql(u8, global.name, "gl_RayTmaxEXT")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.ray_tmax_khr));
+            }
+            if (std.mem.eql(u8, global.name, "gl_InstanceCustomIndexEXT")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.instance_custom_index_khr));
+            }
+            if (std.mem.eql(u8, global.name, "gl_HitKindEXT")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.hit_kind_khr));
+            }
+            if (std.mem.eql(u8, global.name, "gl_IncomingRayFlagsEXT")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.incoming_ray_flags_khr));
             }
             // Skip BuiltIn decoration for builtins requiring extra capabilities
             // gl_SampleMaskIn, gl_SamplePosition → SampleRateShading
@@ -4839,6 +4896,45 @@ const Codegen = struct {
                 try self.emitWord(self.operandId(resolved, 1));
                 try self.emitWord(self.operandId(resolved, 2));
                 try self.emitWord(self.operandId(resolved, 3));
+            },
+            .report_intersection => {
+                // OpReportIntersectionKHR <result_type> <result_id> <hit_t> <hit_kind> → bool
+                const bool_type = try self.ensureType(.bool);
+                const rid = inst.result_id orelse 0;
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ReportIntersectionKHR)));
+                try self.emitWord(bool_type);
+                try self.emitWord(rid);
+                try self.emitWord(self.operandId(resolved, 0));
+                try self.emitWord(self.operandId(resolved, 1));
+            },
+            .ignore_intersection => {
+                // OpIgnoreIntersectionKHR (no operands)
+                try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.IgnoreIntersectionKHR)));
+            },
+            .terminate_ray => {
+                // OpTerminateRayKHR (no operands)
+                try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.TerminateRayKHR)));
+            },
+            .execute_callable => {
+                // OpExecuteCallableKHR <sbt_index> <callable_data>
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecuteCallableKHR)));
+                try self.emitWord(self.operandId(resolved, 0));
+                try self.emitWord(self.operandId(resolved, 1));
+            },
+            .trace_ray => {
+                // OpTraceRayKHR <accel> <ray_flags> <cull_mask> <sbt_offset> <sbt_stride> <miss_index> <origin> <t_min> <direction> <t_max> <payload>
+                try self.emitWord(spirv.encodeInstructionHeader(12, @intFromEnum(spirv.Op.TraceRayKHR)));
+                try self.emitWord(self.operandId(resolved, 0));  // acceleration structure
+                try self.emitWord(self.operandId(resolved, 1));  // ray flags
+                try self.emitWord(self.operandId(resolved, 2));  // cull mask
+                try self.emitWord(self.operandId(resolved, 3));  // SBT offset
+                try self.emitWord(self.operandId(resolved, 4));  // SBT stride
+                try self.emitWord(self.operandId(resolved, 5));  // miss index
+                try self.emitWord(self.operandId(resolved, 6));  // origin
+                try self.emitWord(self.operandId(resolved, 7));  // tMin
+                try self.emitWord(self.operandId(resolved, 8));  // direction
+                try self.emitWord(self.operandId(resolved, 9));  // tMax
+                try self.emitWord(self.operandId(resolved, 10)); // payload
             },
         }
     }

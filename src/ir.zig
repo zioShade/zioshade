@@ -255,6 +255,11 @@ pub const Instruction = struct {
         group_any,
         set_mesh_outputs,
         emit_mesh_tasks,
+        report_intersection,
+        ignore_intersection,
+        terminate_ray,
+        execute_callable,
+        trace_ray,
     };
 
     pub const Operand = union(enum) {
@@ -278,4 +283,9 @@ pub const SPIRVStorageClass = enum(u32) {
     storage_buffer = 12,
     image = 11,
     task_payload_workgroup = 5402,
+    ray_payload = 5338,
+    incoming_ray_payload = 5339,
+    hit_attribute = 5340,
+    callable_data = 5328,
+    incoming_callable_data = 5327,
 };

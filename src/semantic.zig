@@ -976,6 +976,18 @@ const Analyzer = struct {
             .{ .name = "gl_TaskCountEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
             .{ .name = "gl_PrimitiveCountEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
             .{ .name = "gl_VertexCountEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
+            // KHR_ray_tracing builtins
+            .{ .name = "gl_LaunchIDEXT", .ty = .uvec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_LaunchSizeEXT", .ty = .uvec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_WorldRayOriginEXT", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_WorldRayDirectionEXT", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_ObjectRayOriginEXT", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_ObjectRayDirectionEXT", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_RayTminEXT", .ty = .float, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_RayTmaxEXT", .ty = .float, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_InstanceCustomIndexEXT", .ty = .uint, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_HitKindEXT", .ty = .uint, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_IncomingRayFlagsEXT", .ty = .uint, .is_in = true, .is_out = false, .sc = .input },
         };
 
         for (&builtins) |b| {
@@ -1105,7 +1117,7 @@ const Analyzer = struct {
                     .in_decl => .input,
                     .out_decl => .output,
                     .uniform_decl => if (ty.isSampler()) .uniform_constant else .uniform,
-                    .var_decl => if (node.data.qualifier != null and node.data.qualifier.?.is_shared) .workgroup else if (node.data.qualifier != null and node.data.qualifier.?.is_task_payload_shared) .task_payload_workgroup else .private,
+                    .var_decl => if (node.data.qualifier != null and node.data.qualifier.?.is_shared) .workgroup else if (node.data.qualifier != null and node.data.qualifier.?.is_task_payload_shared) .task_payload_workgroup else if (node.data.qualifier != null and node.data.qualifier.?.is_ray_payload) .ray_payload else if (node.data.qualifier != null and node.data.qualifier.?.is_incoming_ray_payload) .incoming_ray_payload else if (node.data.qualifier != null and node.data.qualifier.?.is_hit_attribute) .hit_attribute else if (node.data.qualifier != null and node.data.qualifier.?.is_callable_data) .callable_data else if (node.data.qualifier != null and node.data.qualifier.?.is_incoming_callable_data) .incoming_callable_data else .private,
                     else => .private,
                 };
                 try self.globals.append(self.alloc, .{
@@ -3524,6 +3536,80 @@ const Analyzer = struct {
                         operands[3] = .{ .id = arg_tids.items[3].id };
                         try self.instructions.append(self.alloc, .{
                             .tag = .emit_mesh_tasks,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = operands,
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = result_id };
+                    }
+                    // === KHR_ray_tracing builtins ===
+                    // ignoreIntersectionEXT() → void
+                    if (std.mem.eql(u8, node.data.name, "ignoreIntersectionEXT")) {
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .ignore_intersection,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = &.{},
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = result_id };
+                    }
+                    // terminateRayEXT() → void
+                    if (std.mem.eql(u8, node.data.name, "terminateRayEXT")) {
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .terminate_ray,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = &.{},
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = result_id };
+                    }
+                    // reportIntersectionEXT(hitT, hitKind) → bool
+                    if (std.mem.eql(u8, node.data.name, "reportIntersectionEXT") and arg_tids.items.len >= 2) {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        operands[1] = .{ .id = arg_tids.items[1].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .report_intersection,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .bool,
+                        });
+                        return .{ .ty = .bool, .id = result_id };
+                    }
+                    // executeCallableEXT(sbtIndex, callableData) → void
+                    if (std.mem.eql(u8, node.data.name, "executeCallableEXT") and arg_tids.items.len >= 2) {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        operands[1] = .{ .id = arg_tids.items[1].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .execute_callable,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = operands,
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = result_id };
+                    }
+                    // traceRayEXT(accel, rayFlags, cullMask, sbtOffset, sbtStride, missIndex, origin, tMin, direction, tMax, payload) → void
+                    if (std.mem.eql(u8, node.data.name, "traceRayEXT") and arg_tids.items.len >= 11) {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 11);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        operands[1] = .{ .id = arg_tids.items[1].id };
+                        operands[2] = .{ .id = arg_tids.items[2].id };
+                        operands[3] = .{ .id = arg_tids.items[3].id };
+                        operands[4] = .{ .id = arg_tids.items[4].id };
+                        operands[5] = .{ .id = arg_tids.items[5].id };
+                        operands[6] = .{ .id = arg_tids.items[6].id };
+                        operands[7] = .{ .id = arg_tids.items[7].id };
+                        operands[8] = .{ .id = arg_tids.items[8].id };
+                        operands[9] = .{ .id = arg_tids.items[9].id };
+                        operands[10] = .{ .id = arg_tids.items[10].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .trace_ray,
                             .result_type = null,
                             .result_id = null,
                             .operands = operands,
@@ -5970,6 +6056,9 @@ const Analyzer = struct {
             "tensorSizeARM", "tensorReadARM",
             // EXT_mesh_shader builtins
             "SetMeshOutputsEXT", "EmitMeshTasksEXT",
+            // KHR_ray_tracing builtins
+            "traceRayEXT", "reportIntersectionEXT", "ignoreIntersectionEXT",
+            "terminateRayEXT", "executeCallableEXT",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;

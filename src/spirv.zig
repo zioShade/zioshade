@@ -226,6 +226,11 @@ pub const Op = enum(u16) {
     MemoryBarrier = 225,
     EmitMeshTasksEXT = 5368,
     SetMeshOutputsEXT = 5369,
+    TraceRayKHR = 5333,
+    ReportIntersectionKHR = 5334,
+    IgnoreIntersectionKHR = 5335,
+    TerminateRayKHR = 5336,
+    ExecuteCallableKHR = 5337,
     _,
 };
 
@@ -261,6 +266,7 @@ pub const Capability = enum(u32) {
     texture_sample_weighted_qcom = 4484,
     texture_box_filter_qcom = 4485,
     texture_block_match_qcom = 4486,
+    ray_tracing_khr = 5340,
     ray_query_khr = 4472,
     ray_query_position_fetch_khr = 5391,
     tensors_arm = 4174,
@@ -299,6 +305,19 @@ pub const BuiltIn = enum(u32) {
     task_count_ext = 5299,
     primitive_count_ext = 5300,
     vertex_count_ext = 5301,
+    launch_id_khr = 5317,
+    launch_size_khr = 5318,
+    world_ray_origin_khr = 5319,
+    world_ray_direction_khr = 5320,
+    object_ray_origin_khr = 5321,
+    object_ray_direction_khr = 5322,
+    ray_tmin_khr = 5323,
+    ray_tmax_khr = 5324,
+    instance_custom_index_khr = 5325,
+    object_to_world_khr = 5330,
+    world_to_object_khr = 5331,
+    hit_kind_khr = 5332,
+    incoming_ray_flags_khr = 5351,
     _,
 };
 
@@ -311,6 +330,12 @@ pub const ExecutionModel = enum(u32) {
     GLCompute = 5,
     TaskEXT = 5364,
     MeshEXT = 5365,
+    RayGenerationKHR = 5313,
+    IntersectionKHR = 5314,
+    AnyHitKHR = 5315,
+    ClosestHitKHR = 5316,
+    MissKHR = 5317,
+    CallableKHR = 5318,
     _,
 };
 
@@ -328,6 +353,11 @@ pub const StorageClass = enum(u32) {
     PhysicalStorageBuffer = 5349,
     StorageBuffer = 12,
     TaskPayloadWorkgroupEXT = 5402,
+    RayPayloadKHR = 5338,
+    IncomingRayPayloadKHR = 5339,
+    HitAttributeKHR = 5340,
+    CallableDataKHR = 5328,
+    IncomingCallableDataKHR = 5327,
     _,
 };
 

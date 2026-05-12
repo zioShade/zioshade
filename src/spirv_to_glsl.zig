@@ -259,7 +259,10 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     defer module.deinit(alloc);
 
     // Mesh/task shaders cannot be cross-compiled to GLSL (no standard dialect exists)
-    if (module.execution_model == .MeshEXT or module.execution_model == .TaskEXT) {
+    if (module.execution_model == .MeshEXT or module.execution_model == .TaskEXT or
+        module.execution_model == .RayGenerationKHR or module.execution_model == .IntersectionKHR or
+        module.execution_model == .AnyHitKHR or module.execution_model == .ClosestHitKHR or
+        module.execution_model == .MissKHR or module.execution_model == .CallableKHR) {
         return error.CrossCompileUnsupported;
     }
 
