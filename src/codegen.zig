@@ -15,6 +15,18 @@ const inline_mb = @import("inline_multiblock.zig");
 pub const Stage = enum { vertex, fragment, compute, geometry, tessellation_control, tessellation_evaluation, mesh, task };
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
 
+fn spirv_versionOrdinal(v: SPIRVVersion) u32 {
+    return switch (v) {
+        .@"1.0" => 0,
+        .@"1.1" => 1,
+        .@"1.2" => 2,
+        .@"1.3" => 3,
+        .@"1.4" => 4,
+        .@"1.5" => 5,
+        .@"1.6" => 6,
+    };
+}
+
 pub fn generate(
     alloc: std.mem.Allocator,
     module: *const ir.Module,
@@ -72,6 +84,11 @@ pub fn generate(
         .codegen_pure_cache = .{},
     };
     defer cg.deinit();
+
+    // Mesh/task shaders require SPIR-V 1.4+
+    if ((stage == .mesh or stage == .task) and spirv_versionOrdinal(spirv_version) < spirv_versionOrdinal(.@"1.4")) {
+        return error.CodegenFailed;
+    }
 
     try cg.emitHeader(spirv_version);
     try cg.emitCapabilities();
