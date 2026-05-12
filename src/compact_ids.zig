@@ -528,12 +528,12 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 41, 42, 43, 44, 50 => true, // Constants
                 61 => true, // Load
                 65 => true, // AccessChain
-                77, 79, 80, 81 => true, // Composite ops
+                77, 79, 80, 81, 82, 83 => true, // Composite ops + CopyObject
                 84 => true, // Transpose
                 86 => true, // OpSampledImage (pure — safe if result unused)
                 100, 103, 104, 105, 106, 107 => true, // Image queries
                 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98 => true, // Image sampling (pure — safe to remove if result unused)
-                109, 110, 111, 112, 114, 124 => true, // Conversions
+                109, 110, 111, 112, 113, 114, 115, 124 => true, // Conversions (including UConvert, FConvert)
                 126, 127 => true, // Negate
                 128...133, 135...138, 141, 142 => true, // Arithmetic
                 143 => true, // OpMatrixTimesScalar
@@ -543,7 +543,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 169 => true, // Select
                 172, 173, 174, 175, 176, 177, 178, 179 => true, // Integer comparisons
                 180, 182, 184, 186, 188, 190 => true, // FOrd comparisons
-                194, 196, 198, 199, 200 => true, // Shift + Bit ops
+                194, 195, 196, 197, 198, 199, 200 => true, // Shift + Bit ops
                 207...215 => true, // Derivatives
                 12 => true, // ExtInst
                 // Type instructions (result_only, no side effects)
