@@ -257,6 +257,12 @@ pub const GlslCompileOptions = struct { version: u32 = 430, es: bool = false };
 pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: GlslCompileOptions) ![]const u8 {
     var module = try parseModule(alloc, spirv_words);
     defer module.deinit(alloc);
+
+    // Mesh/task shaders cannot be cross-compiled to GLSL (no standard dialect exists)
+    if (module.execution_model == .MeshEXT or module.execution_model == .TaskEXT) {
+        return error.CrossCompileUnsupported;
+    }
+
     const entry_id = module.entry_point_id orelse return error.NoEntryPoint;
 
     // Arena allocator for all backend internals — eliminates individual free() overhead
