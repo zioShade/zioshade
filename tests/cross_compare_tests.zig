@@ -1,0 +1,509 @@
+// SPDX-License-Identifier: MIT
+//! Output comparison tests: glslpp vs spirv-cross.
+//!
+//! For each test shader, compiles GLSL → SPIR-V (via glslangValidator),
+//! then cross-compiles the SAME SPIR-V with both glslpp and spirv-cross.
+//! Compares key structural elements to ensure semantic equivalence.
+//!
+//! Requires:
+//!   - glslangValidator in PATH or VULKAN_SDK
+//!   - spirv-cross in PATH or VULKAN_SDK
+
+const std = @import("std");
+const glslpp = @import("glslpp");
+
+const alloc = std.testing.allocator;
+
+const GlslangValidator = "C:\\VulkanSDK\\1.4.341.1\\Bin\\glslangValidator.exe";
+const SpirvCross = "C:\\VulkanSDK\\1.4.341.1\\Bin\\spirv-cross.exe";
+
+/// Compile GLSL to SPIR-V using glslangValidator, return the SPIR-V words
+fn compileToSpirvViaGlslang(allocator: std.mem.Allocator, source: [:0]const u8, stage: glslpp.Stage) ![]u32 {
+    // Ensure .zig-cache exists
+    std.fs.cwd().makePath(".zig-cache") catch {};
+    // Write source to temp file
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ext = switch (stage) {
+        .vertex => ".vert",
+        .fragment => ".frag",
+        .compute => ".comp",
+        else => ".frag",
+    };
+    const tmp_path_ext = std.fmt.bufPrint(&tmp_buf, ".zig-cache/cc{d}{s}", .{ std.crypto.random.int(u32), ext }) catch return error.OutOfMemory;
+
+    const tmp_file = std.fs.cwd().createFile(tmp_path_ext, .{}) catch |err| {
+        return err;
+    };
+    try tmp_file.writeAll(std.mem.sliceTo(source, 0));
+    tmp_file.close(); // Close before running external tool (Windows file locking)
+
+    // Run glslangValidator
+    const spv_path = try std.fmt.allocPrint(allocator, "{s}.spv", .{tmp_path_ext});
+    defer allocator.free(spv_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ GlslangValidator, "-V", "-o", spv_path, tmp_path_ext },
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Read SPIR-V output
+    std.fs.cwd().deleteFile(tmp_path_ext) catch {};
+    const spv_file = std.fs.cwd().openFile(spv_path, .{}) catch {
+        std.debug.print("glslangValidator stderr: {s}\n", .{result.stderr});
+        return error.FileNotFound;
+    };
+    defer spv_file.close();
+    defer std.fs.cwd().deleteFile(spv_path) catch {};
+
+    const spv_bytes = try spv_file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+    // bytes may not be 4-aligned, so copy into properly aligned slice
+    const word_count = spv_bytes.len / 4;
+    const spv_words = try allocator.alloc(u32, word_count);
+    for (0..word_count) |i| {
+        spv_words[i] = std.mem.readInt(u32, spv_bytes[i * 4 ..][0..4], .little);
+    }
+    allocator.free(spv_bytes);
+    return spv_words;
+}
+
+/// Cross-compile SPIR-V to GLSL using spirv-cross CLI
+fn spirvCrossToGlsl(allocator: std.mem.Allocator, spirv: []const u32) ![]u8 {
+    // Write SPIR-V to temp file
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = std.fmt.bufPrint(&tmp_buf, ".zig-cache/spircross-{}.spv", .{std.crypto.random.int(u64)}) catch return error.OutOfMemory;
+    const tmp_file = try std.fs.cwd().createFile(tmp_path, .{});
+    defer tmp_file.close();
+    try tmp_file.writeAll(std.mem.sliceAsBytes(spirv));
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ SpirvCross, tmp_path, "--version", "450", "--vulkan-semantics" },
+    });
+    defer allocator.free(result.stderr);
+    return result.stdout;
+}
+
+/// Normalize GLSL output for comparison:
+/// - Strip comments
+/// - Normalize whitespace
+/// - Lowercase
+fn normalizeGlsl(allocator: std.mem.Allocator, glsl: []const u8) ![]u8 {
+    var result = try allocator.alloc(u8, glsl.len);
+    errdefer allocator.free(result);
+
+    var i: usize = 0;
+    var out: usize = 0;
+    var in_line_comment = false;
+    var in_block_comment = false;
+    var last_was_space = false;
+
+    while (i < glsl.len) {
+        const ch = glsl[i];
+
+        if (in_block_comment) {
+            if (ch == '*' and i + 1 < glsl.len and glsl[i + 1] == '/') {
+                in_block_comment = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if (in_line_comment) {
+            if (ch == '\n') {
+                in_line_comment = false;
+            } else {
+                i += 1;
+                continue;
+            }
+        }
+
+        if (ch == '/' and i + 1 < glsl.len) {
+            if (glsl[i + 1] == '/') {
+                in_line_comment = true;
+                i += 2;
+                continue;
+            }
+            if (glsl[i + 1] == '*') {
+                in_block_comment = true;
+                i += 2;
+                continue;
+            }
+        }
+
+        if (ch == ' ' or ch == '\t' or ch == '\r') {
+            if (!last_was_space and out < result.len) {
+                result[out] = ' ';
+                out += 1;
+                last_was_space = true;
+            }
+            i += 1;
+            continue;
+        }
+
+        if (ch == '\n') {
+            if (out < result.len) {
+                result[out] = '\n';
+                out += 1;
+            }
+            last_was_space = false;
+            i += 1;
+            continue;
+        }
+
+        if (out < result.len) {
+            result[out] = std.ascii.toLower(ch);
+            out += 1;
+        }
+        last_was_space = false;
+        i += 1;
+    }
+
+    return allocator.realloc(result, out);
+}
+
+/// Extract key operations from normalized GLSL
+/// Returns a set of normalized operation strings
+fn extractOperations(allocator: std.mem.Allocator, glsl: []const u8) !std.StringHashMap(void) {
+    var ops = std.StringHashMap(void).init(allocator);
+    errdefer {
+        var it = ops.keyIterator();
+        while (it.next()) |k| allocator.free(k.*);
+        ops.deinit();
+    }
+
+    // Extract lines containing key operations (assignments, function calls, declarations)
+    var lines = std.mem.splitSequence(u8, glsl, "\n");
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t");
+        if (trimmed.len == 0) continue;
+        if (std.mem.startsWith(u8, trimmed, "#")) continue; // preprocessor
+        if (std.mem.startsWith(u8, trimmed, "precision")) continue;
+        if (std.mem.eql(u8, trimmed, "{") or std.mem.eql(u8, trimmed, "}")) continue;
+
+        // Check for key patterns
+        const is_interesting =
+            std.mem.indexOf(u8, trimmed, "uniform") != null or
+            std.mem.indexOf(u8, trimmed, "layout") != null or
+            std.mem.indexOf(u8, trimmed, "in ") != null or
+            std.mem.indexOf(u8, trimmed, "out ") != null or
+            std.mem.indexOf(u8, trimmed, "sampler2d") != null or
+            std.mem.indexOf(u8, trimmed, "texture(") != null or
+            std.mem.indexOf(u8, trimmed, "main()") != null or
+            std.mem.indexOf(u8, trimmed, "= ") != null;
+
+        if (is_interesting) {
+            const owned = try allocator.dupe(u8, trimmed);
+            try ops.put(owned, {});
+        }
+    }
+
+    return ops;
+}
+
+const CompareResult = struct {
+    glslpp_glsl: []const u8,
+    sc_glsl: []const u8,
+    match: bool,
+    mismatches: u32,
+};
+
+/// Compare glslpp vs spirv-cross output for a shader
+fn compareShader(allocator: std.mem.Allocator, name: []const u8, source: [:0]const u8, stage: glslpp.Stage) !CompareResult {
+    // Step 1: GLSL → SPIR-V via glslang (shared between both)
+    const spirv = compileToSpirvViaGlslang(allocator, source, stage) catch |err| {
+        std.debug.print("  [{s}] glslang failed: {}\n", .{ name, err });
+        return err;
+    };
+    defer allocator.free(spirv);
+
+    // Step 2: SPIR-V → GLSL via glslpp
+    const glslpp_glsl = glslpp.spirvToGLSL(allocator, spirv, .{ .version = 450 }) catch |err| {
+        std.debug.print("  [{s}] glslpp spirvToGLSL failed: {}\n", .{ name, err });
+        return err;
+    };
+
+    // Step 3: SPIR-V → GLSL via spirv-cross
+    const sc_glsl = spirvCrossToGlsl(allocator, spirv) catch |err| {
+        std.debug.print("  [{s}] spirv-cross failed: {}\n", .{ name, err });
+        allocator.free(glslpp_glsl);
+        return err;
+    };
+
+    // Step 4: Normalize both outputs
+    const norm_gpp = normalizeGlsl(allocator, glslpp_glsl) catch glslpp_glsl;
+    const norm_sc = normalizeGlsl(allocator, sc_glsl) catch sc_glsl;
+    defer {
+        if (norm_gpp.ptr != glslpp_glsl.ptr) allocator.free(norm_gpp);
+        if (norm_sc.ptr != sc_glsl.ptr) allocator.free(norm_sc);
+    }
+
+    // Step 5: Check for "unhandled" in glslpp output
+    var mismatches: u32 = 0;
+    if (std.mem.indexOf(u8, glslpp_glsl, "unhandled") != null) {
+        mismatches += 1;
+        std.debug.print("  [{s}] glslpp output contains 'unhandled'\n", .{name});
+    }
+
+    // Step 6: Compare key structural elements
+    // Check that both outputs reference the same inputs/outputs/uniforms
+    // Extract layout qualifiers and uniform/texture references from both
+    const patterns_to_check = [_][]const u8{
+        "uniform",
+        "sampler2d",
+        "texture(",
+        "main()",
+    };
+
+    for (patterns_to_check) |pattern| {
+        const gpp_count = countOccurrences(norm_gpp, pattern);
+        const sc_count = countOccurrences(norm_sc, pattern);
+        if (gpp_count != sc_count) {
+            // Allow glslpp to have more (extra uniforms from unused vars stripped by spirv-cross)
+            // but flag if glslpp has fewer (missing feature)
+            if (gpp_count < sc_count) {
+                mismatches += 1;
+                std.debug.print("  [{s}] pattern '{s}': glslpp={} < spirv-cross={} (MISSING)\n", .{ name, pattern, gpp_count, sc_count });
+            }
+        }
+    }
+
+    const match = mismatches == 0;
+    return .{
+        .glslpp_glsl = glslpp_glsl,
+        .sc_glsl = sc_glsl,
+        .match = match,
+        .mismatches = mismatches,
+    };
+}
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) u32 {
+    var count: u32 = 0;
+    var i: usize = 0;
+    while (i < haystack.len) {
+        if (std.mem.indexOfPos(u8, haystack, i, needle)) |pos| {
+            count += 1;
+            i = pos + needle.len;
+        } else break;
+    }
+    return count;
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "cross-compare: scalar arithmetic" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0, std140) uniform U { float a; float b; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r = ((u.a + u.b) * u.a - u.b) / (u.a + 1.0);
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const result = try compareShader(alloc, "scalar_arith", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
+
+test "cross-compare: vector operations" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0, std140) uniform U { vec4 a; vec4 b; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 r = u.a * u.b + vec4(1.0, 2.0, 3.0, 4.0);
+        \\    fragColor = r;
+        \\}
+    ;
+    const result = try compareShader(alloc, "vector_ops", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
+
+test "cross-compare: branching" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r;
+        \\    if (u > 0.5) {
+        \\        r = u * 2.0;
+        \\    } else {
+        \\        r = u + 1.0;
+        \\    }
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const result = try compareShader(alloc, "branching", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
+
+test "cross-compare: for loop" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 10; i++) {
+        \\        sum += u + float(i);
+        \\    }
+        \\    fragColor = vec4(sum);
+        \\}
+    ;
+    const result = try compareShader(alloc, "for_loop", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
+
+test "cross-compare: texture sampling" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c = texture(tex, uv);
+        \\    fragColor = c;
+        \\}
+    ;
+    const result = try compareShader(alloc, "texture", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
+
+test "cross-compare: struct with uniform" {
+    const source =
+        \\#version 450
+        \\struct Light {
+        \\    vec3 pos;
+        \\    vec3 color;
+        \\    float intensity;
+        \\};
+        \\layout(binding = 0, std140) uniform U { Light light; vec3 ambient; } u;
+        \\layout(location = 0) in vec3 normal;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = max(dot(normal, normalize(u.light.pos)), 0.0);
+        \\    vec3 color = u.ambient + u.light.color * u.light.intensity * d;
+        \\    fragColor = vec4(color, 1.0);
+        \\}
+    ;
+    const result = try compareShader(alloc, "struct_uniform", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
+
+test "cross-compare: math builtins" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = sin(u);
+        \\    float b = cos(u);
+        \\    float c = pow(u, 2.0);
+        \\    float d = clamp(u, 0.0, 1.0);
+        \\    float e = mix(0.0, 1.0, u);
+        \\    float f = smoothstep(0.0, 1.0, u);
+        \\    float g = length(vec2(u, 1.0));
+        \\    float h = abs(u);
+        \\    fragColor = vec4(a, b, c, d);
+        \\}
+    ;
+    const result = try compareShader(alloc, "math_builtins", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
+
+test "cross-compare: matrix operations" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0, std140) uniform U { mat4 mvp; vec4 pos; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 transformed = u.mvp * u.pos;
+        \\    fragColor = transformed;
+        \\}
+    ;
+    const result = try compareShader(alloc, "matrix", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
+
+test "cross-compare: function call" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float square(float x) { return x * x; }
+        \\void main() {
+        \\    float r = square(u) + square(u + 1.0);
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const result = try compareShader(alloc, "func_call", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
+
+test "cross-compare: nested loops with break" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 10; i++) {
+        \\        for (int j = 0; j < 10; j++) {
+        \\            sum += float(i + j) * u;
+        \\            if (sum > 50.0) break;
+        \\        }
+        \\    }
+        \\    fragColor = vec4(sum);
+        \\}
+    ;
+    const result = try compareShader(alloc, "nested_loops", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
+
+
+test "cross-compare: branching with multiple conditions" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r;
+        \\    if (u < 0.25) { r = 1.0; }
+        \\    else if (u < 0.5) { r = 0.5; }
+        \\    else if (u < 0.75) { r = 0.25; }
+        \\    else { r = 0.0; }
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const result = try compareShader(alloc, "branch_multi", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
