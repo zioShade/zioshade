@@ -5228,7 +5228,31 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
         pos = ie;
     }
 
-    if (construct_map.count() == 0) return words;
+    // Phase 1a: Build map of OpCompositeInsert: result_id -> (object, composite, index)
+    // Format: OpCompositeInsert type result object composite index1 [index2...]
+    var insert_map = std.AutoHashMapUnmanaged(u32, struct { object: u32, composite: u32, index: u32 }).empty;
+    defer insert_map.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        // OpCompositeInsert: type(1) result(1) object(1) composite(1) indices(1+)
+        if (opcode == 82 and wc >= 6) {
+            const result_id = words[pos + 2];
+            const object = words[pos + 3];
+            const composite = words[pos + 4];
+            // Only handle single-index inserts (multi-index is rare and complex)
+            if (wc == 6) { // exactly one index
+                const index = words[pos + 5];
+                insert_map.put(alloc, result_id, .{ .object = object, .composite = composite, .index = index }) catch {};
+            }
+        }
+        pos = ie;
+    }
+
+    if (construct_map.count() == 0 and insert_map.count() == 0) return words;
 
     // Phase 1b: Also build map of OpVectorShuffle: result_id -> (vec1_id, vec2_id, []shuffle_indices)
     var shuffle_map = std.AutoHashMapUnmanaged(u32, struct { vec1: u32, vec2: u32, indices: std.ArrayListUnmanaged(u32) }){};
@@ -5278,9 +5302,42 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
             const result_id = words[pos + 2];
             const composite_id = words[pos + 3];
             const index = words[ie - 1]; // last word is the index
+            // Try CompositeConstruct/ConstantComposite folding
             if (construct_map.get(composite_id)) |components| {
                 if (index < components.items.len) {
                     try sub_map.put(alloc, result_id, components.items[index]);
+                }
+            }
+            // Try CompositeInsert folding: Extract(Insert(obj, comp, idx), extract_idx)
+            if (insert_map.get(composite_id)) |ins| {
+                if (index == ins.index) {
+                    // Extracting the inserted element -> return the inserted object
+                    try sub_map.put(alloc, result_id, ins.object);
+                } else {
+                    // Extracting a different element -> extract from the original composite
+                    // Chain: follow inserts recursively
+                    var comp = ins.composite;
+                    var found = false;
+                    var depth: u32 = 0;
+                    while (depth < 8) : (depth += 1) {
+                        if (insert_map.get(comp)) |inner_ins| {
+                            if (index == inner_ins.index) {
+                                try sub_map.put(alloc, result_id, inner_ins.object);
+                                found = true;
+                                break;
+                            }
+                            comp = inner_ins.composite;
+                        } else break;
+                    }
+                    // If not found in insert chain, try construct_map
+                    if (!found) {
+                        if (construct_map.get(comp)) |components| {
+                            if (index < components.items.len) {
+                                try sub_map.put(alloc, result_id, components.items[index]);
+                                found = true;
+                            }
+                        }
+                    }
                 }
             }
         }
