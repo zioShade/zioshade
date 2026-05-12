@@ -3312,7 +3312,7 @@ pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error
     if (bound <= 1) return words;
 
     // Collect negate instructions: map result_id -> (opcode, operand_id)
-    // OpFNegate = 127, OpSNegate = 128, OpLogicalNot = 133, OpNot (bitwise) = 131
+    // OpFNegate = 127, OpSNegate = 126, OpNot (bitwise) = 200, OpLogicalNot = 168
     var neg_ops = std.AutoHashMapUnmanaged(u32, struct { opcode: u16, operand: u32 }).empty;
     defer neg_ops.deinit(alloc);
 
@@ -3320,7 +3320,7 @@ pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error
     while (pos < words.len) {
         const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
-        if ((opcode == 127 or opcode == 128 or opcode == 131 or opcode == 133) and wc == 4) {
+        if ((opcode == 126 or opcode == 127 or opcode == 168 or opcode == 200) and wc == 4) {
             const result_id = words[pos + 2];
             const operand = words[pos + 3];
             try neg_ops.put(alloc, result_id, .{ .opcode = opcode, .operand = operand });
