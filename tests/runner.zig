@@ -110,12 +110,17 @@ fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, sav
             break :blk .tessellation_control
         else if (std.mem.endsWith(u8, path, ".tese"))
             break :blk .tessellation_evaluation
+        else if (std.mem.endsWith(u8, path, ".mesh"))
+            break :blk .mesh
+        else if (std.mem.endsWith(u8, path, ".task"))
+            break :blk .task
         else
             break :blk .fragment;
     };
 
     // Compile GLSL -> SPIR-V
-    const words = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage }) catch {
+    const spirv_ver: glslpp.SPIRVVersion = if (stage == .mesh or stage == .task) .@"1.4" else .@"1.5";
+    const words = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver }) catch {
         const detail = glslpp.last_compile_detail orelse .semantic_failed;
         const ctx = glslpp.semantic.last_error_ctx;
         std.debug.print("  COMPILE-{} {s} ctx={s} inner={s}\n", .{ detail, @tagName(detail), ctx, glslpp.semantic.last_error_inner });
@@ -162,7 +167,8 @@ fn runDir(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []const u8, sta
         if (entry.kind != .file) continue;
         const ext = std.fs.path.extension(entry.basename);
         if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
-            !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl"))
+            !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
+            !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task"))
             continue;
 
         // Skip error-validation tests, multi-file link tests, SPIR-V assembly files, and nocompat
@@ -235,6 +241,7 @@ fn mainImpl() !void {
         .{ "glslang-430", "tests/glslang-430" },
         .{ "spirv-cross", "tests/spirv-cross" },
         .{ "ghostty", "tests/ghostty" },
+        .{ "mesh-task", "tests/mesh_task" },
     };
 
     if (target_arg) |target| {
