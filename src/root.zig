@@ -35,7 +35,7 @@ pub const CompileDetail = enum {
 
 pub threadlocal var last_compile_detail: ?CompileDetail = null;
 
-pub const Stage = enum { vertex, fragment, compute, geometry, tessellation_control, tessellation_evaluation, mesh, task };
+pub const Stage = enum { vertex, fragment, compute, geometry, tessellation_control, tessellation_evaluation, mesh, task, raygen, closesthit, miss, intersection, anyhit, callable };
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
 
 pub const ResourceLimits = struct {
@@ -250,6 +250,12 @@ pub fn compileToSPIRV(
         .tessellation_evaluation => .tessellation_evaluation,
         .mesh => .mesh,
         .task => .task,
+        .raygen => .raygen,
+        .closesthit => .closesthit,
+        .miss => .miss,
+        .intersection => .intersection,
+        .anyhit => .anyhit,
+        .callable => .callable,
     };
     const spirv_ver: codegen.SPIRVVersion = switch (options.spirv_version) {
         .@"1.0" => .@"1.0",

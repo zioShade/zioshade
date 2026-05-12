@@ -441,6 +441,11 @@ pub const Qualifier = packed struct {
     is_volatile: bool = false,
     is_invariant: bool = false,
     is_task_payload_shared: bool = false,
+    is_ray_payload: bool = false,
+    is_incoming_ray_payload: bool = false,
+    is_hit_attribute: bool = false,
+    is_callable_data: bool = false,
+    is_incoming_callable_data: bool = false,
 };
 
 pub const OutputTopology = enum { triangles, lines, points };

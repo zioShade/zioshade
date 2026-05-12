@@ -268,6 +268,16 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     _ = options;
     var module = try parseModule(alloc, spirv_words);
     defer module.deinit(alloc);
+
+    // Metal ray tracing uses a fundamentally different model (compute + intersection queries)
+    // Vulkan's ray tracing pipeline stages cannot be directly mapped
+    if (module.execution_model == .RayGenerationKHR or module.execution_model == .ClosestHitKHR or
+        module.execution_model == .MissKHR or module.execution_model == .IntersectionKHR or
+        module.execution_model == .AnyHitKHR or module.execution_model == .CallableKHR)
+    {
+        return error.CrossCompileUnsupported;
+    }
+
     const entry_id = module.entry_point_id orelse return error.NoEntryPoint;
 
     var arena = std.heap.ArenaAllocator.init(alloc);
