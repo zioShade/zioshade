@@ -298,6 +298,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     const w = compat.listWriter(&output, alloc);
 
     const is_compute = module.execution_model == .GLCompute;
+    const is_mesh = module.execution_model == .MeshEXT;
+    const is_task = module.execution_model == .TaskEXT;
+    const is_compute_like = is_compute or is_mesh or is_task;
     const is_frag = module.execution_model == .Fragment;
 
     // MSL header
@@ -379,9 +382,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     try w.writeAll("\n");
 
     // Emit non-entry functions first
-    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute); }
+    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute_like); }
     // Emit entry function last
-    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute);
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute_like);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -1508,6 +1511,21 @@ fn emitInstruction(
             }
             try w.writeAll(");\n");
         },
+        .SetMeshOutputsEXT => {
+            if (inst.words.len >= 3) {
+                const vc = idToExprMsl(m, names, inst.words[1], alloc);
+                const pc = idToExprMsl(m, names, inst.words[2], alloc);
+                try w.print("    mf.set_count({s}, {s});\n", .{vc, pc});
+            }
+        },
+        .EmitMeshTasksEXT => {
+            if (inst.words.len >= 5) {
+                const x = idToExprMsl(m, names, inst.words[1], alloc);
+                const y = idToExprMsl(m, names, inst.words[2], alloc);
+                const z = idToExprMsl(m, names, inst.words[3], alloc);
+                try w.print("    dispatch_mesh_threadgroups(mesh_grid, {s}, {s}, {s});\n", .{x, y, z});
+            }
+        },
         else => {
             try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});
         },
@@ -1542,3 +1560,15 @@ fn emitStd450(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), 
     }
     try w.writeAll(");\n");
 }
+
+fn idToExprMsl(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32, alloc: std.mem.Allocator) []const u8 {
+    if (names.get(id)) |name| return name;
+    const def = getDef(m, id) orelse return "0";
+    if (def.op == .Constant and def.words.len > 3) {
+        return std.fmt.allocPrint(alloc, "{d}", .{def.words[3]}) catch "0";
+    }
+    if (def.op == .ConstantTrue) return "true";
+    if (def.op == .ConstantFalse) return "false";
+    return "0";
+}
+
