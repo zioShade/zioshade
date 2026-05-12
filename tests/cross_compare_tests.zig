@@ -507,3 +507,25 @@ test "cross-compare: branching with multiple conditions" {
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
+
+test "cross-compare: switch statement" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0, std140) uniform U { int a; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r;
+        \\    switch (u.a) {
+        \\        case 0: r = 0.0; break;
+        \\        case 1: r = 1.0; break;
+        \\        case 2: r = 2.0; break;
+        \\        default: r = 3.0; break;
+        \\    }
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const result = try compareShader(alloc, "switch", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
