@@ -12,7 +12,7 @@ const loop_phi = @import("loop_counter_phi.zig");
 const fold_ec = @import("fold_extract_construct.zig");
 const inline_mb = @import("inline_multiblock.zig");
 
-pub const Stage = enum { vertex, fragment, compute, geometry, tessellation_control, tessellation_evaluation };
+pub const Stage = enum { vertex, fragment, compute, geometry, tessellation_control, tessellation_evaluation, mesh, task };
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
 
 pub fn generate(
@@ -1001,6 +1001,8 @@ const Codegen = struct {
             .geometry => .Geometry,
             .tessellation_control => .TessellationControl,
             .tessellation_evaluation => .TessellationEvaluation,
+            .mesh => .MeshEXT,
+            .task => .TaskEXT,
         };
         const entry = self.findEntryPoint() orelse return;
         const entry_id = if (entry.result_id != 0) entry.result_id else self.allocId();
