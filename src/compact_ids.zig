@@ -6093,6 +6093,8 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                             131 => { cf = af - bf; result_val = @bitCast(cf); }, // FSub
                             133 => { cf = af * bf; result_val = @bitCast(cf); }, // FMul
                             136 => { if (bf != 0.0) { cf = af / bf; result_val = @bitCast(cf); } }, // FDiv
+                            140 => { if (bf != 0.0) { cf = @rem(af, bf); result_val = @bitCast(cf); } }, // FRem
+                            141 => { if (bf != 0.0) { cf = @mod(af, bf); result_val = @bitCast(cf); } }, // FMod
                             else => {},
                         }
                     } else if (int_unsigned.isSet(result_type)) {
@@ -6101,6 +6103,13 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                             128 => { result_val = av +% bv; }, // IAdd
                             130 => { result_val = av -% bv; }, // ISub
                             132 => { result_val = av *% bv; }, // IMul
+                            134 => { if (bv != 0) result_val = av / bv; }, // UDiv
+                            137 => { if (bv != 0) result_val = av % bv; }, // UMod
+                            194 => { if (bv < 32) result_val = av >> @intCast(bv); }, // ShiftRightLogical
+                            196 => { if (bv < 32) result_val = av << @intCast(bv); }, // ShiftLeftLogical
+                            197 => { result_val = av | bv; }, // BitwiseOr
+                            198 => { result_val = av ^ bv; }, // BitwiseXor
+                            199 => { result_val = av & bv; }, // BitwiseAnd
                             else => {},
                         }
                     } else if (int_signed.isSet(result_type)) {
@@ -6109,6 +6118,11 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                             128 => { result_val = av +% bv; }, // IAdd
                             130 => { result_val = av -% bv; }, // ISub
                             132 => { result_val = av *% bv; }, // IMul
+                            135 => { if (bv != 0) result_val = @bitCast(@divTrunc(@as(i32, @bitCast(av)), @as(i32, @bitCast(bv)))); }, // SDiv
+                            196 => { if (bv < 32) result_val = av << @intCast(bv); }, // ShiftLeftLogical
+                            197 => { result_val = av | bv; }, // BitwiseOr
+                            198 => { result_val = av ^ bv; }, // BitwiseXor
+                            199 => { result_val = av & bv; }, // BitwiseAnd
                             else => {},
                         }
                     }
