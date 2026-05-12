@@ -13448,3 +13448,21 @@ test "hlsl: constFold bitwise and shift with runtime values" {
     try assertContains(hlsl, "<<");
     try assertContains(hlsl, ">>");
 }
+
+test "hlsl: double negation elimination" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) in float u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = -(-u);
+        \\    float b = -(u + u);
+        \\    fragColor = vec4(a, b, 0.0, 1.0);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "u");
+}
