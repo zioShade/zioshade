@@ -504,6 +504,12 @@ const Codegen = struct {
         try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
         try self.emitWord(@intFromEnum(spirv.Capability.shader));
 
+        // Mesh/Task shader capabilities
+        if (self.stage == .mesh or self.stage == .task) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.mesh_shading_ext));
+        }
+
         // Only emit additional capabilities if the module actually uses them
         var has_subgroup_vote = false;
         var has_float_atomic = false;
@@ -1079,6 +1085,50 @@ const Codegen = struct {
                 try self.emitWord(ls.x);
                 try self.emitWord(ls.y);
                 try self.emitWord(ls.z);
+            }
+        }
+        // Task shaders use LocalSize same as compute
+        if (stage == .task) {
+            if (self.module.local_size) |ls| {
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.LocalSize));
+                try self.emitWord(ls.x);
+                try self.emitWord(ls.y);
+                try self.emitWord(ls.z);
+            }
+        }
+        // Mesh shader execution modes
+        if (stage == .mesh) {
+            if (self.module.local_size) |ls| {
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.LocalSize));
+                try self.emitWord(ls.x);
+                try self.emitWord(ls.y);
+                try self.emitWord(ls.z);
+            }
+            if (self.module.mesh_output_topology) |topo| {
+                const topo_mode: spirv.ExecutionMode = switch (topo) {
+                    .triangles => .OutputTrianglesEXT,
+                    .lines => .OutputLinesEXT,
+                    .points => .OutputPoints,
+                };
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(topo_mode));
+            }
+            if (self.module.mesh_max_vertices) |mv| {
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.OutputVertices));
+                try self.emitWord(mv);
+            }
+            if (self.module.mesh_max_primitives) |mp| {
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.OutputPrimitivesEXT));
+                try self.emitWord(mp);
             }
         }
     }
@@ -4760,10 +4810,18 @@ const Codegen = struct {
                 try self.emitWord(predicate_id);
             },
             .set_mesh_outputs => {
-                // OpSetMeshOutputsEXT: handled in emitMeshTaskOps
+                // OpSetMeshOutputsEXT <vertex_count> <primitive_count>
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.SetMeshOutputsEXT)));
+                try self.emitWord(self.operandId(resolved, 0));
+                try self.emitWord(self.operandId(resolved, 1));
             },
             .emit_mesh_tasks => {
-                // OpEmitMeshTasksEXT: handled in emitMeshTaskOps
+                // OpEmitMeshTasksEXT <x> <y> <z> <payload>
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.EmitMeshTasksEXT)));
+                try self.emitWord(self.operandId(resolved, 0));
+                try self.emitWord(self.operandId(resolved, 1));
+                try self.emitWord(self.operandId(resolved, 2));
+                try self.emitWord(self.operandId(resolved, 3));
             },
         }
     }
