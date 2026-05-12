@@ -100,9 +100,10 @@ fn hasCapability(words: []const u32, cap: spirv.Capability) bool {
 /// Disassemble SPIR-V to text (requires spirv-dis on PATH). Returns owned string.
 fn disassemble(alloc: std.mem.Allocator, words: []const u32) ![]const u8 {
     // Write to temp file
-    const tmp = ".zig-cache/gap_test.spv";
-    // debug file creation removed for Zig 0.16 compat
-    defer f.close();
+    return error.NotAvailable; // disabled for Zig 0.16 compat
+    // const tmp = ".zig-cache/gap_test.spv";
+    // const f = try std.Io.Dir.cwd().createFile(std.Io.get(), tmp, .{});
+    // defer f.close();
     try f.writeAll(std.mem.sliceAsBytes(words));
 
     const result = try std.process.Child.run(.{
