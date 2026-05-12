@@ -2756,6 +2756,12 @@ const Analyzer = struct {
                 store_operands[1] = .{ .id = value_id };
                 _ = self.load_cache.remove(target.id);
                 _ = self.global_load_cache.remove(target.id);
+                // If storing to an AccessChain result (e.g., v.x), also invalidate the base variable (v)
+                // so subsequent loads of v return the updated value, not a stale cached load.
+                if (self.ac_result_to_base.get(target.id)) |base_id| {
+                    _ = self.load_cache.remove(base_id);
+                    _ = self.global_load_cache.remove(base_id);
+                }
                 self.load_cache.put(self.alloc, target.id, value_id) catch {}; // Forward stored value
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
