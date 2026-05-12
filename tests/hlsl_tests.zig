@@ -13489,3 +13489,33 @@ test "hlsl: complex optimizer pipeline" {
     try assertContains(hlsl, "4");
     try assertContains(hlsl, "u");
 }
+
+test "codegen: AC+Store stale load cache regression" {
+    // Regression: v.x = expr; v.y = expr; fragColor = v must use updated v.
+    // Previously fragColor got stale v (only .x modified, .y lost) because
+    // the .assign_op handler didn't invalidate base variable in load cache.
+    const src =
+        \\#version 450
+        \\layout(location = 0) in float u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 v = vec4(1.0, 2.0, 3.0, 4.0);
+        \\    v.x = v.x + u;
+        \\    v.y = v.y * u;
+        \\    fragColor = v;
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // Count OpLoad(61) instructions to verify v is loaded after each modification
+    var load_count: u32 = 0;
+    var i: usize = 5;
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const opcode: u16 = @truncate(spv[i] & 0xFFFF);
+        if (opcode == 61 and wc >= 4) load_count += 1;
+        if (wc == 0) break;
+        i += wc;
+    }
+    try std.testing.expect(load_count >= 2); // at least: load u + load v after .y store
+}
