@@ -150,6 +150,23 @@ pub fn build(b: *std.Build) void {
     reference_test_step.dependOn(&run_reference_tests.step);
     test_step.dependOn(&run_reference_tests.step);
 
+    // Cross-comparison tests: glslpp vs spirv-cross output
+    // Run with: zig build test-cross-compare
+    // Requires glslangValidator and spirv-cross in PATH
+    const cross_compare_step = b.step("test-cross-compare", "Run cross-comparison tests (glslpp vs spirv-cross)");
+    const cross_compare_mod = b.createModule(.{
+        .root_source_file = b.path("tests/cross_compare_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cross_compare_mod.addImport("glslpp", glslpp_mod);
+    const run_cross_compare = b.addRunArtifact(b.addTest(.{
+        .name = "cross-compare-tests",
+        .root_module = cross_compare_mod,
+    }));
+    cross_compare_step.dependOn(&run_cross_compare.step);
+    test_step.dependOn(&run_cross_compare.step);
+
     // Tool: dump any shader — run with: zig build dump-shader -- <prefix.glsl> <shader.glsl> <output_prefix>
     // Generates .hlsl, .glsl, .msl, .spv
     const dump_shader_step = b.step("dump-shader", "Dump shader to all output formats (HLSL/GLSL/MSL/SPIR-V)");
