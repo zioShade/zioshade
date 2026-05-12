@@ -13466,3 +13466,26 @@ test "hlsl: double negation elimination" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "u");
 }
+
+test "hlsl: complex optimizer pipeline" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) in float u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = 3.0 * 2.0;
+        \\    float b = a - 2.0;
+        \\    float c = u + 0.0;
+        \\    float d = c * 1.0;
+        \\    float e = d - d;
+        \\    float f = -(-d);
+        \\    fragColor = vec4(b + f + e, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "4");
+    try assertContains(hlsl, "u");
+}
