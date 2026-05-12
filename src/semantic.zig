@@ -98,6 +98,10 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .uses_ray_query = analyzer.uses_ray_query,
         .uses_ray_query_position_fetch = analyzer.uses_ray_query_position_fetch,
         .uses_arm_tensors = analyzer.uses_arm_tensors,
+        .uses_ext_mesh_shader = analyzer.uses_ext_mesh_shader,
+        .mesh_max_vertices = analyzer.mesh_max_vertices,
+        .mesh_max_primitives = analyzer.mesh_max_primitives,
+        .mesh_output_topology = analyzer.mesh_output_topology,
     };
     // Dead function elimination: only keep functions reachable from main()
     mod = try eliminateDeadFunctions(alloc, mod);
@@ -328,6 +332,11 @@ const Analyzer = struct {
     has_depth_less: bool = false,
     has_depth_unchanged: bool = false,
     uses_qcom_image_processing: bool = false,
+    uses_ext_mesh_shader: bool = false,
+    // Mesh shader layout parameters
+    mesh_max_vertices: ?u32 = null,
+    mesh_max_primitives: ?u32 = null,
+    mesh_output_topology: ?ast.OutputTopology = null,
     uses_ray_query: bool = false,
     uses_ray_query_position_fetch: bool = false,
     uses_arm_tensors: bool = false,
@@ -957,6 +966,16 @@ const Analyzer = struct {
             .{ .name = "gl_BaryCoordNoPerspEXT", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_BaryCoordNV", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_BaryCoordNoPerspNV", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
+            // EXT_mesh_shader builtins
+            .{ .name = "gl_MeshPerVertexEXT", .ty = .vec4, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_PrimitiveTriangleIndicesEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_PrimitiveLineIndicesEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_PrimitivePointIndicesEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_CullPrimitiveEXT", .ty = .bool, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_PrimitiveShadingRateEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_TaskCountEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_PrimitiveCountEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_VertexCountEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
         };
 
         for (&builtins) |b| {
@@ -1032,6 +1051,9 @@ const Analyzer = struct {
                         if (layout.depth_greater) self.has_depth_greater = true;
                         if (layout.depth_less) self.has_depth_less = true;
                         if (layout.depth_unchanged) self.has_depth_unchanged = true;
+                        if (layout.max_vertices) |mv| self.mesh_max_vertices = mv;
+                        if (layout.max_primitives) |mp| self.mesh_max_primitives = mp;
+                        if (layout.output_topology) |t| self.mesh_output_topology = t;
                     }
                 }
                 // Skip creating a global for standalone layout qualifiers (e.g. layout(local_size_x=1) in;)
@@ -1083,7 +1105,7 @@ const Analyzer = struct {
                     .in_decl => .input,
                     .out_decl => .output,
                     .uniform_decl => if (ty.isSampler()) .uniform_constant else .uniform,
-                    .var_decl => if (node.data.qualifier != null and node.data.qualifier.?.is_shared) .workgroup else .private,
+                    .var_decl => if (node.data.qualifier != null and node.data.qualifier.?.is_shared) .workgroup else if (node.data.qualifier != null and node.data.qualifier.?.is_task_payload_shared) .task_payload_workgroup else .private,
                     else => .private,
                 };
                 try self.globals.append(self.alloc, .{
@@ -3477,6 +3499,37 @@ const Analyzer = struct {
                         });
                         self.uses_arm_tensors = true;
                         return .{ .ty = .uint, .id = result_id };
+                    }
+                    // === EXT_mesh_shader builtins ===
+                    // SetMeshOutputsEXT(num_vertices, num_primitives) → void
+                    if (std.mem.eql(u8, node.data.name, "SetMeshOutputsEXT")) {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        operands[1] = .{ .id = arg_tids.items[1].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .set_mesh_outputs,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = operands,
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = result_id };
+                    }
+                    // EmitMeshTasksEXT(x, y, z, payload) → void
+                    if (std.mem.eql(u8, node.data.name, "EmitMeshTasksEXT")) {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 4);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        operands[1] = .{ .id = arg_tids.items[1].id };
+                        operands[2] = .{ .id = arg_tids.items[2].id };
+                        operands[3] = .{ .id = arg_tids.items[3].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .emit_mesh_tasks,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = operands,
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = result_id };
                     }
                     if (std.mem.eql(u8, node.data.name, "tensorReadARM")) {
                         // tensorReadARM(tensor, coords, out [, operands...])
