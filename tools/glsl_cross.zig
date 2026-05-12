@@ -1,13 +1,19 @@
 const std = @import("std");
 pub const glslpp = @import("glslpp");
+const compat = glslpp.compat;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
+pub fn main(maybe_init: compat.MainInit) !void {
+    compat.setMainInit(maybe_init);
+    var gpa_impl = compat.Gpa(.{}){};
+    defer _ = gpa_impl.deinit();
+    const alloc = gpa_impl.allocator();
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    var main_io = compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const io = main_io.io();
+
+    const args = try compat.argsAlloc(alloc);
+    defer compat.argsFree(alloc, args);
 
     if (args.len < 4) {
         std.debug.print("Usage: glsl_cross <input.glsl> <output_prefix> <target:hlsl|glsl|msl>\n", .{});
@@ -19,8 +25,8 @@ pub fn main() !void {
     const target = args[3];
 
     // Read input GLSL
-    const cwd = std.fs.cwd();
-    const glsl_src = try cwd.readFileAlloc(alloc, input_path, 1024 * 1024);
+    const dir = compat.cwd();
+    const glsl_src = try compat.dirReadFileAlloc(io, dir, alloc, input_path, 1024 * 1024);
     defer alloc.free(glsl_src);
 
     // Add null terminator
@@ -49,6 +55,6 @@ pub fn main() !void {
     // Write output
     var out_path: [512]u8 = undefined;
     const out_name = try std.fmt.bufPrint(&out_path, "{s}_glslpp.{s}", .{ output_prefix, target });
-    try cwd.writeFile(.{ .sub_path = out_name, .data = output });
+    try compat.dirWriteFile(io, dir, out_name, output);
     std.debug.print("Wrote {s}\n", .{out_name});
 }
