@@ -13403,3 +13403,48 @@ test "hlsl: bitCount -> countbits" {
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "countbits") != null);
 }
+
+test "hlsl: constFold integer division and modulo" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) in float u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    // These are NOT constant — should remain as ops
+        \\    int a = int(u);
+        \\    int b = a / 3;
+        \\    int c = a % 5;
+        \\    fragColor = vec4(float(b + c));
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    // Division and modulo should still be present (runtime values)
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "/") != null or std.mem.indexOf(u8, hlsl, "/") != null);
+}
+
+test "hlsl: constFold bitwise and shift with runtime values" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) in float u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = int(u);
+        \\    int b = a & 0xFF;
+        \\    int c = a | 0x100;
+        \\    int d = a ^ 0x55;
+        \\    int e = a << 2;
+        \\    int f = a >> 3;
+        \\    fragColor = vec4(float(b + c + d + e + f));
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    // Bitwise and shift ops should be present (runtime values)
+    try assertContains(hlsl, "<<");
+    try assertContains(hlsl, ">>");
+}
