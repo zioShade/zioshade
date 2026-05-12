@@ -8797,7 +8797,7 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
             if (op == 61 and wc >= 4) try b.loads.put(alloc, words[pos + 3], words[pos + 2]);
             if (op == 249 and wc >= 2) try b.succs.append(alloc, words[pos + 1]);
             if (op == 250 and wc >= 4) { try b.succs.append(alloc, words[pos + 2]); try b.succs.append(alloc, words[pos + 3]); }
-            if (op == 251 and wc >= 3) { var i: u32 = 2; while (i < wc) : (i += 1) try b.succs.append(alloc, words[pos + i]); }
+            if (op == 251 and wc >= 3) { try b.succs.append(alloc, words[pos + 2]); var i: u32 = 4; while (i < wc) : (i += 2) try b.succs.append(alloc, words[pos + i]); }
         }
         pos = ie;
     }
