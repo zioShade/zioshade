@@ -12,6 +12,7 @@ pub const Preprocessor = struct {
     is_essl: bool = false,
     expanding: std.ArrayListUnmanaged([]const u8),
     extra_strings: std.ArrayListUnmanaged(u8),
+    has_ext_mesh_shader: bool = false,
 
     pub fn init(alloc: std.mem.Allocator) Preprocessor {
         return .{
@@ -645,9 +646,13 @@ pub const Preprocessor = struct {
                                 i += 1; // skip :
                                 if (i < tokens.len and tokens[i].tag == .identifier) {
                                     const behavior = self.getTokenText(tokens[i]);
-                                    if (std.mem.eql(u8, behavior, "enable") and
-                                        std.mem.eql(u8, ext_name, "GL_EXT_null_initializer"))
+                                    if ((std.mem.eql(u8, behavior, "enable") or std.mem.eql(u8, behavior, "require")) and
+                                        (std.mem.eql(u8, ext_name, "GL_EXT_null_initializer") or
+                                         std.mem.eql(u8, ext_name, "GL_EXT_mesh_shader")))
                                     {
+                                        if (std.mem.eql(u8, ext_name, "GL_EXT_mesh_shader")) {
+                                            self.has_ext_mesh_shader = true;
+                                        }
                                         const name_dup = try self.alloc.dupe(u8, ext_name);
                                         const one_tok = lexer.Token{ .tag = .int_literal, .loc = tokens[i].loc, .start = 0, .len = 1 };
                                         const body = try self.alloc.dupe(lexer.Token, &.{one_tok});
