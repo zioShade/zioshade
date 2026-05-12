@@ -5968,6 +5968,8 @@ const Analyzer = struct {
             "rayQueryInitializeEXT", "rayQueryProceedEXT", "rayQueryGetIntersectionTypeEXT",
             "rayQueryGetIntersectionTriangleVertexPositionsEXT",
             "tensorSizeARM", "tensorReadARM",
+            // EXT_mesh_shader builtins
+            "SetMeshOutputsEXT", "EmitMeshTasksEXT",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;

@@ -901,12 +901,23 @@ fn emitFunction(
 
     // Emit signature
     const is_compute = is_entry and module.execution_model == .GLCompute;
-    if (is_compute) {
+    const is_mesh = is_entry and module.execution_model == .MeshEXT;
+    const is_task = is_entry and module.execution_model == .TaskEXT;
+    if (is_compute or is_task) {
         try w.print("[numthreads({d}, {d}, {d})]\n", .{
             module.local_size[0],
             module.local_size[1],
             module.local_size[2],
         });
+    }
+    if (is_mesh) {
+        try w.print("[numthreads({d}, {d}, {d})]\n", .{
+            module.local_size[0],
+            module.local_size[1],
+            module.local_size[2],
+        });
+        // TODO: emit [OutputTopology("triangle")] and mesh<> signature
+        // For now, emit as compute-like
     }
     if (is_fragment) {
         try w.writeAll("float4 main(");
@@ -1997,6 +2008,25 @@ fn emitInstruction(
         },
 
         else => {
+            // Mesh/task shader ops
+            if (inst.op == .SetMeshOutputsEXT) {
+                if (inst.words.len >= 3) {
+                    const vc = idToExpr(module, names, inst.words[1], alloc);
+                    const pc = idToExpr(module, names, inst.words[2], alloc);
+                    try w.print("    SetMeshOutputCounts({s}, {s});\n", .{vc, pc});
+                }
+                return;
+            }
+            if (inst.op == .EmitMeshTasksEXT) {
+                if (inst.words.len >= 5) {
+                    const x = idToExpr(module, names, inst.words[1], alloc);
+                    const y = idToExpr(module, names, inst.words[2], alloc);
+                    const z = idToExpr(module, names, inst.words[3], alloc);
+                    const p = idToExpr(module, names, inst.words[4], alloc);
+                    try w.print("    DispatchMesh({s}, {s}, {s}, {s});\n", .{x, y, z, p});
+                }
+                return;
+            }
             try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});
         },
     }
@@ -2330,6 +2360,19 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
             };
         },
     };
+}
+
+/// Resolve an ID to an HLSL expression string. Falls back to constant literal for unnamed IDs.
+fn idToExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32, alloc: std.mem.Allocator) []const u8 {
+    if (names.get(id)) |name| return name;
+    const def = getDef(module, id) orelse return "0";
+    if (def.op == .Constant and def.words.len > 3) {
+        const val = def.words[3];
+        return std.fmt.allocPrint(alloc, "{d}", .{val}) catch "0";
+    }
+    if (def.op == .ConstantTrue) return "true";
+    if (def.op == .ConstantFalse) return "false";
+    return "0";
 }
 
 // ---------------------------------------------------------------------------
