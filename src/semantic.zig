@@ -5661,6 +5661,11 @@ const Analyzer = struct {
                 store_ops[1] = .{ .id = new_val_id };
                 _ = self.load_cache.remove(lval.id);
                 _ = self.global_load_cache.remove(lval.id);
+                // If storing to an AccessChain result (e.g., v.x++), also invalidate the base variable
+                if (self.ac_result_to_base.get(lval.id)) |base_id| {
+                    _ = self.load_cache.remove(base_id);
+                    _ = self.global_load_cache.remove(base_id);
+                }
                 self.load_cache.put(self.alloc, lval.id, new_val_id) catch {}; // Forward
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
