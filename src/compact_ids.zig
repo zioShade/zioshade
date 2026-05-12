@@ -1731,7 +1731,9 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             pos += wc;
         }
 
-        if (!value_escapes) dead_loops.set(li);
+        if (!value_escapes) {
+            dead_loops.set(li);
+        }
     }
 
     // Phase 2.5: Check if function-local vars stored in the loop are loaded after merge.
@@ -1756,6 +1758,12 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             var loop_stored_locals = std.DynamicBitSet.initEmpty(alloc, bound) catch continue;
             defer loop_stored_locals.deinit();
 
+            // Check if the loop is "simple" (no nested loops or switches)
+            // AC+Store tracking is only safe for simple loops to avoid
+            // breaking switch/loop dominance invariants
+            // Note: skip the loop's own OpLoopMerge by tracking if we've seen it
+            var has_nested_struct = false;
+            var saw_own_merge = false;
             var in_loop2 = false;
             pos = 5;
             while (pos < words.len) {
@@ -1766,13 +1774,52 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                     if (lbl == header_label_id) in_loop2 = true;
                     if (lbl == loop_info.merge_id) in_loop2 = false;
                 }
-                if (in_loop2 and op2 == 62 and wc2 >= 3) { // OpStore
-                    const store_target = words[pos + 1];
-                    if (func_vars.contains(store_target)) {
-                        if (store_target < bound) loop_stored_locals.set(store_target);
+                if (in_loop2) {
+                    if (op2 == 246 and !saw_own_merge) { // OpLoopMerge
+                        saw_own_merge = true; // skip the loop's own merge
+                    } else if (op2 == 246) {
+                        has_nested_struct = true; // nested loop
+                    }
+                    if (op2 == 251) has_nested_struct = true; // OpSwitch
+                    if (op2 == 62 and wc2 >= 3) { // OpStore
+                        const store_target = words[pos + 1];
+                        if (func_vars.contains(store_target)) {
+                            if (store_target < bound) loop_stored_locals.set(store_target);
+                        }
                     }
                 }
                 pos += wc2;
+            }
+
+            // For simple loops without nested struct, also track AC+Store to composite vars
+            if (!has_nested_struct) {
+                var ac_to_base_dl = std.AutoHashMapUnmanaged(u32, u32).empty;
+                defer ac_to_base_dl.deinit(alloc);
+                in_loop2 = false;
+                pos = 5;
+                while (pos < words.len) {
+                    const hdr3 = words[pos]; const wc3: u32 = hdr3 >> 16; const op3: u16 = @truncate(hdr3 & 0xFFFF);
+                    if (wc3 == 0) break;
+                    if (op3 == 248 and wc3 >= 2) {
+                        const lbl = words[pos + 1];
+                        if (lbl == header_label_id) in_loop2 = true;
+                        if (lbl == loop_info.merge_id) in_loop2 = false;
+                    }
+                    if (in_loop2 and op3 == 65 and wc3 >= 4) { // OpAccessChain
+                        const ac_result = words[pos + 2];
+                        const ac_base = words[pos + 3];
+                        if (ac_base > 0 and ac_base < bound and func_vars.contains(ac_base) and ac_result > 0 and ac_result < bound) {
+                            ac_to_base_dl.put(alloc, ac_result, ac_base) catch {};
+                        }
+                    }
+                    if (in_loop2 and op3 == 62 and wc3 >= 3) { // OpStore
+                        const store_target = words[pos + 1];
+                        if (ac_to_base_dl.get(store_target)) |base_var| {
+                            if (base_var < bound) loop_stored_locals.set(base_var);
+                        }
+                    }
+                    pos += wc3;
+                }
             }
 
             if (loop_stored_locals.count() == 0) continue;
