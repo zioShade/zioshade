@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const glslpp = @import("glslpp");
+const compat = @import("glslpp").compat;
 
 const alloc = std.testing.allocator;
 
@@ -19,45 +20,46 @@ const SpirvCross = "C:\\VulkanSDK\\1.4.341.1\\Bin\\spirv-cross.exe";
 
 /// Compile GLSL to SPIR-V using glslangValidator, return the SPIR-V words
 fn compileToSpirvViaGlslang(allocator: std.mem.Allocator, source: [:0]const u8, stage: glslpp.Stage) ![]u32 {
+    const io = compat.testIo();
+    const dir = compat.cwd();
+
     // Ensure .zig-cache exists
-    std.fs.cwd().makePath(".zig-cache") catch {};
+    compat.dirMakePath(io, dir, ".zig-cache") catch {};
+
     // Write source to temp file
-    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var tmp_buf: [compat.max_path_bytes]u8 = undefined;
     const ext = switch (stage) {
         .vertex => ".vert",
         .fragment => ".frag",
         .compute => ".comp",
         else => ".frag",
     };
-    const tmp_path_ext = std.fmt.bufPrint(&tmp_buf, ".zig-cache/cc{d}{s}", .{ std.crypto.random.int(u32), ext }) catch return error.OutOfMemory;
+    const tmp_path_ext = std.fmt.bufPrint(&tmp_buf, ".zig-cache/cc{d}{s}", .{ compat.randomInt(u32), ext }) catch return error.OutOfMemory;
 
-    const tmp_file = std.fs.cwd().createFile(tmp_path_ext, .{}) catch |err| {
+    const tmp_file = compat.dirCreateFile(io, dir, tmp_path_ext, .{}) catch |err| {
         return err;
     };
-    try tmp_file.writeAll(std.mem.sliceTo(source, 0));
-    tmp_file.close(); // Close before running external tool (Windows file locking)
+    compat.fileWriteAll(io, tmp_file, std.mem.sliceTo(source, 0)) catch {};
+    compat.fileClose(io, tmp_file); // Close before running external tool (Windows file locking)
 
     // Run glslangValidator
     const spv_path = try std.fmt.allocPrint(allocator, "{s}.spv", .{tmp_path_ext});
     defer allocator.free(spv_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ GlslangValidator, "-V", "-o", spv_path, tmp_path_ext },
-    });
+    const result = try compat.processRun(io, allocator, &.{ GlslangValidator, "-V", "-o", spv_path, tmp_path_ext });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
     // Read SPIR-V output
-    std.fs.cwd().deleteFile(tmp_path_ext) catch {};
-    const spv_file = std.fs.cwd().openFile(spv_path, .{}) catch {
+    compat.dirDeleteFile(io, dir, tmp_path_ext) catch {};
+    const spv_file = compat.dirOpenFile(io, dir, spv_path, .{}) catch {
         std.debug.print("glslangValidator stderr: {s}\n", .{result.stderr});
         return error.FileNotFound;
     };
-    defer spv_file.close();
-    defer std.fs.cwd().deleteFile(spv_path) catch {};
+    defer compat.fileClose(io, spv_file);
+    defer compat.dirDeleteFile(io, dir, spv_path) catch {};
 
-    const spv_bytes = try spv_file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+    const spv_bytes = try compat.fileReadToEndAlloc(io, spv_file, allocator, 10 * 1024 * 1024);
     // bytes may not be 4-aligned, so copy into properly aligned slice
     const word_count = spv_bytes.len / 4;
     const spv_words = try allocator.alloc(u32, word_count);
@@ -70,18 +72,16 @@ fn compileToSpirvViaGlslang(allocator: std.mem.Allocator, source: [:0]const u8, 
 
 /// Cross-compile SPIR-V to GLSL using spirv-cross CLI
 fn spirvCrossToGlsl(allocator: std.mem.Allocator, spirv: []const u32) ![]u8 {
-    // Write SPIR-V to temp file
-    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&tmp_buf, ".zig-cache/spircross-{}.spv", .{std.crypto.random.int(u64)}) catch return error.OutOfMemory;
-    const tmp_file = try std.fs.cwd().createFile(tmp_path, .{});
-    defer tmp_file.close();
-    try tmp_file.writeAll(std.mem.sliceAsBytes(spirv));
-    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    const io = compat.testIo();
+    const dir = compat.cwd();
 
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ SpirvCross, tmp_path, "--version", "450", "--vulkan-semantics" },
-    });
+    // Write SPIR-V to temp file
+    var tmp_buf_sc: [compat.max_path_bytes]u8 = undefined;
+    const tmp_path = std.fmt.bufPrint(&tmp_buf_sc, ".zig-cache/spircross-{}.spv", .{compat.randomInt(u64)}) catch return error.OutOfMemory;
+    compat.dirWriteFile(io, dir, tmp_path, std.mem.sliceAsBytes(spirv)) catch return error.OutOfMemory;
+    defer compat.dirDeleteFile(io, dir, tmp_path) catch {};
+
+    const result = try compat.processRun(io, allocator, &.{ SpirvCross, tmp_path, "--version", "450", "--vulkan-semantics" });
     defer allocator.free(result.stderr);
     return result.stdout;
 }
