@@ -3159,11 +3159,13 @@ test "T57.1: array uniform in block" {
 test "T57.2: bit shift operations" {
     const source =
         \\#version 450
+        \\layout(location = 0) in float u;
         \\layout(location = 0) out vec4 fragColor;
         \\void main() {
-        \\    int a = 1 << 4;
-        \\    int b = a >> 2;
-        \\    fragColor = vec4(float(a + b));
+        \\    int a = int(u);
+        \\    int b = a << 4;
+        \\    int c = b >> 2;
+        \\    fragColor = vec4(float(a + b + c));
         \\}
     ;
     const hlsl = try compileToHlsl(source);
@@ -3806,9 +3808,10 @@ test "T79.2: integer comparison lessThan/greaterThan" {
 test "T80.1: uint literal and operations" {
     const source =
         \\#version 450
+        \\layout(location = 0) in float inp;
         \\layout(location = 0) out vec4 fragColor;
         \\void main() {
-        \\    uint a = 0xFFFFFFFFu;
+        \\    uint a = uint(inp);
         \\    uint b = a >> 4u;
         \\    fragColor = vec4(float(b));
         \\}
