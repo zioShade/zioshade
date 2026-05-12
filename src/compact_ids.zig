@@ -3340,7 +3340,6 @@ pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error
         // Check if the inner is also a negate of the same type
         if (neg_ops.get(inner_id)) |inner| {
             if (inner.opcode == outer_opcode) {
-                // double negation: outer_result = negate(negate(x)) → x
                 try replacements.put(alloc, outer_result, inner.operand);
             }
         }
@@ -3359,7 +3358,7 @@ pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error
         const ie = pos + wc;
 
         // Skip the outer negate instruction if its result is being replaced
-        if ((opcode == 127 or opcode == 128 or opcode == 131 or opcode == 133) and wc >= 4 and replacements.contains(words[pos + 2])) {
+        if ((opcode == 126 or opcode == 127 or opcode == 168 or opcode == 200) and wc >= 4 and replacements.contains(words[pos + 2])) {
             pos = ie;
             continue;
         }
