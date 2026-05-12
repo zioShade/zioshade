@@ -167,6 +167,21 @@ pub fn build(b: *std.Build) void {
     cross_compare_step.dependOn(&run_cross_compare.step);
     test_step.dependOn(&run_cross_compare.step);
 
+    // Mesh/Task shader tests
+    const mesh_task_test_step = b.step("test-mesh-task", "Run mesh/task shader compilation tests");
+    const mesh_task_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/mesh_task_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mesh_task_test_mod.addImport("glslpp", glslpp_mod);
+    const run_mesh_task_tests = b.addRunArtifact(b.addTest(.{
+        .name = "mesh-task-tests",
+        .root_module = mesh_task_test_mod,
+    }));
+    mesh_task_test_step.dependOn(&run_mesh_task_tests.step);
+    test_step.dependOn(&run_mesh_task_tests.step);
+
     // Tool: dump any shader — run with: zig build dump-shader -- <prefix.glsl> <shader.glsl> <output_prefix>
     // Generates .hlsl, .glsl, .msl, .spv
     const dump_shader_step = b.step("dump-shader", "Dump shader to all output formats (HLSL/GLSL/MSL/SPIR-V)");
