@@ -3853,6 +3853,43 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
 
     if (replacements.count() == 0) return words;
 
+    // Phase 3.5: Double negation: FNegate(FNegate(x)) -> x, SNegate(SNegate(x)) -> x
+    {
+        var unary_ops = std.AutoHashMapUnmanaged(u32, struct { opcode: u16, operand: u32 }).empty;
+        defer unary_ops.deinit(alloc);
+        pos = 5;
+        while (pos < words.len) {
+            const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break;
+            const ie = pos + wc;
+            if (ie > words.len) break;
+            if ((opcode == 126 or opcode == 127) and wc >= 4) { // SNegate or FNegate
+                const result_id = words[pos + 2];
+                const operand = words[pos + 3];
+                if (result_id > 0 and result_id < bound) {
+                    unary_ops.put(alloc, result_id, .{ .opcode = opcode, .operand = operand }) catch {};
+                }
+            }
+            pos = ie;
+        }
+        // Check for double negation chains
+        var it = unary_ops.iterator();
+        while (it.next()) |entry| {
+            const outer_id = entry.key_ptr.*;
+            const outer_op = entry.value_ptr.opcode;
+            const inner_id = entry.value_ptr.operand;
+            if (unary_ops.get(inner_id)) |inner| {
+                if (inner.opcode == outer_op) {
+                    const inner_operand = inner.operand;
+                    const final_val = replacements.get(inner_operand) orelse inner_operand;
+                    replacements.put(alloc, outer_id, final_val) catch {};
+                }
+            }
+        }
+    }
+
+    if (replacements.count() == 0) return words;
+
     // Phase 4: Rewrite
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
     result.appendSliceAssumeCapacity(words[0..5]);
