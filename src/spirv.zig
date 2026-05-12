@@ -224,11 +224,14 @@ pub const Op = enum(u16) {
     Unreachable = 255,
     ControlBarrier = 224,
     MemoryBarrier = 225,
+    EmitMeshTasksEXT = 5368,
+    SetMeshOutputsEXT = 5369,
     _,
 };
 
 pub const Capability = enum(u32) {
     shader = 1,
+    mesh_shading_ext = 5366,
     sampled_image_array_dynamic_indexing = 29,
     image_cube_array = 34,
     sample_rate_shading = 35,
@@ -287,6 +290,15 @@ pub const BuiltIn = enum(u32) {
     local_invocation_index = 29,
     base_vertex = 4424,
     device_index = 4440,
+    mesh_per_vertex_ext = 5285,
+    primitive_triangle_indices_ext = 5294,
+    primitive_line_indices_ext = 5295,
+    primitive_point_indices_ext = 5296,
+    cull_primitive_ext = 5297,
+    primitive_shading_rate_ext = 5298,
+    task_count_ext = 5299,
+    primitive_count_ext = 5300,
+    vertex_count_ext = 5301,
     _,
 };
 
@@ -297,6 +309,8 @@ pub const ExecutionModel = enum(u32) {
     Geometry = 3,
     Fragment = 4,
     GLCompute = 5,
+    TaskEXT = 5364,
+    MeshEXT = 5365,
     _,
 };
 
@@ -313,6 +327,7 @@ pub const StorageClass = enum(u32) {
     PushConstant = 9,
     PhysicalStorageBuffer = 5349,
     StorageBuffer = 12,
+    TaskPayloadWorkgroupEXT = 5402,
     _,
 };
 
@@ -356,6 +371,11 @@ pub const ExecutionMode = enum(u32) {
     DepthLess = 15,
     DepthUnchanged = 16,
     LocalSize = 17,
+    OutputPoints = 1,
+    OutputLinesEXT = 2,
+    OutputTrianglesEXT = 3,
+    OutputPrimitivesEXT = 5367,
+    OutputVertices = 26,
     _,
 };
 
