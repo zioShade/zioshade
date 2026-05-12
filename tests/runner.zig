@@ -114,12 +114,26 @@ fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, sav
             break :blk .mesh
         else if (std.mem.endsWith(u8, path, ".task"))
             break :blk .task
+        else if (std.mem.endsWith(u8, path, ".rgen"))
+            break :blk .raygen
+        else if (std.mem.endsWith(u8, path, ".rchit"))
+            break :blk .closesthit
+        else if (std.mem.endsWith(u8, path, ".rmiss"))
+            break :blk .miss
+        else if (std.mem.endsWith(u8, path, ".rahit"))
+            break :blk .anyhit
+        else if (std.mem.endsWith(u8, path, ".rint"))
+            break :blk .intersection
+        else if (std.mem.endsWith(u8, path, ".rcall"))
+            break :blk .callable
         else
             break :blk .fragment;
     };
 
     // Compile GLSL -> SPIR-V
-    const spirv_ver: glslpp.SPIRVVersion = if (stage == .mesh or stage == .task) .@"1.4" else .@"1.5";
+    const spirv_ver: glslpp.SPIRVVersion = if (stage == .mesh or stage == .task or
+        stage == .raygen or stage == .closesthit or stage == .miss or
+        stage == .intersection or stage == .anyhit or stage == .callable) .@"1.4" else .@"1.5";
     const words = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver }) catch {
         const detail = glslpp.last_compile_detail orelse .semantic_failed;
         const ctx = glslpp.semantic.last_error_ctx;
@@ -168,7 +182,10 @@ fn runDir(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []const u8, sta
         const ext = std.fs.path.extension(entry.basename);
         if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
             !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
-            !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task"))
+            !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task") and
+            !std.mem.eql(u8, ext, ".rgen") and !std.mem.eql(u8, ext, ".rchit") and
+            !std.mem.eql(u8, ext, ".rmiss") and !std.mem.eql(u8, ext, ".rahit") and
+            !std.mem.eql(u8, ext, ".rint") and !std.mem.eql(u8, ext, ".rcall"))
             continue;
 
         // Skip error-validation tests, multi-file link tests, SPIR-V assembly files, and nocompat
@@ -242,6 +259,7 @@ fn mainImpl() !void {
         .{ "spirv-cross", "tests/spirv-cross" },
         .{ "ghostty", "tests/ghostty" },
         .{ "mesh-task", "tests/mesh_task" },
+        .{ "ray-tracing", "tests/ray_tracing" },
     };
 
     if (target_arg) |target| {

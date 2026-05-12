@@ -903,6 +903,13 @@ fn emitFunction(
     const is_compute = is_entry and module.execution_model == .GLCompute;
     const is_mesh = is_entry and module.execution_model == .MeshEXT;
     const is_task = is_entry and module.execution_model == .TaskEXT;
+    const is_raygen = is_entry and module.execution_model == .RayGenerationKHR;
+    const is_closesthit = is_entry and module.execution_model == .ClosestHitKHR;
+    const is_miss = is_entry and module.execution_model == .MissKHR;
+    const is_intersection = is_entry and module.execution_model == .IntersectionKHR;
+    const is_anyhit = is_entry and module.execution_model == .AnyHitKHR;
+    const is_callable = is_entry and module.execution_model == .CallableKHR;
+    const is_rt = is_raygen or is_closesthit or is_miss or is_intersection or is_anyhit or is_callable;
     if (is_compute or is_task) {
         try w.print("[numthreads({d}, {d}, {d})]\n", .{
             module.local_size[0],
@@ -918,6 +925,17 @@ fn emitFunction(
         });
         // TODO: emit [OutputTopology("triangle")] and mesh<> signature
         // For now, emit as compute-like
+    }
+    if (is_rt) {
+        if (module.local_size[0] > 1 or module.local_size[1] > 1 or module.local_size[2] > 1) {
+            try w.print("[numthreads({d}, {d}, {d})]\n", .{
+                module.local_size[0],
+                module.local_size[1],
+                module.local_size[2],
+            });
+        }
+        const stage_name: []const u8 = if (is_raygen) "raygeneration" else if (is_closesthit) "closesthit" else if (is_miss) "miss" else if (is_intersection) "intersection" else if (is_anyhit) "anyhit" else "callable";
+        try w.print("[shader(\"{s}\")]\n", .{stage_name});
     }
     if (is_fragment) {
         try w.writeAll("float4 main(");
@@ -2024,6 +2042,48 @@ fn emitInstruction(
                     const z = idToExpr(module, names, inst.words[3], alloc);
                     const p = idToExpr(module, names, inst.words[4], alloc);
                     try w.print("    DispatchMesh({s}, {s}, {s}, {s});\n", .{x, y, z, p});
+                }
+                return;
+            }
+            // KHR_ray_tracing ops
+            if (inst.op == .TraceRayKHR) {
+                if (inst.words.len >= 12) {
+                    const accel = idToExpr(module, names, inst.words[1], alloc);
+                    const flags = idToExpr(module, names, inst.words[2], alloc);
+                    const mask = idToExpr(module, names, inst.words[3], alloc);
+                    const sbt_off = idToExpr(module, names, inst.words[4], alloc);
+                    const sbt_stride = idToExpr(module, names, inst.words[5], alloc);
+                    const miss = idToExpr(module, names, inst.words[6], alloc);
+                    const origin = idToExpr(module, names, inst.words[7], alloc);
+                    const t_min = idToExpr(module, names, inst.words[8], alloc);
+                    const dir = idToExpr(module, names, inst.words[9], alloc);
+                    const t_max = idToExpr(module, names, inst.words[10], alloc);
+                    const payload = idToExpr(module, names, inst.words[11], alloc);
+                    try w.print("    TraceRay({s}, {s}, {s}, {s}, {s}, {s}, {s}, {s}, {s}, {s}, {s});\n", .{accel, flags, mask, sbt_off, sbt_stride, miss, origin, t_min, dir, t_max, payload});
+                }
+                return;
+            }
+            if (inst.op == .ReportIntersectionKHR) {
+                if (inst.words.len >= 5) {
+                    const hit_t = idToExpr(module, names, inst.words[3], alloc);
+                    const hit_kind = idToExpr(module, names, inst.words[4], alloc);
+                    try w.print("    ReportHit({s}, {s});\n", .{hit_t, hit_kind});
+                }
+                return;
+            }
+            if (inst.op == .IgnoreIntersectionKHR) {
+                try w.writeAll("    IgnoreHit();\n");
+                return;
+            }
+            if (inst.op == .TerminateRayKHR) {
+                try w.writeAll("    AcceptHitAndEndSearch();\n");
+                return;
+            }
+            if (inst.op == .ExecuteCallableKHR) {
+                if (inst.words.len >= 3) {
+                    const sbt = idToExpr(module, names, inst.words[1], alloc);
+                    const data = idToExpr(module, names, inst.words[2], alloc);
+                    try w.print("    CallShader({s}, {s});\n", .{sbt, data});
                 }
                 return;
             }

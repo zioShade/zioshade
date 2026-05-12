@@ -213,6 +213,11 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         5341 => rt(3, ""),            // OpTypeAccelerationStructureKHR (result_only)
         5368 => rt(0, "iiii"),         // OpEmitMeshTasksEXT: x, y, z, payload
         5369 => rt(0, "ii"),           // OpSetMeshOutputsEXT: vertex_count, primitive_count
+        5333 => rt(0, "iiiiiiiiii"),  // OpTraceRayKHR: accel, flags, mask, sbt_off, sbt_stride, miss, origin, tMin, dir, tMax, payload
+        5334 => rt(1, "ii"),           // OpReportIntersectionKHR: hitT, hitKind → bool result
+        5335 => rt(0, ""),             // OpIgnoreIntersectionKHR: no operands
+        5336 => rt(0, ""),             // OpTerminateRayKHR: no operands
+        5337 => rt(0, "ii"),           // OpExecuteCallableKHR: sbt_index, callable_data
         6035 => rt(2, "iiii"),        // OpAtomicFAddEXT
 
         else => null,

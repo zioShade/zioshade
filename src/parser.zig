@@ -422,6 +422,21 @@ const Parser = struct {
                     if (std.mem.eql(u8, ident_text, "taskPayloadSharedEXT")) {
                         q.is_task_payload_shared = true;
                         _ = self.advance(); found = true;
+                    } else if (std.mem.eql(u8, ident_text, "rayPayloadEXT")) {
+                        q.is_ray_payload = true;
+                        _ = self.advance(); found = true;
+                    } else if (std.mem.eql(u8, ident_text, "incomingRayPayloadEXT")) {
+                        q.is_incoming_ray_payload = true;
+                        _ = self.advance(); found = true;
+                    } else if (std.mem.eql(u8, ident_text, "hitAttributeEXT")) {
+                        q.is_hit_attribute = true;
+                        _ = self.advance(); found = true;
+                    } else if (std.mem.eql(u8, ident_text, "callableDataEXT")) {
+                        q.is_callable_data = true;
+                        _ = self.advance(); found = true;
+                    } else if (std.mem.eql(u8, ident_text, "incomingCallableDataEXT")) {
+                        q.is_incoming_callable_data = true;
+                        _ = self.advance(); found = true;
                     } else break;
                 },
                 else => break,
