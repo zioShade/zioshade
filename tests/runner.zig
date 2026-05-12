@@ -1,5 +1,6 @@
 const std = @import("std");
 const glslpp = @import("glslpp");
+const compat = glslpp.compat;
 
 const SpirvVal = "C:\\VulkanSDK\\1.4.341.1\\Bin\\spirv-val.exe";
 
@@ -20,7 +21,9 @@ fn log(comptime fmt: []const u8, args: anytype) void {
     std.debug.print(fmt, args);
 }
 
-fn inlineIncludes(alloc: std.mem.Allocator, path: []const u8, source: []const u8) ![]const u8 {
+fn inlineIncludes(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, source: []const u8) ![]const u8 {
+    const dir = compat.cwd();
+
     // Check if source has #include
     const include_tag = "#include \"";
     const start = std.mem.indexOf(u8, source, include_tag) orelse return source;
@@ -33,15 +36,15 @@ fn inlineIncludes(alloc: std.mem.Allocator, path: []const u8, source: []const u8
     // Build path relative to the source file's directory
     var dir_end = path.len;
     while (dir_end > 0 and path[dir_end - 1] != '/' and path[dir_end - 1] != '\\') dir_end -= 1;
-    const dir = path[0..dir_end];
+    const dir_part = path[0..dir_end];
 
-    var include_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const include_path = std.fmt.bufPrint(&include_path_buf, "{s}{s}", .{ dir, include_filename }) catch return source;
+    var include_path_buf: [compat.max_path_bytes]u8 = undefined;
+    const include_path = std.fmt.bufPrint(&include_path_buf, "{s}{s}", .{ dir_part, include_filename }) catch return source;
 
     // Read the include file
-    const include_file = std.fs.cwd().openFile(include_path, .{}) catch return source;
-    defer include_file.close();
-    const include_source = try include_file.readToEndAlloc(alloc, 1024 * 1024);
+    const include_file = compat.dirOpenFile(io, dir, include_path, .{}) catch return source;
+    defer compat.fileClose(io, include_file);
+    const include_source = try compat.fileReadToEndAlloc(io, include_file, alloc, 1024 * 1024);
     defer alloc.free(include_source);
 
     // Strip #version line from include source
@@ -66,26 +69,32 @@ fn inlineIncludes(alloc: std.mem.Allocator, path: []const u8, source: []const u8
     return result;
 }
 
-fn testShader(alloc: std.mem.Allocator, path: []const u8, save_spv: ?[]const u8) !Result {
-    const file = std.fs.cwd().openFile(path, .{}) catch return .skip;
-    defer file.close();
-    const source = file.readToEndAllocOptions(alloc, 10 * 1024 * 1024, null, .of(u8), 0) catch return .skip;
-    defer alloc.free(source);
+fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, save_spv: ?[]const u8) !Result {
+    const dir = compat.cwd();
+
+    const file = compat.dirOpenFile(io, dir, path, .{}) catch return .skip;
+    defer compat.fileClose(io, file);
+    const source = try compat.fileReadToEndAlloc(io, file, alloc, 10 * 1024 * 1024);
+    // Ensure null-terminated for downstream use
+    const source_z_raw = try alloc.dupeZ(u8, source);
+    alloc.free(source);
+    const source_nt = source_z_raw;
+    defer alloc.free(source_nt);
 
     // Skip empty files
-    if (source.len == 0) return .skip;
+    if (source_nt.len == 0) return .skip;
 
     // Skip header/include files (no main function)
-    if (std.mem.indexOf(u8, source, "void main") == null and
-        std.mem.indexOf(u8, source, "void mainImage") == null)
+    if (std.mem.indexOf(u8, source_nt, "void main") == null and
+        std.mem.indexOf(u8, source_nt, "void mainImage") == null)
         return .skip;
 
     // Skip files that are error-validation tests (contain "// ERROR" markers)
-    if (std.mem.indexOf(u8, source, "// ERROR") != null) return .skip;
+    if (std.mem.indexOf(u8, source_nt, "// ERROR") != null) return .skip;
 
     // Inline #include directives (simple single-level include)
-    const final_source = inlineIncludes(alloc, path, source) catch source;
-    defer if (final_source.ptr != source.ptr) alloc.free(final_source);
+    const final_source = inlineIncludes(io, alloc, path, source_nt) catch source_nt;
+    defer if (final_source.ptr != source_nt.ptr) alloc.free(final_source);
     const source_z = try alloc.dupeZ(u8, final_source);
     defer alloc.free(source_z);
 
@@ -116,28 +125,22 @@ fn testShader(alloc: std.mem.Allocator, path: []const u8, save_spv: ?[]const u8)
 
     // Write to temp file or specified path
     const tmp_path: []const u8 = if (save_spv) |sp| sp else blk: {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        break :blk std.fmt.bufPrint(&buf, ".zig-cache/conformance-{}.spv", .{std.crypto.random.int(u64)}) catch return .skip;
+        var buf: [compat.max_path_bytes]u8 = undefined;
+        break :blk std.fmt.bufPrint(&buf, ".zig-cache/conformance-{}.spv", .{compat.randomInt(u64)}) catch return .skip;
     };
-    const tmp_file = std.fs.cwd().createFile(tmp_path, .{}) catch return .skip;
+    const tmp_file = compat.dirCreateFile(io, dir, tmp_path, .{}) catch return .skip;
     defer {
-        tmp_file.close();
+        compat.fileClose(io, tmp_file);
         // Keep the file if validation failed, for debugging
     }
-    try tmp_file.writeAll(std.mem.sliceAsBytes(words));
+    compat.fileWriteAll(io, tmp_file, std.mem.sliceAsBytes(words)) catch return .skip;
 
     // Run spirv-val
-    const val_result = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ SpirvVal, tmp_path },
-    }) catch return .fail;
+    const val_result = compat.processRun(io, alloc, &.{ SpirvVal, tmp_path }) catch return .fail;
     defer alloc.free(val_result.stdout);
     defer alloc.free(val_result.stderr);
 
-    const exit_code: u32 = switch (val_result.term) {
-        .Exited => |c| c,
-        else => 1,
-    };
+    const exit_code: u32 = val_result.term.exitedCode() orelse 1;
 
     if (exit_code == 0) return .pass;
 
@@ -148,14 +151,14 @@ fn testShader(alloc: std.mem.Allocator, path: []const u8, save_spv: ?[]const u8)
     return .fail;
 }
 
-fn runDir(alloc: std.mem.Allocator, dir_path: []const u8, stats: *Stats) !void {
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
+fn runDir(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []const u8, stats: *Stats) !void {
+    const dir = compat.dirOpenDir(io, compat.cwd(), dir_path, .{ .iterate = true }) catch return;
+    defer compat.dirClose(io, dir);
 
-    var walker = try dir.walk(alloc);
+    var walker = try compat.dirWalk(dir, alloc);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try compat.walkerNext(io, &walker)) |entry| {
         if (entry.kind != .file) continue;
         const ext = std.fs.path.extension(entry.basename);
         if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
@@ -168,10 +171,10 @@ fn runDir(alloc: std.mem.Allocator, dir_path: []const u8, stats: *Stats) !void {
         if (std.mem.indexOf(u8, entry.basename, ".asm.") != null) continue;
         if (std.mem.indexOf(u8, entry.basename, ".nocompat.") != null) continue;
 
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var path_buf: [compat.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
 
-        const result = testShader(alloc, full_path, null) catch .skip;
+        const result = testShader(io, alloc, full_path, null) catch .skip;
         switch (result) {
             .pass => {
                 stats.pass += 1;
@@ -194,26 +197,37 @@ fn runDir(alloc: std.mem.Allocator, dir_path: []const u8, stats: *Stats) !void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .never_unmap = true, .retain_metadata = false }){};
+    try mainImpl();
+}
+
+fn mainImpl() !void {
+    var gpa_impl = compat.Gpa(.{ .never_unmap = true, .retain_metadata = false }){};
     // Don't check for leaks - compileToSPIRV leaks internal state intentionally
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
+    defer _ = gpa_impl.deinit();
+    const alloc = gpa_impl.allocator();
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    // Get I/O context
+    var main_io = compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const io = main_io.io();
 
+    // On 0.15: parse args. On 0.16: args not available from void main, use defaults.
     var stats = Stats{};
     var save_spv_path: ?[]const u8 = null;
-
-    // Parse --save-spv argument
     var target_arg: ?[]const u8 = null;
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--save-spv") and i + 1 < args.len) {
-            save_spv_path = args[i + 1];
-            i += 1;
-        } else {
-            target_arg = args[i];
+
+    if (!compat.is_0_16) {
+        const args = try std.process.argsAlloc(alloc);
+        defer std.process.argsFree(alloc, args);
+
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--save-spv") and i + 1 < args.len) {
+                save_spv_path = args[i + 1];
+                i += 1;
+            } else {
+                target_arg = args[i];
+            }
         }
     }
 
@@ -228,7 +242,7 @@ pub fn main() !void {
         inline for (all_suites) |suite| {
             if (std.mem.eql(u8, target, suite.@"0")) {
                 log("\n=== {s} ===\n", .{suite.@"0"});
-                runDir(alloc, suite.@"1", &stats) catch {};
+                runDir(io, alloc, suite.@"1", &stats) catch {};
                 matched_suite = true;
                 break;
             }
@@ -239,7 +253,7 @@ pub fn main() !void {
             if (std.mem.eql(u8, ext, ".frag") or std.mem.eql(u8, ext, ".vert") or
                 std.mem.eql(u8, ext, ".comp") or std.mem.eql(u8, ext, ".glsl"))
             {
-                const result = testShader(alloc, target, save_spv_path) catch .skip;
+                const result = testShader(io, alloc, target, save_spv_path) catch .skip;
                 switch (result) {
                     .pass => {
                         stats.pass += 1;
@@ -259,13 +273,13 @@ pub fn main() !void {
                 }
             } else {
                 log("\n=== {s} ===\n", .{target});
-                runDir(alloc, target, &stats) catch {};
+                runDir(io, alloc, target, &stats) catch {};
             }
         }
     } else {
         inline for (all_suites) |suite| {
             log("\n=== {s} ===\n", .{suite.@"0"});
-            runDir(alloc, suite.@"1", &stats) catch {};
+            runDir(io, alloc, suite.@"1", &stats) catch {};
         }
     }
 
