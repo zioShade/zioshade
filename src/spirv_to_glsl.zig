@@ -951,25 +951,49 @@ fn emitWhileLoop(
     w: anytype, alloc: std.mem.Allocator,
     is_frag: bool, ovid: ?u32,
 ) !usize {
-    if (loop_idx + 1 >= m.instructions.len or m.instructions[loop_idx + 1].op != .Branch) {
+    // Two patterns after LoopMerge:
+    // Pattern A: LoopMerge; Branch cond_label; ...; BranchConditional cond, body, merge
+    // Pattern B: LoopMerge; BranchConditional cond, body, merge (merged condition)
+
+    var bc_idx: usize = loop_idx + 1;
+    var cond_start: ?usize = null; // start of condition instructions (Pattern A only)
+    var cond_end: usize = loop_idx + 1;
+
+    if (loop_idx + 1 >= m.instructions.len) {
         if (label_map.get(merge_lbl)) |mi| return mi;
         return loop_idx + 1;
     }
-    const cond_lbl = m.instructions[loop_idx + 1].words[1];
-    const cond_idx = label_map.get(cond_lbl) orelse {
+
+    const next_inst = m.instructions[loop_idx + 1];
+    if (next_inst.op == .Branch and next_inst.words.len >= 2) {
+        // Pattern A: separate condition block
+        const cond_lbl = next_inst.words[1];
+        const cond_idx = label_map.get(cond_lbl) orelse {
+            if (label_map.get(merge_lbl)) |mi| return mi;
+            return loop_idx + 1;
+        };
+        cond_start = cond_idx + 1;
+        bc_idx = cond_idx + 1;
+        while (bc_idx < m.instructions.len) : (bc_idx += 1) {
+            const scan = m.instructions[bc_idx];
+            if (scan.op == .BranchConditional) break;
+            if (scan.op == .Branch or scan.op == .FunctionEnd or scan.op == .Label) { bc_idx = m.instructions.len; break; }
+        }
+        if (bc_idx >= m.instructions.len) {
+            if (label_map.get(merge_lbl)) |mi| return mi;
+            return loop_idx + 1;
+        }
+        cond_end = bc_idx;
+    } else if (next_inst.op == .BranchConditional and next_inst.words.len >= 4) {
+        // Pattern B: BranchConditional directly after LoopMerge
+        bc_idx = loop_idx + 1;
+        cond_start = null;
+        cond_end = loop_idx + 1;
+    } else {
         if (label_map.get(merge_lbl)) |mi| return mi;
         return loop_idx + 1;
-    };
-    var bc_idx: usize = cond_idx + 1;
-    while (bc_idx < m.instructions.len) : (bc_idx += 1) {
-        const scan = m.instructions[bc_idx];
-        if (scan.op == .BranchConditional) break;
-        if (scan.op == .Branch or scan.op == .FunctionEnd or scan.op == .Label) { bc_idx = m.instructions.len; break; }
     }
-    if (bc_idx >= m.instructions.len) {
-        if (label_map.get(merge_lbl)) |mi| return mi;
-        return loop_idx + 1;
-    }
+
     const bc = m.instructions[bc_idx];
     if (bc.words.len < 4) {
         if (label_map.get(merge_lbl)) |mi| return mi;
@@ -977,12 +1001,14 @@ fn emitWhileLoop(
     }
     const body_lbl = bc.words[2];
     try w.writeAll("    while (true)\n    {\n");
-    if (cond_idx + 1 < bc_idx) {
-        var ci: usize = cond_idx + 1;
-        while (ci < bc_idx) : (ci += 1) {
-            const cinst = m.instructions[ci];
-            if (cinst.op == .Label or cinst.op == .Branch or cinst.op == .SelectionMerge or cinst.op == .LoopMerge) continue;
-            try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid);
+    if (cond_start) |cs| {
+        if (cs < cond_end) {
+            var ci: usize = cs;
+            while (ci < cond_end) : (ci += 1) {
+                const cinst = m.instructions[ci];
+                if (cinst.op == .Label or cinst.op == .Branch or cinst.op == .SelectionMerge or cinst.op == .LoopMerge) continue;
+                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid);
+            }
         }
     }
     const cond_name = names.get(bc.words[1]) orelse "true";

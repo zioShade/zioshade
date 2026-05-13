@@ -612,3 +612,24 @@ test "msl: bitCount -> popcount" {
     try std.testing.expect(std.mem.indexOf(u8, msl, "popcount") != null);
 }
 
+
+test "T11.1: MSL loop reconstruction produces while loop" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int n; float x; } u;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < u.n; i++) {
+        \\        sum += u.x;
+        \\        if (sum > 10.0) break;
+        \\    }
+        \\    if (sum > 0.0) discard;
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // MSL backend should reconstruct loops as while(true)
+    try assertContains(msl, "while");
+    try assertContains(msl, "break");
+    try assertContains(msl, "discard_fragment");
+}
