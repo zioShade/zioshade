@@ -279,7 +279,11 @@ fn mainImpl() !void {
             // Treat as a direct file or directory path
             const ext = std.fs.path.extension(target);
             if (std.mem.eql(u8, ext, ".frag") or std.mem.eql(u8, ext, ".vert") or
-                std.mem.eql(u8, ext, ".comp") or std.mem.eql(u8, ext, ".glsl"))
+                std.mem.eql(u8, ext, ".comp") or std.mem.eql(u8, ext, ".glsl") or
+                std.mem.eql(u8, ext, ".mesh") or std.mem.eql(u8, ext, ".task") or
+                std.mem.eql(u8, ext, ".rgen") or std.mem.eql(u8, ext, ".rchit") or
+                std.mem.eql(u8, ext, ".rmiss") or std.mem.eql(u8, ext, ".rahit") or
+                std.mem.eql(u8, ext, ".rint") or std.mem.eql(u8, ext, ".rcall"))
             {
                 const result = testShader(io, alloc, target, save_spv_path) catch .skip;
                 switch (result) {
