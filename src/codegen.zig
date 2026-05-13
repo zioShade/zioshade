@@ -873,6 +873,29 @@ const Codegen = struct {
             for (arm_ew) |w| try self.emitWord(w);
             self.alloc.free(arm_ew);
         }
+        // Ray tracing extension
+        if (self.stage == .raygen or self.stage == .closesthit or self.stage == .miss or
+            self.stage == .intersection or self.stage == .anyhit or self.stage == .callable)
+        {
+            try self.emitExtensionString("SPV_KHR_ray_tracing");
+        }
+        // Mesh shading extension
+        if (self.stage == .mesh or self.stage == .task) {
+            try self.emitExtensionString("SPV_EXT_mesh_shader");
+        }
+    }
+
+    fn emitExtensionString(self: *Codegen, ext_name: []const u8) !void {
+        const wc: u16 = 1 + @as(u16, @intCast(std.math.divCeil(usize, ext_name.len + 1, 4) catch unreachable));
+        try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.Extension)));
+        const nw = std.math.divCeil(usize, ext_name.len + 1, 4) catch unreachable;
+        const ew = try self.alloc.alloc(u32, nw);
+        @memset(ew, 0);
+        for (ext_name, 0..) |byte, idx| {
+            ew[idx / 4] |= @as(u32, byte) << @intCast((idx % 4) * 8);
+        }
+        for (ew) |w| try self.emitWord(w);
+        self.alloc.free(ew);
     }
 
     fn emitExtInstImport(self: *Codegen) !void {
@@ -1063,18 +1086,7 @@ const Codegen = struct {
                 try self.emitWord(mp);
             }
         }
-        // Ray tracing stages use LocalSize like compute
-        if (stage == .raygen or stage == .closesthit or stage == .miss or
-            stage == .intersection or stage == .anyhit or stage == .callable) {
-            if (self.module.local_size) |ls| {
-                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ExecutionMode)));
-                try self.emitWord(entry_id);
-                try self.emitWord(@intFromEnum(spirv.ExecutionMode.LocalSize));
-                try self.emitWord(ls.x);
-                try self.emitWord(ls.y);
-                try self.emitWord(ls.z);
-            }
-        }
+        // Ray tracing stages: no LocalSize needed (not supported for these execution models)
     }
 
     fn findEntryPoint(self: *Codegen) ?*const ir.Function {
@@ -4794,12 +4806,14 @@ const Codegen = struct {
                 try self.emitWord(self.operandId(resolved, 1));
             },
             .emit_mesh_tasks => {
-                // OpEmitMeshTasksEXT <x> <y> <z> <payload>
-                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.EmitMeshTasksEXT)));
+                // OpEmitMeshTasksEXT <x> <y> <z> [payload]
+                const has_payload = inst.operands.len > 3;
+                const wc: u16 = if (has_payload) 5 else 4;
+                try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.EmitMeshTasksEXT)));
                 try self.emitWord(self.operandId(resolved, 0));
                 try self.emitWord(self.operandId(resolved, 1));
                 try self.emitWord(self.operandId(resolved, 2));
-                try self.emitWord(self.operandId(resolved, 3));
+                if (has_payload) try self.emitWord(self.operandId(resolved, 3));
             },
             .report_intersection => {
                 // OpReportIntersectionKHR <result_type> <result_id> <hit_t> <hit_kind> → bool
