@@ -289,7 +289,7 @@ pub const Preprocessor = struct {
                 .pp_version => {
                     self.skipToEndOfLine(inc_tokens, &j);
                 },
-                .pp_error, .pp_pragma, .pp_line, .pp_extension => {
+                .pp_error, .pp_warning, .pp_pragma, .pp_line, .pp_extension => {
                     self.skipToEndOfLine(inc_tokens, &j);
                 },
                 .identifier => {
@@ -908,8 +908,8 @@ pub const Preprocessor = struct {
                         self.skipToEndOfLine(tokens, &i);
                     }
                 },
-                .pp_error => {
-                    // #error directive — skip but could report in future
+                .pp_error, .pp_warning => {
+                    // #error/#warning directive — skip but could report in future
                     self.skipToEndOfLine(tokens, &i);
                 },
                 .pp_pragma => {
