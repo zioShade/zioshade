@@ -1840,6 +1840,27 @@ fn emitInstruction(
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord,
             });
         },
+        .ImageSampleProjDrefImplicitLod => {
+            // Projected shadow: SampleCmp with manual projection
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            const parts = splitPair(si);
+            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}.xy / {s}.w, {s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, dref,
+            });
+        },
+        .ImageSampleProjDrefExplicitLod => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            const parts = splitPair(si);
+            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}.xy / {s}.w, {s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, dref,
+            });
+        },
         .ImageSampleExplicitLod => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";

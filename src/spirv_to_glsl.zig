@@ -1433,6 +1433,21 @@ fn emitInstruction(
             // Projected: textureProj(sampler, vec4(xy, z, w)) divides xy by w
             try w.print("    {s} {s} = textureProj({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
         },
+        .ImageSampleProjDrefImplicitLod => {
+            // Projected shadow: textureProj(sampler2DShadow, vec4(xy, depth, w))
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            try w.print("    {s} {s} = textureProj({s}, vec4({s}.xy, {s}, {s}.w));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref, coord });
+        },
+        .ImageSampleProjDrefExplicitLod => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            try w.print("    {s} {s} = textureProjLod({s}, vec4({s}.xy, {s}, {s}.w), 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref, coord });
+        },
         .ImageSampleExplicitLod => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
@@ -1450,6 +1465,24 @@ fn emitInstruction(
                 }
             } else {
                 try w.print("    {s} {s} = textureLod({s}, {s}, 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
+            }
+        },
+        .ImageSampleProjExplicitLod => {
+            // Projected explicit LOD: textureProjLod(sampler, coord, lod)
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            if (inst.words.len > 5) {
+                const mask = inst.words[5];
+                var off: usize = 6;
+                if (mask & 0x1 != 0) off += 1;
+                if (mask & 0x2 != 0 and off < inst.words.len) {
+                    try w.print("    {s} {s} = textureProjLod({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[off]) orelse "0" });
+                } else {
+                    try w.print("    {s} {s} = textureProjLod({s}, {s}, 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
+                }
+            } else {
+                try w.print("    {s} {s} = textureProjLod({s}, {s}, 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
             }
         },
         .ImageFetch => {
