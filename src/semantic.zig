@@ -424,6 +424,26 @@ const Analyzer = struct {
         return id;
     }
 
+    /// Ensure a TypedId is uint type, converting from int if needed
+    fn ensureUint(self: *Analyzer, tid: TypedId) !u32 {
+        if (tid.ty == .uint) return tid.id;
+        if (tid.ty == .int) {
+            // Emit int-to-uint conversion
+            const result_id = self.allocId();
+            const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+            operands[0] = .{ .id = tid.id };
+            try self.instructions.append(self.alloc, .{
+                .tag = .convert_itu,
+                .result_type = null,
+                .result_id = result_id,
+                .operands = operands,
+                .ty = .uint,
+            });
+            return result_id;
+        }
+        return tid.id;
+    }
+
     /// Get or create a constant int IR node with dedup
     fn getConstInt(self: *Analyzer, val: u32, ty: ast.Type) !u32 {
         const key = (@as(u64, @intFromEnum(ty)) << 32) | @as(u64, val);
@@ -3516,8 +3536,9 @@ const Analyzer = struct {
                     // SetMeshOutputsEXT(num_vertices, num_primitives) → void
                     if (std.mem.eql(u8, node.data.name, "SetMeshOutputsEXT")) {
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                        operands[0] = .{ .id = arg_tids.items[0].id };
-                        operands[1] = .{ .id = arg_tids.items[1].id };
+                        // Ensure uint arguments (int literals are signed)
+                        operands[0] = .{ .id = try self.ensureUint(arg_tids.items[0]) };
+                        operands[1] = .{ .id = try self.ensureUint(arg_tids.items[1]) };
                         try self.instructions.append(self.alloc, .{
                             .tag = .set_mesh_outputs,
                             .result_type = null,
@@ -3530,9 +3551,9 @@ const Analyzer = struct {
                     // EmitMeshTasksEXT(x, y, z, payload) → void
                     if (std.mem.eql(u8, node.data.name, "EmitMeshTasksEXT")) {
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 4);
-                        operands[0] = .{ .id = arg_tids.items[0].id };
-                        operands[1] = .{ .id = arg_tids.items[1].id };
-                        operands[2] = .{ .id = arg_tids.items[2].id };
+                        operands[0] = .{ .id = try self.ensureUint(arg_tids.items[0]) };
+                        operands[1] = .{ .id = try self.ensureUint(arg_tids.items[1]) };
+                        operands[2] = .{ .id = try self.ensureUint(arg_tids.items[2]) };
                         operands[3] = .{ .id = arg_tids.items[3].id };
                         try self.instructions.append(self.alloc, .{
                             .tag = .emit_mesh_tasks,

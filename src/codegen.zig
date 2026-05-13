@@ -3598,6 +3598,7 @@ const Codegen = struct {
             .convert_itof => try self.emitUnaryOp(spirv.Op.ConvertSToF, resolved),
             .bitcast => try self.emitUnaryOp(spirv.Op.Bitcast, resolved),
             .convert_utof => try self.emitUnaryOp(spirv.Op.ConvertUToF, resolved),
+            .convert_itu => try self.emitUnaryOp(spirv.Op.Bitcast, resolved),
             .bool_to_float, .bool_to_int, .bool_to_uint => {
                 // bool → numeric: use OpSelect(T, bool, T(1), T(0))
                 const result_type_id = resolved.result_type orelse return;
