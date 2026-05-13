@@ -668,3 +668,39 @@ test "T12.1: MSL CompositeInsert (partial vector write)" {
     // Should contain assignment to swizzle component
     try assertContains(msl, ".x");
 }
+
+test "msl: frexp (FrexpStruct std450 #52)" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) in float v0;
+        \\layout(location = 0) out float fragColor;
+        \\void main() {
+        \\    int e;
+        \\    float f = frexp(v0, e);
+        \\    fragColor = f + float(e);
+        \\}
+    ;
+    const msl = try compileToMsl(src);
+    defer alloc.free(msl);
+    try assertContains(msl, "frexp(");
+    try assertNotContains(msl, "ResType");
+    try assertNotContains(msl, "unhandled");
+}
+
+test "msl: modf (ModfStruct std450 #36)" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) in float v0;
+        \\layout(location = 0) out float fragColor;
+        \\void main() {
+        \\    float whole;
+        \\    float frac_part = modf(v0, whole);
+        \\    fragColor = frac_part + whole;
+        \\}
+    ;
+    const msl = try compileToMsl(src);
+    defer alloc.free(msl);
+    try assertContains(msl, "modf(");
+    try assertNotContains(msl, "ResType");
+    try assertNotContains(msl, "unhandled");
+}
