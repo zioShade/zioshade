@@ -4,7 +4,7 @@
 // bandwidth and kernel launch overhead. Operates on SPIR-V binary words.
 const std = @import("std");
 const compact_ids = @import("compact_ids.zig");
-const opt = @import("compact_ids_passes.zig");
+const opt = @import("compact_ids_passes");
 const spirv = @import("spirv.zig");
 
 /// Configuration for kernel fusion.
