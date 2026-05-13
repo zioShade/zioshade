@@ -9,12 +9,37 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // Real optimization passes for full module
+    const passes_mod = b.createModule(.{
+        .root_source_file = b.path("src/compact_ids_passes.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    glslpp_mod.addImport("compact_ids_passes", passes_mod);
 
     // Expose as named module for consumers (e.g., wintty)
     _ = b.addModule("glslpp", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "compact_ids_passes", .module = passes_mod },
+        },
+    });
+
+    // Compile-only module: same API but stub optimization passes (~10K fewer lines to compile)
+    const passes_stub_mod = b.createModule(.{
+        .root_source_file = b.path("src/compact_ids_passes_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    _ = b.addModule("glslpp_compile", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "compact_ids_passes", .module = passes_stub_mod },
+        },
     });
 
     const lib = b.addLibrary(.{

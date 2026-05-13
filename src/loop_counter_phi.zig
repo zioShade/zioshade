@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const compact_ids = @import("compact_ids.zig");
-const opt = @import("compact_ids_passes.zig");
+const opt = @import("compact_ids_passes");
 
 pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
     const bound = words[3];
