@@ -15,6 +15,17 @@ pub const Preprocessor = struct {
     has_ext_mesh_shader: bool = false,
     has_ext_ray_tracing: bool = false,
 
+    // Include support
+    include_paths: []const []const u8 = &.{},
+    include_depth: u32 = 0,
+    max_include_depth: u32 = 16,
+    included_files: std.StringHashMapUnmanaged(void) = .empty, // cycle detection
+    file_reader: ?*const fn ([]const u8) anyerror![:0]const u8 = null,
+    // Back-reference to the source file path for relative includes
+    source_file_path: []const u8 = "",
+    // Stored include file contents (to keep slices alive)
+    included_sources: std.ArrayListUnmanaged([]const u8) = .empty,
+
     pub fn init(alloc: std.mem.Allocator) Preprocessor {
         return .{
             .alloc = alloc,
@@ -44,6 +55,14 @@ pub const Preprocessor = struct {
         self.output.deinit(self.alloc);
         self.expanding.deinit(self.alloc);
         self.extra_strings.deinit(self.alloc);
+        // Clean up include tracking
+        {
+            var it = self.included_files.keyIterator();
+            while (it.next()) |k| self.alloc.free(k.*);
+        }
+        self.included_files.deinit(self.alloc);
+        for (self.included_sources.items) |src| self.alloc.free(src);
+        self.included_sources.deinit(self.alloc);
     }
 
     pub fn addDefine(self: *Preprocessor, name: []const u8, value: []const lexer.Token) !void {
@@ -80,6 +99,259 @@ pub const Preprocessor = struct {
             if (tok.tag == .eof) break;
             if (tok.loc.line > start_line) break;
         }
+    }
+
+    fn handleInclude(self: *Preprocessor, tokens: []const lexer.Token, index: *usize) !void {
+        index.* += 1; // skip pp_include
+
+        if (index.* >= tokens.len) return error.PreprocessFailed;
+
+        // Get the filename token
+        const file_tok = tokens[index.*];
+        var include_path: ?[]const u8 = null;
+        var is_system = false;
+
+        if (file_tok.tag == .string_literal) {
+            // #include "file" \u2014 relative include
+            include_path = self.getTokenText(file_tok);
+            // Strip quotes
+            if (include_path != null and include_path.?.len >= 2) {
+                include_path = include_path.?[1 .. include_path.?.len - 1];
+            }
+        } else if (file_tok.tag == .lt) {
+            // #include <file> \u2014 system include
+            is_system = true;
+            index.* += 1;
+            var path_buf = std.ArrayListUnmanaged(u8).empty;
+            defer path_buf.deinit(self.alloc);
+            while (index.* < tokens.len) : (index.* += 1) {
+                const tok = tokens[index.*];
+                if (tok.tag == .gt) break;
+                const text = self.getTokenText(tok);
+                try path_buf.appendSlice(self.alloc, text);
+            }
+            if (path_buf.items.len > 0) {
+                include_path = path_buf.items;
+            }
+        }
+
+        // Skip rest of line
+        while (index.* < tokens.len) : (index.* += 1) {
+            const tok = tokens[index.*];
+            if (tok.tag == .eof or tok.loc.line > file_tok.loc.line) break;
+        }
+
+        const path = include_path orelse return;
+        if (path.len == 0) return;
+
+        // Check include depth
+        if (self.include_depth >= self.max_include_depth) return error.PreprocessFailed;
+
+        // Check for cycles
+        if (self.included_files.contains(path)) return;
+
+        // Resolve the file and read it
+        const resolved_source = self.resolveInclude(path, is_system) catch |err| switch (err) {
+            error.FileNotFound => {
+                // Include file not found \u2014 skip silently
+                return;
+            },
+            else => return err,
+        };
+
+        // Mark as included for cycle detection
+        const path_copy = try self.alloc.dupe(u8, path);
+        try self.included_files.put(self.alloc, path_copy, {});
+
+        // Tokenize the included source
+        const inc_tokens = try lexer.tokenize(self.alloc, resolved_source);
+
+        // Recursively preprocess the included tokens
+        const saved_source = self.source;
+        self.source = resolved_source;
+        self.include_depth += 1;
+        defer {
+            self.source = saved_source;
+            self.include_depth -= 1;
+        }
+
+        // Process included tokens inline (same logic as main process loop)
+        var j: usize = 0;
+        while (j < inc_tokens.len) {
+            const tok = inc_tokens[j];
+            switch (tok.tag) {
+                .pp_include => {
+                    try self.handleInclude(inc_tokens, &j);
+                },
+                .pp_define => {
+                    if (self.isActive()) {
+                        try self.parseDefine(inc_tokens, &j);
+                    } else {
+                        self.skipToEndOfLine(inc_tokens, &j);
+                    }
+                },
+                .pp_undef => {
+                    if (self.isActive()) {
+                        j += 1;
+                        if (j < inc_tokens.len and inc_tokens[j].tag == .identifier) {
+                            const name = self.getTokenText(inc_tokens[j]);
+                            if (self.defines.fetchRemove(name)) |entry| {
+                                self.alloc.free(entry.key);
+                                switch (entry.value) {
+                                    .object => |body| self.alloc.free(body),
+                                    .function => |f| {
+                                        for (f.params) |p| self.alloc.free(p);
+                                        self.alloc.free(f.params);
+                                        self.alloc.free(f.body);
+                                    },
+                                }
+                            }
+                            j += 1;
+                        }
+                    } else {
+                        self.skipToEndOfLine(inc_tokens, &j);
+                    }
+                },
+                .pp_ifdef => {
+                    j += 1;
+                    if (j < inc_tokens.len and inc_tokens[j].tag == .identifier) {
+                        const name = self.getTokenText(inc_tokens[j]);
+                        const defined = self.defines.contains(name);
+                        try self.if_stack.append(self.alloc, .{
+                            .taken = defined,
+                            .any_taken = defined,
+                            .active = defined,
+                        });
+                        j += 1;
+                    }
+                },
+                .pp_ifndef => {
+                    j += 1;
+                    if (j < inc_tokens.len and inc_tokens[j].tag == .identifier) {
+                        const name = self.getTokenText(inc_tokens[j]);
+                        const defined = self.defines.contains(name);
+                        try self.if_stack.append(self.alloc, .{
+                            .taken = !defined,
+                            .any_taken = !defined,
+                            .active = !defined,
+                        });
+                        j += 1;
+                    }
+                },
+                .pp_if => {
+                    j += 1;
+                    const expr_start = j;
+                    while (j < inc_tokens.len and inc_tokens[j].loc.line == tok.loc.line) : (j += 1) {}
+                    const expr_end = j;
+                    const result = try self.evaluateExpression(inc_tokens, expr_start, expr_end);
+                    const taken = result != 0;
+                    try self.if_stack.append(self.alloc, .{
+                        .taken = taken,
+                        .any_taken = taken,
+                        .active = taken,
+                    });
+                },
+                .pp_elif => {
+                    if (self.if_stack.items.len == 0) return error.PreprocessFailed;
+                    const state = &self.if_stack.items[self.if_stack.items.len - 1];
+                    if (!state.any_taken) {
+                        j += 1;
+                        const expr_start = j;
+                        while (j < inc_tokens.len and inc_tokens[j].loc.line == tok.loc.line) : (j += 1) {}
+                        const expr_end = j;
+                        const result = try self.evaluateExpression(inc_tokens, expr_start, expr_end);
+                        const taken = result != 0;
+                        state.taken = taken;
+                        state.any_taken = taken;
+                        state.active = taken;
+                    } else {
+                        state.active = false;
+                        self.skipToEndOfLine(inc_tokens, &j);
+                    }
+                },
+                .pp_else => {
+                    if (self.if_stack.items.len == 0) return error.PreprocessFailed;
+                    const state = &self.if_stack.items[self.if_stack.items.len - 1];
+                    if (!state.any_taken) {
+                        state.taken = true;
+                        state.any_taken = true;
+                        state.active = true;
+                    } else {
+                        state.active = false;
+                    }
+                    j += 1;
+                },
+                .pp_endif => {
+                    if (self.if_stack.items.len == 0) return error.PreprocessFailed;
+                    _ = self.if_stack.pop();
+                    j += 1;
+                },
+                .pp_version => {
+                    self.skipToEndOfLine(inc_tokens, &j);
+                },
+                .pp_error, .pp_pragma, .pp_line, .pp_extension => {
+                    self.skipToEndOfLine(inc_tokens, &j);
+                },
+                .identifier => {
+                    if (self.isActive()) {
+                        try self.expandMacro(inc_tokens, &j, tok);
+                    } else {
+                        j += 1;
+                    }
+                },
+                .eof => {
+                    j += 1;
+                },
+                else => {
+                    if (self.isActive()) {
+                        try self.output.append(self.alloc, tok);
+                    }
+                    j += 1;
+                },
+            }
+        }
+
+        self.alloc.free(inc_tokens);
+    }
+
+    fn resolveInclude(self: *Preprocessor, path: []const u8, is_system: bool) ![:0]const u8 {
+        // Try file reader callback first
+        if (self.file_reader) |reader| {
+            return reader(path);
+        }
+
+        // Try relative to source file
+        if (!is_system and self.source_file_path.len > 0) {
+            var dir_end = self.source_file_path.len;
+            while (dir_end > 0 and self.source_file_path[dir_end - 1] != '/' and self.source_file_path[dir_end - 1] != '\\') dir_end -= 1;
+            const dir_part = self.source_file_path[0..dir_end];
+
+            var full_path_buf: [4096]u8 = undefined;
+            const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}{s}", .{ dir_part, path }) catch return error.FileNotFound;
+
+            const file = std.fs.cwd().openFile(full_path, .{}) catch return error.FileNotFound;
+            defer file.close();
+            const contents = try file.readToEndAlloc(self.alloc, 10 * 1024 * 1024);
+            try self.included_sources.append(self.alloc, contents);
+            // Null-terminate
+            const z = try self.alloc.dupeZ(u8, contents);
+            return z;
+        }
+
+        // Try include paths
+        for (self.include_paths) |inc_path| {
+            var full_path_buf: [4096]u8 = undefined;
+            const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}/{s}", .{ inc_path, path }) catch continue;
+
+            const file = std.fs.cwd().openFile(full_path, .{}) catch continue;
+            defer file.close();
+            const contents = try file.readToEndAlloc(self.alloc, 10 * 1024 * 1024);
+            try self.included_sources.append(self.alloc, contents);
+            const z = try self.alloc.dupeZ(u8, contents);
+            return z;
+        }
+
+        return error.FileNotFound;
     }
 
     fn parseDefine(self: *Preprocessor, tokens: []const lexer.Token, index: *usize) !void {
@@ -631,7 +903,23 @@ pub const Preprocessor = struct {
                     _ = self.if_stack.pop();
                     i += 1;
                 },
-                .pp_error, .pp_pragma, .pp_line => {
+                .pp_include => {
+                    if (self.isActive()) {
+                        try self.handleInclude(tokens, &i);
+                    } else {
+                        self.skipToEndOfLine(tokens, &i);
+                    }
+                },
+                .pp_error => {
+                    // #error directive — skip but could report in future
+                    self.skipToEndOfLine(tokens, &i);
+                },
+                .pp_pragma => {
+                    // #pragma — skip (standard GLSL pragmas like STDGL invariant(all))
+                    self.skipToEndOfLine(tokens, &i);
+                },
+                .pp_line => {
+                    // #line N or #line N "file" — skip (line directives are informational)
                     self.skipToEndOfLine(tokens, &i);
                 },
                 .pp_extension => {
