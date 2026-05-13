@@ -2595,6 +2595,8 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 30 => "log2",
                 31 => "sqrt",
                 32 => "rsqrt",     // InverseSqrt
+                34 => "mul",       // matrixCompMult - component-wise multiply
+                36 => "modf",       // ModfStructure
                 37 => "min",       // FMin
                 38 => "max",       // FMax
                 39 => "min",       // SMin
@@ -2607,14 +2609,9 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 46 => "lerp",      // FMix / mix
                 48 => "step",
                 49 => "smoothstep",
-                66 => "length",
-                67 => "distance",
-                68 => "cross",
-                69 => "normalize",
-                70 => "faceforward",
-                71 => "reflect",
-                72 => "refract",
-                51 => "modf",
+                50 => "fma",       // FMA (fused multiply-add)
+                51 => "modf",      // FrexpStruct → modf in HLSL
+                52 => "ldexp",     // Ldexp
                 73 => "firstbitlow", // FindILsb → HLSL firstbitlow
                 74 => "firstbithigh", // FindSMsb → HLSL firstbithigh
                 75 => "firstbithigh", // FindUMsb → HLSL firstbithigh
