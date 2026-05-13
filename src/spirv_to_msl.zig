@@ -561,7 +561,6 @@ fn mslWidenedElementType(m: *const ParsedModule, elem_type_id: u32, stride: u32,
 
 fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, cb_name: []const u8, w: anytype, alloc: std.mem.Allocator, member_offsets: *const std.AutoHashMap(MemberKey, u32), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry))) !void {
     _ = cb_name;
-    _ = member_offsets;
     const inst = getDef(m, struct_id) orelse return; if (inst.op != .TypeStruct) return;
     for (inst.words[2..], 0..) |mt_id, mi| {
         const mti = getDef(m, mt_id);
@@ -575,11 +574,21 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
                 try mslWidenedElementType(m, elem_type_id, s, names, alloc)
             else
                 try mslPackedType(m, elem_type_id, names, alloc);
-            try w.print("    {s} _m{d}[{d}];\n", .{et, mi, lv});
+            const key = MemberKey{ .struct_id = struct_id, .member_index = @intCast(mi) };
+            if (member_offsets.get(key)) |off| {
+                try w.print("    {s} _m{d}[{d}] [[offset({d})]];\n", .{et, mi, lv, off});
+            } else {
+                try w.print("    {s} _m{d}[{d}];\n", .{et, mi, lv});
+            }
             continue;
         } }
         const mt = try mslPackedType(m, mt_id, names, alloc);
-        try w.print("    {s} _m{d};\n", .{mt, mi});
+        const key = MemberKey{ .struct_id = struct_id, .member_index = @intCast(mi) };
+        if (member_offsets.get(key)) |off| {
+            try w.print("    {s} _m{d} [[offset({d})]];\n", .{mt, mi, off});
+        } else {
+            try w.print("    {s} _m{d};\n", .{mt, mi});
+        }
     }
 }
 
