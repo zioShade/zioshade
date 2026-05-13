@@ -69,10 +69,10 @@ test "task shader compiles with EmitMeshTasksEXT" {
     try std.testing.expect(spirv.len > 0);
     try std.testing.expectEqual(@as(u32, 0x07230203), spirv[0]); // magic
 
-    // Verify EmitMeshTasksEXT opcode (5368) appears in SPIR-V binary
+    // Verify EmitMeshTasksEXT opcode (5294) appears in SPIR-V binary
     var found = false;
     for (spirv) |word| {
-        if ((word & 0xFFFF) == 5368) {
+        if ((word & 0xFFFF) == 5294) {
             found = true;
         }
     }

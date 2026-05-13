@@ -976,6 +976,7 @@ const Codegen = struct {
         defer interface_ids.deinit(self.alloc);
         const list_all = @intFromEnum(self.spirv_version) >= 4; // 1.4+
         for (self.module.globals) |global| {
+            if (global.result_id == 0) continue; // Skip unassigned globals
             if (list_all or global.storage_class == .input or global.storage_class == .output) {
                 interface_ids.append(self.alloc, global.result_id) catch unreachable;
             }
@@ -3134,6 +3135,7 @@ const Codegen = struct {
     }
     fn emitGlobals(self: *Codegen) !void {
         for (self.module.globals) |global| {
+            if (global.result_id == 0) continue; // Skip unassigned globals
             const ptr_type_id = try self.ensurePointerType(global.ty, global.storage_class);
             try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Variable)));
             try self.emitWord(ptr_type_id);
@@ -4800,8 +4802,8 @@ const Codegen = struct {
                 try self.emitWord(predicate_id);
             },
             .set_mesh_outputs => {
-                // OpSetMeshOutputsEXT <vertex_count> <primitive_count>
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.SetMeshOutputsEXT)));
+                // OpSetMeshOutputsEXT <vertex_count> <primitive_count> (no result type)
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.SetMeshOutputsEXT)));
                 try self.emitWord(self.operandId(resolved, 0));
                 try self.emitWord(self.operandId(resolved, 1));
             },
