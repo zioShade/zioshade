@@ -2100,6 +2100,9 @@ fn emitInstruction(
         },
         .ControlBarrier => try w.writeAll("    GroupMemoryBarrierWithGroupSync();\n"),
         .MemoryBarrier => try w.writeAll("    DeviceMemoryBarrier();\n"),
+        .ImageTexelPointer => {
+            // No code emission needed — result used by atomic ops
+        },
 
         // Subgroup operations → HLSL Wave* intrinsics (SM6.0+)
         .GroupNonUniformElect => {
