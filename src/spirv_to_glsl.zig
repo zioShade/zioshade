@@ -837,7 +837,15 @@ fn emitBody(
     while (idx < m.instructions.len) : (idx += 1) {
         const inst = m.instructions[idx];
         if (inst.op == .FunctionEnd) break;
-        if (inst.op == .FunctionParameter or inst.op == .Label or inst.op == .SelectionMerge or inst.op == .LoopMerge or inst.op == .Branch) continue;
+        if (inst.op == .FunctionParameter or inst.op == .Label or inst.op == .SelectionMerge or inst.op == .Branch) continue;
+
+        // Handle LoopMerge: emit while(true) { condition; if (!cond) break; body; }
+        if (inst.op == .LoopMerge and inst.words.len >= 3) {
+            const merge_lbl = inst.words[1];
+            const cont_lbl = inst.words[2];
+            idx = try emitWhileLoop(m, names, decs, idx, merge_lbl, cont_lbl, &label_map, &bc_merge, w, alloc, is_frag, output_var_id);
+            continue;
+        }
 
         if (inst.op == .BranchConditional) {
             if (inst.words.len < 4) continue;
@@ -929,6 +937,96 @@ fn emitBody(
 
         try emitInstruction(m, names, decs, inst, w, alloc, is_frag, output_var_id);
     }
+}
+
+fn emitWhileLoop(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
+    loop_idx: usize,
+    merge_lbl: u32,
+    cont_lbl: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+    bc_merge: *const std.AutoHashMap(usize, u32),
+    w: anytype, alloc: std.mem.Allocator,
+    is_frag: bool, ovid: ?u32,
+) !usize {
+    if (loop_idx + 1 >= m.instructions.len or m.instructions[loop_idx + 1].op != .Branch) {
+        if (label_map.get(merge_lbl)) |mi| return mi;
+        return loop_idx + 1;
+    }
+    const cond_lbl = m.instructions[loop_idx + 1].words[1];
+    const cond_idx = label_map.get(cond_lbl) orelse {
+        if (label_map.get(merge_lbl)) |mi| return mi;
+        return loop_idx + 1;
+    };
+    var bc_idx: usize = cond_idx + 1;
+    while (bc_idx < m.instructions.len) : (bc_idx += 1) {
+        const scan = m.instructions[bc_idx];
+        if (scan.op == .BranchConditional) break;
+        if (scan.op == .Branch or scan.op == .FunctionEnd or scan.op == .Label) { bc_idx = m.instructions.len; break; }
+    }
+    if (bc_idx >= m.instructions.len) {
+        if (label_map.get(merge_lbl)) |mi| return mi;
+        return loop_idx + 1;
+    }
+    const bc = m.instructions[bc_idx];
+    if (bc.words.len < 4) {
+        if (label_map.get(merge_lbl)) |mi| return mi;
+        return loop_idx + 1;
+    }
+    const body_lbl = bc.words[2];
+    try w.writeAll("    while (true)\n    {\n");
+    if (cond_idx + 1 < bc_idx) {
+        var ci: usize = cond_idx + 1;
+        while (ci < bc_idx) : (ci += 1) {
+            const cinst = m.instructions[ci];
+            if (cinst.op == .Label or cinst.op == .Branch or cinst.op == .SelectionMerge or cinst.op == .LoopMerge) continue;
+            try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid);
+        }
+    }
+    const cond_name = names.get(bc.words[1]) orelse "true";
+    try w.print("        if (!({s})) break;\n", .{cond_name});
+    const body_idx = label_map.get(body_lbl) orelse m.instructions.len;
+    if (body_idx < m.instructions.len) {
+        var bi: usize = body_idx + 1;
+        while (bi < m.instructions.len) : (bi += 1) {
+            const binst = m.instructions[bi];
+            if (binst.op == .FunctionEnd) break;
+            if (binst.op == .Label and binst.words.len > 1) {
+                const lbl = binst.words[1];
+                if (lbl == cont_lbl or lbl == merge_lbl) break;
+                continue;
+            }
+            if (binst.op == .LoopMerge or binst.op == .SelectionMerge) continue;
+            if (binst.op == .Branch) {
+                if (binst.words.len > 1 and (binst.words[1] == cont_lbl or binst.words[1] == merge_lbl)) continue;
+                continue;
+            }
+            if (binst.op == .BranchConditional) {
+                const ncn = names.get(binst.words[1]) orelse "c";
+                const ntl = binst.words[2];
+                const nfl = if (binst.words.len > 3) binst.words[3] else null;
+                const nml = bc_merge.get(bi);
+                if (nml) |nmv| {
+                    const nhe = nfl != null and nfl.? != nmv;
+                    try w.print("        if ({s})\n        {{\n", .{ncn});
+                    bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
+                    if (nhe) {
+                        try w.writeAll("        } else {\n");
+                        bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
+                    }
+                    try w.writeAll("        }\n");
+                    if (label_map.get(nmv)) |nmi| { bi = nmi; }
+                }
+                continue;
+            }
+            try emitInstruction(m, names, decs, binst, w, alloc, is_frag, ovid);
+        }
+    }
+    try w.writeAll("    }\n");
+    if (label_map.get(merge_lbl)) |mi| return mi;
+    return loop_idx + 1;
 }
 
 
