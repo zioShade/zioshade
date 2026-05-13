@@ -1430,3 +1430,40 @@ test "T21.6: sign(int) via SSign (std450 #7)" {
     try assertNotContains(glsl, "unhandled");
 }
 
+
+// Regression test for FrexpStruct/ModfStruct struct decomposition
+test "T22.1: frexp() struct decomposition (not ResType)" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform UBO { float x; };
+        \\layout(location = 0) out float fragColor;
+        \\void main() {
+        \\    int e;
+        \\    float f = frexp(x, e);
+        \\    fragColor = f + float(e);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "frexp(");
+    try assertNotContains(glsl, "ResType");
+    try assertNotContains(glsl, "unhandled");
+}
+
+test "T22.2: modf() struct decomposition (not ResType)" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform UBO { float x; };
+        \\layout(location = 0) out float fragColor;
+        \\void main() {
+        \\    float whole;
+        \\    float frac_part = modf(x, whole);
+        \\    fragColor = frac_part + whole;
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "modf(");
+    try assertNotContains(glsl, "ResType");
+    try assertNotContains(glsl, "unhandled");
+}
