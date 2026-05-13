@@ -579,7 +579,11 @@ fn std450ToGlsl(val: u32) ?[]const u8 {
         35 => "modf",
         51 => "frexp",
         76 => "interpolateAtCentroid", 77 => "interpolateAtSample", 78 => "interpolateAtOffset",
-        79 => "min", 80 => "max",
+        54 => "packSnorm4x8", 55 => "packUnorm4x8",
+        56 => "packSnorm2x16", 57 => "packUnorm2x16", 58 => "packHalf2x16",
+        60 => "unpackSnorm2x16", 61 => "unpackUnorm2x16", 62 => "unpackHalf2x16",
+        63 => "unpackSnorm4x8", 64 => "unpackUnorm4x8",
+        79 => "min", 80 => "max", 81 => "clamp",
         else => null,
     };
 }
