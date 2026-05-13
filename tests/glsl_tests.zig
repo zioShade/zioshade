@@ -1328,3 +1328,105 @@ test "T20.6: GLSL textureGather (ImageGather)" {
     defer alloc.free(glsl);
     try assertNotContains(glsl, "unhandled");
 }
+
+// Regression tests for std450 opcode mapping bugs - appended to glsl_tests.zig
+// These test that specific std450 opcodes emit the correct GLSL function names
+
+test "T21.1: inverse() not matrixCompMult (std450 #34)" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform UBO { mat4 mvp; };
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 inv = inverse(mvp);
+        \\    fragColor = inv[0];
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "inverse(");
+    try assertNotContains(glsl, "matrixCompMult");
+    try assertNotContains(glsl, "unhandled");
+}
+
+test "T21.2: frexp() not ldexp (std450 #52)" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform UBO { float x; };
+        \\layout(location = 0) out float fragColor;
+        \\void main() {
+        \\    int e;
+        \\    float f = frexp(x, e);
+        \\    fragColor = f + float(e);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "frexp(");
+    try assertNotContains(glsl, "ldexp");
+    try assertNotContains(glsl, "unhandled");
+}
+
+test "T21.3: asinh/acosh/atanh (std450 #22-24)" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform UBO { float x; };
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(asinh(x), acosh(x), atanh(x), 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "asinh(");
+    try assertContains(glsl, "acosh(");
+    try assertContains(glsl, "atanh(");
+    try assertNotContains(glsl, "unhandled");
+}
+
+test "T21.4: max() with correct std450 enum (FMax=38)" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform UBO { vec4 a; vec4 b; };
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = max(a, b);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "max(");
+    try assertNotContains(glsl, "unhandled");
+}
+
+test "T21.5: ldexp (std450 #53)" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform UBO { float x; int e; };
+        \\layout(location = 0) out float fragColor;
+        \\void main() {
+        \\    fragColor = ldexp(x, e);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "ldexp(");
+    try assertNotContains(glsl, "unhandled");
+}
+
+test "T21.6: sign(int) via SSign (std450 #7)" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform UBO { int x; };
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int s = sign(x);
+        \\    fragColor = vec4(float(s));
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "sign(");
+    try assertNotContains(glsl, "unhandled");
+}
+
