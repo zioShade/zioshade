@@ -109,7 +109,7 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .Variable, .Function, .FunctionParameter,
         => if (words.len > 2) words[2] else null,
 
-        .Load, .AccessChain, .CompositeConstruct, .CompositeExtract,
+        .Load, .AccessChain, .CompositeConstruct, .CompositeExtract, .CompositeInsert,
         .VectorShuffle, .SampledImage, .ImageSampleImplicitLod,
         .ImageSampleExplicitLod, .ImageFetch, .ImageGather,
         .ImageQuerySizeLod, .ImageQuerySize,

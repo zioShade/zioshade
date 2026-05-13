@@ -650,3 +650,21 @@ test "T11.2: findLSB/findMSB in MSL" {
     try assertContains(msl, "ctz");
     try assertContains(msl, "clz");
 }
+
+test "T12.1: MSL CompositeInsert (partial vector write)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 v = vec4(1.0, 2.0, 3.0, 4.0);
+        \\    v.x = 5.0;
+        \\    fragColor = v;
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // Should not contain "unhandled op" for CompositeInsert
+    try assertNotContains(msl, "unhandled op");
+    // Should contain assignment to swizzle component
+    try assertContains(msl, ".x");
+}

@@ -1402,6 +1402,31 @@ fn emitInstruction(
             }
             try w.writeAll(";\n");
         },
+        .CompositeInsert => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rname = names.get(inst.words[2]) orelse "v";
+            const object = names.get(inst.words[3]) orelse "obj";
+            const composite = names.get(inst.words[4]) orelse "comp";
+            try w.print("    {s} {s} = {s};\n", .{rtt, rname, composite});
+            // Check if composite is a vector type (for swizzle vs index)
+            const is_vec = blk: {
+                const comp_def = getDef(m, inst.words[4]) orelse break :blk false;
+                // Get the result type of the composite operand's defining instruction
+                if (comp_def.words.len < 2) break :blk false;
+                const comp_type_id = comp_def.words[1];
+                const type_inst = getDef(m, comp_type_id) orelse break :blk false;
+                break :blk type_inst.op == .TypeVector;
+            };
+            try w.print("    {s}", .{rname});
+            for (inst.words[5..]) |index| {
+                if (is_vec) {
+                    try w.writeAll(swizzleChar(index));
+                } else {
+                    try w.print("[{d}]", .{index});
+                }
+            }
+            try w.print(" = {s};\n", .{object});
+        },
         .VectorShuffle => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const v1 = names.get(inst.words[3]) orelse "v1";
