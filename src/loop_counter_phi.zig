@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const compact_ids = @import("compact_ids.zig");
+const opt = @import("compact_ids_passes.zig");
 
 pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
     const bound = words[3];
@@ -372,7 +373,7 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
     }
 
     const nw = result.toOwnedSlice(alloc) catch return words;
-    const dce = compact_ids.deadCodeElim(alloc, nw) catch return nw;
+    const dce = opt.deadCodeElim(alloc, nw) catch return nw;
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
 }
