@@ -475,6 +475,40 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
         }
         if (resultIdFromOp(inst.op, inst.words)) |rid| { if (!names.contains(rid)) { const name = std.fmt.allocPrint(alloc, "v{}", .{counter}) catch continue; counter += 1; names.put(rid, name) catch {}; } }
     }
+
+    // Deduplicate Function-scoped variable names
+    // Collect all Function-scoped variable IDs grouped by name
+    var name_groups = std.StringHashMapUnmanaged(std.ArrayList(u32)).empty;
+    defer { var dgi = name_groups.iterator(); while (dgi.next()) |e| { alloc.free(e.key_ptr.*); e.value_ptr.deinit(alloc); } name_groups.deinit(alloc); }
+    {
+        var di: usize = 0;
+        while (di < m.instructions.len) : (di += 1) {
+            const dinst = m.instructions[di];
+            if (dinst.op == .Variable and dinst.words.len >= 4) {
+                const dsc: spirv.StorageClass = @enumFromInt(dinst.words[3]);
+                if (dsc == .Function) {
+                    const drid = dinst.words[2];
+                    if (names.get(drid)) |dvn| {
+                        const dvn_copy = alloc.dupe(u8, dvn) catch continue;
+                        const dgop = name_groups.getOrPut(alloc, dvn_copy) catch { alloc.free(dvn_copy); continue; };
+                        if (!dgop.found_existing) dgop.value_ptr.* = std.ArrayList(u32).initCapacity(alloc, 2) catch continue;
+                        dgop.value_ptr.append(alloc, drid) catch {};
+                    }
+                }
+            }
+        }
+    }
+    // Apply renames for duplicate groups
+    {
+        var dgi2 = name_groups.iterator();
+        while (dgi2.next()) |dentry| {
+            if (dentry.value_ptr.items.len <= 1) continue;
+            for (dentry.value_ptr.items, 1..) |did, dsuffix| {
+                const dnew = std.fmt.allocPrint(alloc, "{s}_{d}", .{ dentry.key_ptr.*, dsuffix }) catch continue;
+                _ = names.fetchPut(did, dnew) catch {};
+            }
+        }
+    }
 }
 
 fn collectDecorations(alloc: std.mem.Allocator, m: *const ParsedModule, decs: *std.AutoHashMap(u32, std.ArrayList(DecorationEntry))) !void {
@@ -621,30 +655,44 @@ fn emitFunction(
     }
 
     // Call-site out-param detection
-    if (opi.get(func_id)) |ois| {
-        for (ois.items) |pi| {
-            if (pi >= param_ids.items.len) continue;
-            const pid = param_ids.items[pi];
-            if (out_param_var_ids.contains(pid)) continue;
-            const p_inst = getDef(m, pid) orelse continue;
-            const ptid = p_inst.words[1];
-            var si2 = func_idx + 1;
-            while (si2 < m.instructions.len) : (si2 += 1) {
-                const si = m.instructions[si2];
-                if (si.op == .FunctionEnd) break;
-                if (si.op != .Variable or si.words.len < 4) continue;
-                const sc: spirv.StorageClass = @enumFromInt(si.words[3]);
-                if (sc != .Function) continue;
-                const vid = si.words[2];
-                const vti = getDef(m, si.words[1]);
-                if (vti) |vt| {
-                    if (vt.op == .TypePointer and vt.words.len > 3 and vt.words[3] == ptid) {
-                        out_param_var_ids.put(pid, vid) catch {};
-                        const pn = names.get(pid) orelse "p";
-                        const pa = alloc.dupe(u8, pn) catch continue;
-                        if (names.fetchPut(vid, pa) catch null) |old| alloc.free(old.value);
-                        break;
+    // For each FunctionCall in this function, check if arguments match out-param patterns
+    if (opi.get(func_id)) |_| {
+        var si3 = func_idx + 1;
+        while (si3 < m.instructions.len) : (si3 += 1) {
+            const si = m.instructions[si3];
+            if (si.op == .FunctionEnd) break;
+            if (si.op != .FunctionCall or si.words.len < 4) continue;
+            const called_fid = si.words[3];
+            const call_out_params = opi.get(called_fid) orelse continue;
+            // For each out-param position of the called function
+            for (call_out_params.items) |pi| {
+                if (pi + 4 >= si.words.len) continue;
+                const arg_id = si.words[4 + pi]; // actual argument ID
+                // Only rename if arg is a Function-scoped variable
+                const arg_def = getDef(m, arg_id) orelse continue;
+                if (arg_def.op != .Variable) continue;
+                if (arg_def.words.len < 4) continue;
+                const asc: spirv.StorageClass = @enumFromInt(arg_def.words[3]);
+                if (asc != .Function) continue;
+                // Don't rename if this variable already got a name from definition-level detection
+                if (out_param_var_ids.contains(arg_id)) continue;
+                // Get the parameter name from the called function
+                const called_param_ids = blk: {
+                    var cpi = std.ArrayList(u32).initCapacity(alloc, 4) catch break :blk &.{};
+                    var ci = func_idx + 1;
+                    while (ci < m.instructions.len) : (ci += 1) {
+                        const cinst = m.instructions[ci];
+                        if (cinst.op == .FunctionEnd) break;
+                        if (cinst.op == .FunctionParameter) {
+                            cpi.append(alloc, cinst.words[2]) catch {};
+                        }
                     }
+                    break :blk cpi.items;
+                };
+                if (pi < called_param_ids.len) {
+                    const pname = names.get(called_param_ids[pi]) orelse "p";
+                    const pa = alloc.dupe(u8, pname) catch continue;
+                    if (names.fetchPut(arg_id, pa) catch null) |old| alloc.free(old.value);
                 }
             }
         }
