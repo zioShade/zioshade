@@ -633,3 +633,20 @@ test "T11.1: MSL loop reconstruction produces while loop" {
     try assertContains(msl, "break");
     try assertContains(msl, "discard_fragment");
 }
+
+test "T11.2: findLSB/findMSB in MSL" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = findLSB(7);
+        \\    int b = findMSB(7);
+        \\    fragColor = vec4(float(a), float(b), 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // findLSB/findMSB should emit ctz/clz in MSL, not "unhandled"
+    try assertContains(msl, "ctz");
+    try assertContains(msl, "clz");
+}

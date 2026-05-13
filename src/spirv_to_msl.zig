@@ -608,6 +608,9 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         45 => "fast::clamp", 46 => "mix", 48 => "step", 49 => "smoothstep",
         66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
         70 => "faceforward", 71 => "reflect", 72 => "refract",
+        73 => "ctz",       // findLSB → ctz (count trailing zeros)
+        74 => "clz",       // findMSB(signed) → simplified; may need adjustment
+        75 => "clz",       // findMSB(unsigned) → simplified; may need adjustment
         else => null,
     };
 }
