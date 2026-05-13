@@ -1448,7 +1448,7 @@ const Analyzer = struct {
         // Check if the last instruction is a return (covers all paths)
         const needs_implicit_return = if (self.instructions.items.len > 0) blk: {
             const last_tag = self.instructions.items[self.instructions.items.len - 1].tag;
-            break :blk last_tag != .return_void and last_tag != .return_val and last_tag != .unreachable_inst and last_tag != .kill;
+            break :blk last_tag != .return_void and last_tag != .return_val and last_tag != .unreachable_inst and last_tag != .kill and last_tag != .emit_mesh_tasks;
         } else true;
 
         // If last instruction is not a return, add an implicit return
@@ -3114,7 +3114,8 @@ const Analyzer = struct {
                     var tid = try self.analyzeExpression(arg);
                     // Atomic functions need pointer arg, don't auto-load first arg
                     // Image atomics also need the image pointer (not loaded value)
-                    const skip_load = (is_atomic_fn and i == 0) or (is_image_atomic_fn and i == 0);
+                    const is_emit_mesh_tasks = std.mem.eql(u8, node.data.name, "EmitMeshTasksEXT");
+                    const skip_load = (is_atomic_fn and i == 0) or (is_image_atomic_fn and i == 0) or (is_emit_mesh_tasks and i == 3);
                     if (tid.is_ptr and !skip_load) {
                         const ld = try self.emitLoadCached(tid.id, tid.ty);
                         tid = .{ .ty = tid.ty, .id = ld };
