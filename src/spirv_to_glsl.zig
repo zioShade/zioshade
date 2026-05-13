@@ -1436,9 +1436,83 @@ fn emitInstruction(
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = texelFetch({s}, {s}, 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0" });
         },
+        .ImageRead => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            try w.print("    {s} {s} = imageLoad({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "img", names.get(inst.words[4]) orelse "0" });
+        },
+        .ImageWrite => {
+            // OpImageWrite: image, coordinate, texel
+            const img = names.get(inst.words[1]) orelse "img";
+            const coord = names.get(inst.words[2]) orelse "0";
+            const texel = names.get(inst.words[3]) orelse "vec4(0)";
+            try w.print("    imageStore({s}, {s}, {s});\n", .{img, coord, texel});
+        },
         .Kill => try w.writeAll("    discard;\n"),
         .ControlBarrier => try w.writeAll("    barrier();\n    memoryBarrier();\n"),
         .MemoryBarrier => try w.writeAll("    memoryBarrier();\n"),
+
+        // Atomic operations → GLSL atomic* builtins
+        .AtomicIAdd => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
+            try w.print("    {s} = atomicAdd({s}, {s});\n", .{rn, ptr, val});
+        },
+        .AtomicISub => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
+            try w.print("    {s} = atomicAdd({s}, -{s});\n", .{rn, ptr, val});
+        },
+        .AtomicOr => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
+            try w.print("    {s} = atomicOr({s}, {s});\n", .{rn, ptr, val});
+        },
+        .AtomicXor => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
+            try w.print("    {s} = atomicXor({s}, {s});\n", .{rn, ptr, val});
+        },
+        .AtomicAnd => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
+            try w.print("    {s} = atomicAnd({s}, {s});\n", .{rn, ptr, val});
+        },
+        .AtomicSMin, .AtomicUMin => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            try w.print("    {s} = atomicMin({s}, {s});\n", .{rn, ptr, val});
+        },
+        .AtomicSMax, .AtomicUMax => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            try w.print("    {s} = atomicMax({s}, {s});\n", .{rn, ptr, val});
+        },
+        .AtomicExchange => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            try w.print("    {s} = atomicExchange({s}, {s});\n", .{rn, ptr, val});
+        },
+        .AtomicCompareExchange => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            const cmp = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
+            try w.print("    {s} = atomicCompSwap({s}, {s}, {s});\n", .{rn, ptr, cmp, val});
+        },
+        .AtomicFAddEXT => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0.0" else "0.0";
+            try w.print("    {s} = atomicAdd({s}, {s});\n", .{rn, ptr, val});
+        },
 
         // Subgroup operations → GLSL subgroup* builtins
         .GroupNonUniformElect => {

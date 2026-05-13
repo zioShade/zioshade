@@ -1501,12 +1501,86 @@ fn emitInstruction(
             const si = names.get(inst.words[3]) orelse "tex";
             try w.print("    {s} {s} = {s}.read({s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, names.get(inst.words[4]) orelse "0"});
         },
+        .ImageRead => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "img";
+            try w.print("    {s} {s} = {s}.read({s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, names.get(inst.words[4]) orelse "0"});
+        },
+        .ImageWrite => {
+            const img = names.get(inst.words[1]) orelse "img";
+            const coord = names.get(inst.words[2]) orelse "0";
+            const texel = names.get(inst.words[3]) orelse "float4(0)";
+            try w.print("    {s}.write({s}, {s});\n", .{img, texel, coord});
+        },
         .Kill => try w.writeAll("    discard_fragment();\n"),
         .ControlBarrier => {
             try w.writeAll("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
         },
         .MemoryBarrier => {
             try w.writeAll("    threadgroup_barrier(mem_flags::mem_device);\n");
+        },
+
+        // Atomic operations → MSL atomic_fetch_*_explicit
+        .AtomicIAdd => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
+            try w.print("    {s} = atomic_fetch_add_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+        },
+        .AtomicISub => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
+            try w.print("    {s} = atomic_fetch_sub_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+        },
+        .AtomicOr => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
+            try w.print("    {s} = atomic_fetch_or_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+        },
+        .AtomicXor => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
+            try w.print("    {s} = atomic_fetch_xor_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+        },
+        .AtomicAnd => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
+            try w.print("    {s} = atomic_fetch_and_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+        },
+        .AtomicSMin, .AtomicUMin => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            try w.print("    {s} = atomic_fetch_min_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+        },
+        .AtomicSMax, .AtomicUMax => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            try w.print("    {s} = atomic_fetch_max_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+        },
+        .AtomicExchange => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            try w.print("    {s} = atomic_exchange_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+        },
+        .AtomicCompareExchange => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+            const cmp = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
+            try w.print("    {s} = atomic_compare_exchange_weak_explicit({s}, &{s}, {s}, memory_order_relaxed, memory_order_relaxed);\n", .{rn, ptr, cmp, val});
+        },
+        .AtomicFAddEXT => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "mem";
+            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0.0" else "0.0";
+            try w.print("    {s} = atomic_fetch_add_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
         },
 
         // Subgroup operations → MSL simd_* functions
