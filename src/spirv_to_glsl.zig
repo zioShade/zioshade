@@ -1456,6 +1456,22 @@ fn emitInstruction(
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = texelFetch({s}, {s}, 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0" });
         },
+        .ImageGather => {
+            // OpImageGather: result_type, result, sampled_image, coordinate, component [, image_operands]
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const comp = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            try w.print("    {s} {s} = textureGather({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, comp });
+        },
+        .ImageDrefGather => {
+            // OpImageDrefGather: result_type, result, sampled_image, coordinate, dref [, image_operands]
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            try w.print("    {s} {s} = textureGather({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref });
+        },
         .ImageRead => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = imageLoad({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "img", names.get(inst.words[4]) orelse "0" });

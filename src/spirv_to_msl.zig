@@ -1519,6 +1519,22 @@ fn emitInstruction(
             const si = names.get(inst.words[3]) orelse "tex";
             try w.print("    {s} {s} = {s}.read({s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, names.get(inst.words[4]) orelse "0"});
         },
+        .ImageGather => {
+            // MSL: tex.gather(samp, coord, component)
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const comp = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            try w.print("    {s} {s} = {s}.gather({s}Smplr, {s}, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, comp});
+        },
+        .ImageDrefGather => {
+            // MSL: tex.gather_compare(samp, coord, compare)
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            try w.print("    {s} {s} = {s}.gather_compare({s}Smplr, {s}, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, dref});
+        },
         .ImageRead => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "img";
