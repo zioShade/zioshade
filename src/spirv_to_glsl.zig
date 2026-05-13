@@ -562,6 +562,7 @@ fn std450ToGlsl(val: u32) ?[]const u8 {
         10 => "fract",
         11 => "radians", 12 => "degrees", 13 => "sin", 14 => "cos", 15 => "tan",
         16 => "asin", 17 => "acos", 18 => "atan", 19 => "sinh", 20 => "cosh", 21 => "tanh",
+        22 => "asinh", 23 => "acosh", 24 => "atanh",
         25 => "atan", 26 => "pow", 27 => "exp", 28 => "log", 29 => "exp2", 30 => "log2",
         31 => "sqrt", 32 => "inversesqrt", 33 => "determinant",
         34 => "inverse",
@@ -574,6 +575,7 @@ fn std450ToGlsl(val: u32) ?[]const u8 {
         66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
         70 => "faceforward", 71 => "reflect", 72 => "refract",
         73 => "findLSB", 74 => "findMSB", 75 => "findMSB",
+        79 => "min", 80 => "max",
         else => null,
     };
 }

@@ -610,6 +610,7 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         11 => "radians", 12 => "degrees", 13 => "sin", 14 => "cos", 15 => "tan",
         16 => "asin", 17 => "acos", 18 => "atan", 25 => "atan2",
         19 => "sinh", 20 => "cosh", 21 => "tanh",
+        22 => "asinh", 23 => "acosh", 24 => "atanh",
         26 => "powr", 27 => "exp", 28 => "log", 29 => "exp2", 30 => "log2",
         31 => "sqrt", 32 => "rsqrt", 33 => "determinant",
         34 => "inverse",
@@ -623,6 +624,7 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         73 => "ctz",       // findLSB → ctz (count trailing zeros)
         74 => "clz",       // findMSB(signed) → simplified; may need adjustment
         75 => "clz",       // findMSB(unsigned) → simplified; may need adjustment
+        79 => "min", 80 => "max",
         else => null,
     };
 }
