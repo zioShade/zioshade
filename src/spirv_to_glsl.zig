@@ -792,10 +792,10 @@ fn emitBody(
             if (ml) |mval| {
                 const he = fl != null and fl.? != mval;
                 try w.print("    if ({s})\n    {{\n", .{cn});
-                idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ");
+                idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
                 if (he) {
                     try w.writeAll("    } else {\n");
-                    idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ");
+                    idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
                 }
                 try w.writeAll("    }\n");
                 if (label_map.get(mval)) |mi| { idx = mi; }
@@ -814,7 +814,7 @@ fn emitBody(
                 try w.print("    switch ({s}) {{\n", .{sn});
                 if (dl != mval) {
                     try w.writeAll("    default:\n");
-                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ");
+                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", true);
                 }
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
@@ -822,7 +822,7 @@ fn emitBody(
                     const target = inst.words[wi + 1];
                     if (target == mval) continue;
                     try w.print("    case {d}:\n", .{cv});
-                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ");
+                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", true);
                 }
                 try w.writeAll("    }\n");
                 if (label_map.get(mval)) |mi| { idx = mi; }
@@ -846,15 +846,22 @@ fn emitBlock(
     bm: *const std.AutoHashMap(usize, u32),
     w: anytype, alloc: std.mem.Allocator,
     is_frag: bool, ovid: ?u32, indent: []const u8,
+    is_switch: bool,
 ) !usize {
     const si = lm.get(label) orelse return error.InvalidSpirv;
     var i: usize = si + 1;
     while (i < m.instructions.len) : (i += 1) {
         const inst = m.instructions[i];
         if (inst.op == .FunctionEnd) break;
-        if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) break;
+        if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) {
+            if (is_switch) try w.print("{s}    break;\n", .{indent});
+            break;
+        }
         if (inst.op == .Label or inst.op == .SelectionMerge or inst.op == .LoopMerge) continue;
-        if (inst.op == .Branch) continue;
+        if (inst.op == .Branch) {
+            if (is_switch) try w.print("{s}    break;\n", .{indent});
+            continue;
+        }
         if (inst.op == .BranchConditional) {
             if (inst.words.len < 4) continue;
             const cn = names.get(inst.words[1]) orelse "c";
@@ -864,10 +871,10 @@ fn emitBlock(
             if (nm) |nmv| {
                 const he = fl != null and fl.? != nmv;
                 try w.print("{s}    if ({s})\n{s}    {{\n", .{ indent, cn, indent });
-                i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent);
+                i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
                 if (he) {
                     try w.print("{s}    }} else {{\n", .{indent});
-                    i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent);
+                    i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
                 }
                 try w.print("{s}    }}\n", .{indent});
                 if (lm.get(nmv)) |nmi| { i = nmi; }
