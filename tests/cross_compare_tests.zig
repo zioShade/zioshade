@@ -529,3 +529,43 @@ test "cross-compare: switch statement" {
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
+
+test "cross-compare: while loop with uniform bound" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0, std140) uniform U { int n; float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    int i = 0;
+        \\    while (i < u.n) {
+        \\        sum += u.x * float(i);
+        \\        i++;
+        \\    }
+        \\    fragColor = vec4(sum);
+        \\}
+    ;
+    const result = try compareShader(alloc, "while_uniform", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
+
+test "cross-compare: for loop with uniform bound" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0, std140) uniform U { int n; float x; } u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < u.n; i++) {
+        \\        sum += u.x * float(i);
+        \\    }
+        \\    fragColor = vec4(sum);
+        \\}
+    ;
+    const result = try compareShader(alloc, "for_uniform", source, .fragment);
+    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.sc_glsl);
+    try std.testing.expect(result.match);
+}
