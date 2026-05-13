@@ -130,282 +130,185 @@ pub fn generate(
     cg.words.items[3] = cg.next_id;
 
     const raw = try cg.words.toOwnedSlice(alloc);
-    // DEBUG: dump raw SPIR-V before optimization
+    // === Streamlined optimization pipeline ===
+    // Single pass of each optimization category. Removes repeated iterations
+    // that provided diminishing returns for compute shaders.
+
+    // Early cleanup: merge access chains + DCE
     const merged = opt.mergeAccessChains(alloc, raw) catch raw;
     if (merged.ptr != raw.ptr) alloc.free(raw);
     const dce = opt.deadCodeElim(alloc, merged) catch return merged;
     if (dce.ptr != merged.ptr) alloc.free(merged);
-    // Eliminate trivial entry point wrappers (main() { callee(); })
     const no_wrapper = opt.elimTrivialEntryPoint(alloc, dce) catch return dce;
     if (no_wrapper.ptr != dce.ptr) alloc.free(dce);
     const loop_elim = opt.deadLoopElim(alloc, no_wrapper) catch return no_wrapper;
     if (loop_elim.ptr != no_wrapper.ptr) alloc.free(no_wrapper);
-    // Eliminate calls to functions with only OpUnreachable body
     const no_unreachable = opt.elimUnreachableCalls(alloc, loop_elim) catch loop_elim;
     if (no_unreachable.ptr != loop_elim.ptr) alloc.free(loop_elim);
-    // Iterative inlining: inline, moveVar+elimUninit+DCE+compact, repeat until inline has no changes
+
+    // Inlining (single pass with fixup)
     var inlined = opt.inlineTrivialFuncs(alloc, no_unreachable) catch return no_unreachable;
     if (inlined.ptr != no_unreachable.ptr) alloc.free(no_unreachable);
-    var iter: u32 = 0;
-    while (iter < 5) : (iter += 1) {
-        // Fix OpVariable ordering after inlining (vars may be placed mid-block)
+    {
         const var_fixed = opt.moveVarToEntry(alloc, inlined) catch inlined;
         if (var_fixed.ptr != inlined.ptr) alloc.free(inlined);
-        // Eliminate uninitialized vars (loaded but never stored)
-        // Disabled for debugging
-        // const no_uninit = opt.elimUninitVars(alloc, var_fixed) catch var_fixed;
-        // if (no_uninit.ptr != var_fixed.ptr) alloc.free(var_fixed);
-        const no_uninit = var_fixed;
-        // DCE + compact after inlining
-        const dce2 = opt.deadCodeElim(alloc, no_uninit) catch break;
-        if (dce2.ptr != no_uninit.ptr) alloc.free(no_uninit);
-        const compact2 = compact_ids.compactIds(alloc, dce2) catch { inlined = dce2; break; };
-        if (compact2.ptr != dce2.ptr) alloc.free(dce2);
-        // Try next round of inlining
-        const next = opt.inlineTrivialFuncs(alloc, compact2) catch { inlined = compact2; break; };
-        if (next.ptr == compact2.ptr) { inlined = next; break; } // no more inlining possible
-        alloc.free(compact2);
-        inlined = next;
+        const dce2 = opt.deadCodeElim(alloc, var_fixed) catch var_fixed;
+        if (dce2.ptr != var_fixed.ptr) alloc.free(var_fixed);
+        inlined = compact_ids.compactIds(alloc, dce2) catch dce2;
+        if (inlined.ptr != dce2.ptr) alloc.free(dce2);
     }
-    // Inline multi-block functions that are called once
-    // (deferred to after trivial inlining + DCE)
-    // Eliminate calls to pure void-returning functions
+
+    // Dead function removal
     const no_dead_calls = opt.elimDeadVoidCalls(alloc, inlined) catch return inlined;
     if (no_dead_calls.ptr != inlined.ptr) alloc.free(inlined);
-    // Eliminate dead functions (bodies of functions whose calls were removed)
     const no_dead_funcs = opt.elimDeadFunctions(alloc, no_dead_calls) catch return no_dead_calls;
     if (no_dead_funcs.ptr != no_dead_calls.ptr) alloc.free(no_dead_calls);
-    // Convert loop counter variables to OpPhi
+
+    // Loop counter to Phi + branch merge Phi
     const phi = loop_phi.loopCounterToPhi(alloc, no_dead_funcs) catch return no_dead_funcs;
     if (phi.ptr != no_dead_funcs.ptr) alloc.free(no_dead_funcs);
-    // Convert branch-merge variables to OpPhi early so subsequent passes can optimize
-    const bphi_early = opt.branchMergePhi(alloc, phi) catch return phi;
-    if (bphi_early.ptr != phi.ptr) alloc.free(phi);
-    const simpl_phi_early = opt.simplifyTrivialPhi(alloc, bphi_early) catch bphi_early;
-    if (simpl_phi_early.ptr != bphi_early.ptr) alloc.free(bphi_early);
-    const rse = opt.redundantStoreElim(alloc, simpl_phi_early) catch return simpl_phi_early;
-    if (rse.ptr != simpl_phi_early.ptr) alloc.free(simpl_phi_early);
-    const retargeted = rse;
-    if (retargeted.ptr != rse.ptr) alloc.free(rse);
-    const blk_merged = opt.mergeBlocks(alloc, retargeted) catch return retargeted;
-    if (blk_merged.ptr != retargeted.ptr) alloc.free(retargeted);
-    const blk_merged2 = opt.mergeNonEmptyBlocks(alloc, blk_merged) catch return blk_merged;
-    if (blk_merged2.ptr != blk_merged.ptr) alloc.free(blk_merged);
-    // Hoist invariant ACs from branch targets to header blocks
-    const hoisted = opt.hoistInvariantACs(alloc, blk_merged2) catch return blk_merged2;
-    if (hoisted.ptr != blk_merged2.ptr) alloc.free(blk_merged2);
+    const bphi = opt.branchMergePhi(alloc, phi) catch return phi;
+    if (bphi.ptr != phi.ptr) alloc.free(phi);
+    const simpl_phi = opt.simplifyTrivialPhi(alloc, bphi) catch bphi;
+    if (simpl_phi.ptr != bphi.ptr) alloc.free(bphi);
+
+    // Store forwarding + block merging
+    const rse = opt.redundantStoreElim(alloc, simpl_phi) catch return simpl_phi;
+    if (rse.ptr != simpl_phi.ptr) alloc.free(simpl_phi);
+    const blk1 = opt.mergeBlocks(alloc, rse) catch return rse;
+    if (blk1.ptr != rse.ptr) alloc.free(rse);
+    const blk2 = opt.mergeNonEmptyBlocks(alloc, blk1) catch return blk1;
+    if (blk2.ptr != blk1.ptr) alloc.free(blk1);
+
+    // Hoist invariant access chains
+    const hoisted = opt.hoistInvariantACs(alloc, blk2) catch return blk2;
+    if (hoisted.ptr != blk2.ptr) alloc.free(blk2);
     const hoisted_dce = opt.deadCodeElim(alloc, hoisted) catch return hoisted;
     if (hoisted_dce.ptr != hoisted.ptr) alloc.free(hoisted);
-    // Inline multi-block functions that are called once (after phi conversion eliminates func vars)
+
+    // Multi-block inlining
     const mb_inlined = inline_mb.inlineMultiBlock(alloc, hoisted_dce) catch return hoisted_dce;
     if (mb_inlined.ptr != hoisted_dce.ptr) alloc.free(hoisted_dce);
-    // Merge blocks + DCE after inlining (inliner creates continuation blocks)
     const mb_merged = opt.mergeBlocks(alloc, mb_inlined) catch mb_inlined;
     if (mb_merged.ptr != mb_inlined.ptr) alloc.free(mb_inlined);
-    const mb_merged2 = opt.mergeNonEmptyBlocks(alloc, mb_merged) catch mb_merged;
+    const mb_merged2 = opt.mergeNonEmptyBlocks(alloc, mb_merged) catch return mb_merged;
     if (mb_merged2.ptr != mb_merged.ptr) alloc.free(mb_merged);
-    const mb_dce = opt.deadCodeElim(alloc, mb_merged2) catch mb_merged2;
+    const mb_dce = opt.deadCodeElim(alloc, mb_merged2) catch return mb_merged2;
     if (mb_dce.ptr != mb_merged2.ptr) alloc.free(mb_merged2);
+
+    // Type dedup
     const deduped = opt.dedupStructTypes(alloc, mb_dce) catch return mb_dce;
     if (deduped.ptr != mb_dce.ptr) alloc.free(mb_dce);
-    const negated = opt.elimSelfRefArithmetic(alloc, deduped) catch return deduped;
-    if (negated.ptr != deduped.ptr) alloc.free(deduped);
-    const negated2 = opt.eliminateDoubleNegate(alloc, negated) catch return negated;
-    if (negated2.ptr != negated.ptr) alloc.free(negated);
-    const neg_folded = opt.foldNegateIntoAddSub(alloc, negated2) catch return negated2;
-    if (neg_folded.ptr != negated2.ptr) alloc.free(negated2);
-    const algebrad = opt.algebraicSimpl(alloc, neg_folded) catch return neg_folded;
-    if (algebrad.ptr != neg_folded.ptr) alloc.free(neg_folded);
+
+    // Arithmetic simplification chain
+    const neg1 = opt.elimSelfRefArithmetic(alloc, deduped) catch return deduped;
+    if (neg1.ptr != deduped.ptr) alloc.free(deduped);
+    const neg2 = opt.eliminateDoubleNegate(alloc, neg1) catch return neg1;
+    if (neg2.ptr != neg1.ptr) alloc.free(neg1);
+    const neg3 = opt.foldNegateIntoAddSub(alloc, neg2) catch return neg2;
+    if (neg3.ptr != neg2.ptr) alloc.free(neg2);
+    const algebrad = opt.algebraicSimpl(alloc, neg3) catch return neg3;
+    if (algebrad.ptr != neg3.ptr) alloc.free(neg3);
     const cf = opt.constFold(alloc, algebrad) catch return algebrad;
     if (cf.ptr != algebrad.ptr) alloc.free(algebrad);
     const folded = opt.foldSelect(alloc, cf) catch return cf;
     if (folded.ptr != cf.ptr) alloc.free(cf);
-    // Fold constant branches: OpBranchConditional with constant condition -> OpBranch
+
+    // Control flow optimization
     const folded_br = opt.foldConstBranches(alloc, folded) catch folded;
     if (folded_br.ptr != folded.ptr) alloc.free(folded);
-    const elim_dead_blks = opt.elimUnreachableBlocks(alloc, folded_br) catch folded_br;
-    if (elim_dead_blks.ptr != folded_br.ptr) alloc.free(folded_br);
-    const simpl_phi = opt.simplifyTrivialPhi(alloc, elim_dead_blks) catch elim_dead_blks;
-    if (simpl_phi.ptr != elim_dead_blks.ptr) alloc.free(elim_dead_blks);
-    const compacted = compact_ids.compactIds(alloc, simpl_phi) catch return simpl_phi;
-    if (compacted.ptr != simpl_phi.ptr) alloc.free(simpl_phi);
-    // Eliminate redundant loads of read-only variables
+    const elim_blks = opt.elimUnreachableBlocks(alloc, folded_br) catch folded_br;
+    if (elim_blks.ptr != folded_br.ptr) alloc.free(folded_br);
+    const phi2 = opt.simplifyTrivialPhi(alloc, elim_blks) catch elim_blks;
+    if (phi2.ptr != elim_blks.ptr) alloc.free(elim_blks);
+    const compacted = compact_ids.compactIds(alloc, phi2) catch return phi2;
+    if (compacted.ptr != phi2.ptr) alloc.free(phi2);
+
+    // Memory optimization
     const no_rle = opt.elimRedundantLoads(alloc, compacted) catch return compacted;
     if (no_rle.ptr != compacted.ptr) alloc.free(compacted);
-    // CSE duplicate OpAccessChain and OpSampledImage within blocks
-    const no_dup_ac = opt.cseWithinBlocks(alloc, no_rle) catch return no_rle;
-    if (no_dup_ac.ptr != no_rle.ptr) alloc.free(no_rle);
-    // Fold CompositeExtract from OpConstantComposite
-    const folded_cce = opt.foldConstCompositeExtract(alloc, no_dup_ac) catch no_dup_ac;
-    if (folded_cce.ptr != no_dup_ac.ptr) alloc.free(no_dup_ac);
-    // Fold CompositeExtract from CompositeConstruct
-    const folded_ce = opt.foldCompositeExtract(alloc, folded_cce) catch return folded_cce;
-    if (folded_ce.ptr != folded_cce.ptr) alloc.free(folded_cce);
-    // Fold VectorShuffle from CompositeConstruct into CompositeConstruct
-    const folded_sh = opt.foldShuffleFromComposite(alloc, folded_ce) catch folded_ce;
-    if (folded_sh.ptr != folded_ce.ptr) alloc.free(folded_ce);
-    // Fold extract+const -> VectorShuffle: CompositeConstruct(extract, 0.0, extract) -> VectorShuffle
-    const folded_ecs = fold_ec.foldExtractConstructToShuffle(alloc, folded_sh) catch folded_sh;
-    if (folded_ecs.ptr != folded_sh.ptr) alloc.free(folded_sh);
-    // Eliminate identity vector shuffles (shuffle(v, v, 0, 1, ...))
-    const no_id_shuffle = opt.elimIdentityShuffle(alloc, folded_ecs) catch return folded_ecs;
-    if (no_id_shuffle.ptr != folded_ecs.ptr) alloc.free(folded_ecs);
-    // Eliminate uninit vars (loaded but never stored)
-    const no_uninit = opt.elimUninitVars(alloc, no_id_shuffle) catch return no_id_shuffle;
-    if (no_uninit.ptr != no_id_shuffle.ptr) alloc.free(no_id_shuffle);
-    // Forward constant stores to function-local vars
+    const no_dup = opt.cseWithinBlocks(alloc, no_rle) catch return no_rle;
+    if (no_dup.ptr != no_rle.ptr) alloc.free(no_rle);
+
+    // Composite optimization
+    const cce = opt.foldConstCompositeExtract(alloc, no_dup) catch no_dup;
+    if (cce.ptr != no_dup.ptr) alloc.free(no_dup);
+    const ce = opt.foldCompositeExtract(alloc, cce) catch return cce;
+    if (ce.ptr != cce.ptr) alloc.free(cce);
+    const sh = opt.foldShuffleFromComposite(alloc, ce) catch ce;
+    if (sh.ptr != ce.ptr) alloc.free(ce);
+    const ecs = fold_ec.foldExtractConstructToShuffle(alloc, sh) catch sh;
+    if (ecs.ptr != sh.ptr) alloc.free(sh);
+    const no_id_sh = opt.elimIdentityShuffle(alloc, ecs) catch return ecs;
+    if (no_id_sh.ptr != ecs.ptr) alloc.free(ecs);
+
+    // Variable optimization
+    const no_uninit = opt.elimUninitVars(alloc, no_id_sh) catch return no_id_sh;
+    if (no_uninit.ptr != no_id_sh.ptr) alloc.free(no_id_sh);
     const const_fwd = opt.constStoreForward(alloc, no_uninit) catch return no_uninit;
     if (const_fwd.ptr != no_uninit.ptr) alloc.free(no_uninit);
-    // Fix variables accessed before first store (inserts OpUndef initializers)
     const fixed_early = opt.fixEarlyAccessVars(alloc, const_fwd) catch const_fwd;
     if (fixed_early.ptr != const_fwd.ptr) alloc.free(const_fwd);
-    // Scatter-store to CompositeConstruct
+
+    // Store-to-composite + store-forward
     const scattered = opt.scatterStoreToComposite(alloc, fixed_early) catch return fixed_early;
     if (scattered.ptr != fixed_early.ptr) alloc.free(fixed_early);
-    // Store-forward extract: replace store+AC+load with CompositeExtract
     const forwarded = opt.storeForwardExtract(alloc, scattered) catch return scattered;
     if (forwarded.ptr != scattered.ptr) alloc.free(scattered);
-    // Second round: constFold + foldCE after store forwarding exposes new patterns
-    const cf2 = opt.constFold(alloc, forwarded) catch forwarded;
-    if (cf2.ptr != forwarded.ptr) alloc.free(forwarded);
-    // Second round: fold negates exposed by constFold
-    const neg_folded2 = opt.foldNegateIntoAddSub(alloc, cf2) catch cf2;
-    if (neg_folded2.ptr != cf2.ptr) alloc.free(cf2);
-    const algebrad2 = opt.algebraicSimpl(alloc, neg_folded2) catch neg_folded2;
-    if (algebrad2.ptr != neg_folded2.ptr) alloc.free(neg_folded2);
-    const folded_cce2 = opt.foldConstCompositeExtract(alloc, algebrad2) catch algebrad2;
-    if (folded_cce2.ptr != algebrad2.ptr) alloc.free(algebrad2);
-    const folded_ce2 = opt.foldCompositeExtract(alloc, folded_cce2) catch folded_cce2;
-    if (folded_ce2.ptr != folded_cce2.ptr) alloc.free(folded_cce2);
-    // Second round: fold constant branches after constFold + foldCE
-    const folded_br2 = opt.foldConstBranches(alloc, folded_ce2) catch folded_ce2;
-    if (folded_br2.ptr != folded_ce2.ptr) alloc.free(folded_ce2);
-    const elim_dead_blks2 = opt.elimUnreachableBlocks(alloc, folded_br2) catch folded_br2;
-    if (elim_dead_blks2.ptr != folded_br2.ptr) alloc.free(folded_br2);
-    const simpl_phi2 = opt.simplifyTrivialPhi(alloc, elim_dead_blks2) catch elim_dead_blks2;
-    if (simpl_phi2.ptr != elim_dead_blks2.ptr) alloc.free(elim_dead_blks2);
-    // Remove dead stores to function-local vars (stores with no loads after forwarding)
-    const no_dead_stores = opt.elimDeadVarStores(alloc, simpl_phi2) catch simpl_phi2;
-    if (no_dead_stores.ptr != simpl_phi2.ptr) alloc.free(simpl_phi2);
+
+    // Final cleanup
+    const no_dead_stores = opt.elimDeadVarStores(alloc, forwarded) catch forwarded;
+    if (no_dead_stores.ptr != forwarded.ptr) alloc.free(forwarded);
     const final_dce = opt.deadCodeElim(alloc, no_dead_stores) catch return no_dead_stores;
     if (final_dce.ptr != no_dead_stores.ptr) alloc.free(no_dead_stores);
-    const final_retarget = opt.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
-    if (final_retarget.ptr != final_dce.ptr) alloc.free(final_dce);
-    // Second CSE pass to catch duplicates introduced by store-forward-extract etc.
-    const final_cse = opt.cseWithinBlocks(alloc, final_retarget) catch return final_retarget;
-    if (final_cse.ptr != final_retarget.ptr) alloc.free(final_retarget);
+    const retargeted = opt.retargetEmptyBlocks(alloc, final_dce) catch return final_dce;
+    if (retargeted.ptr != final_dce.ptr) alloc.free(final_dce);
+    const final_cse = opt.cseWithinBlocks(alloc, retargeted) catch return retargeted;
+    if (final_cse.ptr != retargeted.ptr) alloc.free(retargeted);
     const final_dce2 = opt.deadCodeElim(alloc, final_cse) catch return final_cse;
     if (final_dce2.ptr != final_cse.ptr) alloc.free(final_cse);
-    // Remove identity stores: Load(P) -> Store(P, loaded_value) where load used only in store
     const no_id_stores = opt.elimIdentityStores(alloc, final_dce2) catch final_dce2;
     if (no_id_stores.ptr != final_dce2.ptr) alloc.free(final_dce2);
-    const final_dce3 = opt.deadCodeElim(alloc, no_id_stores) catch no_id_stores;
-    if (final_dce3.ptr != no_id_stores.ptr) alloc.free(no_id_stores);
-    const final_compact = compact_ids.compactIds(alloc, final_dce3) catch return final_dce3;
-    if (final_compact.ptr != final_dce3.ptr) alloc.free(final_dce3);
-    // Third round: elimRedundantLoads + CSE after identity store elimination
-    const no_rle3 = opt.elimRedundantLoads(alloc, final_compact) catch return final_compact;
-    if (no_rle3.ptr != final_compact.ptr) alloc.free(final_compact);
-    const cse3 = opt.cseWithinBlocks(alloc, no_rle3) catch return no_rle3;
-    if (cse3.ptr != no_rle3.ptr) alloc.free(no_rle3);
-    const dce4 = opt.deadCodeElim(alloc, cse3) catch return cse3;
-    if (dce4.ptr != cse3.ptr) alloc.free(cse3);
-    const final_compact2 = compact_ids.compactIds(alloc, dce4) catch return dce4;
-    if (final_compact2.ptr != dce4.ptr) alloc.free(dce4);
-    // Fourth round: try identity stores, then OpCopyMemory optimization
-    const no_id_stores2 = opt.elimIdentityStores(alloc, final_compact2) catch return final_compact2;
-    if (no_id_stores2.ptr != final_compact2.ptr) alloc.free(final_compact2);
-    const copy_mem = opt.copyMemoryOpt(alloc, no_id_stores2) catch return no_id_stores2;
-    if (copy_mem.ptr != no_id_stores2.ptr) alloc.free(no_id_stores2);
-    const dce5 = opt.deadCodeElim(alloc, copy_mem) catch return copy_mem;
-    if (dce5.ptr != copy_mem.ptr) alloc.free(copy_mem);
-    const final_compact3 = compact_ids.compactIds(alloc, dce5) catch return dce5;
-    if (final_compact3.ptr != dce5.ptr) alloc.free(dce5);
-    // Fifth round: try redundant loads + CSE + identity stores + copyMemory after copyMemoryOpt
-    const no_rle5 = opt.elimRedundantLoads(alloc, final_compact3) catch return final_compact3;
-    if (no_rle5.ptr != final_compact3.ptr) alloc.free(final_compact3);
-    const cse5 = opt.cseWithinBlocks(alloc, no_rle5) catch return no_rle5;
-    if (cse5.ptr != no_rle5.ptr) alloc.free(no_rle5);
-    const dce6 = opt.deadCodeElim(alloc, cse5) catch return cse5;
-    if (dce6.ptr != cse5.ptr) alloc.free(cse5);
-    const compact6 = compact_ids.compactIds(alloc, dce6) catch return dce6;
-    if (compact6.ptr != dce6.ptr) alloc.free(dce6);
-    const no_id_stores3 = opt.elimIdentityStores(alloc, compact6) catch return compact6;
-    if (no_id_stores3.ptr != compact6.ptr) alloc.free(compact6);
-    const copy_mem2 = opt.copyMemoryOpt(alloc, no_id_stores3) catch return no_id_stores3;
-    if (copy_mem2.ptr != no_id_stores3.ptr) alloc.free(no_id_stores3);
-    const dce7 = opt.deadCodeElim(alloc, copy_mem2) catch return copy_mem2;
-    if (dce7.ptr != copy_mem2.ptr) alloc.free(copy_mem2);
-    const final_compact4 = compact_ids.compactIds(alloc, dce7) catch return dce7;
-    if (final_compact4.ptr != dce7.ptr) alloc.free(dce7);
-    // Remove unused OpExtInstImport instructions
-    const no_unused_imports = opt.elimUnusedImports(alloc, final_compact4) catch return final_compact4;
-    if (no_unused_imports.ptr != final_compact4.ptr) alloc.free(final_compact4);
-    const no_imports_dce = opt.deadCodeElim(alloc, no_unused_imports) catch return no_unused_imports;
-    if (no_imports_dce.ptr != no_unused_imports.ptr) alloc.free(no_unused_imports);
-    const final_compact4b = compact_ids.compactIds(alloc, no_imports_dce) catch return no_imports_dce;
-    if (final_compact4b.ptr != no_imports_dce.ptr) alloc.free(no_imports_dce);
-    // Eliminate unused global variables (uniforms/samplers/images never loaded/stored)
-    // Run the cycle twice to cascade: remove vars -> DCE types -> strip debug -> DCE more -> repeat
-    const gu1 = opt.elimUnusedGlobals(alloc, final_compact4b) catch return final_compact4b;
-    if (gu1.ptr != final_compact4b.ptr) alloc.free(final_compact4b);
-    const gu1_dce = opt.deadCodeElim(alloc, gu1) catch gu1;
-    if (gu1_dce.ptr != gu1.ptr) alloc.free(gu1);
-    const gu1_strip = opt.stripDeadDebugInfo(alloc, gu1_dce) catch gu1_dce;
-    if (gu1_strip.ptr != gu1_dce.ptr) alloc.free(gu1_dce);
-    const gu1_dce2 = opt.deadCodeElim(alloc, gu1_strip) catch gu1_strip;
-    if (gu1_dce2.ptr != gu1_strip.ptr) alloc.free(gu1_strip);
-    // Second iteration: strip may have exposed more dead globals
-    const gu2 = opt.elimUnusedGlobals(alloc, gu1_dce2) catch gu1_dce2;
-    if (gu2.ptr != gu1_dce2.ptr) alloc.free(gu1_dce2);
-    const gu2_dce = opt.deadCodeElim(alloc, gu2) catch gu2;
-    if (gu2_dce.ptr != gu2.ptr) alloc.free(gu2);
-    const gu2_strip = opt.stripDeadDebugInfo(alloc, gu2_dce) catch gu2_dce;
-    if (gu2_strip.ptr != gu2_dce.ptr) alloc.free(gu2_dce);
-    const gu2_dce2 = opt.deadCodeElim(alloc, gu2_strip) catch gu2_strip;
-    if (gu2_dce2.ptr != gu2_strip.ptr) alloc.free(gu2_strip);
-    // Third iteration
-    const gu3 = opt.elimUnusedGlobals(alloc, gu2_dce2) catch gu2_dce2;
-    if (gu3.ptr != gu2_dce2.ptr) alloc.free(gu2_dce2);
-    const gu3_dce = opt.deadCodeElim(alloc, gu3) catch gu3;
-    if (gu3_dce.ptr != gu3.ptr) alloc.free(gu3);
-    const gu3_strip = opt.stripDeadDebugInfo(alloc, gu3_dce) catch gu3_dce;
-    if (gu3_strip.ptr != gu3_dce.ptr) alloc.free(gu3_dce);
-    const gu3_dce2 = opt.deadCodeElim(alloc, gu3_strip) catch gu3_strip;
-    if (gu3_dce2.ptr != gu3_strip.ptr) alloc.free(gu3_strip);
-    const gu_compact = compact_ids.compactIds(alloc, gu3_dce2) catch return gu3_dce2;
-    if (gu_compact.ptr != gu3_dce2.ptr) alloc.free(gu3_dce2);
-    // Deduplicate array types after all optimizations
+    const copy_mem = opt.copyMemoryOpt(alloc, no_id_stores) catch return no_id_stores;
+    if (copy_mem.ptr != no_id_stores.ptr) alloc.free(no_id_stores);
+    const final_dce3 = opt.deadCodeElim(alloc, copy_mem) catch return copy_mem;
+    if (final_dce3.ptr != copy_mem.ptr) alloc.free(copy_mem);
+    const compacted2 = compact_ids.compactIds(alloc, final_dce3) catch return final_dce3;
+    if (compacted2.ptr != final_dce3.ptr) alloc.free(final_dce3);
+
+    // Import + global cleanup (single pass)
+    const no_imports = opt.elimUnusedImports(alloc, compacted2) catch return compacted2;
+    if (no_imports.ptr != compacted2.ptr) alloc.free(compacted2);
+    const no_imports_dce = opt.deadCodeElim(alloc, no_imports) catch return no_imports;
+    if (no_imports_dce.ptr != no_imports.ptr) alloc.free(no_imports);
+    const compacted3 = compact_ids.compactIds(alloc, no_imports_dce) catch return no_imports_dce;
+    if (compacted3.ptr != no_imports_dce.ptr) alloc.free(no_imports_dce);
+    const gu = opt.elimUnusedGlobals(alloc, compacted3) catch return compacted3;
+    if (gu.ptr != compacted3.ptr) alloc.free(compacted3);
+    const gu_dce = opt.deadCodeElim(alloc, gu) catch gu;
+    if (gu_dce.ptr != gu.ptr) alloc.free(gu);
+    const gu_strip = opt.stripDeadDebugInfo(alloc, gu_dce) catch gu_dce;
+    if (gu_strip.ptr != gu_dce.ptr) alloc.free(gu_dce);
+    const gu_dce2 = opt.deadCodeElim(alloc, gu_strip) catch gu_strip;
+    if (gu_dce2.ptr != gu_strip.ptr) alloc.free(gu_strip);
+    const gu_compact = compact_ids.compactIds(alloc, gu_dce2) catch return gu_dce2;
+    if (gu_compact.ptr != gu_dce2.ptr) alloc.free(gu_dce2);
+
+    // Final type dedup
     const deduped_arr = opt.dedupArrayTypes(alloc, gu_compact) catch return gu_compact;
     if (deduped_arr.ptr != gu_compact.ptr) alloc.free(gu_compact);
-    // Second struct dedup: after all optimizations (including DCE which may unify member types)
-    const deduped_struct2 = opt.dedupStructTypes(alloc, deduped_arr) catch return deduped_arr;
-    if (deduped_struct2.ptr != deduped_arr.ptr) alloc.free(deduped_arr);
-    // Pointer type dedup: struct dedup may create duplicate pointer types
-    const deduped_ptr = opt.dedupPointerTypes(alloc, deduped_struct2) catch return deduped_struct2;
-    if (deduped_ptr.ptr != deduped_struct2.ptr) alloc.free(deduped_struct2);
+    const deduped_struct = opt.dedupStructTypes(alloc, deduped_arr) catch return deduped_arr;
+    if (deduped_struct.ptr != deduped_arr.ptr) alloc.free(deduped_arr);
+    const deduped_ptr = opt.dedupPointerTypes(alloc, deduped_struct) catch return deduped_struct;
+    if (deduped_ptr.ptr != deduped_struct.ptr) alloc.free(deduped_struct);
     const deduped_func = opt.dedupFunctionTypes(alloc, deduped_ptr) catch deduped_ptr;
     if (deduped_func.ptr != deduped_ptr.ptr) alloc.free(deduped_ptr);
-    const dce_tail = opt.deadCodeElim(alloc, deduped_func) catch return deduped_func;
-    if (dce_tail.ptr != deduped_func.ptr) alloc.free(deduped_func);
-    // Final elimUnusedGlobals: optimization passes may have eliminated uses of global variables
-    // that were alive during earlier elimUnusedGlobals runs
-    const gu_final = opt.elimUnusedGlobals(alloc, dce_tail) catch dce_tail;
-    if (gu_final.ptr != dce_tail.ptr) alloc.free(dce_tail);
-    // Deduplicate after final elimUnusedGlobals
-    const deduped_arr2 = opt.dedupArrayTypes(alloc, gu_final) catch return gu_final;
-    if (deduped_arr2.ptr != gu_final.ptr) alloc.free(gu_final);
-    const deduped_struct3 = opt.dedupStructTypes(alloc, deduped_arr2) catch return deduped_arr2;
-    if (deduped_struct3.ptr != deduped_arr2.ptr) alloc.free(deduped_arr2);
-    const deduped_ptr2 = opt.dedupPointerTypes(alloc, deduped_struct3) catch return deduped_struct3;
-    if (deduped_ptr2.ptr != deduped_struct3.ptr) alloc.free(deduped_struct3);
-    const deduped_func2 = opt.dedupFunctionTypes(alloc, deduped_ptr2) catch deduped_ptr2;
-    if (deduped_func2.ptr != deduped_ptr2.ptr) alloc.free(deduped_ptr2);
-    const tail_dce = opt.deadCodeElim(alloc, deduped_func2) catch return deduped_func2;
-    if (tail_dce.ptr != deduped_func2.ptr) alloc.free(deduped_func2);
-    const final_compact5 = compact_ids.compactIds(alloc, tail_dce) catch return tail_dce;
-    if (final_compact5.ptr != tail_dce.ptr) alloc.free(tail_dce);
-    return final_compact5;
+    const tail_dce = opt.deadCodeElim(alloc, deduped_func) catch return deduped_func;
+    if (tail_dce.ptr != deduped_func.ptr) alloc.free(deduped_func);
+    const result = compact_ids.compactIds(alloc, tail_dce) catch return tail_dce;
+    if (result.ptr != tail_dce.ptr) alloc.free(tail_dce);
+    return result;
+
 }
 
 const Codegen = struct {
