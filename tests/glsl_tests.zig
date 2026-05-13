@@ -1268,3 +1268,48 @@ test "T20.2: GLSL fma (std450 #50)" {
     defer alloc.free(glsl);
     try assertNotContains(glsl, "unhandled");
 }
+
+test "T20.3: GLSL imageStore (OpImageWrite)" {
+    const source =
+        \\#version 430
+        \\layout(rgba8, binding = 0) uniform writeonly image2D img;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    imageStore(img, ivec2(0, 0), vec4(1.0));
+        \\    fragColor = vec4(1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertNotContains(glsl, "unhandled");
+}
+
+test "T20.4: GLSL imageLoad (OpImageRead)" {
+    const source =
+        \\#version 430
+        \\layout(rgba8, binding = 0) uniform readonly image2D img;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 c = imageLoad(img, ivec2(0, 0));
+        \\    fragColor = c;
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertNotContains(glsl, "unhandled");
+}
+
+test "T20.5: GLSL shadow texture (sampler2DShadow)" {
+    const source =
+        \\#version 430
+        \\uniform sampler2DShadow shadowMap;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = texture(shadowMap, vec3(0.5, 0.5, 0.0));
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertNotContains(glsl, "unhandled");
+}

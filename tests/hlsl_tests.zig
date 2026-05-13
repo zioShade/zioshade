@@ -13557,3 +13557,47 @@ test "codegen: AC+Store stale load cache regression" {
     }
     try std.testing.expect(load_count >= 2); // at least: load u + load v after .y store
 }
+
+test "hlsl: shadow texture (SampleCmp)" {
+    const src =
+        \\#version 450
+        \\uniform sampler2DShadow shadowMap;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float d = texture(shadowMap, vec3(0.5, 0.5, 0.0));
+        \\    fragColor = vec4(d);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    try assertNotContains(hlsl, "unhandled");
+}
+
+test "hlsl: textureSize (ImageQuerySizeLod)" {
+    const src =
+        \\#version 450
+        \\uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec2 s = textureSize(tex, 0);
+        \\    fragColor = vec4(float(s.x));
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    try assertNotContains(hlsl, "unhandled");
+}
+
+test "hlsl: fma (std450 #50)" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r = fma(2.0, 3.0, 1.0);
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    try assertNotContains(hlsl, "unhandled");
+}
