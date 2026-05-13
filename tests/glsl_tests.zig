@@ -1313,3 +1313,18 @@ test "T20.5: GLSL shadow texture (sampler2DShadow)" {
     defer alloc.free(glsl);
     try assertNotContains(glsl, "unhandled");
 }
+
+test "T20.6: GLSL textureGather (ImageGather)" {
+    const source =
+        \\#version 450
+        \\uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec4 g = textureGather(tex, vec2(0.5), 0);
+        \\    fragColor = g;
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertNotContains(glsl, "unhandled");
+}
