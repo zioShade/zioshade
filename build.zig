@@ -167,6 +167,19 @@ pub fn build(b: *std.Build) void {
     cross_compare_step.dependOn(&run_cross_compare.step);
     test_step.dependOn(&run_cross_compare.step);
 
+    // Optimizer regression tests
+    const opt_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/optimizer_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    opt_test_mod.addImport("glslpp", glslpp_mod);
+    const run_opt_tests = b.addRunArtifact(b.addTest(.{
+        .name = "optimizer-tests",
+        .root_module = opt_test_mod,
+    }));
+    test_step.dependOn(&run_opt_tests.step);
+
     // Mesh/Task shader tests
     const mesh_task_test_step = b.step("test-mesh-task", "Run mesh/task shader compilation tests");
     const mesh_task_test_mod = b.createModule(.{
