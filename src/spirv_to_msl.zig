@@ -1401,6 +1401,16 @@ fn emitInstruction(
             try w.writeAll(");\n");
         },
         .CompositeExtract => {
+            // Skip if source is a decomposed std450 struct (FrexpStruct/ModfStruct)
+            if (inst.words.len > 3) {
+                const src_def = getDef(m, inst.words[3]);
+                if (src_def) |sd| {
+                    if (sd.op == .ExtInst and sd.words.len >= 5) {
+                        const ext_op = sd.words[4];
+                        if (ext_op == 52 or ext_op == 36) return;
+                    }
+                }
+            }
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const comp = names.get(inst.words[3]) orelse "c";
             try w.print("    {s} {s} = {s}", .{rtt, names.get(inst.words[2]) orelse "v", comp});
@@ -1457,7 +1467,47 @@ fn emitInstruction(
         .Any => try emitCall(m, names, inst, "any", w, alloc),
         .ExtInst => {
             if (inst.words.len < 5) return;
-            try emitStd450(m, names, inst, inst.words[4], w, alloc);
+            const instruction = inst.words[4];
+            // FrexpStruct (52) and ModfStruct (36) return structs — decompose to two-arg form
+            if (instruction == 52 or instruction == 36) {
+                const result_id = inst.words[2];
+                const input_name = names.get(inst.words[5]) orelse "x";
+                const func_name: []const u8 = if (instruction == 52) "frexp" else "modf";
+                var fract_name: []const u8 = "_fract";
+                var second_name: []const u8 = "_second";
+                var fract_type: []const u8 = "float";
+                var second_type: []const u8 = "int";
+                // Find downstream CompositeExtracts for member names/types
+                {
+                    var j: usize = 0;
+                    for (m.instructions, 0..) |mi, i| {
+                        if (mi.op == .ExtInst and mi.words.len >= 3 and mi.words[2] == result_id) {
+                            j = i + 1;
+                            break;
+                        }
+                    }
+                    while (j < m.instructions.len) : (j += 1) {
+                        const ni = m.instructions[j];
+                        if (ni.op == .FunctionEnd) break;
+                        if (ni.op == .CompositeExtract and ni.words.len >= 5 and ni.words[3] == result_id) {
+                            const member_idx = ni.words[4];
+                            const ce_name = names.get(ni.words[2]) orelse "v";
+                            const ce_type = try mslType(m, ni.words[1], names, alloc);
+                            if (member_idx == 0) {
+                                fract_name = ce_name;
+                                fract_type = ce_type;
+                            } else if (member_idx == 1) {
+                                second_name = ce_name;
+                                second_type = ce_type;
+                            }
+                        }
+                    }
+                }
+                try w.print("    {s} {s};\n", .{ second_type, second_name });
+                try w.print("    {s} {s} = {s}({s}, {s});\n", .{ fract_type, fract_name, func_name, input_name, second_name });
+            } else {
+                try emitStd450(m, names, inst, instruction, w, alloc);
+            }
         },
         .SampledImage => {
             const ri = inst.words[2];

@@ -13601,3 +13601,40 @@ test "hlsl: fma (std450 #50)" {
     defer alloc.free(hlsl);
     try assertNotContains(hlsl, "unhandled");
 }
+
+test "hlsl: frexp (FrexpStruct std450 #52)" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) in float v0;
+        \\layout(location = 0) out float fragColor;
+        \\void main() {
+        \\    int e;
+        \\    float f = frexp(v0, e);
+        \\    fragColor = f + float(e);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "frexp(");
+    try assertNotContains(hlsl, "ResType");
+    try assertNotContains(hlsl, "unhandled");
+}
+
+test "hlsl: modf (ModfStruct std450 #36)" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) in float v0;
+        \\layout(location = 0) out float fragColor;
+        \\void main() {
+        \\    float whole;
+        \\    float frac_part = modf(v0, whole);
+        \\    fragColor = frac_part + whole;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "modf(");
+    try assertNotContains(hlsl, "ResType");
+    try assertNotContains(hlsl, "unhandled");
+}
+
