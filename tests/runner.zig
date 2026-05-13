@@ -165,7 +165,10 @@ fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, sav
 
     // Print spirv-val error for diagnostics
     if (val_result.stderr.len > 0) {
-        log("  spirv-val: {s}\n", .{val_result.stderr});
+        log("  spirv-val stderr: {s}\n", .{val_result.stderr});
+    }
+    if (val_result.stdout.len > 0) {
+        log("  spirv-val stdout: {s}\n", .{val_result.stdout});
     }
     return .fail;
 }

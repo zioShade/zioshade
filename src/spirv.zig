@@ -236,7 +236,7 @@ pub const Op = enum(u16) {
 
 pub const Capability = enum(u32) {
     shader = 1,
-    mesh_shading_ext = 5366,
+    mesh_shading_ext = 5283,
     sampled_image_array_dynamic_indexing = 29,
     image_cube_array = 34,
     sample_rate_shading = 35,
@@ -266,7 +266,7 @@ pub const Capability = enum(u32) {
     texture_sample_weighted_qcom = 4484,
     texture_box_filter_qcom = 4485,
     texture_block_match_qcom = 4486,
-    ray_tracing_khr = 5340,
+    ray_tracing_khr = 4479,
     ray_query_khr = 4472,
     ray_query_position_fetch_khr = 5391,
     tensors_arm = 4174,
@@ -402,9 +402,9 @@ pub const ExecutionMode = enum(u32) {
     DepthUnchanged = 16,
     LocalSize = 17,
     OutputPoints = 1,
-    OutputLinesEXT = 2,
-    OutputTrianglesEXT = 3,
-    OutputPrimitivesEXT = 5367,
+    OutputLinesEXT = 5269,
+    OutputTrianglesEXT = 5298,
+    OutputPrimitivesEXT = 5270,
     OutputVertices = 26,
     _,
 };
