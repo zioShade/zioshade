@@ -2732,7 +2732,11 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 73 => "firstbitlow", // FindILsb → HLSL firstbitlow
                 74 => "firstbithigh", // FindSMsb → HLSL firstbithigh
                 75 => "firstbithigh", // FindUMsb → HLSL firstbithigh
-                79 => "min", 80 => "max",
+                79 => "min", 80 => "max", 81 => "clamp",
+                54 => "pack_snorm4x8", 55 => "pack_unorm4x8",
+                56 => "pack_snorm2x16", 57 => "pack_unorm2x16", 58 => "pack_half2x16",
+                60 => "unpack_snorm2x16", 61 => "unpack_unorm2x16", 62 => "unpack_half2x16",
+                63 => "unpack_snorm4x8", 64 => "unpack_unorm4x8",
                 76 => "EvaluateAttributeAtCentroid", 77 => "EvaluateAttributeAtSample", 78 => "EvaluateAttributeSnapped",
                 else => null,
             };

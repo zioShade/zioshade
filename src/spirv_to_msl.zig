@@ -625,7 +625,7 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         73 => "ctz",       // findLSB → ctz (count trailing zeros)
         74 => "clz",       // findMSB(signed) → simplified; may need adjustment
         75 => "clz",       // findMSB(unsigned) → simplified; may need adjustment
-        79 => "min", 80 => "max",
+        79 => "min", 80 => "max", 81 => "clamp",
         35 => "modf", 51 => "frexp",
         else => null,
     };
