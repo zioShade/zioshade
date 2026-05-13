@@ -501,6 +501,22 @@ test "T10.2: ternary operator (OpSelect)" {
     try assertContains(hlsl, "?");
 }
 
+test "T10.4: sign(int) uses SSign std450" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0, std140) uniform U { int val; } u;
+        \\void main() {
+        \\    int s = sign(u.val);
+        \\    if (s < 0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // SSign (std450 #7) should emit sign() not "unhandled"
+    try assertContains(hlsl, "sign(");
+    try assertContains(hlsl, "discard");
+}
+
 // ---------------------------------------------------------------------------
 // T11: Composite operations
 // ---------------------------------------------------------------------------
