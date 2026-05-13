@@ -411,9 +411,7 @@ pub const Preprocessor = struct {
                 if (tok.tag == .eof or tok.loc.line > name_tok.loc.line) {
                     break;
                 }
-                if (tok.tag != .semicolon) {
-                    try body.append(self.alloc, tok);
-                }
+                try body.append(self.alloc, tok);
                 index.* += 1;
             }
 
@@ -445,9 +443,7 @@ pub const Preprocessor = struct {
                 if (tok.tag == .eof or tok.loc.line > name_tok.loc.line) {
                     break;
                 }
-                if (tok.tag != .semicolon) {
-                    try body.append(self.alloc, tok);
-                }
+                try body.append(self.alloc, tok);
                 index.* += 1;
             }
 
