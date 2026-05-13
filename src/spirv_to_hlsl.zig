@@ -2727,7 +2727,8 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 49 => "smoothstep",
                 50 => "fma",       // FMA (fused multiply-add)
                 51 => "modf",      // FrexpStruct → modf in HLSL
-                52 => "ldexp",     // Ldexp
+                52 => "frexp",     // FrexpStruct
+                53 => "ldexp",     // Ldexp
                 73 => "firstbitlow", // FindILsb → HLSL firstbitlow
                 74 => "firstbithigh", // FindSMsb → HLSL firstbithigh
                 75 => "firstbithigh", // FindUMsb → HLSL firstbithigh
