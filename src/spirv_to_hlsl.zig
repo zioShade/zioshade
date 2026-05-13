@@ -2543,6 +2543,7 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 4 => "abs",
                 5 => "abs",        // SAbs
                 6 => "sign",
+                7 => "sign",       // SSign (sign for signed ints)
                 10 => "fract",
                 11 => "radians",
                 12 => "degrees",

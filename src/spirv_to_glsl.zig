@@ -558,7 +558,7 @@ fn detectOutParams(m: *const ParsedModule, entry_id: u32, opi: *std.AutoHashMap(
 // ---- Std450 → GLSL function name mapping ----
 fn std450ToGlsl(val: u32) ?[]const u8 {
     return switch (val) {
-        1 => "round", 3 => "trunc", 4, 5 => "abs", 6 => "sign", 8 => "floor", 9 => "ceil",
+        1 => "round", 3 => "trunc", 4, 5 => "abs", 6, 7 => "sign", 8 => "floor", 9 => "ceil",
         10 => "fract",
         11 => "radians", 12 => "degrees", 13 => "sin", 14 => "cos", 15 => "tan",
         16 => "asin", 17 => "acos", 18 => "atan", 19 => "sinh", 20 => "cosh", 21 => "tanh",
