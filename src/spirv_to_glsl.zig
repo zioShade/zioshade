@@ -564,7 +564,7 @@ fn std450ToGlsl(val: u32) ?[]const u8 {
         16 => "asin", 17 => "acos", 18 => "atan", 19 => "sinh", 20 => "cosh", 21 => "tanh",
         25 => "atan", 26 => "pow", 27 => "exp", 28 => "log", 29 => "exp2", 30 => "log2",
         31 => "sqrt", 32 => "inversesqrt", 33 => "determinant",
-        34 => "matrixCompMult", 35 => "outerProduct",
+        34 => "inverse",
         36 => "modf",
         37 => "min", 38 => "max", 39 => "min",
         40 => "max", 41 => "min", 42 => "max", 43 => "clamp", 44 => "clamp",
