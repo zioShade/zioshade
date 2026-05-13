@@ -1809,6 +1809,27 @@ fn emitInstruction(
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord,
             });
         },
+        .ImageSampleDrefImplicitLod => {
+            // Shadow texture: HLSL uses .SampleCmp(sampler, coord, compare)
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            const parts = splitPair(si);
+            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}, {s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, dref,
+            });
+        },
+        .ImageSampleDrefExplicitLod => {
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            const parts = splitPair(si);
+            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}, {s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, dref,
+            });
+        },
         .ImageSampleProjImplicitLod => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
