@@ -1984,66 +1984,86 @@ fn emitInstruction(
         .AtomicIAdd => {
             // OpAtomicIAdd: result_type, result, pointer, memory_scope, semantics, value
             const rt = try hlslType(module, inst.words[1], names, alloc);
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            try w.print("    {s} {s}; InterlockedAdd({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+            switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedAdd({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
+                .image => |p| try w.print("    {s} {s}; InterlockedAdd({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+            }
         },
         .AtomicISub => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            try w.print("    {s} {s}; InterlockedAdd({s}, -({s}));\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+            switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedAdd({s}, -({s}));\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
+                .image => |p| try w.print("    {s} {s}; InterlockedAdd({s}[{s}], -({s}));\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+            }
         },
         .AtomicSMin, .AtomicUMin => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            try w.print("    {s} {s}; InterlockedMin({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+            switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedMin({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
+                .image => |p| try w.print("    {s} {s}; InterlockedMin({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+            }
         },
         .AtomicSMax, .AtomicUMax => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            try w.print("    {s} {s}; InterlockedMax({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+            switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedMax({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
+                .image => |p| try w.print("    {s} {s}; InterlockedMax({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+            }
         },
         .AtomicAnd => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            try w.print("    {s} {s}; InterlockedAnd({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+            switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedAnd({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
+                .image => |p| try w.print("    {s} {s}; InterlockedAnd({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+            }
         },
         .AtomicOr => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            try w.print("    {s} {s}; InterlockedOr({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+            switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedOr({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
+                .image => |p| try w.print("    {s} {s}; InterlockedOr({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+            }
         },
         .AtomicXor => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            try w.print("    {s} {s}; InterlockedXor({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+            switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedXor({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
+                .image => |p| try w.print("    {s} {s}; InterlockedXor({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+            }
         },
         .AtomicExchange => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            try w.print("    {s} {s}; InterlockedExchange({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+            switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedExchange({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
+                .image => |p| try w.print("    {s} {s}; InterlockedExchange({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+            }
         },
         .AtomicCompareExchange => {
             // OpAtomicCompareExchange: result_type, result, pointer, sc1, sem1, sem2, value, comparator
             const rt = try hlslType(module, inst.words[1], names, alloc);
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
             const cmp = if (inst.words.len > 8) names.get(inst.words[8]) orelse "0" else "0";
-            try w.print("    {s} {s}; InterlockedCompareExchange({s}, {s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, cmp, val });
+            switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedCompareExchange({s}, {s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, cmp, val }),
+                .image => |p| try w.print("    {s} {s}; InterlockedCompareExchange({s}[{s}], {s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, cmp, val }),
+            }
         },
         .AtomicFAddEXT => {
             // OpAtomicFAddEXT: floating-point atomic add
             const rt = try hlslType(module, inst.words[1], names, alloc);
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1.0" else "1.0";
-            try w.print("    {s} {s}; InterlockedAdd({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val });
+            switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedAdd({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
+                .image => |p| try w.print("    {s} {s}; InterlockedAdd({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+            }
         },
         .Return => {
             // Skip bare return in fragment entry — we emit the output return at function end
@@ -2571,6 +2591,25 @@ fn emitStd450(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
         try w.writeAll(names.get(arg) orelse "x");
     }
     try w.writeAll(");\n");
+}
+
+/// Classify an atomic pointer: SSBO variable or ImageTexelPointer (image atomic)
+const HlslAtomicPtr = union(enum) {
+    ssbo: []const u8,
+    image: struct { img: []const u8, coord: []const u8 },
+};
+
+fn classifyHlslAtomicPtr(module: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), ptr_id: u32) HlslAtomicPtr {
+    const pd = getDef(module, ptr_id);
+    if (pd) |d| {
+        if (d.op == .ImageTexelPointer) {
+            return .{ .image = .{
+                .img = names.get(d.words[3]) orelse "img",
+                .coord = names.get(d.words[4]) orelse "0",
+            } };
+        }
+    }
+    return .{ .ssbo = names.get(ptr_id) orelse "mem" };
 }
 
 fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
