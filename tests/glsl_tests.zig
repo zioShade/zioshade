@@ -1238,3 +1238,19 @@ test "glsl: bitCount roundtrip" {
     try std.testing.expect(std.mem.indexOf(u8, glsl_out, "bitCount") != null);
 }
 
+
+test "T20.1: GLSL textureSize (ImageQuerySizeLod)" {
+    const source =
+        \\#version 450
+        \\uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec2 s = textureSize(tex, 0);
+        \\    fragColor = vec4(float(s.x), float(s.y), 0.0, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "textureSize");
+    try assertNotContains(glsl, "unhandled");
+}

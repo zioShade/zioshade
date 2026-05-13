@@ -1447,6 +1447,39 @@ fn emitInstruction(
             const texel = names.get(inst.words[3]) orelse "vec4(0)";
             try w.print("    imageStore({s}, {s}, {s});\n", .{img, coord, texel});
         },
+        .ImageQuerySizeLod => {
+            // OpImageQuerySizeLod: result_type, result, image, lod
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const img = names.get(inst.words[3]) orelse "tex";
+            const lod = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
+            try w.print("    {s} {s} = textureSize({s}, {s});\n", .{rtt, rn, img, lod});
+        },
+        .ImageQuerySize => {
+            // OpImageQuerySize: result_type, result, image (no lod)
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const img = names.get(inst.words[3]) orelse "tex";
+            try w.print("    {s} {s} = textureSize({s}, 0);\n", .{rtt, rn, img});
+        },
+        .ImageQueryLod => {
+            // OpImageQueryQueryLod: result_type, result, image, coord
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const img = names.get(inst.words[3]) orelse "tex";
+            const coord2 = if (inst.words.len > 4) names.get(inst.words[4]) orelse "vec2(0)" else "vec2(0)";
+            try w.print("    {s} {s} = textureQueryLod({s}, {s});\n", .{rtt, rn, img, coord2});
+        },
+        .ImageQueryLevels => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const img = names.get(inst.words[3]) orelse "tex";
+            try w.print("    int {s} = textureQueryLevels({s});\n", .{rn, img});
+        },
+        .ImageQuerySamples => {
+            const rn = names.get(inst.words[2]) orelse "v";
+            const img = names.get(inst.words[3]) orelse "tex";
+            try w.print("    int {s} = textureSamples({s});\n", .{rn, img});
+        },
         .Kill => try w.writeAll("    discard;\n"),
         .ControlBarrier => try w.writeAll("    barrier();\n    memoryBarrier();\n"),
         .MemoryBarrier => try w.writeAll("    memoryBarrier();\n"),

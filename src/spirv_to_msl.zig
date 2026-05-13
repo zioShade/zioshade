@@ -1512,6 +1512,20 @@ fn emitInstruction(
             const texel = names.get(inst.words[3]) orelse "float4(0)";
             try w.print("    {s}.write({s}, {s});\n", .{img, texel, coord});
         },
+        .ImageQuerySizeLod => {
+            // MSL: texture.get_width/height(level)
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const img = names.get(inst.words[3]) orelse "tex";
+            const lod = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
+            try w.print("    {s} {s} = {s}.get_width({s});\n", .{rtt, rn, img, lod});
+        },
+        .ImageQuerySize => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const img = names.get(inst.words[3]) orelse "tex";
+            try w.print("    {s} {s} = {s}.get_width(0);\n", .{rtt, rn, img});
+        },
         .Kill => try w.writeAll("    discard_fragment();\n"),
         .ControlBarrier => {
             try w.writeAll("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
