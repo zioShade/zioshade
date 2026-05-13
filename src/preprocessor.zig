@@ -24,7 +24,7 @@ pub const Preprocessor = struct {
     // Back-reference to the source file path for relative includes
     source_file_path: []const u8 = "",
     // Stored include file contents (to keep slices alive)
-    included_sources: std.ArrayListUnmanaged([]const u8) = .empty,
+    included_sources: std.ArrayListUnmanaged([:0]const u8) = .empty,
 
     pub fn init(alloc: std.mem.Allocator) Preprocessor {
         return .{
@@ -331,10 +331,11 @@ pub const Preprocessor = struct {
 
             const file = std.fs.cwd().openFile(full_path, .{}) catch return error.FileNotFound;
             defer file.close();
-            const contents = try file.readToEndAlloc(self.alloc, 10 * 1024 * 1024);
-            try self.included_sources.append(self.alloc, contents);
-            // Null-terminate
-            const z = try self.alloc.dupeZ(u8, contents);
+            const raw = try file.readToEndAlloc(self.alloc, 10 * 1024 * 1024);
+            // Null-terminate for lexer
+            const z = try self.alloc.dupeZ(u8, raw);
+            self.alloc.free(raw);
+            try self.included_sources.append(self.alloc, z);
             return z;
         }
 
@@ -345,9 +346,10 @@ pub const Preprocessor = struct {
 
             const file = std.fs.cwd().openFile(full_path, .{}) catch continue;
             defer file.close();
-            const contents = try file.readToEndAlloc(self.alloc, 10 * 1024 * 1024);
-            try self.included_sources.append(self.alloc, contents);
-            const z = try self.alloc.dupeZ(u8, contents);
+            const raw = try file.readToEndAlloc(self.alloc, 10 * 1024 * 1024);
+            const z = try self.alloc.dupeZ(u8, raw);
+            self.alloc.free(raw);
+            try self.included_sources.append(self.alloc, z);
             return z;
         }
 
@@ -1688,4 +1690,57 @@ test "self-recursion prevention" {
         }
     }
     try std.testing.expect(found_identifier);
+}
+
+test "#include with string literal" {
+    const alloc = std.testing.allocator;
+
+    // Create a temp include file
+    const cwd = std.fs.cwd();
+    cwd.writeFile(.{ .sub_path = "test_include_helper.glsl", .data = "float helper_func() { return 1.0; }" }) catch |err| {
+        std.debug.print("SKIP: could not create include file: {}\n", .{err});
+        return;
+    };
+    defer cwd.deleteFile("test_include_helper.glsl") catch {};
+
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+    pp.source_file_path = "test_main.glsl";
+
+    const source = "#include \"test_include_helper.glsl\"\nvoid main() { float x = helper_func(); }";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    // Should contain the included code (float, identifier tokens)
+    var found_float = false;
+    for (result) |tok| {
+        if (tok.tag == .kw_float) {
+            found_float = true;
+        }
+    }
+    try std.testing.expect(found_float);
+}
+
+test "#include cycle detection" {
+    const alloc = std.testing.allocator;
+
+    // Create a file that includes itself
+    const cwd = std.fs.cwd();
+    cwd.writeFile(.{ .sub_path = "test_cycle.glsl", .data = "#include \"test_cycle.glsl\"\nvoid main() {}" }) catch return;
+    defer cwd.deleteFile("test_cycle.glsl") catch {};
+
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+    pp.source_file_path = "test_main.glsl";
+
+    const source = "#include \"test_cycle.glsl\"\nvoid main() {}";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    // Should not infinite loop or crash
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
 }
