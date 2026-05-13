@@ -16,6 +16,8 @@ const log = std.log.scoped(.spirv_to_hlsl);
 // SPIR-V Binary Parser
 // ---------------------------------------------------------------------------
 
+const LoopInfo = struct { merge: u32, cont: u32 };
+
 const Instruction = struct {
     op: spirv.Op,
     words: []const u32,
@@ -1117,14 +1119,33 @@ fn emitBody(
         }
     }
 
+    // Build LoopMerge index → {merge_label, continue_label} map
+    var loop_merge_map = std.AutoHashMap(usize, LoopInfo).init(alloc);
+    defer loop_merge_map.deinit();
+    idx = func_idx + 1;
+    while (idx < module.instructions.len) : (idx += 1) {
+        const inst = module.instructions[idx];
+        if (inst.op == .FunctionEnd) break;
+        if (inst.op == .LoopMerge and inst.words.len >= 3) {
+            loop_merge_map.put(idx, .{ .merge = inst.words[1], .cont = inst.words[2] }) catch {};
+        }
+    }
+
     // Structured emission
     idx = func_idx + 1;
     while (idx < module.instructions.len) : (idx += 1) {
         const inst = module.instructions[idx];
         if (inst.op == .FunctionEnd) break;
         if (inst.op == .FunctionParameter or inst.op == .Label or
-            inst.op == .SelectionMerge or inst.op == .LoopMerge or
-            inst.op == .Branch) continue;
+            inst.op == .SelectionMerge or inst.op == .Branch) continue;
+
+        // Handle LoopMerge: emit while(true) { condition; if(!cond) break; body; }
+        if (inst.op == .LoopMerge and inst.words.len >= 3) {
+            const merge_lbl = inst.words[1];
+            const cont_lbl = inst.words[2];
+            idx = try emitWhileLoopHLSL(module, names, decorations, idx, merge_lbl, cont_lbl, &label_map, &bc_merge_map, &loop_merge_map, w, alloc, is_fragment, output_var_id);
+            continue;
+        }
 
         if (inst.op == .BranchConditional) {
             if (inst.words.len < 4) continue;
@@ -1198,6 +1219,152 @@ fn emitBody(
 /// Emit instructions from a block starting at `label` until we reach a Branch to `merge_label`.
 /// Handles nested if/else by recursion.
 /// Returns the index of the last instruction processed.
+fn emitWhileLoopHLSL(
+    module: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
+    loop_idx: usize,
+    merge_lbl: u32,
+    cont_lbl: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+    bc_merge_map: *const std.AutoHashMap(usize, u32),
+    loop_merge_map: *const std.AutoHashMap(usize, LoopInfo),
+    w: anytype,
+    alloc: std.mem.Allocator,
+    is_fragment: bool,
+    output_var_id: ?u32,
+) !usize {
+    // Two patterns after LoopMerge:
+    // Pattern A: LoopMerge; Branch cond_label; ...; BranchConditional cond, body, merge
+    // Pattern B: LoopMerge; BranchConditional cond, body, merge (merged condition)
+
+    var cond_name: []const u8 = "true";
+    var body_lbl: u32 = 0;
+    var bc_idx: usize = loop_idx + 1;
+    var cond_start: ?usize = null; // start of condition instructions (for pattern A)
+    var cond_end: usize = loop_idx + 1; // end of condition instructions
+
+    if (loop_idx + 1 >= module.instructions.len) {
+        if (label_map.get(merge_lbl)) |mi| return mi;
+        return loop_idx + 1;
+    }
+
+    const next_inst = module.instructions[loop_idx + 1];
+    if (next_inst.op == .Branch and next_inst.words.len >= 2) {
+        // Pattern A: separate condition block
+        const cond_lbl = next_inst.words[1];
+        const cond_idx = label_map.get(cond_lbl) orelse {
+            if (label_map.get(merge_lbl)) |mi| return mi;
+            return loop_idx + 1;
+        };
+        cond_start = cond_idx + 1;
+        // Find BranchConditional in condition block
+        bc_idx = cond_idx + 1;
+        while (bc_idx < module.instructions.len) : (bc_idx += 1) {
+            const scan = module.instructions[bc_idx];
+            if (scan.op == .BranchConditional) break;
+            if (scan.op == .Branch or scan.op == .FunctionEnd or scan.op == .Label) {
+                bc_idx = module.instructions.len;
+                break;
+            }
+        }
+        if (bc_idx >= module.instructions.len) {
+            if (label_map.get(merge_lbl)) |mi| return mi;
+            return loop_idx + 1;
+        }
+        cond_end = bc_idx;
+    } else if (next_inst.op == .BranchConditional and next_inst.words.len >= 4) {
+        // Pattern B: BranchConditional directly after LoopMerge
+        bc_idx = loop_idx + 1;
+        cond_start = null;
+        cond_end = loop_idx + 1;
+    } else {
+        if (label_map.get(merge_lbl)) |mi| return mi;
+        return loop_idx + 1;
+    }
+
+    const bc = module.instructions[bc_idx];
+    if (bc.words.len < 4) {
+        if (label_map.get(merge_lbl)) |mi| return mi;
+        return loop_idx + 1;
+    }
+    cond_name = names.get(bc.words[1]) orelse "true";
+    body_lbl = bc.words[2];
+
+    // Emit: while (true) {
+    try w.writeAll("    while (true)\n    {\n");
+
+    // Emit condition block instructions (for pattern A)
+    if (cond_start) |cs| {
+        if (cs < cond_end) {
+            var ci: usize = cs;
+            while (ci < cond_end) : (ci += 1) {
+                const cinst = module.instructions[ci];
+                if (cinst.op == .Label or cinst.op == .Branch or cinst.op == .SelectionMerge or cinst.op == .LoopMerge) continue;
+                try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, output_var_id);
+            }
+        }
+    }
+
+    // Emit: if (!(condition)) break;
+    try w.print("        if (!({s})) break;\n", .{cond_name});
+
+    // Emit body block
+    const body_idx = label_map.get(body_lbl) orelse module.instructions.len;
+    if (body_idx < module.instructions.len) {
+        var bi: usize = body_idx + 1;
+        while (bi < module.instructions.len) : (bi += 1) {
+            const binst = module.instructions[bi];
+            if (binst.op == .FunctionEnd) break;
+            if (binst.op == .Label and binst.words.len > 1) {
+                const lbl = binst.words[1];
+                if (lbl == cont_lbl or lbl == merge_lbl) break;
+                continue;
+            }
+            if (binst.op == .LoopMerge) {
+                // Nested loop — recurse
+                if (binst.words.len >= 3) {
+                    const nmerge = binst.words[1];
+                    const ncont = binst.words[2];
+                    bi = try emitWhileLoopHLSL(module, names, decorations, bi, nmerge, ncont, label_map, bc_merge_map, loop_merge_map, w, alloc, is_fragment, output_var_id);
+                    bi -= 1; // caller will increment
+                }
+                continue;
+            }
+            if (binst.op == .SelectionMerge) continue;
+            if (binst.op == .Branch) {
+                if (binst.words.len > 1 and (binst.words[1] == cont_lbl or binst.words[1] == merge_lbl)) continue;
+                continue;
+            }
+            if (binst.op == .BranchConditional) {
+                const ncn = names.get(binst.words[1]) orelse "c";
+                const ntl = binst.words[2];
+                const nfl = if (binst.words.len > 3) binst.words[3] else null;
+                const nml = bc_merge_map.get(bi);
+                if (nml) |nmv| {
+                    const nhe = nfl != null and nfl.? != nmv;
+                    try w.print("        if ({s})\n        {{\n", .{ncn});
+                    bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                    if (nhe) {
+                        try w.writeAll("        } else {\n");
+                        bi = try emitBlock(module, names, decorations, nfl.?, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                    }
+                    try w.writeAll("        }\n");
+                    if (label_map.get(nmv)) |nmi| {
+                        bi = nmi;
+                    }
+                }
+                continue;
+            }
+            try emitInstruction(module, names, decorations, binst, w, alloc, is_fragment, output_var_id);
+        }
+    }
+
+    try w.writeAll("    }\n");
+    if (label_map.get(merge_lbl)) |mi| return mi;
+    return loop_idx + 1;
+}
+
 fn emitBlock(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
