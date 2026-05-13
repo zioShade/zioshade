@@ -4,6 +4,7 @@
 // bandwidth and kernel launch overhead. Operates on SPIR-V binary words.
 const std = @import("std");
 const compact_ids = @import("compact_ids.zig");
+const opt = @import("compact_ids_passes.zig");
 const spirv = @import("spirv.zig");
 
 /// Configuration for kernel fusion.
@@ -940,7 +941,7 @@ fn fusePair(
     const result = try out.toOwnedSlice(alloc);
 
     // Run DCE + compactIds to clean up
-    const dce_result = compact_ids.deadCodeElim(alloc, result) catch return result;
+    const dce_result = opt.deadCodeElim(alloc, result) catch return result;
     if (dce_result.ptr != result.ptr) alloc.free(result);
     const compacted = compact_ids.compactIds(alloc, dce_result) catch return dce_result;
     if (compacted.ptr != dce_result.ptr) alloc.free(dce_result);
