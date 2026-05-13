@@ -1551,69 +1551,92 @@ fn emitInstruction(
         },
         .Kill => try w.writeAll("    discard;\n"),
         .ControlBarrier => try w.writeAll("    barrier();\n    memoryBarrier();\n"),
+        .ImageTexelPointer => {
+            // No code emission needed — result used by atomic ops which resolve via classifyAtomicPtr
+        },
         .MemoryBarrier => try w.writeAll("    memoryBarrier();\n"),
 
         // Atomic operations → GLSL atomic* builtins
         .AtomicIAdd => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            try w.print("    {s} = atomicAdd({s}, {s});\n", .{rn, ptr, val});
+            switch (classifyAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomicAdd({s}, {s});\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = imageAtomicAdd({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicISub => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            try w.print("    {s} = atomicAdd({s}, -{s});\n", .{rn, ptr, val});
+            switch (classifyAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomicAdd({s}, -{s});\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = imageAtomicAdd({s}, {s}, -{s});\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicOr => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            try w.print("    {s} = atomicOr({s}, {s});\n", .{rn, ptr, val});
+            switch (classifyAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomicOr({s}, {s});\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = imageAtomicOr({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicXor => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            try w.print("    {s} = atomicXor({s}, {s});\n", .{rn, ptr, val});
+            switch (classifyAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomicXor({s}, {s});\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = imageAtomicXor({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicAnd => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            try w.print("    {s} = atomicAnd({s}, {s});\n", .{rn, ptr, val});
+            switch (classifyAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomicAnd({s}, {s});\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = imageAtomicAnd({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicSMin, .AtomicUMin => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            try w.print("    {s} = atomicMin({s}, {s});\n", .{rn, ptr, val});
+            switch (classifyAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomicMin({s}, {s});\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = imageAtomicMin({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicSMax, .AtomicUMax => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            try w.print("    {s} = atomicMax({s}, {s});\n", .{rn, ptr, val});
+            switch (classifyAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomicMax({s}, {s});\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = imageAtomicMax({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicExchange => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            try w.print("    {s} = atomicExchange({s}, {s});\n", .{rn, ptr, val});
+            switch (classifyAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomicExchange({s}, {s});\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = imageAtomicExchange({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicCompareExchange => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
             const cmp = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
-            try w.print("    {s} = atomicCompSwap({s}, {s}, {s});\n", .{rn, ptr, cmp, val});
+            switch (classifyAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomicCompSwap({s}, {s}, {s});\n", .{rn, ptr, cmp, val}),
+                .image => |p| try w.print("    {s} = imageAtomicCompSwap({s}, {s}, {s}, {s});\n", .{rn, p.img, p.coord, cmp, val}),
+            }
         },
         .AtomicFAddEXT => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0.0" else "0.0";
-            try w.print("    {s} = atomicAdd({s}, {s});\n", .{rn, ptr, val});
+            switch (classifyAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomicAdd({s}, {s});\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = imageAtomicAdd({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+            }
         },
 
         // Subgroup operations → GLSL subgroup* builtins
@@ -1812,6 +1835,25 @@ fn emitCall(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), in
         try w.writeAll(names.get(arg) orelse "x");
     }
     try w.writeAll(");\n");
+}
+
+/// Classify an atomic pointer: SSBO variable or ImageTexelPointer (image atomic)
+const AtomicPtr = union(enum) {
+    ssbo: []const u8,
+    image: struct { img: []const u8, coord: []const u8 },
+};
+
+fn classifyAtomicPtr(m: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), ptr_id: u32) AtomicPtr {
+    const pd = getDef(m, ptr_id);
+    if (pd) |d| {
+        if (d.op == .ImageTexelPointer) {
+            return .{ .image = .{
+                .img = names.get(d.words[3]) orelse "img",
+                .coord = names.get(d.words[4]) orelse "0",
+            } };
+        }
+    }
+    return .{ .ssbo = names.get(ptr_id) orelse "mem" };
 }
 
 fn emitStd450(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, instruction: u32, w: anytype, alloc: std.mem.Allocator) !void {

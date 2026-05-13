@@ -1582,68 +1582,91 @@ fn emitInstruction(
         .MemoryBarrier => {
             try w.writeAll("    threadgroup_barrier(mem_flags::mem_device);\n");
         },
+        .ImageTexelPointer => {
+            // No code emission needed — result used by atomic ops which resolve via classifyMslAtomicPtr
+        },
 
         // Atomic operations → MSL atomic_fetch_*_explicit
         .AtomicIAdd => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            try w.print("    {s} = atomic_fetch_add_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_add_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = atomic_fetch_add_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicISub => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            try w.print("    {s} = atomic_fetch_sub_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_sub_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = atomic_fetch_sub_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicOr => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            try w.print("    {s} = atomic_fetch_or_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_or_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = atomic_fetch_or_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicXor => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            try w.print("    {s} = atomic_fetch_xor_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_xor_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = atomic_fetch_xor_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicAnd => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            try w.print("    {s} = atomic_fetch_and_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_and_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = atomic_fetch_and_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicSMin, .AtomicUMin => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            try w.print("    {s} = atomic_fetch_min_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_min_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = atomic_fetch_min_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicSMax, .AtomicUMax => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            try w.print("    {s} = atomic_fetch_max_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_max_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = atomic_fetch_max_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicExchange => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            try w.print("    {s} = atomic_exchange_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomic_exchange_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = atomic_exchange_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
+            }
         },
         .AtomicCompareExchange => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
             const cmp = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
-            try w.print("    {s} = atomic_compare_exchange_weak_explicit({s}, &{s}, {s}, memory_order_relaxed, memory_order_relaxed);\n", .{rn, ptr, cmp, val});
+            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomic_compare_exchange_weak_explicit({s}, &{s}, {s}, memory_order_relaxed, memory_order_relaxed);\n", .{rn, ptr, cmp, val}),
+                .image => |p| try w.print("    {s} = atomic_compare_exchange_weak_explicit(&{s}[{s}], &{s}, {s}, memory_order_relaxed, memory_order_relaxed);\n", .{rn, p.img, p.coord, cmp, val}),
+            }
         },
         .AtomicFAddEXT => {
             const rn = names.get(inst.words[2]) orelse "v";
-            const ptr = names.get(inst.words[3]) orelse "mem";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0.0" else "0.0";
-            try w.print("    {s} = atomic_fetch_add_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val});
+            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
+                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_add_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
+                .image => |p| try w.print("    {s} = atomic_fetch_add_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
+            }
         },
 
         // Subgroup operations → MSL simd_* functions
@@ -1871,6 +1894,26 @@ fn emitCall(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), in
         try w.writeAll(names.get(arg) orelse "x");
     }
     try w.writeAll(");\n");
+}
+
+
+/// Classify an atomic pointer: SSBO variable or ImageTexelPointer (image atomic)
+const MslAtomicPtr = union(enum) {
+    ssbo: []const u8,
+    image: struct { img: []const u8, coord: []const u8 },
+};
+
+fn classifyMslAtomicPtr(m: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), ptr_id: u32) MslAtomicPtr {
+    const pd = getDef(m, ptr_id);
+    if (pd) |d| {
+        if (d.op == .ImageTexelPointer) {
+            return .{ .image = .{
+                .img = names.get(d.words[3]) orelse "img",
+                .coord = names.get(d.words[4]) orelse "0",
+            } };
+        }
+    }
+    return .{ .ssbo = names.get(ptr_id) orelse "mem" };
 }
 
 fn emitStd450(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, instruction: u32, w: anytype, alloc: std.mem.Allocator) !void {
