@@ -1446,6 +1446,28 @@ test "T24.2: while loop" {
     try assertContains(hlsl, "discard");
 }
 
+
+test "T24.2b: HLSL loop reconstruction produces while loop" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int n; float x; } u;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < u.n; i++) {
+        \\        sum += u.x;
+        \\        if (sum > 10.0) break;
+        \\    }
+        \\    if (sum > 0.0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // HLSL backend should now reconstruct loops as while(true)
+    try assertContains(hlsl, "while");
+    try assertContains(hlsl, "break");
+    try assertContains(hlsl, "discard");
+}
+
 test "T24.3: nested if-else chain" {
     const source =
         \\#version 430
