@@ -1512,6 +1512,24 @@ fn emitInstruction(
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}.w, {s}, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dref});
         },
+        .ImageSampleProjExplicitLod => {
+            // Projected explicit LOD: sample with manual projection + lod
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            if (inst.words.len > 5) {
+                const mask = inst.words[5];
+                var off: usize = 6;
+                if (mask & 0x1 != 0) off += 1;
+                if (mask & 0x2 != 0 and off < inst.words.len) {
+                    try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}.w, level({s}));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, names.get(inst.words[off]) orelse "0"});
+                } else {
+                    try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}.w, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord});
+                }
+            } else {
+                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}.w, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord});
+            }
+        },
         .ImageSampleExplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";

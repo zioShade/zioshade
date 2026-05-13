@@ -1861,6 +1861,31 @@ fn emitInstruction(
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, dref,
             });
         },
+        .ImageSampleProjExplicitLod => {
+            // Projected explicit LOD: SampleLevel with manual projection
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const parts = splitPair(si);
+            if (inst.words.len > 5) {
+                const mask = inst.words[5];
+                var off: usize = 6;
+                if (mask & 0x1 != 0) off += 1;
+                if (mask & 0x2 != 0 and off < inst.words.len) {
+                    try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}.w, {s});\n", .{
+                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, names.get(inst.words[off]) orelse "0",
+                    });
+                } else {
+                    try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}.w, 0);\n", .{
+                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord,
+                    });
+                }
+            } else {
+                try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}.w, 0);\n", .{
+                    rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord,
+                });
+            }
+        },
         .ImageSampleExplicitLod => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
