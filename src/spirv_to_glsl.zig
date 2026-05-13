@@ -575,6 +575,9 @@ fn std450ToGlsl(val: u32) ?[]const u8 {
         66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
         70 => "faceforward", 71 => "reflect", 72 => "refract",
         73 => "findLSB", 74 => "findMSB", 75 => "findMSB",
+        35 => "modf",
+        51 => "frexp",
+        76 => "interpolateAtCentroid", 77 => "interpolateAtSample", 78 => "interpolateAtOffset",
         79 => "min", 80 => "max",
         else => null,
     };
