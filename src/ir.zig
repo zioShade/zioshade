@@ -149,6 +149,7 @@ pub const Instruction = struct {
         convert_uti,
         convert_iti,
         convert_itof,
+        convert_itu,
         bitcast,
         convert_utof,
         convert_narrow, // OpSConvert: int/int16 → int8, or ivec4 → i8vec4
