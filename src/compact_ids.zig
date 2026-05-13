@@ -191,7 +191,7 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         334...336 => rt(2, "ii"), // OpGroupNonUniformAll..AllEqual: scope, value
         337 => rt(2, "iii"),      // OpGroupNonUniformBroadcast: scope, value, id
         338 => rt(2, "ii"),       // OpGroupNonUniformBroadcastFirst: scope, value
-        339...340 => rt(2, "ii"), // OpGroupNonUniformBallot, ReverseBallot: scope, value
+        339...340 => rt(2, "ii"), // OpGroupNonUniformBallot, InverseBallot: scope, value
         341 => rt(2, "iii"),      // OpGroupNonUniformBallotBitExtract: scope, value, index
         342...344 => rt(2, "ili"), // OpGroupNonUniformBallotBitCount..Exclusive: scope, group_op(lit), value
         345...346 => rt(2, "ii"), // OpGroupNonUniformBallotFindLSB/MSB: scope, value
