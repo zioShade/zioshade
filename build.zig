@@ -304,4 +304,40 @@ pub fn build(b: *std.Build) void {
     validate_all_step.dependOn(&dxc_focus.step);
     validate_all_step.dependOn(&glsl_val_crt.step);
     validate_all_step.dependOn(&glsl_val_focus.step);
+
+    // Tool: SPIR-V to GLSL — run with: zig build spv-to-glsl -- <input.spv> <output.glsl>
+    const spv_to_glsl_step = b.step("spv-to-glsl", "Convert SPIR-V to GLSL via glslpp");
+    const spv_to_glsl_mod = b.createModule(.{
+        .root_source_file = b.path("tools/spv_to_glsl.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    spv_to_glsl_mod.addImport("glslpp", glslpp_mod);
+    const spv_to_glsl_exe = b.addExecutable(.{
+        .name = "spv-to-glsl",
+        .root_module = spv_to_glsl_mod,
+    });
+    const run_spv_to_glsl = b.addRunArtifact(spv_to_glsl_exe);
+    if (b.args) |a| {
+        for (a) |arg| run_spv_to_glsl.addArg(arg);
+    }
+    spv_to_glsl_step.dependOn(&run_spv_to_glsl.step);
+
+    // Tool: SPIR-V to HLSL — run with: zig build spv-to-hlsl -- <input.spv> <output.hlsl>
+    const spv_to_hlsl_step = b.step("spv-to-hlsl", "Convert SPIR-V to HLSL via glslpp");
+    const spv_to_hlsl_mod = b.createModule(.{
+        .root_source_file = b.path("tools/spv_to_hlsl.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    spv_to_hlsl_mod.addImport("glslpp", glslpp_mod);
+    const spv_to_hlsl_exe = b.addExecutable(.{
+        .name = "spv-to-hlsl",
+        .root_module = spv_to_hlsl_mod,
+    });
+    const run_spv_to_hlsl = b.addRunArtifact(spv_to_hlsl_exe);
+    if (b.args) |a| {
+        for (a) |arg| run_spv_to_hlsl.addArg(arg);
+    }
+    spv_to_hlsl_step.dependOn(&run_spv_to_hlsl.step);
 }
