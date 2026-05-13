@@ -1472,6 +1472,21 @@ fn emitInstruction(
             // MSL: tex.sample(samp, coord)
             try w.print("    {s} {s} = {s}.sample({s}Smplr, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord});
         },
+        .ImageSampleDrefImplicitLod => {
+            // Shadow texture: MSL uses .sample(compare_sampler, coord, depth_compare)
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, dref});
+        },
+        .ImageSampleDrefExplicitLod => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}, {s}, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, dref});
+        },
         .ImageSampleProjImplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";

@@ -1406,6 +1406,22 @@ fn emitInstruction(
             const coord = names.get(inst.words[4]) orelse "uv";
             try w.print("    {s} {s} = texture({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
         },
+        .ImageSampleDrefImplicitLod => {
+            // Shadow texture: texture(sampler2DShadow, vec3(uv, depth))
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            try w.print("    {s} {s} = texture({s}, vec3({s}, {s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref });
+        },
+        .ImageSampleDrefExplicitLod => {
+            // Shadow texture with explicit LOD
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            try w.print("    {s} {s} = textureLod({s}, vec4({s}, {s}, 0.0), 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref });
+        },
         .ImageSampleProjImplicitLod => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
