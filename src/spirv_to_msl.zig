@@ -1497,6 +1497,21 @@ fn emitInstruction(
             // Projected sample: divide xy by w
             try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}.w);\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord});
         },
+        .ImageSampleProjDrefImplicitLod => {
+            // Projected shadow: divide xy by w, compare depth
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}.w, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dref});
+        },
+        .ImageSampleProjDrefExplicitLod => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}.w, {s}, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dref});
+        },
         .ImageSampleExplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
