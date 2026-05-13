@@ -1886,10 +1886,32 @@ fn emitInstruction(
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";
             const parts = splitPair(si);
-            // OpImageGather: component is word[5] if present, else 0
-            // For simplicity, use .GatherRed (component = 0)
-            try w.print("    {s} {s} = {s}.GatherRed({s}, {s});\n", .{
-                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord,
+            // OpImageGather component is word[5] (default 0 = Red)
+            const comp_val: u32 = if (inst.words.len > 5) blk: {
+                const def = getDef(module, inst.words[5]) orelse break :blk 0;
+                if (def.op == .Constant and def.words.len > 3) break :blk def.words[3];
+                break :blk 0;
+            } else 0;
+            const gather_swiz = switch (comp_val) {
+                0 => "GatherRed",
+                1 => "GatherGreen",
+                2 => "GatherBlue",
+                3 => "GatherAlpha",
+                else => "GatherRed",
+            };
+            try w.print("    {s} {s} = {s}.{s}({s}, {s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", parts[0], gather_swiz, parts[1], coord,
+            });
+        },
+        .ImageDrefGather => {
+            // HLSL: tex.GatherCmp(sampler, coord, compare)
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            const parts = splitPair(si);
+            try w.print("    {s} {s} = {s}.GatherCmp({s}, {s}, {s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, dref,
             });
         },
         .ImageQuerySizeLod => {
