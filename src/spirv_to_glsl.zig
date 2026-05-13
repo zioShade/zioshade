@@ -60,6 +60,21 @@ fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
     }
 }
 
+fn exprName(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32, alloc: std.mem.Allocator) []const u8 {
+    if (names.get(id)) |n| return n;
+    const def = getDef(m, id) orelse return std.fmt.allocPrint(alloc, "v{d}", .{id}) catch "?";
+    if (def.op == .ConstantTrue) return "true";
+    if (def.op == .ConstantFalse) return "false";
+    if (def.op == .Constant and def.words.len > 3) {
+        // Float constant
+        const bits = def.words[3];
+        if (def.words.len > 4) return std.fmt.allocPrint(alloc, "v{d}", .{id}) catch "?";
+        const f: f32 = @bitCast(bits);
+        return std.fmt.allocPrint(alloc, "{d}", .{f}) catch "0.0";
+    }
+    return std.fmt.allocPrint(alloc, "v{d}", .{id}) catch "?";
+}
+
 fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) return try alloc.dupe(u8, base_name);
@@ -839,13 +854,51 @@ fn emitBody(
             const ml = bc_merge.get(idx);
             if (ml) |mval| {
                 const he = fl != null and fl.? != mval;
+                // Scan merge block for Phi nodes to pre-declare
+                const merge_idx = label_map.get(mval) orelse m.instructions.len;
+                var phi_vars = std.ArrayList(struct { result_id: u32, type_id: u32, vals: [2]u32, preds: [2]u32 }).initCapacity(alloc, 4) catch unreachable;
+                defer phi_vars.deinit(alloc);
+                if (merge_idx < m.instructions.len) {
+                    var mi2: usize = merge_idx + 1;
+                    while (mi2 < m.instructions.len) : (mi2 += 1) {
+                        const minst = m.instructions[mi2];
+                        if (minst.op != .Phi) break;
+                        if (minst.words.len >= 7) {
+                            phi_vars.append(alloc, .{ .result_id = minst.words[2], .type_id = minst.words[1], .vals = .{ minst.words[3], minst.words[5] }, .preds = .{ minst.words[4], minst.words[6] } }) catch {};
+                        }
+                    }
+                }
+                for (phi_vars.items) |pv| {
+                    const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    try w.print("    {s} {s}_phi;\n", .{ rtt, vn });
+                }
                 try w.print("    if ({s})\n    {{\n", .{cn});
                 idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
+                // After true branch: assign Phi vars from the val matching true target
+                for (phi_vars.items) |pv| {
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    const true_val = if (pv.preds[1] == tl) pv.vals[1] else pv.vals[0];
+                    const tvn = exprName(m, names, true_val, alloc);
+                    try w.print("        {s}_phi = {s};\n", .{ vn, tvn });
+                }
                 if (he) {
                     try w.writeAll("    } else {\n");
                     idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
+                    // After false branch: assign Phi vars from the val matching false target
+                    for (phi_vars.items) |pv| {
+                        const vn = names.get(pv.result_id) orelse "pv";
+                        const false_val = if (pv.preds[1] != tl) pv.vals[1] else pv.vals[0];
+                        const fvn = exprName(m, names, false_val, alloc);
+                        try w.print("        {s}_phi = {s};\n", .{ vn, fvn });
+                    }
                 }
                 try w.writeAll("    }\n");
+                for (phi_vars.items) |pv| {
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    const phi_name = try std.fmt.allocPrint(alloc, "{s}_phi", .{vn});
+                    if (names.fetchPut(pv.result_id, phi_name) catch null) |old| alloc.free(old.value);
+                }
                 if (label_map.get(mval)) |mi| { idx = mi; }
             } else {
                 try w.print("    if ({s}) {{ /* TODO */ }}\n", .{cn});
@@ -918,13 +971,53 @@ fn emitBlock(
             const nm = bm.get(i);
             if (nm) |nmv| {
                 const he = fl != null and fl.? != nmv;
+                // Scan merge block for Phi nodes to pre-declare
+                const merge_idx = lm.get(nmv) orelse m.instructions.len;
+                var phi_vars = std.ArrayList(struct { result_id: u32, type_id: u32, vals: [2]u32, preds: [2]u32 }).initCapacity(alloc, 4) catch unreachable;
+                defer phi_vars.deinit(alloc);
+                if (merge_idx < m.instructions.len) {
+                    var mi2: usize = merge_idx + 1;
+                    while (mi2 < m.instructions.len) : (mi2 += 1) {
+                        const minst = m.instructions[mi2];
+                        if (minst.op != .Phi) break;
+                        if (minst.words.len >= 7) {
+                            phi_vars.append(alloc, .{ .result_id = minst.words[2], .type_id = minst.words[1], .vals = .{ minst.words[3], minst.words[5] }, .preds = .{ minst.words[4], minst.words[6] } }) catch {};
+                        }
+                    }
+                }
+                // Pre-declare Phi result variables
+                for (phi_vars.items) |pv| {
+                    const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    try w.print("{s}    {s} {s}_phi;\n", .{ indent, rtt, vn });
+                }
                 try w.print("{s}    if ({s})\n{s}    {{\n", .{ indent, cn, indent });
                 i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
+                // After true branch: assign Phi vars
+                for (phi_vars.items) |pv| {
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    const true_val = if (pv.preds[1] == tl) pv.vals[1] else pv.vals[0];
+                    const tvn = exprName(m, names, true_val, alloc);
+                    try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, tvn });
+                }
                 if (he) {
                     try w.print("{s}    }} else {{\n", .{indent});
                     i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
+                    // After false branch: assign Phi vars
+                    for (phi_vars.items) |pv| {
+                        const vn = names.get(pv.result_id) orelse "pv";
+                        const false_val = if (pv.preds[1] != tl) pv.vals[1] else pv.vals[0];
+                        const fvn = exprName(m, names, false_val, alloc);
+                        try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, fvn });
+                    }
                 }
                 try w.print("{s}    }}\n", .{indent});
+                // Map Phi result IDs to _phi names
+                for (phi_vars.items) |pv| {
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    const phi_name = try std.fmt.allocPrint(alloc, "{s}_phi", .{vn});
+                    if (names.fetchPut(pv.result_id, phi_name) catch null) |old| alloc.free(old.value);
+                }
                 if (lm.get(nmv)) |nmi| { i = nmi; }
             } else {
                 try w.print("{s}    if ({s}) {{ /* */ }}\n", .{ indent, cn });
@@ -1018,14 +1111,20 @@ fn emitInstruction(
             try w.writeAll(";\n");
         },
         .Phi => {
+            // If this Phi was already handled by emitBlock/emitFunction (name ends with _phi), skip
+            if (names.get(inst.words[2])) |existing| {
+                if (std.mem.endsWith(u8, existing, "_phi")) return;
+            }
+            // Fallback: alias to first incoming value
             if (inst.words.len < 4) return;
             const fv = inst.words[3];
+            const result_id = inst.words[2];
             if (names.get(fv)) |sn| {
                 const a = try alloc.dupe(u8, sn);
-                if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
+                if (names.fetchPut(result_id, a) catch null) |old| alloc.free(old.value);
             } else {
                 const a = try std.fmt.allocPrint(alloc, "v{d}", .{fv});
-                if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
+                if (names.fetchPut(result_id, a) catch null) |old| alloc.free(old.value);
             }
         },
         .AccessChain => {
