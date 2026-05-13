@@ -3136,11 +3136,63 @@ const Codegen = struct {
     fn emitGlobals(self: *Codegen) !void {
         for (self.module.globals) |global| {
             if (global.result_id == 0) continue; // Skip unassigned globals
-            const ptr_type_id = try self.ensurePointerType(global.ty, global.storage_class);
-            try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Variable)));
-            try self.emitWord(ptr_type_id);
-            try self.emitWord(global.result_id);
-            try self.emitWord(@intFromEnum(global.storage_class));
+
+            // Mesh shader per-vertex outputs must be arrays in SPIR-V
+            var needs_array = false;
+            var array_size: u32 = 0;
+            if (global.storage_class == .output and self.module.mesh_max_vertices != null) {
+                if (std.mem.eql(u8, global.name, "gl_MeshPerVertexEXT")) {
+                    needs_array = true;
+                    array_size = self.module.mesh_max_vertices.?;
+                }
+            }
+            if (global.storage_class == .output and self.module.mesh_max_primitives != null) {
+                if (std.mem.eql(u8, global.name, "gl_PrimitiveTriangleIndicesEXT") or
+                    std.mem.eql(u8, global.name, "gl_PrimitiveLineIndicesEXT") or
+                    std.mem.eql(u8, global.name, "gl_PrimitivePointIndicesEXT"))
+                {
+                    needs_array = true;
+                    array_size = self.module.mesh_max_primitives.?;
+                }
+            }
+
+            if (needs_array) {
+                // Emit: %arr = OpTypeArray %base_type %const_size
+                //        %ptr = OpTypePointer Output %arr
+                //        OpVariable %ptr Output
+                const base_type_id = try self.ensureType(global.ty);
+                const size_const_id = try self.emitIntConstant(array_size);
+                const arr_key = (@as(u64, base_type_id) << 32) | @as(u64, array_size);
+                const arr_type_id = if (self.emitted_array_types.get(arr_key)) |cached| cached else blk: {
+                    const aid = self.allocId();
+                    try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeArray)));
+                    try self.emitTypeWord(aid);
+                    try self.emitTypeWord(base_type_id);
+                    try self.emitTypeWord(size_const_id);
+                    try self.emitted_array_types.put(self.alloc, arr_key, aid);
+                    break :blk aid;
+                };
+                const ptr_key = (@as(u64, arr_type_id) << 32) | @as(u64, @intFromEnum(global.storage_class));
+                const ptr_type_id = if (self.emitted_ptr_types.get(ptr_key)) |cached| cached else blk: {
+                    const pid = self.allocId();
+                    try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
+                    try self.emitTypeWord(pid);
+                    try self.emitTypeWord(@intFromEnum(global.storage_class));
+                    try self.emitTypeWord(arr_type_id);
+                    try self.emitted_ptr_types.put(self.alloc, ptr_key, pid);
+                    break :blk pid;
+                };
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Variable)));
+                try self.emitWord(ptr_type_id);
+                try self.emitWord(global.result_id);
+                try self.emitWord(@intFromEnum(global.storage_class));
+            } else {
+                const ptr_type_id = try self.ensurePointerType(global.ty, global.storage_class);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Variable)));
+                try self.emitWord(ptr_type_id);
+                try self.emitWord(global.result_id);
+                try self.emitWord(@intFromEnum(global.storage_class));
+            }
         }
     }
 
