@@ -182,6 +182,19 @@ pub fn build(b: *std.Build) void {
     mesh_task_test_step.dependOn(&run_mesh_task_tests.step);
     test_step.dependOn(&run_mesh_task_tests.step);
 
+    // Mesh/task regression tests (bugs fixed during conformance hardening)
+    const mesh_reg_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/mesh_regression_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mesh_reg_test_mod.addImport("glslpp", glslpp_mod);
+    const run_mesh_reg_tests = b.addRunArtifact(b.addTest(.{
+        .name = "mesh-reg-tests",
+        .root_module = mesh_reg_test_mod,
+    }));
+    test_step.dependOn(&run_mesh_reg_tests.step);
+
     // Ray tracing pipeline tests
     const ray_tracing_test_step = b.step("test-ray-tracing", "Run ray tracing pipeline tests");
     const ray_tracing_test_mod = b.createModule(.{
