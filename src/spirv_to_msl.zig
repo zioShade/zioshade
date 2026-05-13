@@ -605,16 +605,19 @@ fn detectOutParams(m: *const ParsedModule, entry_id: u32, opi: *std.AutoHashMap(
 // ---- Std450 → MSL function name mapping ----
 fn std450ToMsl(val: u32) ?[]const u8 {
     return switch (val) {
-        1 => "round", 3 => "trunc", 4, 5 => "abs", 6, 7 => "sign", 8 => "floor", 9 => "ceil",
+        1 => "round", 2 => "rint", 3 => "trunc", 4, 5 => "abs", 6, 7 => "sign", 8 => "floor", 9 => "ceil",
         10 => "fract",
         11 => "radians", 12 => "degrees", 13 => "sin", 14 => "cos", 15 => "tan",
         16 => "asin", 17 => "acos", 18 => "atan", 25 => "atan2",
         19 => "sinh", 20 => "cosh", 21 => "tanh",
         26 => "powr", 27 => "exp", 28 => "log", 29 => "exp2", 30 => "log2",
         31 => "sqrt", 32 => "rsqrt", 33 => "determinant",
+        34 => "matrix_componentwise_multiply",
         37 => "min", 38 => "max", 39 => "min",
         40 => "max", 41 => "min", 42 => "max", 43 => "clamp", 44 => "clamp",
         45 => "fast::clamp", 46 => "mix", 48 => "step", 49 => "smoothstep",
+        50 => "fma",
+        52 => "ldexp",
         66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
         70 => "faceforward", 71 => "reflect", 72 => "refract",
         73 => "ctz",       // findLSB → ctz (count trailing zeros)

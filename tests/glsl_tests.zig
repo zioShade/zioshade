@@ -1254,3 +1254,17 @@ test "T20.1: GLSL textureSize (ImageQuerySizeLod)" {
     try assertContains(glsl, "textureSize");
     try assertNotContains(glsl, "unhandled");
 }
+
+test "T20.2: GLSL fma (std450 #50)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r = fma(2.0, 3.0, 1.0);
+        \\    fragColor = vec4(r);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertNotContains(glsl, "unhandled");
+}
