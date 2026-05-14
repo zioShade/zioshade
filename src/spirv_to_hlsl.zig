@@ -290,8 +290,13 @@ pub fn spirvToHLSL(
                 const ptr_type = inst.words[1];
                 const ptr_inst = getDef(&module, ptr_type) orelse continue;
                 if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
-                    const pointee_id = ptr_inst.words[3];
-                    const pt_inst = getDef(&module, pointee_id) orelse continue;
+                    var pointee_id = ptr_inst.words[3];
+                    // Unwrap array types to find underlying struct
+                    var pt_inst = getDef(&module, pointee_id) orelse continue;
+                    while (pt_inst.op == .TypeArray and pt_inst.words.len > 2) {
+                        pointee_id = pt_inst.words[2];
+                        pt_inst = getDef(&module, pointee_id) orelse break;
+                    }
                     if (pt_inst.op == .TypeStruct) {
                         hlslEmitOneStructForwardDecl(&module, &names, pointee_id, w, aa, &local_structs, &emitted_names2) catch {};
                     }
@@ -341,6 +346,58 @@ pub fn spirvToHLSL(
                     try w.print("// specialization constant {d}\nstatic const {s} {s} = {d};\n", .{sid, type_str, name, default_val});
                 }
             }
+        }
+    }
+    try w.writeAll("\n");
+
+    // Emit struct declarations for types used in constant composites
+    for (module.instructions) |inst| {
+        if (inst.op != .ConstantComposite or inst.words.len <= 3) continue;
+        const type_id = inst.words[1];
+        const type_inst = getDef(&module, type_id) orelse continue;
+        if (type_inst.op == .TypeStruct) {
+            hlslEmitOneStructForwardDecl(&module, &names, type_id, w, aa, &local_structs, &emitted_names2) catch {};
+        } else if (type_inst.op == .TypeArray and type_inst.words.len > 2) {
+            const elem_type_id = type_inst.words[2];
+            const elem_inst = getDef(&module, elem_type_id) orelse continue;
+            if (elem_inst.op == .TypeStruct) {
+                hlslEmitOneStructForwardDecl(&module, &names, elem_type_id, w, aa, &local_structs, &emitted_names2) catch {};
+            }
+        }
+    }
+
+    // Emit constant array/struct composites as static const declarations
+    for (module.instructions) |inst| {
+        if (inst.op != .ConstantComposite or inst.words.len <= 3) continue;
+        const rid = inst.words[2];
+        const type_id = inst.words[1];
+        const type_inst = getDef(&module, type_id) orelse continue;
+        // Only handle array and struct types (not vectors which are inlined)
+        if (type_inst.op != .TypeArray and type_inst.op != .TypeStruct) continue;
+        const name = names.get(rid) orelse continue;
+        if (type_inst.op == .TypeArray) {
+            // static const elemType name[N] = {comp0, comp1, ...}
+            const elem_type = try hlslType(&module, type_inst.words[2], &names, aa);
+            const len_id = type_inst.words[3];
+            const len_def = getDef(&module, len_id);
+            const len_val: u32 = if (len_def) |ld| ld.words[3] else 1;
+            try w.print("static const {s} {s}[{d}] = {{", .{elem_type, name, len_val});
+            for (inst.words[3..], 0..) |comp_id, i| {
+                if (i > 0) try w.writeAll(", ");
+                const comp_name = names.get(comp_id) orelse "0";
+                try w.writeAll(comp_name);
+            }
+            try w.writeAll("};\n");
+        } else if (type_inst.op == .TypeStruct) {
+            // static const StructType name = {comp0, comp1, ...}
+            const struct_name = names.get(type_id) orelse "Struct";
+            try w.print("static const {s} {s} = {{", .{struct_name, name});
+            for (inst.words[3..], 0..) |comp_id, i| {
+                if (i > 0) try w.writeAll(", ");
+                const comp_name = names.get(comp_id) orelse "0";
+                try w.writeAll(comp_name);
+            }
+            try w.writeAll("};\n");
         }
     }
     try w.writeAll("\n");
