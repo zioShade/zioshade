@@ -871,12 +871,16 @@ fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHas
                         const et = try hlslType(module, mi2.words[2], names, alloc);
                         const li = getDef(module, mi2.words[3]);
                         const lv: u32 = if(li)|l| l.words[3] else 1;
-                        try w.print("    {s} _m{d}[{d}];\n", .{et, mi, lv});
+                        var mname_buf: [32]u8 = undefined;
+                        const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
+                        try w.print("    {s} {s}[{d}];\n", .{et, mname, lv});
                         continue;
                     }
                 }
                 const mt = try hlslType(module, mt_id, names, alloc);
-                try w.print("    {s} _m{d};\n", .{mt, mi});
+                var mname_buf: [32]u8 = undefined;
+                const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
+                try w.print("    {s} {s};\n", .{mt, mname});
             }
             try w.writeAll("};\n");
         },
