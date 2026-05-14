@@ -280,6 +280,27 @@ pub fn spirvToHLSL(
     }
     if (textures.items.len > 0) try w.writeAll("\n");
 
+    // Emit struct declarations for types used as local variables
+    var local_structs = std.AutoHashMap(u32, void).init(aa);
+    defer local_structs.deinit();
+    for (module.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Function) {
+                const ptr_type = inst.words[1];
+                const ptr_inst = getDef(&module, ptr_type) orelse continue;
+                if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
+                    const pointee_id = ptr_inst.words[3];
+                    const pt_inst = getDef(&module, pointee_id) orelse continue;
+                    if (pt_inst.op == .TypeStruct) {
+                        hlslEmitOneStructForwardDecl(&module, &names, pointee_id, w, aa, &local_structs, &emitted_names2) catch {};
+                    }
+                }
+            }
+        }
+    }
+    if (local_structs.count() > 0) try w.writeAll("\n");
+
     // Find ALL function IDs in the module
     var func_ids = std.ArrayList(u32).initCapacity(aa, 8) catch return error.OutOfMemory;
     defer func_ids.deinit(aa);
