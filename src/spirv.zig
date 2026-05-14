@@ -287,6 +287,7 @@ pub const BuiltIn = enum(u32) {
     view_index = 10,
     frag_coord = 15,
     front_facing = 17,
+    sample_id = 18,
     sample_position = 19,
     sample_mask = 20,
     helper_invocation = 23,
