@@ -1660,6 +1660,10 @@ fn emitInstruction(
         .Unreachable => {}, // no-op
         .BeginInvocationInterlockEXT => try w.writeAll("    simd_barrier();\n"),
         .EndInvocationInterlockEXT => try w.writeAll("    simd_barrier();\n"),
+        .ReadClockKHR => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            try w.print("    {s} {s} = clock();\n", .{ rtt, names.get(inst.words[2]) orelse "t" });
+        },
         .ControlBarrier => {
             try w.writeAll("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
         },
