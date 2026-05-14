@@ -568,7 +568,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pt = pi.words[3];
         switch (sc) {
             .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding}) catch {}; },
-            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const name = names.get(rid) orelse "tex"; switch(pei.op){ .TypeSampledImage=>{ const si_img = if (pei.words.len > 2) getDef(m, pei.words[2]) else null; const si_st = if (si_img != null and si_img.?.words.len > 2) getDef(m, si_img.?.words[2]) else null; const si_uint = si_st != null and si_st.?.op == .TypeInt and si_st.?.words.len > 3 and si_st.?.words[3] == 0; const si_int = si_st != null and si_st.?.op == .TypeInt and si_st.?.words.len > 3 and si_st.?.words[3] != 0; tex.append(alloc,.{.name=name,.binding=binding,.is_uint=si_uint,.is_int=si_int}) catch {};}, .TypeImage=>{ const sampled: u32 = if (pei.words.len > 7) pei.words[7] else 0; const is_storage = sampled == 2; const st_inst = if (pei.words.len > 2) getDef(m, pei.words[2]) else null; const is_uint = st_inst != null and st_inst.?.op == .TypeInt and st_inst.?.words.len > 3 and st_inst.?.words[3] == 0; const is_int = st_inst != null and st_inst.?.op == .TypeInt and st_inst.?.words.len > 3 and st_inst.?.words[3] != 0; const fmt: []const u8 = blk: { if (pei.words.len > 8) { break :blk switch(pei.words[8]) { 0 => "rgba8f", 1 => "rgba32f", 2 => "rgba16f", 3 => "r32f", 4 => "rgba8", 5 => "rgba8_snorm", 6 => "rg32f", 7 => "rg16f", 8 => "r11f_g11f_b10f", 9 => "r16f", 10 => "rgba16", 11 => "rgb10_a2", 12 => "rg8", 13 => "rg8_snorm", 14 => "r8", 15 => "r8_snorm", 16 => "rgba16_snorm", 17 => "rgba32i", 18 => "rgba16i", 19 => "rgba8i", 20 => "rg32i", 21 => "rg16i", 22 => "rg8i", 23 => "r32i", 24 => "rgba32ui", 25 => "rgba16ui", 26 => "rgba8ui", 27 => "rg32ui", 28 => "rg16ui", 29 => "rg8ui", 30...33 => "r32ui", else => "rgba8f" }; } break :blk "rgba8f"; }; const dim: []const u8 = blk: { if (pei.words.len > 3) { break :blk switch(pei.words[3]) { 0 => "1D", 1 => "2D", 2 => "3D", 3 => "Cube", 4 => "Rect", 5 => "Buffer", 6 => "SubpassData", else => "2D" }; } break :blk "2D"; }; tex.append(alloc,.{.name=name,.binding=binding,.is_storage=is_storage,.format_str=fmt,.dim_str=dim,.is_uint=is_uint,.is_int=is_int}) catch {};}, else=>{}} },
+            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const name = names.get(rid) orelse "tex"; switch(pei.op){ .TypeSampledImage=>{ const si_img = if (pei.words.len > 2) getDef(m, pei.words[2]) else null; const si_st = if (si_img != null and si_img.?.words.len > 2) getDef(m, si_img.?.words[2]) else null; const si_uint = si_st != null and si_st.?.op == .TypeInt and si_st.?.words.len > 3 and si_st.?.words[3] == 0; const si_int = si_st != null and si_st.?.op == .TypeInt and si_st.?.words.len > 3 and si_st.?.words[3] != 0; const si_dim: []const u8 = blk: { if (si_img != null and si_img.?.words.len > 3) { break :blk switch(si_img.?.words[3]) { 0 => "1D", 1 => "2D", 2 => "3D", 3 => "Cube", 4 => "Rect", 5 => "Buffer", 6 => "SubpassData", else => "2D" }; } break :blk "2D"; }; tex.append(alloc,.{.name=name,.binding=binding,.is_uint=si_uint,.is_int=si_int,.dim_str=si_dim}) catch {};}, .TypeImage=>{ const sampled: u32 = if (pei.words.len > 7) pei.words[7] else 0; const is_storage = sampled == 2; const st_inst = if (pei.words.len > 2) getDef(m, pei.words[2]) else null; const is_uint = st_inst != null and st_inst.?.op == .TypeInt and st_inst.?.words.len > 3 and st_inst.?.words[3] == 0; const is_int = st_inst != null and st_inst.?.op == .TypeInt and st_inst.?.words.len > 3 and st_inst.?.words[3] != 0; const fmt: []const u8 = blk: { if (pei.words.len > 8) { break :blk switch(pei.words[8]) { 0 => "rgba8f", 1 => "rgba32f", 2 => "rgba16f", 3 => "r32f", 4 => "rgba8", 5 => "rgba8_snorm", 6 => "rg32f", 7 => "rg16f", 8 => "r11f_g11f_b10f", 9 => "r16f", 10 => "rgba16", 11 => "rgb10_a2", 12 => "rg8", 13 => "rg8_snorm", 14 => "r8", 15 => "r8_snorm", 16 => "rgba16_snorm", 17 => "rgba32i", 18 => "rgba16i", 19 => "rgba8i", 20 => "rg32i", 21 => "rg16i", 22 => "rg8i", 23 => "r32i", 24 => "rgba32ui", 25 => "rgba16ui", 26 => "rgba8ui", 27 => "rg32ui", 28 => "rg16ui", 29 => "rg8ui", 30...33 => "r32ui", else => "rgba8f" }; } break :blk "rgba8f"; }; const dim: []const u8 = blk: { if (pei.words.len > 3) { break :blk switch(pei.words[3]) { 0 => "1D", 1 => "2D", 2 => "3D", 3 => "Cube", 4 => "Rect", 5 => "Buffer", 6 => "SubpassData", else => "2D" }; } break :blk "2D"; }; tex.append(alloc,.{.name=name,.binding=binding,.is_storage=is_storage,.format_str=fmt,.dim_str=dim,.is_uint=is_uint,.is_int=is_int}) catch {};}, else=>{}} },
             else => {},
         }
     }
@@ -1840,7 +1840,31 @@ fn emitInstruction(
         },
         .ImageFetch => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
-            try w.print("    {s} {s} = texelFetch({s}, {s}, 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0" });
+            // Check if the sampled image is a buffer texture (texelFetch takes 2 args for buffers)
+            const is_buffer = blk: {
+                const si_def = getDef(m, inst.words[3]);
+                if (si_def) |sd| {
+                    if (sd.op == .SampledImage and sd.words.len > 2) {
+                        const img_def = getDef(m, sd.words[2]);
+                        if (img_def) |id| {
+                            if (id.op == .TypeImage and id.words.len > 3 and id.words[3] == 5) break :blk true;
+                        }
+                    }
+                    // Also check direct image reference (OpImage result)
+                    if (sd.op == .OpImage and sd.words.len > 1) {
+                        const img_type_def = getDef(m, sd.words[1]);
+                        if (img_type_def) |id| {
+                            if (id.op == .TypeImage and id.words.len > 3 and id.words[3] == 5) break :blk true;
+                        }
+                    }
+                }
+                break :blk false;
+            };
+            if (is_buffer) {
+                try w.print("    {s} {s} = texelFetch({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0" });
+            } else {
+                try w.print("    {s} {s} = texelFetch({s}, {s}, 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0" });
+            }
         },
         .ImageGather => {
             // OpImageGather: result_type, result, sampled_image, coordinate, component [, image_operands]
