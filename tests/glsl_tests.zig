@@ -1629,3 +1629,65 @@ test "T25.1: OpSelect with bvec4 condition (mix not ternary)" {
     try assertNotContains(glsl, "?");
     try assertNotContains(glsl, "unhandled");
 }
+
+test "GLSL: struct member access in CompositeExtract" {
+    const source =
+        \\#version 430
+        \\struct Inner { float x; float y; };
+        \\struct Outer { Inner a; float b; };
+        \\layout(location = 0) out vec4 FragColor;
+        \\layout(binding = 0, std140) uniform U { float u; } ubo;
+        \\void main() {
+        \\    Outer o;
+        \\    o.a.x = ubo.u;
+        \\    o.a.y = 2.0;
+        \\    o.b = 3.0;
+        \\    FragColor = vec4(o.a.x, o.a.y, o.b, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // Must use .memberName syntax for struct member access, not [index]
+    try assertNotContains(glsl, "[0]");
+    try assertNotContains(glsl, "[1]");
+}
+
+test "GLSL: isampler2D texture type detection" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform isampler2D tex;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    ivec4 v = texelFetch(tex, ivec2(0), 0);
+        \\    FragColor = vec4(v);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "isampler2D");
+    // The declaration should be 'isampler2D tex' not 'sampler2D tex' (but isampler contains sampler)
+    // Check it's not preceded by a space (i.e., not bare sampler2D)
+    try assertNotContains(glsl, " uniform sampler2D ");
+}
+
+test "GLSL: local array variable declaration" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 u; } ubo;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    float a[4];
+        \\    a[0] = ubo.u.x;
+        \\    a[1] = ubo.u.y;
+        \\    a[2] = ubo.u.z;
+        \\    a[3] = ubo.u.w;
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 4; i++) sum += a[i];
+        \\    FragColor = vec4(sum, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // Must emit float a[4] or similar array declaration
+    try assertContains(glsl, "[4]");
+}
