@@ -1620,6 +1620,13 @@ fn emitInstruction(
         .Unreachable => {}, // no-op in GLSL
         .BeginInvocationInterlockEXT => try w.writeAll("    beginInvocationInterlockARB();\n"),
         .EndInvocationInterlockEXT => try w.writeAll("    endInvocationInterlockARB();\n"),
+        .ReadClockKHR => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const scope_id = if (inst.words.len > 3) inst.words[3] else 0;
+            const scope_name = if (scope_id == 1) "clockARB()" else "clockRealtimeEXT()";
+            const rn = names.get(inst.words[2]) orelse "t";
+            try w.print("    {s} {s} = {s};\n", .{ rtt, rn, scope_name });
+        },
         .ControlBarrier => try w.writeAll("    barrier();\n    memoryBarrier();\n"),
         .ImageTexelPointer => {
             // No code emission needed — result used by atomic ops which resolve via classifyAtomicPtr

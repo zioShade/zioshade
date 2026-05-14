@@ -214,6 +214,7 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         4482...4483 => rt(2, "iiiii"), // OpImageBlockMatchSSDQCOM, OpImageBlockMatchSADQCOM
         5340 => rt(2, "ii"),         // OpRayQueryGetIntersectionTriangleVertexPositionsKHR
         5341 => rt(3, ""),            // OpTypeAccelerationStructureKHR (result_only)
+        5056 => rt(1, "i"),           // OpReadClockKHR: scope
         5294 => rt(0, "iiii"),         // OpEmitMeshTasksEXT: x, y, z, payload
         5295 => rt(0, "ii"),           // OpSetMeshOutputsEXT: vertex_count, primitive_count
         4445 => rt(0, "iiiiiiiiiii"), // OpTraceRayKHR: accel, flags, mask, sbt_off, sbt_stride, miss, origin, tMin, dir, tMax, payload

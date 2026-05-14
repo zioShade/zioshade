@@ -224,6 +224,7 @@ pub const Op = enum(u16) {
     ControlBarrier = 224,
     MemoryBarrier = 225,
     EmitMeshTasksEXT = 5294,
+    ReadClockKHR = 5056,
     SetMeshOutputsEXT = 5295,
     TraceRayKHR = 4445,
     ReportIntersectionKHR = 5334,
