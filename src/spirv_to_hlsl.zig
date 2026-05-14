@@ -2459,9 +2459,25 @@ fn emitInstruction(
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";
             const parts = splitPair(si);
-            // Projected sample: divide xy by w
-            try w.print("    {s} {s} = {s}.Sample({s}, {s}.xy / {s}.w);\n", .{
-                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord,
+            // Projected sample: divide xy by last component
+            // Determine coordinate type to use correct swizzle (.z for vec3, .w for vec4)
+            const coord_type = getTypeOf(module, inst.words[4]);
+            const last_swizzle: []const u8 = if (coord_type) |ct| blk: {
+                const ct_inst = getDef(module, ct);
+                if (ct_inst) |ci| {
+                    if (ci.op == .TypeVector and ci.words.len > 3) {
+                        const vec_len = ci.words[3];
+                        break :blk switch (vec_len) {
+                            3 => ".z",
+                            4 => ".w",
+                            else => ".z",
+                        };
+                    }
+                }
+                break :blk ".z";
+            } else ".z";
+            try w.print("    {s} {s} = {s}.Sample({s}, {s}.xy / {s}{s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle,
             });
         },
         .ImageSampleProjDrefImplicitLod => {
@@ -2471,8 +2487,18 @@ fn emitInstruction(
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             const parts = splitPair(si);
-            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}.xy / {s}.w, {s});\n", .{
-                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, dref,
+            const coord_type = getTypeOf(module, inst.words[4]);
+            const last_swizzle: []const u8 = if (coord_type) |ct| blk: {
+                const ct_inst = getDef(module, ct);
+                if (ct_inst) |ci| {
+                    if (ci.op == .TypeVector and ci.words.len > 3) {
+                        break :blk switch (ci.words[3]) { 3 => ".z", 4 => ".w", else => ".z" };
+                    }
+                }
+                break :blk ".z";
+            } else ".z";
+            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}.xy / {s}{s}, {s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, dref,
             });
         },
         .ImageSampleProjDrefExplicitLod => {
@@ -2481,8 +2507,18 @@ fn emitInstruction(
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             const parts = splitPair(si);
-            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}.xy / {s}.w, {s});\n", .{
-                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, dref,
+            const coord_type = getTypeOf(module, inst.words[4]);
+            const last_swizzle: []const u8 = if (coord_type) |ct| blk: {
+                const ct_inst = getDef(module, ct);
+                if (ct_inst) |ci| {
+                    if (ci.op == .TypeVector and ci.words.len > 3) {
+                        break :blk switch (ci.words[3]) { 3 => ".z", 4 => ".w", else => ".z" };
+                    }
+                }
+                break :blk ".z";
+            } else ".z";
+            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}.xy / {s}{s}, {s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, dref,
             });
         },
         .ImageSampleProjExplicitLod => {
