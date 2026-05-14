@@ -704,3 +704,25 @@ test "msl: modf (ModfStruct std450 #36)" {
     try assertNotContains(msl, "ResType");
     try assertNotContains(msl, "unhandled");
 }
+
+test "MSL: local array variable declaration" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec4 u; } ubo;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    float a[4];
+        \\    a[0] = ubo.u.x;
+        \\    a[1] = ubo.u.y;
+        \\    a[2] = ubo.u.z;
+        \\    a[3] = ubo.u.w;
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 4; i++) sum += a[i];
+        \\    FragColor = vec4(sum, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "[4]");
+}
+
