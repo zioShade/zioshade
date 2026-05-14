@@ -1691,3 +1691,13 @@ test "GLSL: local array variable declaration" {
     // Must emit float a[4] or similar array declaration
     try assertContains(glsl, "[4]");
 }
+
+test "GLSL: struct types used as local variables get declared" {
+    // Uses frexp-modf.frag which has ResType/ResType_1 structs as local variables
+    // that can't be optimized away by the SPIR-V optimizer
+    const raw = @embedFile("spirv_cross_shaders/frexp-modf.frag");
+    const source: [:0]const u8 = @ptrCast(raw);
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "struct ResType");
+}
