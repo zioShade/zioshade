@@ -376,12 +376,34 @@ pub fn spirvToHLSL(
         if (type_inst.op != .TypeArray and type_inst.op != .TypeStruct) continue;
         const name = names.get(rid) orelse continue;
         if (type_inst.op == .TypeArray) {
-            // static const elemType name[N] = {comp0, comp1, ...}
-            const elem_type = try hlslType(&module, type_inst.words[2], &names, aa);
+            // Build full element type string including nested array dimensions
             const len_id = type_inst.words[3];
             const len_def = getDef(&module, len_id);
             const len_val: u32 = if (len_def) |ld| ld.words[3] else 1;
-            try w.print("static const {s} {s}[{d}] = {{", .{elem_type, name, len_val});
+            var elem_id = type_inst.words[2];
+            var dims = std.ArrayList(u32).initCapacity(aa, 2) catch continue;
+            defer dims.deinit(aa);
+            dims.append(aa, len_val) catch {};
+            // Walk nested TypeArray to find all dimensions
+            var inner = getDef(&module, elem_id);
+            while (inner) |inn| {
+                if (inn.op == .TypeArray and inn.words.len > 3) {
+                    const inner_len_id = inn.words[3];
+                    const inner_len_def = getDef(&module, inner_len_id);
+                    const inner_len: u32 = if (inner_len_def) |ild| ild.words[3] else 1;
+                    dims.append(aa, inner_len) catch {};
+                    elem_id = inn.words[2];
+                    inner = getDef(&module, elem_id);
+                } else break;
+            }
+            const base_type = try hlslType(&module, elem_id, &names, aa);
+            // Build array suffix: [N][M]...
+            var arr_suffix = std.ArrayList(u8).initCapacity(aa, 32) catch continue;
+            defer arr_suffix.deinit(aa);
+            for (dims.items) |d| {
+                arr_suffix.print(aa, "[{d}]", .{d}) catch {};
+            }
+            try w.print("static const {s} {s}{s} = {{", .{ base_type, name, arr_suffix.items });
             for (inst.words[3..], 0..) |comp_id, i| {
                 if (i > 0) try w.writeAll(", ");
                 const comp_name = names.get(comp_id) orelse "0";
@@ -550,6 +572,50 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
                 counter += 1;
                 names.put(rid, name) catch {};
             }
+        }
+    }
+
+    // Deduplicate variable names: if multiple IDs have the same name, append _ID suffix
+    // Only deduplicate IDs that are Function-scoped Variables to avoid renaming cbuffer members etc.
+    var func_var_ids = std.AutoHashMap(u32, void).init(alloc);
+    defer func_var_ids.deinit();
+    for (module.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Function) {
+                func_var_ids.put(inst.words[2], {}) catch {};
+            }
+        }
+    }
+    // Build reverse map: name -> list of IDs (only for function vars)
+    var name_ids = std.StringHashMap(std.ArrayList(u32)).init(alloc);
+    defer {
+        var it = name_ids.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(alloc);
+        }
+        name_ids.deinit();
+    }
+    var fniter = func_var_ids.iterator();
+    while (fniter.next()) |entry| {
+        const id = entry.key_ptr.*;
+        const name = names.get(id) orelse continue;
+        const gop = name_ids.getOrPut(name) catch continue;
+        if (!gop.found_existing) {
+            gop.value_ptr.* = std.ArrayList(u32).initCapacity(alloc, 2) catch continue;
+        }
+        gop.value_ptr.append(alloc, id) catch {};
+    }
+    // For names with multiple function-variable IDs, rename to name_ID
+    var dniter = name_ids.iterator();
+    while (dniter.next()) |entry| {
+        const name = entry.key_ptr.*;
+        const ids = entry.value_ptr.*;
+        if (ids.items.len <= 1) continue;
+        for (ids.items, 0..) |id, i| {
+            if (i == 0) continue; // Keep first one as-is
+            const new_name = std.fmt.allocPrint(alloc, "{s}_{d}", .{ name, id }) catch continue;
+            names.put(id, new_name) catch {};
         }
     }
 }
