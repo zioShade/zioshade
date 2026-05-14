@@ -1552,3 +1552,62 @@ test "T23.3: while-loop with update in continue block" {
     try assertContains(glsl, "break");
     try assertNotContains(glsl, "unhandled");
 }
+
+test "T24.1: continue in for-loop" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 10; i++) {
+        \\        if (i == 3) continue;
+        \\        sum += float(i);
+        \\    }
+        \\    FragColor = vec4(sum, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "continue");
+    try assertNotContains(glsl, "unhandled");
+}
+
+test "T24.2: break in for-loop" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 10; i++) {
+        \\        if (i == 7) break;
+        \\        sum += float(i);
+        \\    }
+        \\    FragColor = vec4(sum, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "break");
+    try assertNotContains(glsl, "unhandled");
+}
+
+test "T24.3: continue and break in for-loop" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 10; i++) {
+        \\        if (i == 3) continue;
+        \\        if (i == 7) break;
+        \\        sum += float(i);
+        \\    }
+        \\    FragColor = vec4(sum, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "continue");
+    try assertContains(glsl, "break");
+    try assertNotContains(glsl, "unhandled");
+}
