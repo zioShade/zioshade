@@ -269,13 +269,26 @@ pub fn spirvToHLSL(
     }
 
     // Emit textures
+    // Detect textures used with Dref operations (need SamplerComparisonState)
+    var has_dref_gather = false;
+    for (module.instructions) |inst| {
+        if (inst.op == .ImageDrefGather) {
+            has_dref_gather = true;
+            break;
+        }
+    }
+
     for (textures.items) |tex| {
         if (tex.is_storage) {
             // Storage images use UAV register space (u#)
             try w.print("{s} {s} : register(u{d});\n", .{ tex.hlsl_type, tex.name, tex.binding });
         } else {
             try w.print("{s} {s} : register(t{d});\n", .{ tex.hlsl_type, tex.name, tex.binding });
-            try w.print("SamplerState {s}_sampler : register(s{d});\n", .{ tex.name, tex.binding });
+            if (has_dref_gather) {
+                try w.print("SamplerComparisonState {s}_sampler : register(s{d});\n", .{ tex.name, tex.binding });
+            } else {
+                try w.print("SamplerState {s}_sampler : register(s{d});\n", .{ tex.name, tex.binding });
+            }
         }
     }
     if (textures.items.len > 0) try w.writeAll("\n");
