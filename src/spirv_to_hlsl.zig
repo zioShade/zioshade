@@ -1347,6 +1347,18 @@ fn emitFunction(
         const stage_name: []const u8 = if (is_raygen) "raygeneration" else if (is_closesthit) "closesthit" else if (is_miss) "miss" else if (is_intersection) "intersection" else if (is_anyhit) "anyhit" else "callable";
         try w.print("[shader(\"{s}\")]\n", .{stage_name});
     }
+    // Emit Private storage class variables as static globals
+    for (module.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Private) {
+                const type_name = try hlslType(module, inst.words[1], names, alloc);
+                const arr_suffix = try hlslGetArraySuffix(module, inst.words[1]);
+                const vname = names.get(inst.words[2]) orelse "_private";
+                try w.print("static {s} {s}{s};\n", .{ type_name, vname, arr_suffix });
+            }
+        }
+    }
     if (is_fragment) {
         if (output_vars.items.len > 1) {
             try w.writeAll("_MRT_OUT main(");
