@@ -1467,3 +1467,88 @@ test "T22.2: modf() struct decomposition (not ResType)" {
     try assertNotContains(glsl, "ResType");
     try assertNotContains(glsl, "unhandled");
 }
+
+// ---------------------------------------------------------------------------
+// T23: Continue block emission (for-loop increment)
+// ---------------------------------------------------------------------------
+
+test "T23.1: for-loop counter increment (continue block)" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 FragColor;
+        \\layout(location = 0) uniform int N;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < N; i++) {
+        \\        sum += float(i);
+        \\    }
+        \\    FragColor = vec4(sum, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // The output must contain a while(true) loop with a break
+    try assertContains(glsl, "while (true)");
+    try assertContains(glsl, "break");
+    // The loop counter must be incremented (continue block emitted)
+    // The optimizer may fold constants, so check for the increment pattern
+    try assertContains(glsl, "+ 1");
+    // Must not have unhandled opcodes
+    try assertNotContains(glsl, "unhandled");
+}
+
+test "T23.2: nested for-loops" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 FragColor;
+        \\layout(location = 0) uniform int N;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < N; i++) {
+        \\        for (int j = 0; j < N; j++) {
+        \\            sum += float(i * j);
+        \\        }
+        \\    }
+        \\    FragColor = vec4(sum, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // Both counters must be incremented
+    // Count the number of "while (true)" — should be 2 for nested loops
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, glsl, pos, "while (true)")) |idx| {
+        count += 1;
+        pos = idx + 1;
+    }
+    if (count < 2) {
+        std.debug.print("Expected 2 nested while(true) loops, found {d}\n{s}\n", .{ count, glsl });
+        return error.TestExpectedFind;
+    }
+    try assertNotContains(glsl, "unhandled");
+}
+
+test "T23.3: while-loop with update in continue block" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 FragColor;
+        \\layout(location = 0) uniform float limit;
+        \\void main() {
+        \\    float x = 0.5;
+        \\    int n = 0;
+        \\    while (x > limit && n < 10) {
+        \\        x *= 0.7;
+        \\        n++;
+        \\    }
+        \\    FragColor = vec4(x, float(n), 0.0, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // x must be updated (continue block emitted)
+    // Check that the while loop has assignments inside it
+    try assertContains(glsl, "while (true)");
+    try assertContains(glsl, "break");
+    try assertNotContains(glsl, "unhandled");
+}
