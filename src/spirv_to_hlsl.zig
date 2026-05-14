@@ -3027,8 +3027,26 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                         else { cur_type = null; }
                     }
                 }
-            } else { try w.print("[{s}]", .{names.get(index_id) orelse "i"}); }
-        } else { try w.print("[{s}]", .{names.get(index_id) orelse "i"}); }
+            } else {
+                try w.print("[{s}]", .{names.get(index_id) orelse "i"});
+                if (cur_type) |tid| {
+                    const ti = getDef(module, tid);
+                    if (ti) |tinst| {
+                        if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                        else { cur_type = null; }
+                    }
+                }
+            }
+        } else {
+            try w.print("[{s}]", .{names.get(index_id) orelse "i"});
+            if (cur_type) |tid| {
+                const ti = getDef(module, tid);
+                if (ti) |tinst| {
+                    if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                    else { cur_type = null; }
+                }
+            }
+        }
     }
 }
 
@@ -3131,9 +3149,31 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                 }
             } else {
                 try buf.print(alloc, "[{s}]", .{names.get(index_id) orelse "i"});
+                // Advance type for dynamic index (array element)
+                if (current_type_id) |tid| {
+                    const ti = getDef(module, tid);
+                    if (ti) |tinst| {
+                        if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                            current_type_id = tinst.words[2];
+                        } else {
+                            current_type_id = null;
+                        }
+                    }
+                }
             }
         } else {
             try buf.print(alloc, "[{s}]", .{names.get(index_id) orelse "i"});
+            // Advance type for dynamic index
+            if (current_type_id) |tid| {
+                const ti = getDef(module, tid);
+                if (ti) |tinst| {
+                    if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                        current_type_id = tinst.words[2];
+                    } else {
+                        current_type_id = null;
+                    }
+                }
+            }
         }
     }
 
