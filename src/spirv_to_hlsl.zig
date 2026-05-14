@@ -2078,12 +2078,27 @@ fn emitInstruction(
 
         .Select => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
-            try w.print("    {s} {s} = ({s}) ? {s} : {s};\n", .{
-                rt, names.get(inst.words[2]) orelse "v",
-                names.get(inst.words[3]) orelse "c",
-                names.get(inst.words[4]) orelse "t",
-                names.get(inst.words[5]) orelse "f",
-            });
+            const cond_type = getTypeOf(module, inst.words[3]);
+            const is_vec_cond = if (cond_type) |ct| blk: {
+                const ct_inst = getDef(module, ct);
+                break :blk ct_inst != null and ct_inst.?.op == .TypeVector;
+            } else false;
+            if (is_vec_cond) {
+                // DXC requires select() for vector conditions
+                try w.print("    {s} {s} = select({s}, {s}, {s});\n", .{
+                    rt, names.get(inst.words[2]) orelse "v",
+                    names.get(inst.words[3]) orelse "c",
+                    names.get(inst.words[4]) orelse "t",
+                    names.get(inst.words[5]) orelse "f",
+                });
+            } else {
+                try w.print("    {s} {s} = ({s}) ? {s} : {s};\n", .{
+                    rt, names.get(inst.words[2]) orelse "v",
+                    names.get(inst.words[3]) orelse "c",
+                    names.get(inst.words[4]) orelse "t",
+                    names.get(inst.words[5]) orelse "f",
+                });
+            }
         },
 
         .BitwiseOr => try emitBinOp(module, names, inst, "|", w, alloc),
