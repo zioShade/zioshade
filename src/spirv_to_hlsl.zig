@@ -826,16 +826,17 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
     // Storage images use RWTexture/RWBuffer types
     if (is_storage) {
         if (is_int) |int_type| {
-            const rw_types = [2][5][]const u8{
-                .{ "RWTexture1D<int4>", "RWTexture2D<int4>", "RWTexture3D<int4>", "RWTexture2DArray<int4>", "RWBuffer<int4>" },
-                .{ "RWTexture1D<uint4>", "RWTexture2D<uint4>", "RWTexture3D<uint4>", "RWTexture2DArray<uint4>", "RWBuffer<uint4>" },
+            // Use scalar type for single-component formats (R32i/R32ui), vector for multi-component
+            const scalar_or_vec: [2][5][]const u8 = .{
+                .{ "RWTexture1D<int>", "RWTexture2D<int>", "RWTexture3D<int>", "RWTexture2DArray<int>", "RWBuffer<int>" },
+                .{ "RWTexture1D<uint>", "RWTexture2D<uint>", "RWTexture3D<uint>", "RWTexture2DArray<uint>", "RWBuffer<uint>" },
             };
             const int_idx: usize = switch (int_type) { .int => 0, .uint => 1 };
             const dim_idx: usize = switch (dim) {
                 .Dim1D => 0, .Dim2D => 1, .Dim3D => 2,
                 .DimBuffer => 4, else => 1,
             };
-            return rw_types[int_idx][dim_idx];
+            return scalar_or_vec[int_idx][dim_idx];
         }
         // Float storage textures
         const rw_float_types = [5][]const u8{
@@ -895,20 +896,35 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
 fn hlslGetArraySuffix(module: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
     const ptr_inst = getDef(module, ptr_type_id) orelse return "";
     if (ptr_inst.op != .TypePointer or ptr_inst.words.len <= 3) return "";
-    const pointee_id = ptr_inst.words[3];
-    const pt_inst = getDef(module, pointee_id) orelse return "";
-    if (pt_inst.op == .TypeArray and pt_inst.words.len > 3) {
+
+    // Collect all array dimensions
+    var dims: [4]u32 = undefined;
+    var dim_count: usize = 0;
+    var current_id = ptr_inst.words[3];
+    while (dim_count < dims.len) {
+        const pt_inst = getDef(module, current_id) orelse break;
+        if (pt_inst.op != .TypeArray or pt_inst.words.len <= 3) break;
         const len_id = pt_inst.words[3];
         const len_def = getDef(module, len_id);
         if (len_def) |ld| {
             if (ld.op == .Constant and ld.words.len > 3) {
-                var buf: [32]u8 = undefined;
-                const s = std.fmt.bufPrint(&buf, "[{d}]", .{ld.words[3]}) catch return "";
-                return try std.heap.page_allocator.dupe(u8, s);
-            }
-        }
+                dims[dim_count] = ld.words[3];
+                dim_count += 1;
+            } else break;
+        } else break;
+        current_id = pt_inst.words[2];
     }
-    return "";
+    if (dim_count == 0) return "";
+
+    // Build suffix string like [2][2]
+    var buf: [64]u8 = undefined;
+    var pos: usize = 0;
+    for (dims[0..dim_count]) |d| {
+        const part = std.fmt.bufPrint(buf[pos..], "[{d}]", .{d}) catch break;
+        pos += part.len;
+    }
+    const suffix = buf[0..pos];
+    return try std.heap.page_allocator.dupe(u8, suffix);
 }
 
 fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
