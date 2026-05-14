@@ -617,6 +617,25 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
 // Type resolution
 // ---------------------------------------------------------------------------
 
+fn hlslGetArraySuffix(module: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
+    const ptr_inst = getDef(module, ptr_type_id) orelse return "";
+    if (ptr_inst.op != .TypePointer or ptr_inst.words.len <= 3) return "";
+    const pointee_id = ptr_inst.words[3];
+    const pt_inst = getDef(module, pointee_id) orelse return "";
+    if (pt_inst.op == .TypeArray and pt_inst.words.len > 3) {
+        const len_id = pt_inst.words[3];
+        const len_def = getDef(module, len_id);
+        if (len_def) |ld| {
+            if (ld.op == .Constant and ld.words.len > 3) {
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "[{d}]", .{ld.words[3]}) catch return "";
+                return try std.heap.page_allocator.dupe(u8, s);
+            }
+        }
+    }
+    return "";
+}
+
 fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
     const inst = getDef(module, type_id) orelse return "float4";
     switch (inst.op) {
@@ -1501,13 +1520,15 @@ fn emitInstruction(
             if (sc == .Output and is_fragment) {
                 const result_id = inst.words[2];
                 const type_name = try hlslType(module, inst.words[1], names, alloc);
-                try w.print("    {s} {s};\n", .{ type_name, names.get(result_id) orelse "var" });
+                const arr_suffix = try hlslGetArraySuffix(module, inst.words[1]);
+                try w.print("    {s} {s}{s};\n", .{ type_name, names.get(result_id) orelse "var", arr_suffix });
                 return;
             }
             if (sc == .Input or sc == .Output or sc == .Uniform or sc == .UniformConstant) return;
             const result_id = inst.words[2];
             const type_name = try hlslType(module, inst.words[1], names, alloc);
-            try w.print("    {s} {s};\n", .{ type_name, names.get(result_id) orelse "var" });
+            const arr_suffix = try hlslGetArraySuffix(module, inst.words[1]);
+            try w.print("    {s} {s}{s};\n", .{ type_name, names.get(result_id) orelse "var", arr_suffix });
         },
 
         .Load => {
