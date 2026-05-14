@@ -270,8 +270,13 @@ pub fn spirvToHLSL(
 
     // Emit textures
     for (textures.items) |tex| {
-        try w.print("{s} {s} : register(t{d});\n", .{ tex.hlsl_type, tex.name, tex.binding });
-        try w.print("SamplerState {s}_sampler : register(s{d});\n", .{ tex.name, tex.binding });
+        if (tex.is_storage) {
+            // Storage images use UAV register space (u#)
+            try w.print("{s} {s} : register(u{d});\n", .{ tex.hlsl_type, tex.name, tex.binding });
+        } else {
+            try w.print("{s} {s} : register(t{d});\n", .{ tex.hlsl_type, tex.name, tex.binding });
+            try w.print("SamplerState {s}_sampler : register(s{d});\n", .{ tex.name, tex.binding });
+        }
     }
     if (textures.items.len > 0) try w.writeAll("\n");
 
@@ -346,6 +351,7 @@ const TextureDecl = struct {
     name: []const u8,
     binding: u32,
     hlsl_type: []const u8,
+    is_storage: bool = false,
 };
 
 // ---------------------------------------------------------------------------
@@ -543,16 +549,29 @@ fn collectResources(
                 const pointee_inst = getDef(module, pointee_type) orelse continue;
                 const binding = getDecorationValue(decorations, result_id, .binding) orelse 0;
                 const name = names.get(result_id) orelse "tex";
-                const hlsl_type = switch (pointee_inst.op) {
-                    .TypeSampledImage => hlslTextureTypeFromImage(module, pointee_inst.words[2]),
-                    .TypeImage => hlslTextureTypeFromImage(module, pointee_type),
-                    .TypeSampler => continue, // samplers paired with textures
-                    else => continue,
+                var is_storage = false;
+                const hlsl_type = blk: {
+                    switch (pointee_inst.op) {
+                        .TypeSampledImage => break :blk hlslTextureTypeFromImage(module, pointee_inst.words[2]),
+                        .TypeImage => {
+                            // Check if this is a storage image (Sampled=2)
+                            const img_inst = getDef(module, pointee_type);
+                            if (img_inst) |ii| {
+                                if (ii.op == .TypeImage and ii.words.len >= 8 and ii.words[7] == 2) {
+                                    is_storage = true;
+                                }
+                            }
+                            break :blk hlslTextureTypeFromImage(module, pointee_type);
+                        },
+                        .TypeSampler => continue, // samplers paired with textures
+                        else => continue,
+                    }
                 };
                 textures.append(alloc, .{
                     .name = name,
                     .binding = binding,
                     .hlsl_type = hlsl_type,
+                    .is_storage = is_storage,
                 }) catch {};
             },
             else => {},
@@ -571,6 +590,7 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
     // OpTypeImage layout: header, result_id, Sampled_Type, Dim, Depth, Arrayed, MS, Sampled, ImageFormat
     const is_arrayed = inst.words.len >= 6 and inst.words[5] == 1;
     const is_ms = inst.words.len >= 7 and inst.words[6] == 1; // Multisampled
+    const is_storage = inst.words.len >= 8 and inst.words[7] == 2; // Sampled=2 means storage image
 
     // Determine component type from Sampled_Type (words[2])
     const is_int: ?enum { int, uint } = blk: {
@@ -583,6 +603,32 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
         }
         break :blk null; // float (default)
     };
+
+    // Storage images use RWTexture/RWBuffer types
+    if (is_storage) {
+        if (is_int) |int_type| {
+            const rw_types = [2][5][]const u8{
+                .{ "RWTexture1D<int4>", "RWTexture2D<int4>", "RWTexture3D<int4>", "RWTexture2DArray<int4>", "RWBuffer<int4>" },
+                .{ "RWTexture1D<uint4>", "RWTexture2D<uint4>", "RWTexture3D<uint4>", "RWTexture2DArray<uint4>", "RWBuffer<uint4>" },
+            };
+            const int_idx: usize = switch (int_type) { .int => 0, .uint => 1 };
+            const dim_idx: usize = switch (dim) {
+                .Dim1D => 0, .Dim2D => 1, .Dim3D => 2,
+                .DimBuffer => 4, else => 1,
+            };
+            return rw_types[int_idx][dim_idx];
+        }
+        // Float storage textures
+        const rw_float_types = [5][]const u8{
+            "RWTexture1D<float4>", "RWTexture2D<float4>", "RWTexture3D<float4>",
+            "RWTexture2DArray<float4>", "RWBuffer<float4>",
+        };
+        const dim_idx: usize = switch (dim) {
+            .Dim1D => 0, .Dim2D => 1, .Dim3D => 2,
+            .DimBuffer => 4, else => 1,
+        };
+        return rw_float_types[dim_idx];
+    }
 
     // MS textures
     if (is_ms) {
