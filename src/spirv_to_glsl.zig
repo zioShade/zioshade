@@ -1414,12 +1414,27 @@ fn emitInstruction(
         },
         .Select => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
-            try w.print("    {s} {s} = ({s}) ? {s} : {s};\n", .{
-                rtt, names.get(inst.words[2]) orelse "v",
-                names.get(inst.words[3]) orelse "c",
-                names.get(inst.words[4]) orelse "t",
-                names.get(inst.words[5]) orelse "f",
-            });
+            const cond_name = names.get(inst.words[3]) orelse "c";
+            const true_name = names.get(inst.words[4]) orelse "t";
+            const false_name = names.get(inst.words[5]) orelse "f";
+            // Check if condition is a bvec (vector boolean) — GLSL can't use ternary with bvec
+            // Look up condition's result type to determine if it's bvecN
+            const is_bvec = blk: {
+                const cond_def = getDef(m, inst.words[3]);
+                if (cond_def) |cd| {
+                    if (cd.words.len > 1) {
+                        const cond_type_str = glslType(m, cd.words[1], names, alloc) catch "bool";
+                        break :blk std.mem.startsWith(u8, cond_type_str, "bvec");
+                    }
+                }
+                break :blk false;
+            };
+            if (is_bvec) {
+                // mix(false_val, true_val, bvec_condition) — GLSL mix with bvec selector
+                try w.print("    {s} {s} = mix({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", false_name, true_name, cond_name });
+            } else {
+                try w.print("    {s} {s} = ({s}) ? {s} : {s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", cond_name, true_name, false_name });
+            }
         },
         .BitwiseOr => try emitBinOp(m, names, inst, "|", w, alloc),
         .BitwiseXor => try emitBinOp(m, names, inst, "^", w, alloc),
