@@ -230,6 +230,24 @@ pub fn spirvToHLSL(
 
     // Phase 1: collect names, decorations
     collectNames(aa, &module, &names);
+
+    // Rename HLSL-reserved keyword names (line, register, etc.)
+    {
+        var it = names.keyIterator();
+        while (it.next()) |key_ptr| {
+            if (names.get(key_ptr.*)) |n| {
+                // HLSL keywords that conflict with common GLSL names
+                if (std.mem.eql(u8, n, "line")) {
+                    names.put(key_ptr.*, "line_val") catch {};
+                } else if (std.mem.eql(u8, n, "register")) {
+                    names.put(key_ptr.*, "register_val") catch {};
+                } else if (std.mem.eql(u8, n, "dword")) {
+                    names.put(key_ptr.*, "dword_val") catch {};
+                }
+            }
+        }
+    }
+
     try collectDecorations(aa, &module, &decorations);
 
     // Phase 2: collect resources
