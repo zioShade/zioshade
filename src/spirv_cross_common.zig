@@ -119,7 +119,7 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .UConvert, .SConvert, .FConvert, .Bitcast,
         .SNegate, .FNegate,
         .IAdd, .FAdd, .ISub, .FSub, .IMul, .FMul,
-        .UDiv, .SDiv, .FDiv, .UMod, .SRem, .FRem, .FMod,
+        .UDiv, .SDiv, .FDiv, .UMod, .SRem, .SMod, .FRem, .FMod,
         .VectorTimesScalar, .MatrixTimesScalar,
         .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix,
         .Dot, .Transpose, .OuterProduct,

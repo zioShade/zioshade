@@ -1340,7 +1340,7 @@ fn emitInstruction(
         .FSub, .ISub => try emitBinOp(m, names, inst, "-", w, alloc),
         .FMul, .IMul => try emitBinOp(m, names, inst, "*", w, alloc),
         .FDiv, .SDiv, .UDiv => try emitBinOp(m, names, inst, "/", w, alloc),
-        .UMod, .SRem => try emitBinOp(m, names, inst, "%", w, alloc),
+        .UMod, .SRem, .SMod => try emitBinOp(m, names, inst, "%", w, alloc),
         .FMod, .FRem => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const lhs = try resolvePointer(m, names, inst.words[3], alloc);
@@ -1364,6 +1364,8 @@ fn emitInstruction(
         .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(m, names, inst, ">=", w, alloc),
         .LogicalOr => try emitBinOp(m, names, inst, "||", w, alloc),
         .LogicalAnd => try emitBinOp(m, names, inst, "&&", w, alloc),
+        .IsNan => try emitCall(m, names, inst, "isnan", w, alloc),
+        .IsInf => try emitCall(m, names, inst, "isinf", w, alloc),
         .LogicalNot => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = !{s};\n", .{rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0"});
