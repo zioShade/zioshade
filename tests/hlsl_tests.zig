@@ -340,7 +340,7 @@ test "T6.2: user function with out parameter" {
     defer alloc.free(hlsl);
     // Out parameter value must be used in the output (not DCE'd)
     try assertContains(hlsl, "cbuffer");
-    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "u_x");
     try assertContains(hlsl, "discard");
 }
 
@@ -533,9 +533,9 @@ test "T11.1: CompositeConstruct (vector constructor)" {
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
     // Vector construction should appear in output (using all 3 uniform components)
-    try assertContains(hlsl, "_m0");
-    try assertContains(hlsl, "_m1");
-    try assertContains(hlsl, "_m2");
+    try assertContains(hlsl, "u_x");
+    try assertContains(hlsl, "u_y");
+    try assertContains(hlsl, "u_z");
 }
 
 test "T11.2: CompositeExtract (swizzle)" {
@@ -550,8 +550,8 @@ test "T11.2: CompositeExtract (swizzle)" {
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    // Should reference _m1 (the y component)
-    try assertContains(hlsl, "_m1");
+    // Should reference u_y (the y component)
+    try assertContains(hlsl, "u_y");
 }
 
 // ---------------------------------------------------------------------------
@@ -609,7 +609,7 @@ test "T13.2: if/else branching" {
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
     // Must use the uniform and produce branching HLSL
-    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "u_x");
     try assertContains(hlsl, "discard");
 }
 
@@ -719,9 +719,9 @@ test "T15.5: multiply-add expression" {
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "_m0");
-    try assertContains(hlsl, "_m1");
-    try assertContains(hlsl, "_m2");
+    try assertContains(hlsl, "u_x");
+    try assertContains(hlsl, "u_y");
+    try assertContains(hlsl, "u_z");
 }
 
 test "T15.6: mat4 multiplication" {
@@ -750,8 +750,8 @@ test "T15.7: float2 vector type" {
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
     // Both uniform components must be used
-    try assertContains(hlsl, "_m0");
-    try assertContains(hlsl, "_m1");
+    try assertContains(hlsl, "u_x");
+    try assertContains(hlsl, "u_y");
 }
 
 test "T15.8: bool to float conversion in condition" {
@@ -815,8 +815,8 @@ test "T16.3: nested if/else" {
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
     try assertContains(hlsl, "discard");
-    try assertContains(hlsl, "_m0");
-    try assertContains(hlsl, "_m1");
+    try assertContains(hlsl, "u_x");
+    try assertContains(hlsl, "u_y");
 }
 
 test "T16.4: multiple uniform members" {
@@ -845,8 +845,8 @@ test "T16.5: variable reassignment" {
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "_m0");
-    try assertContains(hlsl, "_m1");
+    try assertContains(hlsl, "u_x");
+    try assertContains(hlsl, "u_y");
 }
 
 // ---------------------------------------------------------------------------
@@ -1207,7 +1207,7 @@ test "T22.2: multiple uniforms in single block" {
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
     try assertContains(hlsl, "cbuffer");
-    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "u_time");
 }
 
 test "T22.3: function with multiple returns" {
@@ -1255,7 +1255,7 @@ test "T22.5: chained arithmetic with precedence" {
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "u_x");
     try assertContains(hlsl, "discard");
 }
 
@@ -2103,8 +2103,8 @@ test "WIN1: wintty CRT shader compiles to HLSL" {
     // Must NOT use array indexing for cbuffer access (DXC rejects this)
     try assertNotContains(hlsl, "Globals[0]");
     try assertNotContains(hlsl, "Globals[1]");
-    // Must use proper _mN member access
-    try assertContains(hlsl, "Globals_m");
+    // Must use proper named member access
+    try assertContains(hlsl, "Globals_i");
     try assertNotContains(hlsl, "unhandled");
 }
 
@@ -2188,7 +2188,7 @@ test "WIN3: binding=0 produces register(b0)" {
     // Must use the uniform (proves code wasn't DCE'd)
     try assertContains(hlsl, "discard");
     // Must use iResolution in output
-    try assertContains(hlsl, "_m0");
+    try assertContains(hlsl, "Globals_iResolution");
 }
 
 test "T31.1: texelFetch maps to Load (int2 coord)" {
@@ -13403,8 +13403,8 @@ test "CBUFFER_ACCESS: cbuffer member access uses _mN suffix not array index" {
     try assertNotContains(hlsl, "Globals[1]");
     try assertNotContains(hlsl, "Globals[2]");
     // Must use _mN member access
-    try assertContains(hlsl, "Globals_m0");
-    try assertContains(hlsl, "Globals_m1");
+    try assertContains(hlsl, "Globals_iResolution");
+    try assertContains(hlsl, "Globals_iTime");
 }
 
 // ---------------------------------------------------------------------------
