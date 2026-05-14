@@ -408,6 +408,50 @@ pub fn spirvToHLSL(
         try emitFunction(&module, &names, &decorations, fid, w, aa, false, &out_param_info);
     }
 
+    // Detect MRT (multiple render targets) for fragment entry
+    var mrt_count: u32 = 0;
+    for (module.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Output) mrt_count += 1;
+        }
+    }
+    if (mrt_count > 1) {
+        // Collect and sort output vars by location
+        const MRTVar = struct { id: u32, location: u32 };
+        var mrt_vars = std.ArrayList(MRTVar).initCapacity(aa, mrt_count) catch return error.OutOfMemory;
+        defer mrt_vars.deinit(aa);
+        for (module.instructions) |inst| {
+            if (inst.op == .Variable and inst.words.len >= 4) {
+                const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+                if (sc == .Output) {
+                    const vid = inst.words[2];
+                    var loc: u32 = 0;
+                    if (decorations.get(vid)) |dec_list| {
+                        for (dec_list.items) |d| {
+                            if (d.decoration == .location and d.extra.len > 0) {
+                                loc = d.extra[0];
+                                break;
+                            }
+                        }
+                    }
+                    mrt_vars.append(aa, .{ .id = vid, .location = loc }) catch {};
+                }
+            }
+        }
+        const MRTSort = struct { fn lessThan(_: void, a: MRTVar, b: MRTVar) bool { return a.location < b.location; } };
+        std.sort.insertion(MRTVar, mrt_vars.items, {}, MRTSort.lessThan);
+        // Emit the struct with SV_Target semantics
+        try w.writeAll("struct _MRT_OUT\n{\n");
+        for (mrt_vars.items) |mv| {
+            const mv_inst = getDef(&module, mv.id) orelse continue;
+            const mv_type = try hlslType(&module, mv_inst.words[1], &names, aa);
+            const mv_name = names.get(mv.id) orelse "out";
+            try w.print("    {s} {s} : SV_Target{d};\n", .{ mv_type, mv_name, mv.location });
+        }
+        try w.writeAll("};\n\n");
+    }
+
     // Emit entry function last
     try emitFunction(&module, &names, &decorations, entry_id, w, aa, true, &out_param_info);
     output_owned = false;
@@ -1007,16 +1051,41 @@ fn emitFunction(
     var output_var_id: ?u32 = null;
     var input_var_ids = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;
     defer input_var_ids.deinit(alloc);
+    // Collect ALL output variables (for MRT support)
+    const OutputVar = struct { id: u32, location: u32 };
+    var output_vars = std.ArrayList(OutputVar).initCapacity(alloc, 4) catch return error.OutOfMemory;
+    defer output_vars.deinit(alloc);
     if (is_fragment) {
         for (module.instructions) |inst| {
             if (inst.op == .Variable and inst.words.len >= 4) {
                 const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                 if (sc == .Output) {
-                    output_var_id = inst.words[2];
+                    const vid = inst.words[2];
+                    // Find location decoration
+                    var loc: u32 = 0;
+                    if (decorations.get(vid)) |dec_list| {
+                        for (dec_list.items) |d| {
+                            if (d.decoration == .location and d.extra.len > 0) {
+                                loc = d.extra[0];
+                                break;
+                            }
+                        }
+                    }
+                    output_vars.append(alloc, .{ .id = vid, .location = loc }) catch {};
                 } else if (sc == .Input) {
                     input_var_ids.append(alloc, inst.words[2]) catch {};
                 }
             }
+        }
+        // Sort output vars by location
+        const SortCtx = struct {
+            fn lessThan(_: void, a: OutputVar, b: OutputVar) bool {
+                return a.location < b.location;
+            }
+        };
+        std.sort.insertion(OutputVar, output_vars.items, {}, SortCtx.lessThan);
+        if (output_vars.items.len > 0) {
+            output_var_id = output_vars.items[0].id; // primary output (location 0)
         }
     }
 
@@ -1162,7 +1231,11 @@ fn emitFunction(
         try w.print("[shader(\"{s}\")]\n", .{stage_name});
     }
     if (is_fragment) {
-        try w.writeAll("float4 main(");
+        if (output_vars.items.len > 1) {
+            try w.writeAll("_MRT_OUT main(");
+        } else {
+            try w.writeAll("float4 main(");
+        }
     } else {
         try w.print("{s} {s}(", .{ return_type, func_name });
     }
@@ -1243,15 +1316,35 @@ fn emitFunction(
         }
     }
 
-    if (is_fragment) try w.writeAll(") : SV_Target\n{\n") else try w.writeAll(")\n{\n");
+    const has_mrt = is_fragment and output_vars.items.len > 1;
+
+    // For MRT: emit struct return type with SV_Target semantics
+    if (has_mrt) {
+        try w.writeAll(")\n{\n");
+    } else if (is_fragment) {
+        try w.writeAll(") : SV_Target\n{\n");
+    } else {
+        try w.writeAll(")\n{\n");
+    }
 
     // Declare output variable as local in fragment entry
-    if (is_fragment and output_var_id != null) {
-        const out_var_inst = getDef(module, output_var_id.?);
-        if (out_var_inst) |ovi| {
-            const out_type = try hlslType(module, ovi.words[1], names, alloc);
-            const out_name = names.get(output_var_id.?) orelse "_fragColor";
-            try w.print("    {s} {s};\n", .{ out_type, out_name });
+    if (is_fragment) {
+        if (has_mrt) {
+            // Declare ALL output variables as locals for MRT
+            for (output_vars.items) |ov| {
+                const ov_inst = getDef(module, ov.id) orelse continue;
+                const ov_type = try hlslType(module, ov_inst.words[1], names, alloc);
+                const ov_name = names.get(ov.id) orelse "out";
+                try w.print("    {s} {s};\n", .{ ov_type, ov_name });
+            }
+        } else if (output_var_id != null) {
+            // Single output: only declare the primary one
+            const out_var_inst = getDef(module, output_var_id.?);
+            if (out_var_inst) |ovi| {
+                const out_type = try hlslType(module, ovi.words[1], names, alloc);
+                const out_name = names.get(output_var_id.?) orelse "_fragColor";
+                try w.print("    {s} {s};\n", .{ out_type, out_name });
+            }
         }
     }
 
@@ -1260,8 +1353,18 @@ fn emitFunction(
 
     // Return output var for fragment
     if (is_fragment and output_var_id != null) {
-        const out_name = names.get(output_var_id.?) orelse "_out";
-        try w.print("    return {s};\n", .{out_name});
+        if (has_mrt) {
+            // Fill the MRT struct and return
+            try w.writeAll("    _MRT_OUT _mrt_out;\n");
+            for (output_vars.items) |ov| {
+                const ov_name = names.get(ov.id) orelse "out";
+                try w.print("    _mrt_out.{s} = {s};\n", .{ ov_name, ov_name });
+            }
+            try w.writeAll("    return _mrt_out;\n");
+        } else {
+            const out_name = names.get(output_var_id.?) orelse "_out";
+            try w.print("    return {s};\n", .{out_name});
+        }
     }
 
     try w.writeAll("}\n");
