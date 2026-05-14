@@ -2512,6 +2512,7 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
     if (!base_is_cb) try w.writeAll(base_name);
     var cur_type: ?u32 = resolvePointeeType(module, base_id);
+    var first_member = true;
     for (indices) |index_id| {
         const idx_inst = getDef(module, index_id);
         if (idx_inst) |def| {
@@ -2519,9 +2520,12 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                 const val = def.words[3];
                 const is_vector = if (cur_type) |tid| blk: { const ti = getDef(module, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
                 if (is_vector) {
-                    try w.writeAll(swizzleChar(val));
-                } else if (base_is_cb) {
+                    try w.writeAll(switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
+                } else if (base_is_cb and first_member) {
                     try w.print("{s}_m{d}", .{cb_prefix, val});
+                    first_member = false;
+                } else if (base_is_cb) {
+                    try w.print("._m{d}", .{val});
                 } else {
                     try w.print("[{d}]", .{val});
                 }
@@ -2569,6 +2573,7 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
 
     // Walk the type chain starting from the base pointer's pointee type
     var current_type_id: ?u32 = resolvePointeeType(module, base_id);
+    var first_member = true; // Only use cbuffer prefix for the first member access
 
     for (indices) |index_id| {
         const idx_inst = getDef(module, index_id);
@@ -2585,9 +2590,10 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                     try buf.appendSlice(alloc, switch (val) {
                         0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
                     });
-                } else if (base_is_cbuffer) {
+                } else if (base_is_cbuffer and first_member) {
                     // Cbuffer members use cbufferName_mN prefix for uniqueness
                     try buf.print(alloc, "{s}_m{d}", .{cbuffer_prefix, val});
+                    first_member = false;
                 } else {
                     try buf.print(alloc, "._m{d}", .{val});
                 }
