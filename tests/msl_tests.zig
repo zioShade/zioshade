@@ -726,3 +726,21 @@ test "MSL: local array variable declaration" {
     try assertContains(msl, "[4]");
 }
 
+test "MSL: nested struct member access in AccessChain" {
+    const source =
+        \\#version 430
+        \\struct Inner { vec4 a; float b; };
+        \\struct Outer { Inner sub; float c; };
+        \\layout(binding = 0, std140) uniform U { Outer data; } ubo;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    FragColor = ubo.data.sub.a + vec4(ubo.data.c);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // Should use .sub and .a for struct member access, not [0]
+    try assertContains(msl, ".sub");
+    try assertContains(msl, ".a");
+}
+
