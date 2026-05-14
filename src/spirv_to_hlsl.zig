@@ -2636,6 +2636,17 @@ fn swizzleChar(index: u32) []const u8 {
     };
 }
 
+fn hlslGetMemberName(module: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
+    for (module.instructions) |inst| {
+        if (inst.op == .MemberName and inst.words.len >= 4 and inst.words[1] == struct_id and inst.words[2] == member_idx) {
+            var name_len: usize = 0;
+            for (inst.words[3..]) |word| { const bytes = std.mem.asBytes(&word); for (bytes) |b| { if (b == 0) break; if (name_len < buf.len - 1) { buf[name_len] = b; name_len += 1; } } }
+            return buf[0..name_len];
+        }
+    }
+    return std.fmt.bufPrint(buf, "_m{d}", .{member_idx}) catch "_m0";
+}
+
 fn splitPair(pair: []const u8) [2][]const u8 {
     if (std.mem.indexOfScalar(u8, pair, ',')) |comma| {
         return .{ pair[0..comma], pair[comma + 1 ..] };
@@ -2677,7 +2688,20 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                 } else if (base_is_cb) {
                     try w.print("._m{d}", .{val});
                 } else {
-                    try w.print("[{d}]", .{val});
+                    // Use member name for structs, [index] for arrays
+                    var used_name = false;
+                    if (cur_type) |tid| {
+                        const ti = getDef(module, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeStruct) {
+                                var mname_buf: [32]u8 = undefined;
+                                const mname = hlslGetMemberName(module, tid, val, &mname_buf);
+                                try w.print(".{s}", .{mname});
+                                used_name = true;
+                            }
+                        }
+                    }
+                    if (!used_name) try w.print("[{d}]", .{val});
                 }
                 if (cur_type) |tid| {
                     const ti = getDef(module, tid);
@@ -2744,8 +2768,23 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                     // Cbuffer members use cbufferName_mN prefix for uniqueness
                     try buf.print(alloc, "{s}_m{d}", .{cbuffer_prefix, val});
                     first_member = false;
-                } else {
+                } else if (base_is_cbuffer) {
                     try buf.print(alloc, "._m{d}", .{val});
+                } else {
+                    // Use member name for structs, ._mN for arrays
+                    var used_name = false;
+                    if (current_type_id) |tid| {
+                        const ti = getDef(module, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeStruct) {
+                                var mname_buf: [32]u8 = undefined;
+                                const mname = hlslGetMemberName(module, tid, val, &mname_buf);
+                                try buf.print(alloc, ".{s}", .{mname});
+                                used_name = true;
+                            }
+                        }
+                    }
+                    if (!used_name) try buf.print(alloc, "._m{d}", .{val});
                 }
 
                 // Advance type: struct member type, or vector element type
