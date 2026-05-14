@@ -482,8 +482,13 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 const ptr_type = inst.words[1];
                 const ptr_inst = getDef(&module, ptr_type) orelse continue;
                 if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
-                    const pointee_id = ptr_inst.words[3];
-                    const pt_inst = getDef(&module, pointee_id) orelse continue;
+                    var pointee_id = ptr_inst.words[3];
+                    var pt_inst = getDef(&module, pointee_id) orelse continue;
+                    // Unwrap array types to find underlying struct
+                    while (pt_inst.op == .TypeArray and pt_inst.words.len > 2) {
+                        pointee_id = pt_inst.words[2];
+                        pt_inst = getDef(&module, pointee_id) orelse break;
+                    }
                     if (pt_inst.op == .TypeStruct) {
                         emitOneStructForwardDecl(&module, &names, pointee_id, w, aa, &local_structs_glsl, &emitted_names) catch {};
                     }
