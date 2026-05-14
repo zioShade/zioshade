@@ -1657,6 +1657,9 @@ fn emitInstruction(
             try w.print("    {s} {s} = {s}.get_width(0);\n", .{rtt, rn, img});
         },
         .Kill => try w.writeAll("    discard_fragment();\n"),
+        .Unreachable => {}, // no-op
+        .BeginInvocationInterlockEXT => try w.writeAll("    simd_barrier();\n"),
+        .EndInvocationInterlockEXT => try w.writeAll("    simd_barrier();\n"),
         .ControlBarrier => {
             try w.writeAll("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
         },

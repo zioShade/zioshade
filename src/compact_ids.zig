@@ -182,6 +182,9 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         253 => rt(0, ""),            // OpReturn
         254 => rt(0, "i"),           // OpReturnValue: value
         255 => rt(0, ""),            // OpUnreachable
+        // --- Fragment Shader Interlock ---
+        5364 => rt(0, ""),            // OpBeginInvocationInterlockEXT
+        5365 => rt(0, ""),            // OpEndInvocationInterlockEXT
         // --- Vendor ---
         4163 => rt(3, "iii"),       // OpTypeTensorARM
         4164 => rt(2, "iil"),       // OpTensorReadARM

@@ -1617,6 +1617,9 @@ fn emitInstruction(
             try w.print("    int {s} = textureSamples({s});\n", .{rn, img});
         },
         .Kill => try w.writeAll("    discard;\n"),
+        .Unreachable => {}, // no-op in GLSL
+        .BeginInvocationInterlockEXT => try w.writeAll("    beginInvocationInterlockARB();\n"),
+        .EndInvocationInterlockEXT => try w.writeAll("    endInvocationInterlockARB();\n"),
         .ControlBarrier => try w.writeAll("    barrier();\n    memoryBarrier();\n"),
         .ImageTexelPointer => {
             // No code emission needed — result used by atomic ops which resolve via classifyAtomicPtr
