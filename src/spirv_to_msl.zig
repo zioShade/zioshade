@@ -147,6 +147,7 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
     if (!base_is_cb) try w.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
+    var first_member = true;
     for (indices) |index_id| {
         const idx_inst = getDef(m, index_id);
         if (idx_inst) |def| {
@@ -155,8 +156,11 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
                 if (is_vector) {
                     try w.writeAll(swizzleChar(val));
-                } else if (base_is_cb) {
+                } else if (base_is_cb and first_member) {
                     try w.print("{s}_1._m{d}", .{cb_prefix, val});
+                    first_member = false;
+                } else if (base_is_cb) {
+                    try w.print("._m{d}", .{val});
                 } else {
                     try w.print("[{d}]", .{val});
                 }
