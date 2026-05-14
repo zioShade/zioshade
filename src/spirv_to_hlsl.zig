@@ -852,8 +852,8 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
     // MS textures
     if (is_ms) {
         return switch (dim) {
-            .Dim2D => if (is_arrayed) "Texture2DMSArray" else "Texture2DMS",
-            else => "Texture2DMS",
+            .Dim2D => if (is_arrayed) "Texture2DMSArray<float4>" else "Texture2DMS<float4>",
+            else => "Texture2DMS<float4>",
         };
     }
 
@@ -2470,18 +2470,35 @@ fn emitInstruction(
             const rt = try hlslType(module, inst.words[1], names, alloc);
             const coord_name = names.get(inst.words[4]) orelse "0";
             const tex_name = names.get(inst.words[3]) orelse "tex";
-            // Check if this is a buffer texture — Buffer.Load takes scalar int, Texture2D.Load takes int3
+            // Check if this is a buffer texture — Buffer.Load takes scalar int
             var is_buffer_tex = false;
-            // Check coordinate type: scalar = buffer, vector = texture
             if (getDef(module, inst.words[4])) |coord_inst| {
                 if (coord_inst.op == .Constant) {
-                    // Scalar constant = buffer texture
                     is_buffer_tex = true;
+                }
+            }
+            // Check for multisampled texture — Texture2DMS.Load(int2, sampleIndex)
+            // ImageFetch for MS textures has Sample operand after coordinate
+            // SPIR-V Image Operands: word[5] has bitmask, Sample = 0x20
+            var is_ms_tex = false;
+            var sample_idx: []const u8 = "0";
+            if (inst.words.len > 5) {
+                // Check if word[5] is the Image Operands bitmask (not a result ID)
+                // Sample bit = 0x20
+                const operands_mask = inst.words[5];
+                if (operands_mask & 0x40 != 0 and inst.words.len > 6) {
+                    // Has Sample operand — this is a multisampled fetch
+                    is_ms_tex = true;
+                    sample_idx = names.get(inst.words[6]) orelse "0";
                 }
             }
             if (is_buffer_tex) {
                 try w.print("    {s} {s} = {s}.Load({s});\n", .{
                     rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name,
+                });
+            } else if (is_ms_tex) {
+                try w.print("    {s} {s} = {s}.Load({s}, {s});\n", .{
+                    rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name, sample_idx,
                 });
             } else {
                 try w.print("    {s} {s} = {s}.Load(int3({s}, 0));\n", .{
