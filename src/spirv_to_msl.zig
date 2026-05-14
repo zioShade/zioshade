@@ -515,6 +515,27 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     }
     try w.writeAll("\n");
 
+    // Emit struct declarations for types used as local variables
+    var local_structs_msl = std.AutoHashMap(u32, void).init(aa);
+    defer local_structs_msl.deinit();
+    for (module.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Function) {
+                const ptr_type = inst.words[1];
+                const ptr_inst = getDef(&module, ptr_type) orelse continue;
+                if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
+                    const pointee_id = ptr_inst.words[3];
+                    const pt_inst = getDef(&module, pointee_id) orelse continue;
+                    if (pt_inst.op == .TypeStruct) {
+                        mslEmitOneStructForwardDecl(&module, &names, pointee_id, w, aa, &local_structs_msl, &emitted_names_msl) catch {};
+                    }
+                }
+            }
+        }
+    }
+    if (local_structs_msl.count() > 0) try w.writeAll("\n");
+
     // Emit non-entry functions first
     for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute_like); }
     // Emit entry function last
