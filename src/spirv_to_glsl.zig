@@ -427,6 +427,51 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
     try w.writeAll("\n");
 
+    // Emit constant array/struct composites as const declarations
+    // Also scan for struct types used in composites for forward declarations
+    for (module.instructions) |inst| {
+        if (inst.op != .ConstantComposite or inst.words.len <= 3) continue;
+        const rid = inst.words[2];
+        const type_id = inst.words[1];
+        const type_inst = getDef(&module, type_id) orelse continue;
+        if (type_inst.op == .TypeArray) {
+            // const elemType name[N] = {comp0, comp1, ...}
+            const elem_type = try glslType(&module, type_inst.words[2], &names, aa);
+            const len_id = type_inst.words[3];
+            const len_def = getDef(&module, len_id);
+            const len_val: u32 = if (len_def) |ld| ld.words[3] else 1;
+            const name = names.get(rid) orelse continue;
+            try w.print("const {s} {s}[{d}] = {{", .{elem_type, name, len_val});
+            for (inst.words[3..], 0..) |comp_id, i| {
+                if (i > 0) try w.writeAll(", ");
+                const comp_name = names.get(comp_id) orelse "0";
+                try w.writeAll(comp_name);
+            }
+            try w.writeAll("};\n");
+            // Also declare struct type for element type
+            const elem_id = type_inst.words[2];
+            const elem_inst = getDef(&module, elem_id);
+            if (elem_inst) |ei| {
+                if (ei.op == .TypeStruct) {
+                    emitOneStructForwardDecl(&module, &names, elem_id, w, aa, &emitted_structs, &emitted_names) catch {};
+                }
+            }
+        } else if (type_inst.op == .TypeStruct) {
+            // Forward declare the struct first
+            emitOneStructForwardDecl(&module, &names, type_id, w, aa, &emitted_structs, &emitted_names) catch {};
+            const struct_name = names.get(type_id) orelse "Struct";
+            const name = names.get(rid) orelse continue;
+            try w.print("const {s} {s} = {{", .{struct_name, name});
+            for (inst.words[3..], 0..) |comp_id, i| {
+                if (i > 0) try w.writeAll(", ");
+                const comp_name = names.get(comp_id) orelse "0";
+                try w.writeAll(comp_name);
+            }
+            try w.writeAll("};\n");
+        }
+    }
+    try w.writeAll("\n");
+
     // Emit struct declarations for types used as local variables
     var local_structs_glsl = std.AutoHashMap(u32, void).init(aa);
     defer local_structs_glsl.deinit();
