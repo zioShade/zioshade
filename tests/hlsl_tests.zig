@@ -13659,3 +13659,31 @@ test "HLSL: local array variable declaration" {
     try assertContains(hlsl, "[4]");
 }
 
+test "HLSL: struct forward decl with member names" {
+    const source =
+        \\#version 430
+        \\struct Foo { float a; float b; };
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    FragColor = vec4(1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // If struct appears in output, it should use named members
+    if (std.mem.indexOf(u8, hlsl, "struct Foo") != null) {
+        try assertContains(hlsl, "float a;");
+        try assertContains(hlsl, "float b;");
+    }
+}
+
+test "HLSL: constant composite array emission" {
+    // Uses frexp-modf.frag which has ResType structs that survive optimization
+    const raw = @embedFile("spirv_cross_shaders/frexp-modf.frag");
+    const source: [:0]const u8 = @ptrCast(raw);
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Struct types used as local variables should be declared
+    try assertContains(hlsl, "struct ResType");
+}
+
