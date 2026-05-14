@@ -1024,6 +1024,10 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
     for (inst.words[2..], 0..) |member_type_id, member_idx| {
         const member_type = try hlslType(module, member_type_id, names, alloc);
 
+        // Get member name from OpMemberName, fallback to _m{index}
+        var mname_buf: [32]u8 = undefined;
+        const mname = hlslGetMemberName(module, struct_type_id, @intCast(member_idx), &mname_buf);
+
         // Check for array
         const mt_inst = getDef(module, member_type_id);
         if (mt_inst) |mi| {
@@ -1032,11 +1036,11 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
                 const len_id = mi.words[3];
                 const len_inst = getDef(module, len_id);
                 const len_val: u32 = if (len_inst) |li| li.words[3] else 1;
-                try w.print("    {s} {s}_m{d}[{d}];\n", .{ elem_type, cbuffer_name, member_idx, len_val });
+                try w.print("    {s} {s}_{s}[{d}];\n", .{ elem_type, cbuffer_name, mname, len_val });
                 continue;
             }
         }
-        try w.print("    {s} {s}_m{d};\n", .{ member_type, cbuffer_name, member_idx });
+        try w.print("    {s} {s}_{s};\n", .{ member_type, cbuffer_name, mname });
     }
 }
 
@@ -2161,7 +2165,20 @@ fn emitInstruction(
                         0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
                     });
                 } else {
-                    try w.print("._m{d}", .{index});
+                    // Use named member for structs
+                    var used_name = false;
+                    if (parent_type) |pt| {
+                        const pt_inst = getDef(module, pt);
+                        if (pt_inst) |pi| {
+                            if (pi.op == .TypeStruct) {
+                                var mname_buf: [32]u8 = undefined;
+                                const mname = hlslGetMemberName(module, pt, @intCast(index), &mname_buf);
+                                try w.print(".{s}", .{mname});
+                                used_name = true;
+                            }
+                        }
+                    }
+                    if (!used_name) try w.print("._m{d}", .{index});
                 }
             }
             try w.writeAll(";\n");
@@ -2186,7 +2203,20 @@ fn emitInstruction(
                         0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
                     });
                 } else {
-                    try w.print("._m{d}", .{index});
+                    // Use named member for structs
+                    var used_name = false;
+                    if (parent_type) |pt| {
+                        const pt_inst = getDef(module, pt);
+                        if (pt_inst) |pi| {
+                            if (pi.op == .TypeStruct) {
+                                var mname_buf: [32]u8 = undefined;
+                                const mname = hlslGetMemberName(module, pt, @intCast(index), &mname_buf);
+                                try w.print(".{s}", .{mname});
+                                used_name = true;
+                            }
+                        }
+                    }
+                    if (!used_name) try w.print("._m{d}", .{index});
                 }
             }
             try w.print(" = {s};\n", .{object});
@@ -2943,10 +2973,20 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                 if (is_vector) {
                     try w.writeAll(switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
                 } else if (base_is_cb and first_member) {
-                    try w.print("{s}_m{d}", .{cb_prefix, val});
+                    var mname_buf: [32]u8 = undefined;
+                    var used_name = false;
+                    if (cur_type) |tid| {
+                        const ti = getDef(module, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeStruct) {
+                                const mname = hlslGetMemberName(module, tid, val, &mname_buf);
+                                try w.print("{s}_{s}", .{cb_prefix, mname});
+                                used_name = true;
+                            }
+                        }
+                    }
+                    if (!used_name) try w.print("{s}_m{d}", .{cb_prefix, val});
                     first_member = false;
-                } else if (base_is_cb) {
-                    try w.print("._m{d}", .{val});
                 } else {
                     // Use member name for structs, [index] for arrays
                     var used_name = false;
@@ -3025,13 +3065,23 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                         0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
                     });
                 } else if (base_is_cbuffer and first_member) {
-                    // Cbuffer members use cbufferName_mN prefix for uniqueness
-                    try buf.print(alloc, "{s}_m{d}", .{cbuffer_prefix, val});
+                    // Cbuffer members use cbufferName_memberName prefix
+                    var mname_buf: [32]u8 = undefined;
+                    var used_name = false;
+                    if (current_type_id) |tid| {
+                        const ti = getDef(module, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeStruct) {
+                                const mname = hlslGetMemberName(module, tid, val, &mname_buf);
+                                try buf.print(alloc, "{s}_{s}", .{ cbuffer_prefix, mname });
+                                used_name = true;
+                            }
+                        }
+                    }
+                    if (!used_name) try buf.print(alloc, "{s}_m{d}", .{ cbuffer_prefix, val });
                     first_member = false;
-                } else if (base_is_cbuffer) {
-                    try buf.print(alloc, "._m{d}", .{val});
                 } else {
-                    // Use member name for structs, ._mN for arrays
+                    // Use member name for structs, ._mN for arrays/vectors
                     var used_name = false;
                     if (current_type_id) |tid| {
                         const ti = getDef(module, tid);
