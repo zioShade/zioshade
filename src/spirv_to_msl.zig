@@ -914,7 +914,6 @@ fn emitFunction(
         var itid = pi.words[1];
         if (pti) |pt| {
             if (pt.op == .TypePointer and pt.words.len > 3) {
-                is_out = true;
                 itid = pt.words[3];
             }
         }
@@ -1181,6 +1180,19 @@ fn emitWhileLoopMSL(
                 continue;
             }
             try emitInstruction(m, names, decs, binst, w, alloc, is_frag, ovid, cbuffers, textures);
+        }
+    }
+    // Emit continue block (e.g., i++ in for-loops)
+    const cont_idx = label_map.get(cont_lbl) orelse m.instructions.len;
+    if (cont_idx < m.instructions.len) {
+        var ci2: usize = cont_idx + 1;
+        while (ci2 < m.instructions.len) : (ci2 += 1) {
+            const cinst = m.instructions[ci2];
+            if (cinst.op == .FunctionEnd) break;
+            if (cinst.op == .Label) break;
+            if (cinst.op == .Branch) break;
+            if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
+            try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures);
         }
     }
 

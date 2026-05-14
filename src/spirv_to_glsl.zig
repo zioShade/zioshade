@@ -747,7 +747,6 @@ fn emitFunction(
         var itid = pi.words[1];
         if (pti) |pt| {
             if (pt.op == .TypePointer and pt.words.len > 3) {
-                is_out = true;
                 itid = pt.words[3];
             }
         }
@@ -964,7 +963,7 @@ fn emitWhileLoop(
     bc_merge: *const std.AutoHashMap(usize, u32),
     w: anytype, alloc: std.mem.Allocator,
     is_frag: bool, ovid: ?u32,
-) !usize {
+) anyerror!usize {
     // Two patterns after LoopMerge:
     // Pattern A: LoopMerge; Branch cond_label; ...; BranchConditional cond, body, merge
     // Pattern B: LoopMerge; BranchConditional cond, body, merge (merged condition)
@@ -1038,7 +1037,17 @@ fn emitWhileLoop(
                 if (lbl == cont_lbl or lbl == merge_lbl) break;
                 continue;
             }
-            if (binst.op == .LoopMerge or binst.op == .SelectionMerge) continue;
+            if (binst.op == .LoopMerge) {
+                // Nested loop — recurse
+                if (binst.words.len >= 3) {
+                    const nmerge = binst.words[1];
+                    const ncont = binst.words[2];
+                    bi = try emitWhileLoop(m, names, decs, bi, nmerge, ncont, label_map, bc_merge, w, alloc, is_frag, ovid);
+                    bi -= 1; // caller will increment
+                }
+                continue;
+            }
+            if (binst.op == .SelectionMerge) continue;
             if (binst.op == .Branch) {
                 if (binst.words.len > 1 and (binst.words[1] == cont_lbl or binst.words[1] == merge_lbl)) continue;
                 continue;
@@ -1088,6 +1097,19 @@ fn emitWhileLoop(
             try emitInstruction(m, names, decs, binst, w, alloc, is_frag, ovid);
         }
     }
+    // Emit continue block (e.g., i++ in for-loops)
+    const cont_idx = label_map.get(cont_lbl) orelse m.instructions.len;
+    if (cont_idx < m.instructions.len) {
+        var ci2: usize = cont_idx + 1;
+        while (ci2 < m.instructions.len) : (ci2 += 1) {
+            const cinst = m.instructions[ci2];
+            if (cinst.op == .FunctionEnd) break;
+            if (cinst.op == .Label) break;
+            if (cinst.op == .Branch) break;
+            if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
+            try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid);
+        }
+    }
     try w.writeAll("    }\n");
     if (label_map.get(merge_lbl)) |mi| return mi;
     return loop_idx + 1;
@@ -1104,7 +1126,7 @@ fn emitBlock(
     w: anytype, alloc: std.mem.Allocator,
     is_frag: bool, ovid: ?u32, indent: []const u8,
     is_switch: bool,
-) !usize {
+) anyerror!usize {
     const si = lm.get(label) orelse return error.InvalidSpirv;
     var i: usize = si + 1;
     while (i < m.instructions.len) : (i += 1) {
@@ -1114,7 +1136,16 @@ fn emitBlock(
             if (is_switch) try w.print("{s}    break;\n", .{indent});
             break;
         }
-        if (inst.op == .Label or inst.op == .SelectionMerge or inst.op == .LoopMerge) continue;
+        if (inst.op == .Label or inst.op == .SelectionMerge) continue;
+        if (inst.op == .LoopMerge) {
+            if (inst.words.len >= 3) {
+                const nmerge = inst.words[1];
+                const ncont = inst.words[2];
+                i = try emitWhileLoop(m, names, decs, i, nmerge, ncont, lm, bm, w, alloc, is_frag, ovid);
+                i -= 1;
+            }
+            continue;
+        }
         if (inst.op == .Branch) {
             if (is_switch) try w.print("{s}    break;\n", .{indent});
             continue;
