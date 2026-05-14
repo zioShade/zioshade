@@ -861,12 +861,12 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
     }
 
     return switch (dim) {
-        .Dim1D => if (is_arrayed) "Texture1DArray" else "Texture1D",
-        .Dim2D => if (is_arrayed) "Texture2DArray" else "Texture2D",
-        .DimCube => if (is_arrayed) "TextureCubeArray" else "TextureCube",
-        .Dim3D => "Texture3D",
-        .DimBuffer => "Buffer",
-        else => "Texture2D",
+        .Dim1D => if (is_arrayed) "Texture1DArray<float4>" else "Texture1D<float4>",
+        .Dim2D => if (is_arrayed) "Texture2DArray<float4>" else "Texture2D<float4>",
+        .DimCube => if (is_arrayed) "TextureCubeArray<float4>" else "TextureCube<float4>",
+        .Dim3D => "Texture3D<float4>",
+        .DimBuffer => "Buffer<float4>",
+        else => "Texture2D<float4>",
     };
 }
 
@@ -2405,9 +2405,26 @@ fn emitInstruction(
         },
         .ImageFetch => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
-            try w.print("    {s} {s} = {s}.Load({s});\n", .{
-                rt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0",
-            });
+            const coord_name = names.get(inst.words[4]) orelse "0";
+            const tex_name = names.get(inst.words[3]) orelse "tex";
+            // Check if this is a buffer texture — Buffer.Load takes scalar int, Texture2D.Load takes int3
+            var is_buffer_tex = false;
+            // Check coordinate type: scalar = buffer, vector = texture
+            if (getDef(module, inst.words[4])) |coord_inst| {
+                if (coord_inst.op == .Constant) {
+                    // Scalar constant = buffer texture
+                    is_buffer_tex = true;
+                }
+            }
+            if (is_buffer_tex) {
+                try w.print("    {s} {s} = {s}.Load({s});\n", .{
+                    rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name,
+                });
+            } else {
+                try w.print("    {s} {s} = {s}.Load(int3({s}, 0));\n", .{
+                    rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name,
+                });
+            }
         },
         .ImageGather => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
