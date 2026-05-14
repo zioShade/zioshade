@@ -2186,21 +2186,24 @@ fn emitInstruction(
             const comp = names.get(inst.words[3]) orelse "c";
             try w.print("    {s} {s} = {s}", .{ rt, names.get(inst.words[2]) orelse "v", comp });
             // Determine if parent is vector (use .xyzw) or struct (use _mN)
-            const parent_type = getTypeOf(module, inst.words[3]);
-            const is_vec = if (parent_type) |pt| blk: {
-                const pt_inst = getDef(module, pt);
-                break :blk pt_inst != null and pt_inst.?.op == .TypeVector;
-            } else false;
+            var parent_type = getTypeOf(module, inst.words[3]);
 
             for (inst.words[4..]) |index| {
-                if (is_vec) {
+                // Update parent_type for each index level
+                const current_parent = parent_type;
+                const is_current_vec = if (current_parent) |pt| blk: {
+                    const pt_inst = getDef(module, pt);
+                    break :blk pt_inst != null and pt_inst.?.op == .TypeVector;
+                } else false;
+
+                if (is_current_vec) {
                     try w.writeAll(switch (index) {
                         0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
                     });
                 } else {
                     // Use named member for structs
                     var used_name = false;
-                    if (parent_type) |pt| {
+                    if (current_parent) |pt| {
                         const pt_inst = getDef(module, pt);
                         if (pt_inst) |pi| {
                             if (pi.op == .TypeStruct) {
@@ -2213,6 +2216,21 @@ fn emitInstruction(
                     }
                     if (!used_name) try w.print("._m{d}", .{index});
                 }
+                // Advance parent_type for next index level
+                if (current_parent) |pt| {
+                    const pt_inst = getDef(module, pt);
+                    if (pt_inst) |pi| {
+                        if (pi.op == .TypeVector) {
+                            parent_type = pi.words[2];
+                        } else if (pi.op == .TypeStruct and index + 2 < pi.words.len) {
+                            parent_type = pi.words[index + 2];
+                        } else if (pi.op == .TypeArray or pi.op == .TypeMatrix) {
+                            parent_type = pi.words[2];
+                        } else {
+                            parent_type = null;
+                        }
+                    }
+                }
             }
             try w.writeAll(";\n");
         },
@@ -2224,21 +2242,23 @@ fn emitInstruction(
             // Copy composite, then overwrite the indexed member with object
             try w.print("    {s} {s} = {s};\n", .{ rt, rname, composite });
             // Determine if parent is vector (use .xyzw) or struct (use _mN)
-            const parent_type = getTypeOf(module, inst.words[4]);
-            const is_vec = if (parent_type) |pt| blk: {
-                const pt_inst = getDef(module, pt);
-                break :blk pt_inst != null and pt_inst.?.op == .TypeVector;
-            } else false;
+            var parent_type = getTypeOf(module, inst.words[4]);
             try w.print("    {s}", .{rname});
             for (inst.words[5..]) |index| {
-                if (is_vec) {
+                const current_parent = parent_type;
+                const is_current_vec = if (current_parent) |pt| blk: {
+                    const pt_inst = getDef(module, pt);
+                    break :blk pt_inst != null and pt_inst.?.op == .TypeVector;
+                } else false;
+
+                if (is_current_vec) {
                     try w.writeAll(switch (index) {
                         0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
                     });
                 } else {
                     // Use named member for structs
                     var used_name = false;
-                    if (parent_type) |pt| {
+                    if (current_parent) |pt| {
                         const pt_inst = getDef(module, pt);
                         if (pt_inst) |pi| {
                             if (pi.op == .TypeStruct) {
@@ -2250,6 +2270,21 @@ fn emitInstruction(
                         }
                     }
                     if (!used_name) try w.print("._m{d}", .{index});
+                }
+                // Advance parent_type for next index level
+                if (current_parent) |pt| {
+                    const pt_inst = getDef(module, pt);
+                    if (pt_inst) |pi| {
+                        if (pi.op == .TypeVector) {
+                            parent_type = pi.words[2];
+                        } else if (pi.op == .TypeStruct and index + 2 < pi.words.len) {
+                            parent_type = pi.words[index + 2];
+                        } else if (pi.op == .TypeArray or pi.op == .TypeMatrix) {
+                            parent_type = pi.words[2];
+                        } else {
+                            parent_type = null;
+                        }
+                    }
                 }
             }
             try w.print(" = {s};\n", .{object});
@@ -3427,7 +3462,7 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 46 => "lerp",      // FMix / mix
                 48 => "step",
                 49 => "smoothstep",
-                50 => "fma",       // FMA (fused multiply-add)
+                50 => "mad",       // FMA (fused multiply-add) — HLSL uses mad for float
                 51 => "frexp",     // Frexp (scalar return, pointer out-param)
                 52 => "frexp",     // FrexpStruct (struct return - intercepted)
                 53 => "ldexp",     // Ldexp
