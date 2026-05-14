@@ -626,7 +626,14 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         74 => "clz",       // findMSB(signed) → simplified; may need adjustment
         75 => "clz",       // findMSB(unsigned) → simplified; may need adjustment
         79 => "min", 80 => "max", 81 => "clamp",
-        35 => "modf", 51 => "frexp",
+        35 => "modf", 36 => "modf", 51 => "frexp",
+        54 => "pack_float_to_snorm4x8", 55 => "pack_float_to_unorm4x8",
+        56 => "pack_float_to_snorm2x16", 57 => "pack_float_to_unorm2x16",
+        58 => "pack_float_to_half2x16",
+        60 => "unpack_snorm2x16_to_float", 61 => "unpack_unorm2x16_to_float",
+        62 => "unpack_half2x16_to_float",
+        63 => "unpack_snorm4x8_to_float", 64 => "unpack_unorm4x8_to_float",
+        76 => "interpolate_at_centroid", 77 => "interpolate_at_sample", 78 => "interpolate_at_offset",
         else => null,
     };
 }
