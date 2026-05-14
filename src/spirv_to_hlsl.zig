@@ -2047,6 +2047,9 @@ fn emitInstruction(
 
         // Control flow
         .Kill => try w.writeAll("    discard;\n"),
+        .Unreachable => {}, // no-op
+        .BeginInvocationInterlockEXT => {}, // no-op in HLSL (use rasterizerOrdered views)
+        .EndInvocationInterlockEXT => {},
         .ImageWrite => {
             // OpImageWrite: image, coordinate, texel
             const img = names.get(inst.words[1]) orelse "image";

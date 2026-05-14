@@ -230,6 +230,8 @@ pub const Op = enum(u16) {
     IgnoreIntersectionKHR = 4448,
     TerminateRayKHR = 4449,
     ExecuteCallableKHR = 4446,
+    BeginInvocationInterlockEXT = 5364,
+    EndInvocationInterlockEXT = 5365,
     _,
 };
 
