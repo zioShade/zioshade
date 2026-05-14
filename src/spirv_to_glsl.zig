@@ -435,13 +435,34 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         const type_id = inst.words[1];
         const type_inst = getDef(&module, type_id) orelse continue;
         if (type_inst.op == .TypeArray) {
-            // const elemType name[N] = {comp0, comp1, ...}
-            const elem_type = try glslType(&module, type_inst.words[2], &names, aa);
+            // const elemType name[N][M]... = {comp0, comp1, ...}
             const len_id = type_inst.words[3];
             const len_def = getDef(&module, len_id);
             const len_val: u32 = if (len_def) |ld| ld.words[3] else 1;
+            var elem_id = type_inst.words[2];
+            var dims = std.ArrayList(u32).initCapacity(aa, 2) catch continue;
+            defer dims.deinit(aa);
+            dims.append(aa, len_val) catch {};
+            // Walk nested TypeArray to find all dimensions
+            var inner = getDef(&module, elem_id);
+            while (inner) |inn| {
+                if (inn.op == .TypeArray and inn.words.len > 3) {
+                    const inner_len_id = inn.words[3];
+                    const inner_len_def = getDef(&module, inner_len_id);
+                    const inner_len: u32 = if (inner_len_def) |ild| ild.words[3] else 1;
+                    dims.append(aa, inner_len) catch {};
+                    elem_id = inn.words[2];
+                    inner = getDef(&module, elem_id);
+                } else break;
+            }
+            const base_type = try glslType(&module, elem_id, &names, aa);
+            var arr_suffix = std.ArrayList(u8).initCapacity(aa, 32) catch continue;
+            defer arr_suffix.deinit(aa);
+            for (dims.items) |d| {
+                arr_suffix.print(aa, "[{d}]", .{d}) catch {};
+            }
             const name = names.get(rid) orelse continue;
-            try w.print("const {s} {s}[{d}] = {{", .{elem_type, name, len_val});
+            try w.print("const {s} {s}{s} = {{", .{base_type, name, arr_suffix.items});
             for (inst.words[3..], 0..) |comp_id, i| {
                 if (i > 0) try w.writeAll(", ");
                 const comp_name = names.get(comp_id) orelse "0";
@@ -449,8 +470,8 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             }
             try w.writeAll("};\n");
             // Also declare struct type for element type
-            const elem_id = type_inst.words[2];
-            const elem_inst = getDef(&module, elem_id);
+            const selem_id = type_inst.words[2];
+            const elem_inst = getDef(&module, selem_id);
             if (elem_inst) |ei| {
                 if (ei.op == .TypeStruct) {
                     emitOneStructForwardDecl(&module, &names, elem_id, w, aa, &emitted_structs, &emitted_names) catch {};
@@ -642,6 +663,47 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
                 const dnew = std.fmt.allocPrint(alloc, "{s}_{d}", .{ dentry.key_ptr.*, dsuffix }) catch continue;
                 _ = names.fetchPut(did, dnew) catch {};
             }
+        }
+    }
+
+    // Deduplicate function-local variable names
+    var func_var_ids_glsl = std.AutoHashMap(u32, void).init(alloc);
+    defer func_var_ids_glsl.deinit();
+    for (m.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Function) {
+                func_var_ids_glsl.put(inst.words[2], {}) catch {};
+            }
+        }
+    }
+    var fv_name_ids = std.StringHashMap(std.ArrayList(u32)).init(alloc);
+    defer {
+        var fit = fv_name_ids.iterator();
+        while (fit.next()) |entry| {
+            entry.value_ptr.deinit(alloc);
+        }
+        fv_name_ids.deinit();
+    }
+    var fvniter = func_var_ids_glsl.iterator();
+    while (fvniter.next()) |entry| {
+        const id = entry.key_ptr.*;
+        const name = names.get(id) orelse continue;
+        const gop = fv_name_ids.getOrPut(name) catch continue;
+        if (!gop.found_existing) {
+            gop.value_ptr.* = std.ArrayList(u32).initCapacity(alloc, 2) catch continue;
+        }
+        gop.value_ptr.append(alloc, id) catch {};
+    }
+    var fvdniter = fv_name_ids.iterator();
+    while (fvdniter.next()) |entry| {
+        const fvname = entry.key_ptr.*;
+        const fvids = entry.value_ptr.*;
+        if (fvids.items.len <= 1) continue;
+        for (fvids.items, 0..) |fid, fi| {
+            if (fi == 0) continue;
+            const fnew = std.fmt.allocPrint(alloc, "{s}_{d}", .{ fvname, fid }) catch continue;
+            names.put(fid, fnew) catch {};
         }
     }
 }
