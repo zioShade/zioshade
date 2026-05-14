@@ -427,6 +427,27 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
     try w.writeAll("\n");
 
+    // Emit struct declarations for types used as local variables
+    var local_structs_glsl = std.AutoHashMap(u32, void).init(aa);
+    defer local_structs_glsl.deinit();
+    for (module.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Function) {
+                const ptr_type = inst.words[1];
+                const ptr_inst = getDef(&module, ptr_type) orelse continue;
+                if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
+                    const pointee_id = ptr_inst.words[3];
+                    const pt_inst = getDef(&module, pointee_id) orelse continue;
+                    if (pt_inst.op == .TypeStruct) {
+                        emitOneStructForwardDecl(&module, &names, pointee_id, w, aa, &local_structs_glsl, &emitted_names) catch {};
+                    }
+                }
+            }
+        }
+    }
+    if (local_structs_glsl.count() > 0) try w.writeAll("\n");
+
     var func_ids = std.ArrayList(u32).initCapacity(aa, 8) catch return error.OutOfMemory;
     defer func_ids.deinit(aa);
     for (module.instructions) |inst| { if (inst.op == .Function and inst.words.len > 2) try func_ids.append(aa, inst.words[2]); }
