@@ -501,7 +501,7 @@ test "T11.2: swizzle access" {
     ;
     const msl = try compileToMsl(source);
     defer alloc.free(msl);
-    try assertContains(msl, "[0]");
+    try assertContains(msl, ".x");
 }
 
 // === Subgroup operation tests (Issue #3) ===
