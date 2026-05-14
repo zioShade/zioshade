@@ -281,6 +281,7 @@ pub fn spirvToHLSL(
         var binding: i32 = @intCast(cb.binding);
         binding += options.binding_shift;
         if (binding < 0) binding = 0;
+        // TODO: SSBO (cb.is_ssbo) needs RWStructuredBuffer for writable access
         try w.print("cbuffer {s} : register(b{d})\n{{\n", .{ cb.name, binding });
         try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa);
         try w.writeAll("};\n\n");
@@ -520,6 +521,7 @@ const CbufferDecl = struct {
     name: []const u8,
     type_id: u32,
     binding: u32,
+    is_ssbo: bool = false,
 };
 
 const TextureDecl = struct {
@@ -724,6 +726,14 @@ fn collectDecorations(alloc: std.mem.Allocator, module: *const ParsedModule, dec
     }
 }
 
+fn hasDecoration(decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, dec: spirv.Decoration) bool {
+    const list = decorations.get(id) orelse return false;
+    for (list.items) |entry| {
+        if (entry.decoration == dec) return true;
+    }
+    return false;
+}
+
 fn getDecorationValue(decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, dec: spirv.Decoration) ?u32 {
     const list = decorations.get(id) orelse return null;
     for (list.items) |entry| {
@@ -758,10 +768,13 @@ fn collectResources(
             .Uniform => {
                 const binding = getDecorationValue(decorations, result_id, .binding) orelse 0;
                 const name = names.get(result_id) orelse "Globals";
+                // Check if this is an SSBO (BufferBlock decoration on struct type)
+                const is_ssbo = hasDecoration(decorations, pointee_type, .buffer_block);
                 cbuffers.append(alloc, .{
                     .name = name,
                     .type_id = pointee_type,
                     .binding = binding,
+                    .is_ssbo = is_ssbo,
                 }) catch {};
             },
             .UniformConstant => {
@@ -3302,6 +3315,23 @@ fn isUniformVariable(module: *const ParsedModule, id: u32) bool {
     if (inst.op == .Variable and inst.words.len >= 4) {
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
         return sc == .Uniform;
+    }
+    return false;
+}
+
+fn isSSBOVariable(module: *const ParsedModule, decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32) bool {
+    const inst = getDef(module, id) orelse return false;
+    if (inst.op == .Variable and inst.words.len >= 4) {
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc == .Uniform) {
+            // Check if the pointee type has BufferBlock decoration (SSBO)
+            const ptr_type_inst = getDef(module, inst.words[1]);
+            if (ptr_type_inst) |pti| {
+                if (pti.op == .TypePointer and pti.words.len > 3) {
+                    return hasDecoration(decorations, pti.words[3], .buffer_block);
+                }
+            }
+        }
     }
     return false;
 }
