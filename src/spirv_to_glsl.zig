@@ -77,16 +77,24 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     var writer = compat.StackBufWriter(512).init();
     if (!base_is_cb) writer.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
+    var cb_level: bool = base_is_cb; // only first level uses cb_prefix
     for (indices) |index_id| {
         const idx_inst = getDef(m, index_id);
         if (idx_inst) |def| {
             if (def.op == .Constant and def.words.len > 3) {
                 const val = def.words[3];
+                const is_struct_member = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeStruct; } else false;
                 const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
                 if (is_vector) {
                     writer.writeAll(swizzleChar(val));
-                } else if (base_is_cb) {
+                } else if (cb_level and base_is_cb) {
                     writer.print("{s}_m{d}", .{cb_prefix, val});
+                    cb_level = false; // only first index uses cb_prefix
+                } else if (is_struct_member) {
+                    // Use struct member name for nested struct access
+                    var mname_buf: [32]u8 = undefined;
+                    const mname = getMemberName(m, cur_type.?, val, &mname_buf);
+                    writer.print(".{s}", .{mname});
                 } else {
                     writer.print("[{d}]", .{val});
                 }
@@ -116,16 +124,23 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     defer buf.deinit(alloc);
     if (!base_is_cb) try buf.appendSlice(alloc, base_name);
     cur_type = resolvePointee(m, base_id);
+    var cb_level2: bool = base_is_cb;
     for (indices) |index_id| {
         const idx_inst = getDef(m, index_id);
         if (idx_inst) |def| {
             if (def.op == .Constant and def.words.len > 3) {
                 const val = def.words[3];
+                const is_struct_member = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeStruct; } else false;
                 const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
                 if (is_vector) {
                     try buf.appendSlice(alloc, swizzleChar(val));
-                } else if (base_is_cb) {
+                } else if (cb_level2 and base_is_cb) {
                     try buf.print(alloc, "{s}_m{d}", .{cb_prefix, val});
+                    cb_level2 = false;
+                } else if (is_struct_member) {
+                    var mname_buf: [32]u8 = undefined;
+                    const mname = getMemberName(m, cur_type.?, val, &mname_buf);
+                    try buf.print(alloc, ".{s}", .{mname});
                 } else {
                     try buf.print(alloc, "[{d}]", .{val});
                 }
@@ -160,17 +175,24 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
     if (!base_is_cb) try w.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
+    var cb_level: bool = base_is_cb;
     for (indices) |index_id| {
         const idx_inst = getDef(m, index_id);
         if (idx_inst) |def| {
             if (def.op == .Constant and def.words.len > 3) {
                 const val = def.words[3];
+                const is_struct_member = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeStruct; } else false;
                 const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
                 if (is_vector) {
                     try w.writeAll(swizzleChar(val));
-                } else if (base_is_cb) {
+                } else if (cb_level and base_is_cb) {
                     // GLSL: use instance.member format — instance is "{cb_prefix}_1", member is "{cb_prefix}_m{val}"
                     try w.print("{s}_1.{s}_m{d}", .{cb_prefix, cb_prefix, val});
+                    cb_level = false;
+                } else if (is_struct_member) {
+                    var mname_buf: [32]u8 = undefined;
+                    const mname = getMemberName(m, cur_type.?, val, &mname_buf);
+                    try w.print(".{s}", .{mname});
                 } else {
                     try w.print("[{d}]", .{val});
                 }
@@ -1575,15 +1597,41 @@ fn emitInstruction(
             const comp = names.get(inst.words[3]) orelse "c";
             try w.print("    {s} {s} = {s}", .{ rtt, names.get(inst.words[2]) orelse "v", comp });
             const pt = getTypeOf(m, inst.words[3]);
-            const is_vec = if (pt) |ptv| blk: {
-                const pti = getDef(m, ptv);
-                break :blk pti != null and pti.?.op == .TypeVector;
-            } else false;
+            var cur_type = pt;
             for (inst.words[4..]) |index| {
+                const is_vec = if (cur_type) |ptv| blk: {
+                    const pti = getDef(m, ptv);
+                    break :blk pti != null and pti.?.op == .TypeVector;
+                } else false;
+                const is_struct = if (cur_type) |ptv| blk: {
+                    const pti = getDef(m, ptv);
+                    break :blk pti != null and pti.?.op == .TypeStruct;
+                } else false;
                 if (is_vec) {
                     try w.writeAll(swizzleChar(index));
+                    // Update cur_type to element type
+                    if (cur_type) |ptv| {
+                        const pti = getDef(m, ptv);
+                        if (pti) |tinst| cur_type = tinst.words[2];
+                    }
+                } else if (is_struct) {
+                    var mname_buf: [32]u8 = undefined;
+                    const mname = getMemberName(m, cur_type.?, index, &mname_buf);
+                    try w.print(".{s}", .{mname});
+                    // Update cur_type to member type
+                    if (cur_type) |ptv| {
+                        const pti = getDef(m, ptv);
+                        if (pti) |tinst| {
+                            if (index + 2 < tinst.words.len) cur_type = tinst.words[index + 2];
+                        }
+                    }
                 } else {
                     try w.print("[{d}]", .{index});
+                    // Update cur_type for matrix/array
+                    if (cur_type) |ptv| {
+                        const pti = getDef(m, ptv);
+                        if (pti) |tinst| cur_type = tinst.words[2];
+                    }
                 }
             }
             try w.writeAll(";\n");
