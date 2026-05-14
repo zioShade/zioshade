@@ -733,7 +733,13 @@ fn emitFunction(
             if (inst.op == .Variable and inst.words.len >= 4) {
                 const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                 if (sc == .Output) {
-                    output_var_id = inst.words[2];
+                    // Prefer user-defined outputs (with location) over builtins
+                    const bi = getDecVal(decs, inst.words[2], .built_in);
+                    if (bi == null) {
+                        output_var_id = inst.words[2];
+                    } else if (output_var_id == null) {
+                        output_var_id = inst.words[2];
+                    }
                 } else if (sc == .Input) {
                     input_var_ids.append(alloc, inst.words[2]) catch {};
                 }
@@ -840,13 +846,17 @@ fn emitFunction(
     if (is_frag) {
         if (output_var_id) |ovid| {
             if (getDef(m, ovid)) |ov| {
-                const ot = try glslType(m, ov.words[1], names, alloc);
-                const on = names.get(ovid) orelse "_fragColor";
-                const loc = getDecVal(decs, ovid, .location);
-                if (loc) |l| {
-                    try w.print("layout(location = {d}) out {s} {s};\n\n", .{ l, ot, on });
-                } else {
-                    try w.print("out {s} {s};\n\n", .{ ot, on });
+                // Skip built-in outputs (gl_SampleMask, gl_FragDepth, etc.)
+                const builtin_out = getDecVal(decs, ovid, .built_in);
+                if (builtin_out == null or builtin_out.? != @intFromEnum(spirv.BuiltIn.sample_mask)) {
+                    const ot = try glslType(m, ov.words[1], names, alloc);
+                    const on = names.get(ovid) orelse "_fragColor";
+                    const loc = getDecVal(decs, ovid, .location);
+                    if (loc) |l| {
+                        try w.print("layout(location = {d}) out {s} {s};\n\n", .{ l, ot, on });
+                    } else {
+                        try w.print("out {s} {s};\n\n", .{ ot, on });
+                    }
                 }
             }
         }
@@ -900,6 +910,9 @@ fn emitFunction(
                     .clip_distance => "gl_ClipDistance",
                     .cull_distance => "gl_CullDistance",
                     .front_facing => "gl_FrontFacing",
+                    .sample_position => "gl_SamplePosition",
+                    .sample_mask => "gl_SampleMaskIn",
+                    .sample_id => "gl_SampleID",
                     else => iv_name,
                 };
                 if (!std.mem.eql(u8, iv_name, builtin_name)) {
