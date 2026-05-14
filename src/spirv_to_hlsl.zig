@@ -135,7 +135,7 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .UConvert, .SConvert, .FConvert, .Bitcast,
         .SNegate, .FNegate,
         .IAdd, .FAdd, .ISub, .FSub, .IMul, .FMul,
-        .UDiv, .SDiv, .FDiv, .UMod, .SRem, .FRem, .FMod,
+        .UDiv, .SDiv, .FDiv, .UMod, .SRem, .SMod, .FRem, .FMod,
         .VectorTimesScalar, .MatrixTimesScalar,
         .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix,
         .Dot, .Transpose, .OuterProduct,
@@ -1610,7 +1610,7 @@ fn emitInstruction(
             const rhs = names.get(inst.words[4]) orelse "b";
             try w.print("    {s} {s} = {s} - {s} * floor({s} / {s});\n", .{ rt, result_name, lhs, rhs, lhs, rhs });
         },
-        .UMod, .SRem, .FRem => try emitBinOp(module, names, inst, "%", w, alloc),
+        .UMod, .SRem, .SMod, .FRem => try emitBinOp(module, names, inst, "%", w, alloc),
         .ShiftLeftLogical => try emitBinOp(module, names, inst, "<<", w, alloc),
         .ShiftRightLogical => try emitBinOp(module, names, inst, ">>", w, alloc),
 

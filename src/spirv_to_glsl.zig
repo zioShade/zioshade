@@ -1274,7 +1274,7 @@ fn emitInstruction(
                 names.get(inst.words[4]) orelse "b",
             });
         },
-        .UMod, .SRem => try emitBinOp(m, names, inst, "%", w, alloc),
+        .UMod, .SRem, .SMod => try emitBinOp(m, names, inst, "%", w, alloc),
         .FNegate, .SNegate => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = -{s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
@@ -1290,6 +1290,8 @@ fn emitInstruction(
         .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(m, names, inst, ">=", w, alloc),
         .LogicalOr => try emitBinOp(m, names, inst, "||", w, alloc),
         .LogicalAnd => try emitBinOp(m, names, inst, "&&", w, alloc),
+        .IsNan => try emitCall(m, names, inst, "isnan", w, alloc),
+        .IsInf => try emitCall(m, names, inst, "isinf", w, alloc),
         .LogicalNot => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = !{s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });

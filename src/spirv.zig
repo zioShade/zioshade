@@ -124,6 +124,7 @@ pub const Op = enum(u16) {
     FDiv = 136,
     UMod = 137,
     SRem = 138,
+    SMod = 139,
     FRem = 140,
     VectorTimesScalar = 142,
     MatrixTimesScalar = 143,
