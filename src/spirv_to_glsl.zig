@@ -1061,6 +1061,30 @@ fn emitWhileLoop(
                 }
                 continue;
             }
+            if (binst.op == .Switch) {
+                if (binst.words.len < 3) continue;
+                const sn = names.get(binst.words[1]) orelse "s";
+                const dl = binst.words[2];
+                const sml = bc_merge.get(bi);
+                if (sml) |smv| {
+                    try w.print("        switch ({s}) {{\n", .{sn});
+                    if (dl != smv) {
+                        try w.writeAll("        default:\n");
+                        bi = try emitBlock(m, names, decs, dl, smv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", true);
+                    }
+                    var wi: usize = 3;
+                    while (wi + 1 < binst.words.len) : (wi += 2) {
+                        const cv = binst.words[wi];
+                        const target = binst.words[wi + 1];
+                        if (target == smv) continue;
+                        try w.print("        case {d}:\n", .{cv});
+                        bi = try emitBlock(m, names, decs, target, smv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", true);
+                    }
+                    try w.writeAll("        }\n");
+                    if (label_map.get(smv)) |smi| { bi = smi; }
+                }
+                continue;
+            }
             try emitInstruction(m, names, decs, binst, w, alloc, is_frag, ovid);
         }
     }
@@ -1149,6 +1173,32 @@ fn emitBlock(
                 if (lm.get(nmv)) |nmi| { i = nmi; }
             } else {
                 try w.print("{s}    if ({s}) {{ /* */ }}\n", .{ indent, cn });
+            }
+            continue;
+        }
+        if (inst.op == .Switch) {
+            if (inst.words.len < 3) continue;
+            const sn = names.get(inst.words[1]) orelse "s";
+            const dl = inst.words[2];
+            const sml = bm.get(i);
+            if (sml) |smv| {
+                try w.print("{s}    switch ({s}) {{\n", .{ indent, sn });
+                if (dl != smv) {
+                    try w.print("{s}    default:\n", .{indent});
+                    i = try emitBlock(m, names, decs, dl, smv, lm, bm, w, alloc, is_frag, ovid, indent, true);
+                }
+                var wi: usize = 3;
+                while (wi + 1 < inst.words.len) : (wi += 2) {
+                    const cv = inst.words[wi];
+                    const target = inst.words[wi + 1];
+                    if (target == smv) continue;
+                    try w.print("{s}    case {d}:\n", .{ indent, cv });
+                    i = try emitBlock(m, names, decs, target, smv, lm, bm, w, alloc, is_frag, ovid, indent, true);
+                }
+                try w.print("{s}    }}\n", .{indent});
+                if (lm.get(smv)) |smi| { i = smi; }
+            } else {
+                try w.writeAll("    // switch TODO\n");
             }
             continue;
         }
