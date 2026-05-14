@@ -1611,3 +1611,21 @@ test "T24.3: continue and break in for-loop" {
     try assertContains(glsl, "break");
     try assertNotContains(glsl, "unhandled");
 }
+
+test "T25.1: OpSelect with bvec4 condition (mix not ternary)" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    bool b = gl_FragCoord.x > 128.0;
+        \\    bvec4 cond = bvec4(b, b, b, b);
+        \\    FragColor = mix(vec4(0.0), vec4(1.0), cond);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // bvec4 in Select should emit mix() not ternary
+    try assertContains(glsl, "mix(");
+    try assertNotContains(glsl, "?");
+    try assertNotContains(glsl, "unhandled");
+}
