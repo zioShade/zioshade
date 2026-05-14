@@ -157,12 +157,60 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 if (is_vector) {
                     try w.writeAll(swizzleChar(val));
                 } else if (base_is_cb and first_member) {
-                    try w.print("{s}_1._m{d}", .{cb_prefix, val});
+                    // Use member name for structs, _mN fallback for others
+                    if (cur_type) |tid| {
+                        const ti = getDef(m, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeStruct) {
+                                var mname_buf: [32]u8 = undefined;
+                                const mname = getMemberName(m, tid, val, &mname_buf);
+                                try w.print("{s}_1.{s}", .{ cb_prefix, mname });
+                            } else {
+                                try w.print("{s}_1._m{d}", .{ cb_prefix, val });
+                            }
+                        } else {
+                            try w.print("{s}_1._m{d}", .{ cb_prefix, val });
+                        }
+                    } else {
+                        try w.print("{s}_1._m{d}", .{ cb_prefix, val });
+                    }
                     first_member = false;
                 } else if (base_is_cb) {
-                    try w.print("._m{d}", .{val});
+                    // Use member name for structs, _mN for arrays/matrices
+                    if (cur_type) |tid| {
+                        const ti = getDef(m, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeStruct) {
+                                var mname_buf: [32]u8 = undefined;
+                                const mname = getMemberName(m, tid, val, &mname_buf);
+                                try w.print(".{s}", .{mname});
+                            } else {
+                                try w.print("._m{d}", .{val});
+                            }
+                        } else {
+                            try w.print("._m{d}", .{val});
+                        }
+                    } else {
+                        try w.print("._m{d}", .{val});
+                    }
                 } else {
-                    try w.print("[{d}]", .{val});
+                    // Non-cb: use member name for structs
+                    if (cur_type) |tid| {
+                        const ti = getDef(m, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeStruct) {
+                                var mname_buf: [32]u8 = undefined;
+                                const mname = getMemberName(m, tid, val, &mname_buf);
+                                try w.print(".{s}", .{mname});
+                            } else {
+                                try w.print("[{d}]", .{val});
+                            }
+                        } else {
+                            try w.print("[{d}]", .{val});
+                        }
+                    } else {
+                        try w.print("[{d}]", .{val});
+                    }
                 }
                 if (cur_type) |tid| {
                     const ti = getDef(m, tid);
