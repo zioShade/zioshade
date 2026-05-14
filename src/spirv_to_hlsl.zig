@@ -1353,15 +1353,43 @@ fn emitWhileLoopHLSL(
                 const ntl = binst.words[2];
                 const nfl = if (binst.words.len > 3) binst.words[3] else null;
                 const nml = bc_merge_map.get(bi);
+                // Check if true/false labels are trivial continue/break
+                const tl_is_trivial_continue = blk: { if (ntl == cont_lbl) break :blk true; const tli = label_map.get(ntl) orelse break :blk false; if (tli + 2 < module.instructions.len and module.instructions[tli].op == .Label and module.instructions[tli + 1].op == .Branch and module.instructions[tli + 1].words.len > 1 and module.instructions[tli + 1].words[1] == cont_lbl) break :blk true; break :blk false; };
+                const fl_is_trivial_continue = blk: { if (nfl == null) break :blk false; if (nfl.? == cont_lbl) break :blk true; const fli = label_map.get(nfl.?) orelse break :blk false; if (fli + 2 < module.instructions.len and module.instructions[fli].op == .Label and module.instructions[fli + 1].op == .Branch and module.instructions[fli + 1].words.len > 1 and module.instructions[fli + 1].words[1] == cont_lbl) break :blk true; break :blk false; };
+                const tl_is_trivial_break = blk: { if (ntl == merge_lbl) break :blk true; const tli2 = label_map.get(ntl) orelse break :blk false; if (tli2 + 2 < module.instructions.len and module.instructions[tli2].op == .Label and module.instructions[tli2 + 1].op == .Branch and module.instructions[tli2 + 1].words.len > 1 and module.instructions[tli2 + 1].words[1] == merge_lbl) break :blk true; break :blk false; };
+                const fl_is_trivial_break = blk: { if (nfl == null) break :blk false; if (nfl.? == merge_lbl) break :blk true; const fli2 = label_map.get(nfl.?) orelse break :blk false; if (fli2 + 2 < module.instructions.len and module.instructions[fli2].op == .Label and module.instructions[fli2 + 1].op == .Branch and module.instructions[fli2 + 1].words.len > 1 and module.instructions[fli2 + 1].words[1] == merge_lbl) break :blk true; break :blk false; };
                 if (nml) |nmv| {
                     const nhe = nfl != null and nfl.? != nmv;
-                    try w.print("        if ({s})\n        {{\n", .{ncn});
-                    bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
-                    if (nhe) {
-                        try w.writeAll("        } else {\n");
+                    if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe)) {
+                        try w.print("        if ({s}) continue;\n", .{ncn});
+                    } else if (tl_is_trivial_break and fl_is_trivial_continue) {
+                        try w.print("        if ({s}) break;\n", .{ncn});
+                        try w.writeAll("        continue;\n");
+                    } else if (tl_is_trivial_continue and nhe) {
+                        try w.print("        if ({s}) continue;\n", .{ncn});
                         bi = try emitBlock(module, names, decorations, nfl.?, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                    } else if (tl_is_trivial_break) {
+                        try w.print("        if ({s}) break;\n", .{ncn});
+                        if (nhe) {
+                            bi = try emitBlock(module, names, decorations, nfl.?, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                        }
+                    } else if (fl_is_trivial_continue) {
+                        try w.print("        if ({s})\n        {{\n", .{ncn});
+                        bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                        try w.writeAll("        } continue;\n");
+                    } else if (fl_is_trivial_break and !nhe) {
+                        try w.print("        if ({s})\n        {{\n", .{ncn});
+                        bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                        try w.writeAll("        }\n");
+                    } else {
+                        try w.print("        if ({s})\n        {{\n", .{ncn});
+                        bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                        if (nhe) {
+                            try w.writeAll("        } else {\n");
+                            bi = try emitBlock(module, names, decorations, nfl.?, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                        }
+                        try w.writeAll("        }\n");
                     }
-                    try w.writeAll("        }\n");
                     if (label_map.get(nmv)) |nmi| {
                         bi = nmi;
                     }
@@ -1415,7 +1443,7 @@ fn emitBlock(
 
         // Skip structural instructions
         if (inst.op == .Label or inst.op == .SelectionMerge or inst.op == .LoopMerge) continue;
-        if (inst.op == .Branch) continue; // branch to somewhere else (e.g., loop back-edge)
+        if (inst.op == .Branch) break; // branch to somewhere else (e.g., loop back-edge)
 
         // Handle nested BranchConditional
         if (inst.op == .BranchConditional) {
