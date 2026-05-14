@@ -2050,6 +2050,10 @@ fn emitInstruction(
         .Unreachable => {}, // no-op
         .BeginInvocationInterlockEXT => {}, // no-op in HLSL (use rasterizerOrdered views)
         .EndInvocationInterlockEXT => {},
+        .ReadClockKHR => {
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            try w.print("    {s} {s} = clock();\n", .{ rtt, names.get(inst.words[2]) orelse "t" });
+        },
         .ImageWrite => {
             // OpImageWrite: image, coordinate, texel
             const img = names.get(inst.words[1]) orelse "image";
