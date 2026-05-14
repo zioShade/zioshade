@@ -86,7 +86,20 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 if (is_vector) {
                     writer.writeAll(swizzleChar(val));
                 } else {
-                    writer.print("[{d}]", .{val});
+                    // Use member name for structs, [index] for arrays
+                    var used_name = false;
+                    if (cur_type) |tid| {
+                        const ti = getDef(m, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeStruct) {
+                                var mname_buf: [32]u8 = undefined;
+                                const mname = getMemberName(m, tid, val, &mname_buf);
+                                writer.print(".{s}", .{mname});
+                                used_name = true;
+                            }
+                        }
+                    }
+                    if (!used_name) writer.print("[{d}]", .{val});
                 }
                 if (cur_type) |tid| {
                     const ti = getDef(m, tid);
@@ -115,7 +128,22 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 const val = def.words[3];
                 const is_vector = if (cur_type) |tid| blk: { const ti = getDef(m, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
                 if (is_vector) { try buf.appendSlice(alloc, swizzleChar(val)); }
-                else { try buf.print(alloc, "[{d}]", .{val}); }
+                else {
+                    // Use member name for structs, [index] for arrays
+                    var used_name = false;
+                    if (cur_type) |tid| {
+                        const ti = getDef(m, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeStruct) {
+                                var mname_buf: [32]u8 = undefined;
+                                const mname = getMemberName(m, tid, val, &mname_buf);
+                                try buf.print(alloc, ".{s}", .{mname});
+                                used_name = true;
+                            }
+                        }
+                    }
+                    if (!used_name) try buf.print(alloc, "[{d}]", .{val});
+                }
                 if (cur_type) |tid| {
                     const ti = getDef(m, tid);
                     if (ti) |tinst| {
