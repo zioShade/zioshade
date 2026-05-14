@@ -971,7 +971,6 @@ fn emitFunction(
         var inner_type_id = p_inst.words[1];
         if (param_type_inst) |pti| {
             if (pti.op == .TypePointer and pti.words.len > 3) {
-                is_out_param = true;
                 inner_type_id = pti.words[3]; // pointee type
             }
         }
@@ -1370,6 +1369,19 @@ fn emitWhileLoopHLSL(
                 continue;
             }
             try emitInstruction(module, names, decorations, binst, w, alloc, is_fragment, output_var_id);
+        }
+    }
+    // Emit continue block (e.g., i++ in for-loops)
+    const cont_idx = label_map.get(cont_lbl) orelse module.instructions.len;
+    if (cont_idx < module.instructions.len) {
+        var ci2: usize = cont_idx + 1;
+        while (ci2 < module.instructions.len) : (ci2 += 1) {
+            const cinst = module.instructions[ci2];
+            if (cinst.op == .FunctionEnd) break;
+            if (cinst.op == .Label) break;
+            if (cinst.op == .Branch) break;
+            if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
+            try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, output_var_id);
         }
     }
 
