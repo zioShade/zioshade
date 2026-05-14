@@ -1466,6 +1466,9 @@ fn emitFunction(
             const out_name = names.get(output_var_id.?) orelse "_out";
             try w.print("    return {s};\n", .{out_name});
         }
+    } else if (is_fragment) {
+        // Empty fragment shader — return default value
+        try w.writeAll("    return float4(0.0, 0.0, 0.0, 0.0);\n");
     }
 
     try w.writeAll("}\n");
@@ -2713,7 +2716,7 @@ fn emitInstruction(
         },
         .Return => {
             // Skip bare return in fragment entry — we emit the output return at function end
-            if (is_fragment and output_var_id != null) {} else {
+            if (is_fragment) {} else {
                 try w.writeAll("    return;\n");
             }
         },
