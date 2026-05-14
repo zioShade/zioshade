@@ -2595,7 +2595,7 @@ fn emitInstruction(
         },
         .ImageQuerySizeLod => {
             // OpImageQuerySizeLod: result_type, result, image, lod
-            const rt = try hlslType(module, inst.words[1], names, alloc);
+            // HLSL GetDimensions uses out params, not return value
             const img_name = names.get(inst.words[3]) orelse "tex";
             const lod = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
             // Strip _sampler suffix to get texture name
@@ -2603,21 +2603,36 @@ fn emitInstruction(
             if (std.mem.endsWith(u8, img_name, "_sampler")) {
                 tex_name = img_name[0..img_name.len - "_sampler".len];
             }
-            try w.print("    {s} {s} = {s}.GetDimensions({s});\n", .{
-                rt, names.get(inst.words[2]) orelse "v", tex_name, lod,
-            });
+            const result_name = names.get(inst.words[2]) orelse "v";
+            // Determine dimension from result type
+            const rt_inst = getDef(module, inst.words[1]);
+            const is_scalar = rt_inst != null and rt_inst.?.op != .TypeVector;
+            if (is_scalar) {
+                try w.print("    uint {s}_w, {s}_levels; {s}.GetDimensions({s}, {s}_w, {s}_levels);\n", .{ result_name, result_name, tex_name, lod, result_name, result_name });
+                try w.print("    {s} {s} = {s}_w;\n", .{ try hlslType(module, inst.words[1], names, alloc), result_name, result_name });
+            } else {
+                try w.print("    uint {s}_w, {s}_h, {s}_levels; {s}.GetDimensions({s}, {s}_w, {s}_h, {s}_levels);\n", .{ result_name, result_name, result_name, tex_name, lod, result_name, result_name, result_name });
+                try w.print("    int2 {s} = int2({s}_w, {s}_h);\n", .{ result_name, result_name, result_name });
+            }
         },
         .ImageQuerySize => {
             // OpImageQuerySize: result_type, result, image (no lod)
-            const rt = try hlslType(module, inst.words[1], names, alloc);
+            // HLSL GetDimensions uses out params
             const img_name = names.get(inst.words[3]) orelse "tex";
             var tex_name: []const u8 = img_name;
             if (std.mem.endsWith(u8, img_name, "_sampler")) {
                 tex_name = img_name[0..img_name.len - "_sampler".len];
             }
-            try w.print("    {s} {s} = {s}.GetDimensions(0);\n", .{
-                rt, names.get(inst.words[2]) orelse "v", tex_name,
-            });
+            const result_name = names.get(inst.words[2]) orelse "v";
+            const rt_inst = getDef(module, inst.words[1]);
+            const is_scalar = rt_inst != null and rt_inst.?.op != .TypeVector;
+            if (is_scalar) {
+                try w.print("    uint {s}_w; {s}.GetDimensions({s}_w);\n", .{ result_name, tex_name, result_name });
+                try w.print("    {s} {s} = {s}_w;\n", .{ try hlslType(module, inst.words[1], names, alloc), result_name, result_name });
+            } else {
+                try w.print("    uint {s}_w, {s}_h; {s}.GetDimensions({s}_w, {s}_h);\n", .{ result_name, result_name, tex_name, result_name, result_name });
+                try w.print("    int2 {s} = int2({s}_w, {s}_h);\n", .{ result_name, result_name, result_name });
+            }
         },
         .ImageRead => {
             // OpImageRead: result_type, result, image, coordinate
