@@ -622,6 +622,47 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
         }
         if (resultIdFromOp(inst.op, inst.words)) |rid| { if (!names.contains(rid)) { const name = std.fmt.allocPrint(alloc, "v{}", .{counter}) catch continue; counter += 1; names.put(rid, name) catch {}; } }
     }
+
+    // Deduplicate function-local variable names
+    var func_var_ids_msl = std.AutoHashMap(u32, void).init(alloc);
+    defer func_var_ids_msl.deinit();
+    for (m.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Function) {
+                func_var_ids_msl.put(inst.words[2], {}) catch {};
+            }
+        }
+    }
+    var msl_fv_name_ids = std.StringHashMap(std.ArrayList(u32)).init(alloc);
+    defer {
+        var mfit = msl_fv_name_ids.iterator();
+        while (mfit.next()) |entry| {
+            entry.value_ptr.deinit(alloc);
+        }
+        msl_fv_name_ids.deinit();
+    }
+    var mfvniter = func_var_ids_msl.iterator();
+    while (mfvniter.next()) |entry| {
+        const id = entry.key_ptr.*;
+        const name = names.get(id) orelse continue;
+        const gop = msl_fv_name_ids.getOrPut(name) catch continue;
+        if (!gop.found_existing) {
+            gop.value_ptr.* = std.ArrayList(u32).initCapacity(alloc, 2) catch continue;
+        }
+        gop.value_ptr.append(alloc, id) catch {};
+    }
+    var msl_fvdniter = msl_fv_name_ids.iterator();
+    while (msl_fvdniter.next()) |entry| {
+        const mname = entry.key_ptr.*;
+        const mids = entry.value_ptr.*;
+        if (mids.items.len <= 1) continue;
+        for (mids.items, 0..) |mid, mi| {
+            if (mi == 0) continue;
+            const mnew = std.fmt.allocPrint(alloc, "{s}_{d}", .{ mname, mid }) catch continue;
+            names.put(mid, mnew) catch {};
+        }
+    }
 }
 
 fn collectDecorations(alloc: std.mem.Allocator, m: *const ParsedModule, decs: *std.AutoHashMap(u32, std.ArrayList(DecorationEntry))) !void {
