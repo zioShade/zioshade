@@ -3363,6 +3363,7 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
             break :blk switch (val) {
                 // Correct GLSLstd450 instruction IDs (per SPIR-V spec)
                 1 => "round",
+                2 => "round", // RoundEven — HLSL round() rounds to even
                 3 => "trunc",
                 4 => "abs",
                 5 => "abs",        // SAbs
