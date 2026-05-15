@@ -13798,3 +13798,23 @@ test "HLSL: sample-parameter gl_SampleMaskIn gl_SampleMask" {
     try std.testing.expect(hlsl.len > 0);
 }
 
+test "HLSL: sample-parameter with gl_SampleMaskIn[0]" {
+    const src =
+        \\#version 310 es
+        \\#extension GL_OES_sample_variables : require
+        \\precision mediump float;
+        \\precision highp int;
+        \\layout(location = 0) out vec2 FragColor;
+        \\void main() {
+        \\    FragColor = (gl_SamplePosition + vec2(float(gl_SampleMaskIn[0]))) + vec2(float(gl_SampleID));
+        \\    gl_SampleMask[0] = 1;
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    std.debug.print("\n=== sample-param-mask HLSL ===\n{s}\n", .{hlsl});
+    try std.testing.expect(hlsl.len > 0);
+}
+
