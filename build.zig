@@ -134,6 +134,21 @@ pub fn build(b: *std.Build) void {
     msl_test_step.dependOn(&run_msl_tests.step);
     test_step.dependOn(&run_msl_tests.step);
 
+    // WGSL backend tests — run with: zig build test-wgsl
+    const wgsl_test_step = b.step("test-wgsl", "Run WGSL backend tests (GLSL → SPIR-V → WGSL pipeline)");
+    const wgsl_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/wgsl_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    wgsl_test_mod.addImport("glslpp", glslpp_mod);
+    const run_wgsl_tests = b.addRunArtifact(b.addTest(.{
+        .name = "wgsl-tests",
+        .root_module = wgsl_test_mod,
+    }));
+    wgsl_test_step.dependOn(&run_wgsl_tests.step);
+    test_step.dependOn(&run_wgsl_tests.step);
+
     // Reference correctness tests - run with: zig build test-reference
     // Uses spirv-cross test shaders (Apache-2.0) + hand-crafted patterns
     const reference_test_step = b.step("test-reference", "Run reference correctness tests");

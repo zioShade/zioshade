@@ -156,9 +156,6 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .GroupNonUniformShuffle, .GroupNonUniformShuffleXor,
         .GroupNonUniformShuffleUp, .GroupNonUniformShuffleDown,
         .SubgroupAllKHR, .SubgroupAnyKHR,
-        .ImageSampleDrefImplicitLod, .ImageSampleDrefExplicitLod,
-        .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod,
-        .ImageDrefGather, .ImageQueryLod, .ImageQueryLevels, .ImageQuerySamples,
         => if (words.len > 2) words[2] else null,
 
         else => null,

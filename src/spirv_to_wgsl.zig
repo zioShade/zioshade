@@ -7,7 +7,7 @@ const common = @import("spirv_cross_common.zig");
 
 const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
-const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
+const DecorationEntry = common.DecorationEntry;
 
 pub const WgslCompileOptions = struct {};
 
@@ -267,14 +267,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             if (sc == .Output) {
                 const location = getDecVal(&decorations, inst.words[2], .location);
                 if (location != null) {
-                    try output_vars.append(inst.words[2]);
+                    try output_vars.append(arena, inst.words[2]);
                     if (output_var_id == null) output_var_id = inst.words[2];
                 }
             }
             if (sc == .Input) {
                 const location = getDecVal(&decorations, inst.words[2], .location);
                 if (location != null) {
-                    try input_vars.append(.{ .id = inst.words[2], .type_id = inst.words[1] });
+                    try input_vars.append(arena, .{ .id = inst.words[2], .type_id = inst.words[1] });
                 }
             }
         }
@@ -322,7 +322,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 const set = getDecVal(&decorations, result_id, .descriptor_set) orelse 0;
                 const name = names.get(result_id) orelse "Globals";
                 const is_ssbo = hasDec(&decorations, pointee_type, .buffer_block);
-                try cbuffers.append(.{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = is_ssbo });
+                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = is_ssbo });
             },
             .UniformConstant => {
                 const pointee_inst = getDef(&module, pointee_type) orelse continue;
@@ -333,11 +333,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 switch (pointee_inst.op) {
                     .TypeSampledImage => {
                         const img_type_id = if (pointee_inst.words.len > 2) pointee_inst.words[2] else pointee_type;
-                        try textures.append(.{ .name = name, .binding = binding * 2 + set, .image_type_id = img_type_id, .is_storage = false });
+                        try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = img_type_id, .is_storage = false });
                     },
                     .TypeImage => {
                         if (pointee_inst.words.len > 7 and pointee_inst.words[7] == 2) is_storage = true;
-                        try textures.append(.{ .name = name, .binding = binding * 2 + set, .image_type_id = pointee_type, .is_storage = is_storage });
+                        try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = pointee_type, .is_storage = is_storage });
                     },
                     else => continue,
                 }
@@ -422,7 +422,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n", .{ group, binding, tex.name, tex_type });
             // Emit paired sampler
             const sampler_name = try std.fmt.allocPrint(arena, "{s}_sampler", .{tex.name});
-            try sampler_names.append(.{ .name = sampler_name, .binding = tex.binding + 1 });
+            try sampler_names.append(arena, .{ .name = sampler_name, .binding = tex.binding + 1 });
             try w.print("@group({d}) @binding({d})\nvar {s}: sampler;\n\n", .{ group, binding + 1, sampler_name });
         }
     }
@@ -546,12 +546,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const ptr = names.get(inst.words[3]) orelse "var";
                 const ptr_inst = getDef(module, inst.words[3]);
                 var expr: []const u8 = ptr;
+                var expr_allocated = false;
                 if (ptr_inst) |pi| {
                     if (pi.op == .AccessChain) {
                         expr = try buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc);
+                        expr_allocated = true;
                     }
                 }
                 try w.print("    var {s}: {s} = {s};\n", .{ result_name, rt, expr });
+                if (expr_allocated) alloc.free(expr);
             },
 
             // Store
@@ -560,12 +563,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const val = names.get(inst.words[2]) orelse "0";
                 const ptr_inst = getDef(module, inst.words[1]);
                 var expr: []const u8 = ptr;
+                var expr_allocated = false;
                 if (ptr_inst) |pi| {
                     if (pi.op == .AccessChain) {
                         expr = try buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc);
+                        expr_allocated = true;
                     }
                 }
                 try w.print("    {s} = {s};\n", .{ expr, val });
+                if (expr_allocated) alloc.free(expr);
             },
 
             // AccessChain
