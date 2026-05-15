@@ -788,6 +788,14 @@ fn getDecorationValue(decorations: *const std.AutoHashMap(u32, std.ArrayList(Dec
     return null;
 }
 
+fn hasDecorationRaw(decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, raw_val: u32) bool {
+    const list = decorations.get(id) orelse return false;
+    for (list.items) |entry| {
+        if (@intFromEnum(entry.decoration) == raw_val) return true;
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Resource collection
 // ---------------------------------------------------------------------------
@@ -1454,12 +1462,69 @@ fn emitFunction(
                     try w.print("float2 {s}", .{iv_name});
                 } else if (bi == .sample_id) {
                     try w.print("uint {s} : {s}", .{ iv_name, semantic });
+                } else if (bi == .bary_coord_khr) {
+                    // gl_BaryCoordEXT → float3 SV_Barycentrics (perspective)
+                    try w.print("float3 {s} : {s}", .{ iv_name, semantic });
+                } else if (bi == .bary_coord_no_persp_khr) {
+                    // gl_BaryCoordNoPerspEXT → noperspective float3 SV_Barycentrics
+                    try w.print("noperspective float3 {s} : {s}", .{ iv_name, semantic });
                 } else {
                     try w.print("{s} {s} : {s}", .{ iv_type, iv_name, semantic });
                 }
             } else {
                 const loc = getDecorationValue(decorations, ivid, .location);
-                if (loc) |l| {
+                // Check for PerVertexKHR/PerVertexNV decoration (barycentric per-vertex inputs)
+                const is_per_vertex = hasDecoration(decorations, ivid, .per_vertex_khr) or hasDecoration(decorations, ivid, .per_vertex_nv);
+                if (is_per_vertex) {
+                    // Emit as nointerpolation array: nointerpolation float2 vUV[3] : TEXCOORD0
+                    // Get pointee type (should be TypeArray)
+                    const pointee = resolvePointeeType(module, ivid);
+                    if (pointee) |pt| {
+                        const pt_inst = getDef(module, pt);
+                        if (pt_inst) |pi| {
+                            if (pi.op == .TypeArray and pi.words.len > 3) {
+                                const elem_type = try hlslType(module, pi.words[2], names, alloc);
+                                const arr_len = pi.words[3];
+                                const len_inst = getDef(module, arr_len);
+                                const len_val: u32 = if (len_inst) |li| blk: {
+                                    if (li.op == .Constant and li.words.len > 3) break :blk li.words[3];
+                                    break :blk 3; // default for per-vertex
+                                } else 3;
+                                if (loc) |l| {
+                                    if (!first_input) try w.writeAll(", ");
+                                    first_input = false;
+                                    try w.print("nointerpolation {s} {s}[{d}] : TEXCOORD{d}", .{ elem_type, iv_name, len_val, l });
+                                } else {
+                                    if (!first_input) try w.writeAll(", ");
+                                    first_input = false;
+                                    try w.print("nointerpolation {s} {s}[{d}]", .{ elem_type, iv_name, len_val });
+                                }
+                            } else {
+                                // Not an array — emit as nointerpolation scalar
+                                if (loc) |l| {
+                                    if (!first_input) try w.writeAll(", ");
+                                    first_input = false;
+                                    try w.print("nointerpolation {s} {s} : TEXCOORD{d}", .{ iv_type, iv_name, l });
+                                } else {
+                                    if (!first_input) try w.writeAll(", ");
+                                    first_input = false;
+                                    try w.print("nointerpolation {s} {s}", .{ iv_type, iv_name });
+                                }
+                            }
+                        }
+                    } else {
+                        // Fallback: no pointee type info
+                        if (loc) |l| {
+                            if (!first_input) try w.writeAll(", ");
+                            first_input = false;
+                            try w.print("nointerpolation {s} {s} : TEXCOORD{d}", .{ iv_type, iv_name, l });
+                        } else {
+                            if (!first_input) try w.writeAll(", ");
+                            first_input = false;
+                            try w.print("nointerpolation {s} {s}", .{ iv_type, iv_name });
+                        }
+                    }
+                } else if (loc) |l| {
                     if (!first_input) try w.writeAll(", ");
                     first_input = false;
                     try w.print("{s} {s} : TEXCOORD{d}", .{ iv_type, iv_name, l });
@@ -1571,6 +1636,8 @@ fn builtInToSemantic(b: u32) []const u8 {
         .sample_id => "SV_SampleIndex",
         .sample_mask => "SV_Coverage",
         .sample_position => "SV_Position",
+        .bary_coord_khr => "SV_Barycentrics",
+        .bary_coord_no_persp_khr => "SV_Barycentrics",
         else => "TEXCOORD0",
     };
 }
