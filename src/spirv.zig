@@ -43,6 +43,7 @@ pub const Op = enum(u16) {
     Store = 62,
     CopyMemory = 63,
     CopyObject = 83,
+    CopyLogical = 400,
     AccessChain = 65,
     Decorate = 71,
     MemberDecorate = 72,

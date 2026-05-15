@@ -1409,6 +1409,29 @@ fn emitFunction(
     if (is_fragment and module.early_fragment_tests) {
         try w.writeAll("[earlydepthstencil]\n");
     }
+    // Emit struct forward declarations for per-vertex input block types
+    if (is_fragment) {
+        var local_structs = std.AutoHashMap(u32, void).init(alloc);
+        defer local_structs.deinit();
+        var local_names = std.StringHashMap(void).init(alloc);
+        defer local_names.deinit();
+        for (input_var_ids.items) |ivid| {
+            const is_per_vertex = hasDecoration(decorations, ivid, .per_vertex_khr) or hasDecoration(decorations, ivid, .per_vertex_nv);
+            if (is_per_vertex) {
+                const pointee = resolvePointeeType(module, ivid);
+                if (pointee) |pt| {
+                    const pt_inst = getDef(module, pt);
+                    if (pt_inst) |pi| {
+                        if (pi.op == .TypeArray and pi.words.len > 2) {
+                            hlslEmitOneStructForwardDecl(module, names, pi.words[2], w, alloc, &local_structs, &local_names) catch {};
+                        } else if (pi.op == .TypeStruct) {
+                            hlslEmitOneStructForwardDecl(module, names, pt, w, alloc, &local_structs, &local_names) catch {};
+                        }
+                    }
+                }
+            }
+        }
+    }
     // Emit Private storage class variables as static globals
     for (module.instructions) |inst| {
         if (inst.op == .Variable and inst.words.len >= 4) {
@@ -2242,8 +2265,8 @@ fn emitInstruction(
             try w.print(" = {s};\n", .{obj_name});
         },
 
-        .CopyObject => {
-            // OpCopyObject: just alias the source ID to the result ID
+        .CopyObject, .CopyLogical => {
+            // OpCopyObject/OpCopyLogical: just alias the source ID to the result ID
             if (inst.words.len < 4) return;
             const result_id = inst.words[2];
             const source_id = inst.words[3];
@@ -2262,6 +2285,20 @@ fn emitInstruction(
             try w.writeAll("    ");
             try writeResolvePointer(module, names, inst.words[1], w);
             try w.writeAll(" = ");
+            // Check if source is a zero constant and target is a struct
+            const src_name = names.get(inst.words[2]) orelse "0";
+            if (std.mem.eql(u8, src_name, "0")) {
+                // Check if target type is a struct
+                const target_type = resolvePointeeType(module, inst.words[1]);
+                if (target_type) |tt| {
+                    const tt_inst = getDef(module, tt);
+                    if (tt_inst != null and tt_inst.?.op == .TypeStruct) {
+                        try w.writeAll("{}"); // struct zero-init
+                        try w.writeAll(";\n");
+                        return;
+                    }
+                }
+            }
             try writeResolvePointer(module, names, inst.words[2], w);
             try w.writeAll(";\n");
         },
