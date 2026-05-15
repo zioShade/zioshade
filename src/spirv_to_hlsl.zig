@@ -1375,6 +1375,12 @@ fn emitFunction(
     if (is_fragment) {
         if (output_vars.items.len > 1) {
             try w.writeAll("_MRT_OUT main(");
+        } else if (output_vars.items.len == 1) {
+            // Use the actual output variable type
+            const ov = output_vars.items[0];
+            const ov_inst = getDef(module, ov.id) orelse undefined;
+            const ov_type = try hlslType(module, ov_inst.words[1], names, alloc);
+            try w.print("{s} main(", .{ov_type});
         } else {
             try w.writeAll("float4 main(");
         }
