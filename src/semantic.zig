@@ -1881,7 +1881,6 @@ const Analyzer = struct {
                 try self.emitLabel(merge_label);
                 self.cache_globals = true; // loop merge dominates
 
-
                 self.popScope();
             },
             .while_stmt => {
