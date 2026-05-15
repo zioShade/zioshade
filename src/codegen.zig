@@ -425,6 +425,22 @@ const Codegen = struct {
         try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
         try self.emitWord(@intFromEnum(spirv.Capability.shader));
 
+        // Check if sample-related builtins are used → emit SampleRateShading capability
+        var has_sample_builtins = false;
+        for (self.module.globals) |global| {
+            if (std.mem.eql(u8, global.name, "gl_SampleID") or
+                std.mem.eql(u8, global.name, "gl_SamplePosition") or
+                std.mem.eql(u8, global.name, "gl_SampleMaskIn") or
+                std.mem.eql(u8, global.name, "gl_SampleMask")) {
+                has_sample_builtins = true;
+                break;
+            }
+        }
+        if (has_sample_builtins) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.sample_rate_shading));
+        }
+
         // Mesh/Task shader capabilities
         if (self.stage == .mesh or self.stage == .task) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
@@ -2606,6 +2622,19 @@ const Codegen = struct {
             }
             if (std.mem.eql(u8, global.name, "gl_IncomingRayFlagsEXT")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.incoming_ray_flags_khr));
+            }
+            // Sample-related builtins
+            if (std.mem.eql(u8, global.name, "gl_SampleID")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.sample_id));
+            }
+            if (std.mem.eql(u8, global.name, "gl_SamplePosition")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.sample_position));
+            }
+            if (std.mem.eql(u8, global.name, "gl_SampleMaskIn")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.sample_mask));
+            }
+            if (std.mem.eql(u8, global.name, "gl_SampleMask")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.sample_mask));
             }
             // Skip BuiltIn decoration for builtins requiring extra capabilities
             // gl_SampleMaskIn, gl_SamplePosition → SampleRateShading
