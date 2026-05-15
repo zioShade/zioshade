@@ -13853,3 +13853,14 @@ test "HLSL: barycentric-nv from SPIR-V binary" {
     std.debug.print("\n=== barycentric-nv HLSL ===\n{s}\n", .{hlsl});
     try std.testing.expect(hlsl.len > 0);
 }
+
+test "HLSL: selection-block-dominator from SPIR-V binary" {
+    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/sel.spv", 1024 * 1024);
+    defer alloc.free(spv_data);
+    const spv_u32_len = spv_data.len / 4;
+    const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    std.debug.print("\n=== selection-block-dominator HLSL ===\n{s}\n", .{hlsl});
+    try std.testing.expect(hlsl.len > 0);
+}
