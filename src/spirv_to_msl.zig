@@ -17,15 +17,7 @@ const MemberKey = struct { struct_id: u32, member_index: u32 };
 // ---- Helpers ----
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction { if (id >= m.id_defs.len) return null; const i = m.id_defs[id] orelse return null; if (i >= m.instructions.len) return null; return m.instructions[i]; }
 fn getMemberName(m: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
-    for (m.instructions) |inst| {
-        if (inst.op == .MemberName and inst.words.len >= 4 and inst.words[1] == struct_id and inst.words[2] == member_idx) {
-            var name_len: usize = 0;
-            for (inst.words[3..]) |w| { const bytes = std.mem.asBytes(&w); for (bytes) |b| { if (b == 0) break; if (name_len < buf.len - 1) { buf[name_len] = b; name_len += 1; } } }
-            return buf[0..name_len];
-        }
-    }
-    const fallback = std.fmt.bufPrint(buf, "_m{d}", .{member_idx}) catch "_m0";
-    return fallback;
+    return common.commonGetMemberName(m.instructions, struct_id, member_idx, buf, "_m");
 }
 fn swizzleChar(i: u32) []const u8 { return switch(i){ 0=>".x",1=>".y",2=>".z",3=>".w",else=>".x"}; }
 fn parseLitStr(alloc: std.mem.Allocator, words: []const u32) ![]const u8 { var buf = try std.ArrayList(u8).initCapacity(alloc, words.len*4); for(words)|word|{const bytes:[4]u8=@bitCast(word);for(bytes)|c|{if(c==0)break;buf.appendAssumeCapacity(c);}} return buf.toOwnedSlice(alloc); }

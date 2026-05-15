@@ -727,25 +727,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
 }
 
 fn getMemberName(m: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
-    for (m.instructions) |inst| {
-        if (inst.op == .MemberName and inst.words.len >= 4 and inst.words[1] == struct_id and inst.words[2] == member_idx) {
-            const name_start: usize = 3;
-            var name_len: usize = 0;
-            for (inst.words[name_start..]) |w| {
-                const bytes = std.mem.asBytes(&w);
-                for (bytes) |b| {
-                    if (b == 0) break;
-                    if (name_len < buf.len - 1) {
-                        buf[name_len] = b;
-                        name_len += 1;
-                    }
-                }
-            }
-            if (name_len > 0) return buf[0..name_len];
-        }
-    }
-    const fallback = std.fmt.bufPrint(buf, "m{d}", .{member_idx}) catch "m";
-    return fallback;
+    return common.commonGetMemberName(m.instructions, struct_id, member_idx, buf, "m");
 }
 
 fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, cb_name: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
