@@ -1,20 +1,20 @@
 #version 450
 
-layout(location = 0) in float u;
+layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 fragColor;
 
 void main()
 {
-    // Test logical ops: &&, ||, !
-    bool a = u > 0.3;
-    bool b = u < 0.7;
+    // Test logical operations
+    bool a = uv.x > 0.5;
+    bool b = uv.y > 0.5;
     bool c = a && b;
     bool d = a || b;
     bool e = !a;
-    float result = 0.0;
-    if (c) result += 0.25;
-    if (d) result += 0.25;
-    if (e) result += 0.25;
-    if (!c && d) result += 0.25;
-    fragColor = vec4(result);
+    fragColor = vec4(
+        c ? 1.0 : 0.0,
+        d ? 1.0 : 0.0,
+        e ? 1.0 : 0.0,
+        1.0
+    );
 }
