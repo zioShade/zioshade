@@ -219,22 +219,7 @@ fn resolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
 
 // ---- GLSL type resolution ----
 fn getArraySuffix(m: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
-    const ptr_inst = getDef(m, ptr_type_id) orelse return "";
-    if (ptr_inst.op != .TypePointer or ptr_inst.words.len <= 3) return "";
-    const pointee_id = ptr_inst.words[3];
-    const pt_inst = getDef(m, pointee_id) orelse return "";
-    if (pt_inst.op == .TypeArray and pt_inst.words.len > 3) {
-        const len_id = pt_inst.words[3];
-        const len_def = getDef(m, len_id);
-        if (len_def) |ld| {
-            if (ld.op == .Constant and ld.words.len > 3) {
-                var buf: [32]u8 = undefined;
-                const s = std.fmt.bufPrint(&buf, "[{d}]", .{ld.words[3]}) catch return "";
-                return try std.heap.page_allocator.dupe(u8, s);
-            }
-        }
-    }
-    return "";
+    return common.commonGetArraySuffix(m.instructions, m.id_defs, ptr_type_id, false);
 }
 
 fn glslType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
