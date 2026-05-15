@@ -5309,8 +5309,11 @@ const Analyzer = struct {
                     .f16vec2, .f16vec3, .f16vec4 => .float16,
                     else => if (result_ty == .array) result_ty.array.base.* else result_ty, // mat types, arrays etc
                 };
-                const converted_ids = try self.alloc.alloc(u32, arg_tids.items.len);
-                defer self.alloc.free(converted_ids);
+                // Build flattened component list — expand vector args into scalar components
+                // SPIR-V OpCompositeConstruct for vectors requires all-scalar operands
+                var flat_ids = std.ArrayListUnmanaged(u32).empty;
+                flat_ids.ensureTotalCapacity(self.alloc, arg_tids.items.len * 4) catch return error.OutOfMemory;
+                defer flat_ids.deinit(self.alloc);
                 for (arg_tids.items, 0..) |tid, i| {
                     var arg_id = tid.id;
                     const arg_ty = tid.ty;
@@ -5334,7 +5337,7 @@ const Analyzer = struct {
                                 const val: u32 = @intCast(child.data.int_val);
                                 const fval: f32 = @floatFromInt(val);
                                 arg_id = try self.getConstFloat(fval);
-                                converted_ids[i] = arg_id;
+                                flat_ids.append(self.alloc, arg_id) catch return error.OutOfMemory;
                                 continue;
                             }
                         }
@@ -5345,7 +5348,7 @@ const Analyzer = struct {
                                 const fval: f32 = @floatCast(child.data.float_val);
                                 const ival: u32 = @intFromFloat(fval);
                                 arg_id = try self.getConstInt(ival, if (result_scalar == .uint) .uint else .int);
-                                converted_ids[i] = arg_id;
+                                flat_ids.append(self.alloc, arg_id) catch return error.OutOfMemory;
                                 continue;
                             }
                         }
@@ -5399,7 +5402,20 @@ const Analyzer = struct {
                         } else result_scalar;
                         arg_id = try self.emitPureOp(conv_tag, conv_ops, conv_result_ty);
                     }
-                    converted_ids[i] = arg_id;
+                    // Flatten vector arguments into scalar components
+                    // Only for vector result types (vec2/vec3/vec4) — arrays/structs keep vectors as-is
+                    if (result_ty.isVector() and arg_ty.isVector()) {
+                        const n = arg_ty.numComponents();
+                        for (0..n) |ci| {
+                            const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            ext_ops[0] = .{ .id = arg_id };
+                            ext_ops[1] = .{ .literal_int = @intCast(ci) };
+                            const ext_id = try self.emitPureOp(.composite_extract, ext_ops, result_scalar);
+                            flat_ids.append(self.alloc, ext_id) catch return error.OutOfMemory;
+                        }
+                    } else {
+                        flat_ids.append(self.alloc, arg_id) catch return error.OutOfMemory;
+                    }
                 }
 
                 // Check if all args are integer literals and result is an int/uint vector → constant_composite
@@ -5525,11 +5541,10 @@ const Analyzer = struct {
                 }
 
                 // Allocate operand array
-                const operands = try self.alloc.alloc(ir.Instruction.Operand, converted_ids.len);
-                for (converted_ids, 0..) |cid, i| {
+                const operands = try self.alloc.alloc(ir.Instruction.Operand, flat_ids.items.len);
+                for (flat_ids.items, 0..) |cid, i| {
                     operands[i] = .{ .id = cid };
                 }
-                // converted_ids freed by defer above
 
                 // Check if all operands are constants — if so, check cache for dedup
                 var all_const = true;
