@@ -284,9 +284,33 @@ pub fn spirvToHLSL(
         binding += options.binding_shift;
         if (binding < 0) binding = 0;
         // TODO: SSBO (cb.is_ssbo) needs RWStructuredBuffer for writable access
-        try w.print("cbuffer {s} : register(b{d})\n{{\n", .{ cb.name, binding });
-        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa);
-        try w.writeAll("};\n\n");
+        if (cb.is_ssbo) {
+            // SSBO: emit as RWStructuredBuffer<StructType> or ByteAddressBuffer
+            // For shaders with interlock, use RasterizerOrderedByteAddressBuffer
+            const has_interlock = blk: {
+                for (module.instructions) |inst| {
+                    if (inst.op == .BeginInvocationInterlockEXT or inst.op == .EndInvocationInterlockEXT) break :blk true;
+                }
+                break :blk false;
+            };
+            // Strip __ssbo_buf__ prefix from the name for emission
+            const clean_name = if (std.mem.startsWith(u8, cb.name, "__ssbo_buf__")) cb.name["__ssbo_buf__".len..] else cb.name;
+            if (has_interlock) {
+                const uav_binding: u32 = @intCast(binding);
+                try w.print("globallycoherent RasterizerOrderedByteAddressBuffer {s} : register(u{d});\n\n", .{ clean_name, uav_binding });
+            } else {
+                const struct_name = blk2: {
+                    const struct_inst = getDef(&module, cb.type_id);
+                    break :blk2 if (struct_inst != null and struct_inst.?.op == .TypeStruct) names.get(struct_inst.?.words[1]) orelse "Struct" else "Struct";
+                };
+                const uav_binding: u32 = @intCast(binding);
+                try w.print("RWStructuredBuffer<{s}> {s} : register(u{d});\n\n", .{ struct_name, clean_name, uav_binding });
+            }
+        } else {
+            try w.print("cbuffer {s} : register(b{d})\n{{\n", .{ cb.name, binding });
+            try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa);
+            try w.writeAll("};\n\n");
+        }
     }
 
     // Emit textures
@@ -302,7 +326,20 @@ pub fn spirvToHLSL(
     for (textures.items) |tex| {
         if (tex.is_storage) {
             // Storage images use UAV register space (u#)
-            try w.print("{s} {s} : register(u{d});\n", .{ tex.hlsl_type, tex.name, tex.binding });
+            // For interlock shaders, use RasterizerOrdered variants
+            const has_interlock = blk: {
+                for (module.instructions) |inst2| {
+                    if (inst2.op == .BeginInvocationInterlockEXT or inst2.op == .EndInvocationInterlockEXT) break :blk true;
+                }
+                break :blk false;
+            };
+            if (has_interlock) {
+                var hlsl_type = tex.hlsl_type;
+                if (std.mem.startsWith(u8, hlsl_type, "RW")) hlsl_type = hlsl_type[2..];
+                try w.print("RasterizerOrdered{s} {s} : register(u{d});\n", .{ hlsl_type, tex.name, tex.binding });
+            } else {
+                try w.print("{s} {s} : register(u{d});\n", .{ tex.hlsl_type, tex.name, tex.binding });
+            }
         } else {
             try w.print("{s} {s} : register(t{d});\n", .{ tex.hlsl_type, tex.name, tex.binding });
             if (has_dref_gather) {
@@ -767,13 +804,20 @@ fn collectResources(
         const pointee_type = ptr_inst.words[3];
 
         switch (sc) {
-            .Uniform => {
+            .Uniform, .StorageBuffer => {
                 const binding = getDecorationValue(decorations, result_id, .binding) orelse 0;
-                const name = names.get(result_id) orelse "Globals";
-                // Check if this is an SSBO (BufferBlock decoration on struct type)
-                const is_ssbo = hasDecoration(decorations, pointee_type, .buffer_block);
+                const raw_name = names.get(result_id) orelse "Globals";
+                // Check if this is an SSBO (BufferBlock decoration on struct type, or StorageBuffer class)
+                const is_ssbo = hasDecoration(decorations, pointee_type, .buffer_block) or sc == .StorageBuffer;
+                // For SSBO, we need to save the clean name before tagging
+                const cb_name: []const u8 = if (is_ssbo) alloc.dupe(u8, raw_name) catch "Globals" else raw_name;
+                // Tag SSBO variable name with __ssbo_buf__ prefix so access builders know
+                if (is_ssbo) {
+                    const tagged = std.fmt.allocPrint(alloc, "__ssbo_buf__{s}", .{raw_name}) catch cb_name;
+                    if (names.fetchPut(result_id, tagged) catch null) |old| alloc.free(old.value);
+                }
                 cbuffers.append(alloc, .{
-                    .name = name,
+                    .name = cb_name,
                     .type_id = pointee_type,
                     .binding = binding,
                     .is_ssbo = is_ssbo,
@@ -1890,7 +1934,7 @@ fn emitInstruction(
                 try w.print("    {s} {s}{s};\n", .{ type_name, names.get(result_id) orelse "var", arr_suffix });
                 return;
             }
-            if (sc == .Input or sc == .Output or sc == .Uniform or sc == .UniformConstant) return;
+            if (sc == .Input or sc == .Output or sc == .Uniform or sc == .StorageBuffer or sc == .UniformConstant) return;
             const result_id = inst.words[2];
             const type_name = try hlslType(module, inst.words[1], names, alloc);
             const arr_suffix = try hlslGetArraySuffix(module, inst.words[1]);
@@ -3058,11 +3102,14 @@ fn writeResolvePointer(module: *const ParsedModule, names: *std.AutoHashMap(u32,
 }
 
 fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
-    const base_name = names.get(base_id) orelse "base";
-    if (indices.len == 0) { try w.writeAll(base_name); return; }
-    const base_is_cb = isUniformVariable(module, base_id);
-    const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
-    if (!base_is_cb) try w.writeAll(base_name);
+    const base_name_raw = names.get(base_id) orelse "base";
+    if (indices.len == 0) { try w.writeAll(base_name_raw); return; }
+    // Check if base is an SSBO (tagged with __ssbo_buf__ prefix)
+    const is_ssbo = std.mem.startsWith(u8, base_name_raw, "__ssbo_buf__");
+    const base_name = if (is_ssbo) base_name_raw["__ssbo_buf__".len..] else base_name_raw;
+    const base_is_cb = isUniformVariable(module, base_id) and !is_ssbo;
+    const cb_prefix = if (base_is_cb) base_name else "";
+    if (is_ssbo) try w.print("{s}[0]", .{base_name}) else if (!base_is_cb) try w.writeAll(base_name);
     var cur_type: ?u32 = resolvePointeeType(module, base_id);
     var first_member = true;
     for (indices) |index_id| {
@@ -3149,18 +3196,24 @@ fn resolvePointer(module: *const ParsedModule, names: *std.AutoHashMap(u32, []co
 }
 
 fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
-    const base_name = names.get(base_id) orelse "base";
+    const base_name_raw = names.get(base_id) orelse "base";
 
-    if (indices.len == 0) return try alloc.dupe(u8, base_name);
+    if (indices.len == 0) return try alloc.dupe(u8, base_name_raw);
+
+    // Check if base is an SSBO (tagged with __ssbo_buf__ prefix)
+    const is_ssbo = std.mem.startsWith(u8, base_name_raw, "__ssbo_buf__");
+    const base_name = if (is_ssbo) base_name_raw["__ssbo_buf__".len..] else base_name_raw;
 
     // Check if base is a cbuffer/UBO variable (Uniform storage class)
     // In HLSL, cbuffer members are accessed using cbufferName_mN prefix
-    const base_is_cbuffer = isUniformVariable(module, base_id);
-    const cbuffer_prefix = if (base_is_cbuffer) names.get(base_id) orelse "Globals" else "";
+    const base_is_cbuffer = isUniformVariable(module, base_id) and !is_ssbo;
+    const cbuffer_prefix = if (base_is_cbuffer) base_name else "";
 
     var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
     defer buf.deinit(alloc);
-    if (!base_is_cbuffer) {
+    if (is_ssbo) {
+        try buf.print(alloc, "{s}[0]", .{base_name});
+    } else if (!base_is_cbuffer) {
         try buf.appendSlice(alloc, base_name);
     }
 
@@ -3271,7 +3324,7 @@ fn isUniformVariable(module: *const ParsedModule, id: u32) bool {
     const inst = getDef(module, id) orelse return false;
     if (inst.op == .Variable and inst.words.len >= 4) {
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-        return sc == .Uniform;
+        return sc == .Uniform or sc == .StorageBuffer;
     }
     return false;
 }
@@ -3280,7 +3333,7 @@ fn isSSBOVariable(module: *const ParsedModule, decorations: *const std.AutoHashM
     const inst = getDef(module, id) orelse return false;
     if (inst.op == .Variable and inst.words.len >= 4) {
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-        if (sc == .Uniform) {
+        if (sc == .Uniform or sc == .StorageBuffer) {
             // Check if the pointee type has BufferBlock decoration (SSBO)
             const ptr_type_inst = getDef(module, inst.words[1]);
             if (ptr_type_inst) |pti| {
