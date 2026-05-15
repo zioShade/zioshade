@@ -1410,20 +1410,29 @@ fn emitFunction(
 
     // Add input variables as parameters for fragment entry function
     if (is_fragment) {
-        for (input_var_ids.items, 0..) |ivid, i| {
-            if (param_ids.items.len > 0 or i > 0) try w.writeAll(", ");
+        var first_input = param_ids.items.len == 0;
+        for (input_var_ids.items) |ivid| {
             const iv_inst = getDef(module, ivid) orelse continue;
             const iv_name = names.get(ivid) orelse "input_var";
             const iv_type = try hlslType(module, iv_inst.words[1], names, alloc);
             const builtin = getDecorationValue(decorations, ivid, .built_in);
             if (builtin) |b| {
+                // Skip helper_invocation — will use WaveIsHelperLane() inline
+                const bi: spirv.BuiltIn = @enumFromInt(b);
+                if (bi == .helper_invocation) continue;
                 const semantic = builtInToSemantic(b);
+                if (!first_input) try w.writeAll(", ");
+                first_input = false;
                 try w.print("{s} {s} : {s}", .{ iv_type, iv_name, semantic });
             } else {
                 const loc = getDecorationValue(decorations, ivid, .location);
                 if (loc) |l| {
+                    if (!first_input) try w.writeAll(", ");
+                    first_input = false;
                     try w.print("{s} {s} : TEXCOORD{d}", .{ iv_type, iv_name, l });
                 } else {
+                    if (!first_input) try w.writeAll(", ");
+                    first_input = false;
                     try w.print("{s} {s}", .{ iv_type, iv_name });
                 }
             }
@@ -1920,8 +1929,6 @@ fn emitInstruction(
     is_fragment: bool,
     output_var_id: ?u32,
 ) !void {
-    _ = decorations;
-
     switch (inst.op) {
         .Variable => {
             if (inst.words.len < 4) return;
@@ -1979,7 +1986,24 @@ fn emitInstruction(
                 }
             }
 
-            if (is_output_load) {
+            // Check if loading gl_HelperInvocation — replace with WaveIsHelperLane()
+            var is_helper_invocation = false;
+            if (ptr_inst) |pi| {
+                if (pi.op == .Variable) {
+                    const helper_builtin = getDecorationValue(decorations, ptr_id, .built_in);
+                    if (helper_builtin) |hb| {
+                        const bi: spirv.BuiltIn = @enumFromInt(hb);
+                        if (bi == .helper_invocation) {
+                            is_helper_invocation = true;
+                            const expr = try std.fmt.allocPrint(alloc, "IsHelperLane()", .{});
+                            if (try names.fetchPut(inst.words[2], expr)) |old| alloc.free(old.value);
+                        }
+                    }
+                }
+            }
+            if (is_helper_invocation) {
+                // Already mapped result to WaveIsHelperLane() expression
+            } else if (is_output_load) {
                 // Alias the load result to the output variable name (for passing to functions)
                 const alias = try alloc.dupe(u8, ptr_name);
                 if (try names.fetchPut(inst.words[2], alias)) |old| alloc.free(old.value);

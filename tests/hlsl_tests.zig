@@ -13752,3 +13752,29 @@ test "HLSL: selection-block-dominator do-while(false)" {
     try std.testing.expect(hlsl.len > 0);
 }
 
+test "HLSL: helper-invocation gl_HelperInvocation" {
+    const src =
+        \\#version 310 es
+        \\precision mediump float;
+        \\precision highp int;
+        \\layout(binding = 0) uniform mediump sampler2D uSampler;
+        \\layout(location = 0) in vec2 vUV;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    vec4 c;
+        \\    if (!gl_HelperInvocation) {
+        \\        c = textureLod(uSampler, vUV, 0.0);
+        \\    } else {
+        \\        c = vec4(1.0);
+        \\    }
+        \\    FragColor = c;
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    std.debug.print("\n=== helper-invocation HLSL ===\n{s}\n", .{hlsl});
+    try std.testing.expect(hlsl.len > 0);
+}
+
