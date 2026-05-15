@@ -2781,7 +2781,8 @@ const Analyzer = struct {
                                         .operands = store_ops,
                                         .ty = .void,
                                     });
-                                    return .{ .ty = .void, .id = 0 };
+                                    // Swizzle write returns the shuffle result
+                                    return .{ .ty = base_ty, .id = shuffle_id };
                                 }
                             }
                         }
@@ -2844,7 +2845,8 @@ const Analyzer = struct {
                     .operands = store_operands,
                     .ty = .void,
                 });
-                return .{ .ty = .void, .id = 0 };
+                // Assignment returns the assigned value (GLSL/C semantics)
+                return .{ .ty = target.ty, .id = value_id };
             },
             .compound_assign => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
