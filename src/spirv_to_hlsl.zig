@@ -311,7 +311,11 @@ pub fn spirvToHLSL(
             hlslEmitOneStructForwardDecl(&module, &names, cb.type_id, w, aa, &emitted_structs, &emitted_names2) catch {};
             if (has_interlock) {
                 const uav_binding: u32 = @intCast(binding);
-                try w.print("globallycoherent RasterizerOrderedByteAddressBuffer {s} : register(u{d});\n\n", .{ clean_name, uav_binding });
+                const struct_name = blk2: {
+                    const struct_inst = getDef(&module, cb.type_id);
+                    break :blk2 if (struct_inst != null and struct_inst.?.op == .TypeStruct) hlslSafeName(names.get(struct_inst.?.words[1]) orelse "Struct") else "Struct";
+                };
+                try w.print("RasterizerOrderedStructuredBuffer<{s}> {s} : register(u{d});\n\n", .{ struct_name, clean_name, uav_binding });
             } else {
                 const struct_name = blk2: {
                     const struct_inst = getDef(&module, cb.type_id);
