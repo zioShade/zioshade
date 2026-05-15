@@ -496,7 +496,7 @@ pub fn commonGetArraySuffix(instructions: anytype, id_defs: anytype, ptr_type_id
     return try std.heap.page_allocator.dupe(u8, suffix);
 }
 
-fn localGetDef(instructions: anytype, id_defs: anytype, id: u32) ?@TypeOf(instructions[0]) {
+pub fn localGetDef(instructions: anytype, id_defs: anytype, id: u32) ?@TypeOf(instructions[0]) {
     const idx = if (id < id_defs.len) id_defs[id] orelse return null else return null;
     if (idx >= instructions.len) return null;
     return instructions[idx];

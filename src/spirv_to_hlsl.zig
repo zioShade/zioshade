@@ -242,13 +242,21 @@ pub fn spirvToHLSL(
         var it = names.keyIterator();
         while (it.next()) |key_ptr| {
             if (names.get(key_ptr.*)) |n| {
-                // HLSL keywords that conflict with common GLSL names
-                if (std.mem.eql(u8, n, "line")) {
-                    names.put(key_ptr.*, "line_val") catch {};
-                } else if (std.mem.eql(u8, n, "register")) {
-                    names.put(key_ptr.*, "register_val") catch {};
-                } else if (std.mem.eql(u8, n, "dword")) {
-                    names.put(key_ptr.*, "dword_val") catch {};
+                // HLSL keywords that conflict with common GLSL names or built-in types
+                const new_name: ?[]const u8 = if (std.mem.eql(u8, n, "line"))
+                    "line_val"
+                else if (std.mem.eql(u8, n, "register"))
+                    "register_val"
+                else if (std.mem.eql(u8, n, "dword"))
+                    "dword_val"
+                else if (std.mem.eql(u8, n, "Buffer"))
+                    "Buffer_val"
+                else
+                    null;
+                if (new_name) |nn| {
+                    const renamed = aa.dupe(u8, nn) catch continue;
+                    // old.value was allocated by aa (arena allocator), no need to free
+                    _ = names.fetchPut(key_ptr.*, renamed) catch null;
                 }
             }
         }
@@ -1032,7 +1040,7 @@ fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
             if (inst.words.len > 3) return try hlslType(module, inst.words[3], names, alloc);
             return "float4";
         },
-        .TypeStruct => return names.get(type_id) orelse "Struct",
+        .TypeStruct => return hlslSafeName(names.get(type_id) orelse "Struct"),
         else => return "float4",
     }
 }
@@ -1046,7 +1054,46 @@ fn hlslEmitStructForwardDecls(module: *const ParsedModule, names: *std.AutoHashM
 }
 
 fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
-    return common.commonEmitOneStructForwardDecl(module, names, type_id, w, alloc, emitted, emitted_names, hlslType, hlslGetMemberName);
+    // Use common implementation but apply hlslSafeName to the struct name
+    const instructions = module.instructions;
+    const id_defs = module.id_defs;
+    const inst = common.localGetDef(instructions, id_defs, type_id) orelse return;
+    if (inst.op != .TypeStruct) return;
+
+    // Recurse into member types first
+    if (inst.words.len > 2) {
+        for (inst.words[2..]) |mt_id| {
+            try hlslEmitOneStructForwardDecl(module, names, mt_id, w, alloc, emitted, emitted_names);
+        }
+    }
+
+    if (emitted.get(type_id) != null) return;
+    const raw_name = names.get(type_id) orelse "Struct";
+    const sname = hlslSafeName(raw_name);
+    if (emitted_names.get(sname) != null) return;
+    emitted.put(type_id, {}) catch return;
+    try emitted_names.put(sname, {});
+
+    try w.print("struct {s}\n{{\n", .{sname});
+    for (inst.words[2..], 0..) |mt_id, mi| {
+        const mti = common.localGetDef(instructions, id_defs, mt_id);
+        if (mti) |mi2| {
+            if (mi2.op == .TypeArray and mi2.words.len > 3) {
+                const et = try hlslType(module, mi2.words[2], names, alloc);
+                const li = common.localGetDef(instructions, id_defs, mi2.words[3]);
+                const lv: u32 = if (li) |l| l.words[3] else 1;
+                var mname_buf: [32]u8 = undefined;
+                const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
+                try w.print("    {s} {s}[{d}];\n", .{ et, mname, lv });
+                continue;
+            }
+        }
+        const member_type = try hlslType(module, mt_id, names, alloc);
+        var mname_buf: [32]u8 = undefined;
+        const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
+        try w.print("    {s} {s};\n", .{ member_type, mname });
+    }
+    try w.writeAll("};\n\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -1633,6 +1680,15 @@ fn emitFunction(
     }
 
     try w.writeAll("}\n");
+}
+
+fn hlslSafeName(name: []const u8) []const u8 {
+    // Rename HLSL-reserved keywords and built-in type names
+    if (std.mem.eql(u8, name, "line")) return "line_val";
+    if (std.mem.eql(u8, name, "register")) return "register_val";
+    if (std.mem.eql(u8, name, "dword")) return "dword_val";
+    if (std.mem.eql(u8, name, "Buffer")) return "Buffer_val";
+    return name;
 }
 
 fn builtInToSemantic(b: u32) []const u8 {
