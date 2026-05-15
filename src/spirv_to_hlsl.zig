@@ -1967,6 +1967,86 @@ fn emitWhileLoopHLSL(
     }
     cond_name = names.get(bc.words[1]) orelse "true";
     body_lbl = bc.words[2];
+    const false_lbl: ?u32 = if (bc.words.len > 3) bc.words[3] else null;
+
+    // Check if this is a do-once loop: both branches of BranchConditional go to merge
+    // (no actual looping, just a selection inside a loop wrapper)
+    // Helper: check if a label's block ends with Branch to target
+    const blockEndsAt = struct {
+        fn check(mod: *const ParsedModule, lmap: *const std.AutoHashMap(u32, usize), label_id: u32, target: u32) bool {
+            if (label_id == target) return true;
+            const li = lmap.get(label_id) orelse return false;
+            // Scan from label+1 to find the Branch
+            var si: usize = li + 1;
+            while (si < mod.instructions.len) : (si += 1) {
+                const inst = mod.instructions[si];
+                if (inst.op == .Label or inst.op == .FunctionEnd) return false;
+                if (inst.op == .Branch and inst.words.len > 1) return inst.words[1] == target;
+                if (inst.op == .BranchConditional) {
+                    // Check if both targets go to merge
+                    const t = if (inst.words.len > 2) inst.words[2] else 0;
+                    const f = if (inst.words.len > 3) inst.words[3] else t;
+                    return t == target and f == target;
+                }
+            }
+            return false;
+        }
+    }.check;
+
+    const true_goes_to_merge = blockEndsAt(module, label_map, body_lbl, merge_lbl);
+    const false_goes_to_merge = false_lbl != null and blockEndsAt(module, label_map, false_lbl.?, merge_lbl);
+
+    if (true_goes_to_merge and false_goes_to_merge) {
+        // Both branches exit to merge — this is not a real loop, just a selection
+        // Emit as: if (cond) { true_block } else { false_block }
+        try w.writeAll("    ");
+        // Emit condition block instructions (for pattern A)
+        if (cond_start) |cs| {
+            if (cs < cond_end) {
+                var ci: usize = cs;
+                while (ci < cond_end) : (ci += 1) {
+                    const cinst = module.instructions[ci];
+                    if (cinst.op == .Label or cinst.op == .Branch or cinst.op == .SelectionMerge or cinst.op == .LoopMerge) continue;
+                    try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, output_var_id);
+                }
+            }
+        }
+        try w.print("if ({s})\n    {{\n", .{cond_name});
+        // Emit true block (body_lbl → merge)
+        if (body_lbl != merge_lbl) {
+            const tli = label_map.get(body_lbl) orelse module.instructions.len;
+            if (tli < module.instructions.len) {
+                var ti: usize = tli + 1;
+                while (ti < module.instructions.len) : (ti += 1) {
+                    const tinst = module.instructions[ti];
+                    if (tinst.op == .FunctionEnd) break;
+                    if (tinst.op == .Label) break;
+                    if (tinst.op == .Branch) continue;
+                    try emitInstruction(module, names, decorations, tinst, w, alloc, is_fragment, output_var_id);
+                }
+            }
+        }
+        try w.writeAll("    }");
+        if (false_lbl != null and false_lbl.? != merge_lbl) {
+            try w.writeAll(" else {\n");
+            const fli = label_map.get(false_lbl.?) orelse module.instructions.len;
+            if (fli < module.instructions.len) {
+                var fi: usize = fli + 1;
+                while (fi < module.instructions.len) : (fi += 1) {
+                    const finst = module.instructions[fi];
+                    if (finst.op == .FunctionEnd) break;
+                    if (finst.op == .Label) break;
+                    if (finst.op == .Branch) continue;
+                    try emitInstruction(module, names, decorations, finst, w, alloc, is_fragment, output_var_id);
+                }
+            }
+            try w.writeAll("    }");
+        }
+        try w.writeAll("\n");
+        // Skip to merge label
+        if (label_map.get(merge_lbl)) |mi| return mi;
+        return loop_idx + 1;
+    }
 
     // Emit: while (true) {
     try w.writeAll("    while (true)\n    {\n");
