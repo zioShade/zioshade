@@ -13748,7 +13748,6 @@ test "HLSL: selection-block-dominator do-while(false)" {
     defer alloc.free(spv);
     const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
-    std.debug.print("\n=== selection-block-dominator HLSL ===\n{s}\n", .{hlsl});
     try std.testing.expect(hlsl.len > 0);
 }
 
@@ -13774,7 +13773,28 @@ test "HLSL: helper-invocation gl_HelperInvocation" {
     defer alloc.free(spv);
     const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
-    std.debug.print("\n=== helper-invocation HLSL ===\n{s}\n", .{hlsl});
+    // Should use IsHelperLane() instead of TEXCOORD semantic
+    try assertContains(hlsl, "IsHelperLane()");
+    // Should NOT contain gl_HelperInvocation as a parameter
+    try assertNotContains(hlsl, "gl_HelperInvocation");
+}
+
+test "HLSL: sample-parameter gl_SampleMaskIn gl_SampleMask" {
+    const src =
+        \\#version 310 es
+        \\#extension GL_OES_sample_variables : require
+        \\precision mediump float;
+        \\precision highp int;
+        \\layout(location = 0) out vec2 FragColor;
+        \\void main() {
+        \\    FragColor = gl_SamplePosition + vec2(float(gl_SampleID));
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    // Should contain SV_SampleIndex for gl_SampleID
     try std.testing.expect(hlsl.len > 0);
 }
 
