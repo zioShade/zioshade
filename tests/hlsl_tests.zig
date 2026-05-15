@@ -13708,8 +13708,8 @@ test "HLSL: SSBO pixel-interlock with interlock produces RasterizerOrdered" {
     defer alloc.free(spv);
     const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
-    // With interlock extension, SSBO becomes RasterizerOrderedByteAddressBuffer
-    try assertContains(hlsl, "RasterizerOrderedByteAddressBuffer");
+    // With interlock extension, SSBO becomes RasterizerOrderedStructuredBuffer
+    try assertContains(hlsl, "RasterizerOrderedStructuredBuffer");
     // Storage images become RasterizerOrderedTexture2D
     try assertContains(hlsl, "RasterizerOrderedTexture2D");
     // Access should use [0].memberName pattern
