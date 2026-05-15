@@ -655,6 +655,9 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
                     if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
                     continue;
                 }
+                // Note: array and struct ConstantComposites get their names from
+                // the static const emitter, not here. Their initializer is handled
+                // in the Variable handler via resolveInitializer().
             }
         }
 
@@ -2252,6 +2255,33 @@ fn emitInstruction(
             const result_id = inst.words[2];
             const type_name = try hlslType(module, inst.words[1], names, alloc);
             const arr_suffix = try hlslGetArraySuffix(module, inst.words[1]);
+            // Check for variable initializer (5th word)
+            if (inst.words.len >= 5) {
+                const init_id = inst.words[4];
+                const init_name = names.get(init_id);
+                if (init_name) |in| {
+                    try w.print("    {s} {s}{s} = {s};\n", .{ type_name, names.get(result_id) orelse "var", arr_suffix, in });
+                    return;
+                }
+                // Try to resolve constant composite initializer inline
+                const init_inst = getDef(module, init_id);
+                if (init_inst) |ii| {
+                    if (ii.op == .ConstantComposite and ii.words.len > 3) {
+                        // Build initializer expression: {comp0, comp1, ...}
+                        var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return;
+                        defer buf.deinit(alloc);
+                        buf.appendSlice(alloc, "{") catch return;
+                        for (ii.words[3..], 0..) |comp_id, ci| {
+                            if (ci > 0) buf.appendSlice(alloc, ", ") catch return;
+                            const comp_name = names.get(comp_id) orelse "0";
+                            buf.appendSlice(alloc, comp_name) catch return;
+                        }
+                        buf.appendSlice(alloc, "}") catch return;
+                        try w.print("    {s} {s}{s} = {s};\n", .{ type_name, names.get(result_id) orelse "var", arr_suffix, buf.items });
+                        return;
+                    }
+                }
+            }
             try w.print("    {s} {s}{s};\n", .{ type_name, names.get(result_id) orelse "var", arr_suffix });
         },
 
