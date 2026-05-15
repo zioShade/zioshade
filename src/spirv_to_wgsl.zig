@@ -1,0 +1,894 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! SPIR-V binary → WGSL (WebGPU Shading Language) cross-compiler backend.
+
+const std = @import("std");
+const spirv = @import("spirv.zig");
+const common = @import("spirv_cross_common.zig");
+
+const Instruction = common.Instruction;
+const ParsedModule = common.ParsedModule;
+const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
+
+pub const WgslCompileOptions = struct {};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
+    return common.getDef(module, id);
+}
+
+fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
+    return common.getTypeOf(module, id);
+}
+
+fn getMemberName(module: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
+    return common.commonGetMemberName(module.instructions, struct_id, member_idx, buf, "_");
+}
+
+fn getArraySuffix(module: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
+    return common.commonGetArraySuffix(module.instructions, module.id_defs, ptr_type_id, false);
+}
+
+fn emitStructForwardDecls(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
+    return common.commonEmitStructForwardDecls(module, names, root_type_id, w, alloc, emitted, emitted_names, wgslType, getMemberName);
+}
+
+fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
+    return common.commonEmitOneStructForwardDecl(module, names, type_id, w, alloc, emitted, emitted_names, wgslType, getMemberName);
+}
+
+// ---------------------------------------------------------------------------
+// WGSL type resolution
+// ---------------------------------------------------------------------------
+
+fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
+    const inst = getDef(module, type_id) orelse return "vec4f";
+    return switch (inst.op) {
+        .TypeVoid => "void",
+        .TypeBool => "bool",
+        .TypeInt => if (inst.words.len > 3 and inst.words[3] != 0) "i32" else "u32",
+        .TypeFloat => "f32",
+        .TypeVector => {
+            const s = try wgslType(module, inst.words[2], names, alloc);
+            const c = inst.words[3];
+            if (std.mem.eql(u8, s, "f32")) {
+                if (c >= 1 and c <= 4) return ([_][]const u8{ "", "f32", "vec2f", "vec3f", "vec4f" })[c];
+            } else if (std.mem.eql(u8, s, "i32")) {
+                if (c >= 1 and c <= 4) return ([_][]const u8{ "", "i32", "vec2i", "vec3i", "vec4i" })[c];
+            } else if (std.mem.eql(u8, s, "u32")) {
+                if (c >= 1 and c <= 4) return ([_][]const u8{ "", "u32", "vec2u", "vec3u", "vec4u" })[c];
+            } else if (std.mem.eql(u8, s, "bool")) {
+                if (c >= 1 and c <= 4) return ([_][]const u8{ "", "bool", "vec2<bool>", "vec3<bool>", "vec4<bool>" })[c];
+            }
+            return std.fmt.allocPrint(alloc, "vec{d}<{s}>", .{ c, s });
+        },
+        .TypeMatrix => {
+            const cols = inst.words[3];
+            const ct = getDef(module, inst.words[2]);
+            const rows: u32 = if (ct) |c| c.words[3] else cols;
+            return std.fmt.allocPrint(alloc, "mat{d}x{d}f", .{ cols, rows });
+        },
+        .TypeArray => {
+            const elem_type = try wgslType(module, inst.words[2], names, alloc);
+            const len_id = inst.words[3];
+            const len_def = getDef(module, len_id);
+            if (len_def) |ld| {
+                if (ld.op == .Constant and ld.words.len > 3) {
+                    return std.fmt.allocPrint(alloc, "array<{s}, {d}>", .{ elem_type, ld.words[3] });
+                }
+            }
+            return std.fmt.allocPrint(alloc, "array<{s}>", .{elem_type});
+        },
+        .TypeRuntimeArray => {
+            const elem_type = try wgslType(module, inst.words[2], names, alloc);
+            return std.fmt.allocPrint(alloc, "array<{s}>", .{elem_type});
+        },
+        .TypePointer => if (inst.words.len > 3) try wgslType(module, inst.words[3], names, alloc) else "vec4f",
+        .TypeStruct => names.get(type_id) orelse "Struct",
+        .TypeSampler => "sampler",
+        .TypeImage => blk: {
+            // texture_2d<f32>, texture_1d<f32>, texture_3d<f32>, texture_cube<f32>, etc.
+            const dim = if (inst.words.len > 4) inst.words[4] else 1;
+            const sampled_type_id = inst.words[2];
+            const st = try wgslType(module, sampled_type_id, names, alloc);
+            const tex_type: []const u8 = switch (dim) {
+                0 => "texture_1d",
+                1 => "texture_2d",
+                2 => "texture_3d",
+                3 => "texture_cube",
+                4 => "texture_2d_array",
+                5 => "texture_buffer",
+                6 => "texture_2d",
+                else => "texture_2d",
+            };
+            // Check if multisampled
+            const is_ms = if (inst.words.len > 7) inst.words[7] == 1 else false;
+            if (is_ms) {
+                break :blk std.fmt.allocPrint(alloc, "{s}_multisampled<{s}>", .{ tex_type, st }) catch "texture_2d<f32>";
+            } else {
+                break :blk std.fmt.allocPrint(alloc, "{s}<{s}>", .{ tex_type, st }) catch "texture_2d<f32>";
+            }
+        },
+        .TypeSampledImage => if (inst.words.len > 2) try wgslType(module, inst.words[2], names, alloc) else "texture_2d<f32>",
+        else => "vec4f",
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Decoration helpers
+// ---------------------------------------------------------------------------
+
+fn getDecVal(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, dec: spirv.Decoration) ?u32 {
+    const list = decs.get(id) orelse return null;
+    for (list.items) |e| {
+        if (e.decoration == dec and e.extra.len > 0) return e.extra[0];
+    }
+    return null;
+}
+
+fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, dec: spirv.Decoration) bool {
+    const list = decs.get(id) orelse return false;
+    for (list.items) |e| {
+        if (e.decoration == dec) return true;
+    }
+    return false;
+}
+
+fn collectDecorations(alloc: std.mem.Allocator, module: *const ParsedModule, decorations: *std.AutoHashMap(u32, std.ArrayList(DecorationEntry))) !void {
+    try common.collectDecorations(alloc, module, decorations);
+}
+
+fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8)) void {
+    common.collectNames(alloc, module, names);
+}
+
+// ---------------------------------------------------------------------------
+// Access expression builder
+// ---------------------------------------------------------------------------
+
+fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
+    const base_name = names.get(base_id) orelse "base";
+    if (indices.len == 0) return try alloc.dupe(u8, base_name);
+
+    var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, base_name);
+
+    var current_type_id: ?u32 = resolvePointee(module, base_id);
+
+    for (indices) |index_id| {
+        const idx_inst = getDef(module, index_id);
+        if (idx_inst) |def| {
+            if (def.op == .Constant and def.words.len > 3) {
+                const val = def.words[3];
+                const is_vector = if (current_type_id) |tid| blk: {
+                    const ti = getDef(module, tid);
+                    break :blk ti != null and ti.?.op == .TypeVector;
+                } else false;
+                const is_struct = if (current_type_id) |tid| blk: {
+                    const ti = getDef(module, tid);
+                    break :blk ti != null and ti.?.op == .TypeStruct;
+                } else false;
+
+                if (is_vector) {
+                    try buf.appendSlice(alloc, switch (val) {
+                        0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
+                    });
+                    if (current_type_id) |tid| {
+                        const ti = getDef(module, tid);
+                        if (ti) |tinst| current_type_id = tinst.words[2];
+                    }
+                } else if (is_struct) {
+                    var mname_buf: [32]u8 = undefined;
+                    const mname = getMemberName(module, current_type_id.?, val, &mname_buf);
+                    try buf.print(alloc, ".{s}", .{mname});
+                    if (current_type_id) |tid| {
+                        const ti = getDef(module, tid);
+                        if (ti) |tinst| {
+                            if (val + 2 < tinst.words.len) current_type_id = tinst.words[val + 2];
+                        }
+                    }
+                } else {
+                    try buf.print(alloc, "[{d}]", .{val});
+                    if (current_type_id) |tid| {
+                        const ti = getDef(module, tid);
+                        if (ti) |tinst| current_type_id = tinst.words[2];
+                    }
+                }
+            } else {
+                const idx_name = names.get(index_id) orelse "i";
+                try buf.print(alloc, "[{s}]", .{idx_name});
+                if (current_type_id) |tid| {
+                    const ti = getDef(module, tid);
+                    if (ti) |tinst| current_type_id = tinst.words[2];
+                }
+            }
+        }
+    }
+    return buf.toOwnedSlice(alloc);
+}
+
+fn resolvePointee(module: *const ParsedModule, id: u32) ?u32 {
+    return common.resolvePointeeType(module, id);
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: WgslCompileOptions) ![]const u8 {
+    _ = options;
+    var module = try common.parseModule(alloc, spirv_words);
+    defer module.deinit(alloc);
+
+    var names = std.AutoHashMap(u32, []const u8).init(alloc);
+    defer {
+        var it = names.iterator();
+        while (it.next()) |e| alloc.free(e.value_ptr.*);
+        names.deinit();
+    }
+    collectNames(alloc, &module, &names);
+
+    var decorations = std.AutoHashMap(u32, std.ArrayList(DecorationEntry)).init(alloc);
+    defer {
+        var it = decorations.iterator();
+        while (it.next()) |e| e.value_ptr.deinit(alloc);
+        decorations.deinit();
+    }
+    try collectDecorations(alloc, &module, &decorations);
+
+    // Arena for temporary allocations
+    var aa = std.heap.ArenaAllocator.init(alloc);
+    defer aa.deinit();
+    const arena = aa.allocator();
+
+    var out = std.ArrayList(u8).initCapacity(alloc, 4096) catch return error.OutOfMemory;
+    defer out.deinit(alloc);
+    const w = out.writer(alloc);
+
+    try w.writeAll("// Generated by glslpp SPIR-V → WGSL cross-compiler\n\n");
+
+    const is_fragment = module.execution_model == .Fragment;
+    const is_vertex = module.execution_model == .Vertex;
+    const is_compute = module.execution_model == .GLCompute;
+
+    // Find entry point and function
+    var entry_func_idx: ?usize = null;
+    var output_var_id: ?u32 = null;
+    var output_vars = std.ArrayList(u32).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var input_vars = std.ArrayList(struct { id: u32, type_id: u32 }).initCapacity(arena, 8) catch return error.OutOfMemory;
+
+    // Collect input/output variables
+    for (module.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Output) {
+                const location = getDecVal(&decorations, inst.words[2], .location);
+                if (location != null) {
+                    try output_vars.append(inst.words[2]);
+                    if (output_var_id == null) output_var_id = inst.words[2];
+                }
+            }
+            if (sc == .Input) {
+                const location = getDecVal(&decorations, inst.words[2], .location);
+                if (location != null) {
+                    try input_vars.append(.{ .id = inst.words[2], .type_id = inst.words[1] });
+                }
+            }
+        }
+    }
+
+    // Find entry function
+    if (module.entry_point_id) |ep_id| {
+        for (module.instructions, 0..) |inst, i| {
+            if (inst.op == .Function and inst.words.len > 2 and inst.words[2] == ep_id) {
+                entry_func_idx = i;
+                break;
+            }
+        }
+    }
+
+    if (entry_func_idx == null) {
+        // Try to find any fragment/vertex/compute function
+        for (module.instructions, 0..) |inst, i| {
+            if (inst.op == .Function and inst.words.len > 2) {
+                entry_func_idx = i;
+                break;
+            }
+        }
+    }
+
+    if (entry_func_idx == null) return error.NoEntryPoint;
+
+    // Collect cbuffers and textures
+    var cbuffers = std.ArrayList(struct { name: []const u8, type_id: u32, binding: u32, is_ssbo: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var textures = std.ArrayList(struct { name: []const u8, binding: u32, image_type_id: u32, is_storage: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
+
+    for (module.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const result_type = inst.words[1];
+        const result_id = inst.words[2];
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+
+        const ptr_inst = getDef(&module, result_type) orelse continue;
+        if (ptr_inst.op != .TypePointer or ptr_inst.words.len < 4) continue;
+        const pointee_type = ptr_inst.words[3];
+
+        switch (sc) {
+            .Uniform => {
+                const binding = getDecVal(&decorations, result_id, .binding) orelse 0;
+                const set = getDecVal(&decorations, result_id, .descriptor_set) orelse 0;
+                const name = names.get(result_id) orelse "Globals";
+                const is_ssbo = hasDec(&decorations, pointee_type, .buffer_block);
+                try cbuffers.append(.{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = is_ssbo });
+            },
+            .UniformConstant => {
+                const pointee_inst = getDef(&module, pointee_type) orelse continue;
+                const binding = getDecVal(&decorations, result_id, .binding) orelse 0;
+                const set = getDecVal(&decorations, result_id, .descriptor_set) orelse 0;
+                const name = names.get(result_id) orelse "tex";
+                var is_storage = false;
+                switch (pointee_inst.op) {
+                    .TypeSampledImage => {
+                        const img_type_id = if (pointee_inst.words.len > 2) pointee_inst.words[2] else pointee_type;
+                        try textures.append(.{ .name = name, .binding = binding * 2 + set, .image_type_id = img_type_id, .is_storage = false });
+                    },
+                    .TypeImage => {
+                        if (pointee_inst.words.len > 7 and pointee_inst.words[7] == 2) is_storage = true;
+                        try textures.append(.{ .name = name, .binding = binding * 2 + set, .image_type_id = pointee_type, .is_storage = is_storage });
+                    },
+                    else => continue,
+                }
+            },
+            else => {},
+        }
+    }
+
+    // Emit struct forward declarations for types used in cbuffers
+    var emitted_structs = std.AutoHashMap(u32, void).init(arena);
+    defer emitted_structs.deinit();
+    var emitted_names = std.StringHashMap(void).init(arena);
+    defer emitted_names.deinit();
+
+    for (cbuffers.items) |cb| {
+        try emitStructForwardDecls(&module, &names, cb.type_id, w, alloc, &emitted_structs, &emitted_names);
+    }
+
+    // Emit struct forward declarations for types used as local variables
+    var local_structs = std.AutoHashMap(u32, void).init(arena);
+    defer local_structs.deinit();
+    // Scan for Function-scoped variables
+    for (module.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Function) {
+                const ptr_type = getDef(&module, inst.words[1]);
+                if (ptr_type) |pt| {
+                    if (pt.op == .TypePointer and pt.words.len > 3) {
+                        var tid = pt.words[3];
+                        // Unwrap TypeArray to find struct
+                        while (true) {
+                            const ti = getDef(&module, tid);
+                            if (ti) |tinst| {
+                                if (tinst.op == .TypeArray) {
+                                    tid = tinst.words[2];
+                                    continue;
+                                }
+                            }
+                            break;
+                        }
+                        const ti = getDef(&module, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeStruct and local_structs.get(tid) == null) {
+                                local_structs.put(tid, {}) catch {};
+                                try emitOneStructForwardDecl(&module, &names, tid, w, alloc, &emitted_structs, &emitted_names);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Emit uniform buffers
+    for (cbuffers.items) |cb| {
+        const group = @divFloor(cb.binding, 2);
+        const binding = cb.binding;
+        if (cb.is_ssbo) {
+            try w.print("@group({d}) @binding({d})\nvar<storage, read_write> {s}: ", .{ group, binding, cb.name });
+        } else {
+            try w.print("@group({d}) @binding({d})\nvar<uniform> {s}: ", .{ group, binding, cb.name });
+        }
+        const struct_name = blk: {
+            const struct_inst = getDef(&module, cb.type_id);
+            break :blk if (struct_inst) |si| names.get(si.words[1]) orelse "Struct" else "Struct";
+        };
+        try w.print("{s};\n\n", .{struct_name});
+    }
+
+    // Emit textures and samplers
+    // Group sampler + texture pairs
+    var sampler_names = std.ArrayList(struct { name: []const u8, binding: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+
+    for (textures.items) |tex| {
+        const group = @divFloor(tex.binding, 2);
+        const binding = tex.binding;
+        const tex_type = try wgslType(&module, tex.image_type_id, &names, alloc);
+        if (tex.is_storage) {
+            try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, binding, tex.name, tex_type });
+        } else {
+            try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n", .{ group, binding, tex.name, tex_type });
+            // Emit paired sampler
+            const sampler_name = try std.fmt.allocPrint(arena, "{s}_sampler", .{tex.name});
+            try sampler_names.append(.{ .name = sampler_name, .binding = tex.binding + 1 });
+            try w.print("@group({d}) @binding({d})\nvar {s}: sampler;\n\n", .{ group, binding + 1, sampler_name });
+        }
+    }
+
+    // Emit entry function
+    const entry_stage: []const u8 = if (is_fragment) "@fragment" else if (is_vertex) "@vertex" else if (is_compute) "@compute" else "@fragment";
+
+    // Build function signature
+    try w.print("{s}\nfn main(", .{entry_stage});
+
+    // Input parameters
+    for (input_vars.items, 0..) |iv, i| {
+        if (i > 0) try w.writeAll(", ");
+        const loc = getDecVal(&decorations, iv.id, .location) orelse i;
+        const ptr_inst = getDef(&module, iv.type_id);
+        var actual_type = iv.type_id;
+        if (ptr_inst) |pi| {
+            if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3];
+        }
+        const type_name = try wgslType(&module, actual_type, &names, alloc);
+        const var_name = names.get(iv.id) orelse "input";
+        try w.print("@location({d}) {s}: {s}", .{ loc, var_name, type_name });
+    }
+
+    // Return type
+    if (is_fragment and output_vars.items.len > 0) {
+        const ov = output_vars.items[0];
+        const ptr_inst = getDef(&module, getDef(&module, ov).?.words[1]);
+        var actual_type: u32 = undefined;
+        if (ptr_inst) |pi| {
+            if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = ov;
+        } else actual_type = ov;
+        const type_name = try wgslType(&module, actual_type, &names, alloc);
+        try w.print(") -> @location(0) {s} {{\n", .{type_name});
+    } else {
+        try w.writeAll(") {\n");
+    }
+
+    // Declare output variable as local
+    if (is_fragment and output_vars.items.len > 0) {
+        const ov = output_vars.items[0];
+        const var_inst = getDef(&module, ov).?;
+        const ptr_inst = getDef(&module, var_inst.words[1]);
+        var actual_type: u32 = undefined;
+        if (ptr_inst) |pi| {
+            if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = var_inst.words[1];
+        } else actual_type = var_inst.words[1];
+        const type_name = try wgslType(&module, actual_type, &names, alloc);
+        const var_name = names.get(ov) orelse "out";
+        try w.print("    var {s}: {s};\n", .{ var_name, type_name });
+    }
+
+    // Emit function body
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, is_fragment, output_var_id);
+
+    // Return output var
+    if (is_fragment and output_vars.items.len > 0) {
+        const ov = output_vars.items[0];
+        const var_name = names.get(ov) orelse "out";
+        try w.print("    return {s};\n", .{var_name});
+    }
+
+    try w.writeAll("}\n");
+
+    return out.toOwnedSlice(alloc);
+}
+
+// ---------------------------------------------------------------------------
+// Body emitter
+// ---------------------------------------------------------------------------
+
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, is_fragment: bool, output_var_id: ?u32) !void {
+    _ = decorations;
+    // Skip function declaration instructions
+    var i: usize = func_idx + 1;
+    // Skip FunctionParameter instructions
+    while (i < module.instructions.len) : (i += 1) {
+        const inst = module.instructions[i];
+        if (inst.op == .Label) { i += 1; break; }
+        if (inst.op == .FunctionParameter) {
+            // Declare parameter as local variable
+            if (inst.words.len > 2) {
+                const param_type = try wgslType(module, inst.words[1], names, alloc);
+                const param_name = names.get(inst.words[2]) orelse "p";
+                try w.print("    var {s}: {s};\n", .{ param_name, param_type });
+            }
+            continue;
+        }
+        break;
+    }
+
+    // Emit instructions
+    while (i < module.instructions.len) : (i += 1) {
+        const inst = module.instructions[i];
+        switch (inst.op) {
+            .FunctionEnd => return,
+            .Label, .Branch, .BranchConditional, .LoopMerge, .SelectionMerge, .Phi => {},
+
+            .Variable => {
+                if (inst.words.len >= 4) {
+                    const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+                    if (sc == .Function) {
+                        const rt = try wgslType(module, inst.words[1], names, alloc);
+                        const arr = try getArraySuffix(module, inst.words[1]);
+                        const vn = names.get(inst.words[2]) orelse "v";
+                        try w.print("    var {s}: {s}{s};\n", .{ vn, rt, arr });
+                    } else if (sc == .Private) {
+                        const rt = try wgslType(module, inst.words[1], names, alloc);
+                        const arr = try getArraySuffix(module, inst.words[1]);
+                        const vn = names.get(inst.words[2]) orelse "v";
+                        try w.print("    var {s}: {s}{s};\n", .{ vn, rt, arr });
+                    }
+                    // Output/Input/Uniform/UniformConstant variables handled in entry point setup
+                }
+            },
+
+            // Load
+            .Load => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const ptr = names.get(inst.words[3]) orelse "var";
+                const ptr_inst = getDef(module, inst.words[3]);
+                var expr: []const u8 = ptr;
+                if (ptr_inst) |pi| {
+                    if (pi.op == .AccessChain) {
+                        expr = try buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc);
+                    }
+                }
+                try w.print("    var {s}: {s} = {s};\n", .{ result_name, rt, expr });
+            },
+
+            // Store
+            .Store => {
+                const ptr = names.get(inst.words[1]) orelse "var";
+                const val = names.get(inst.words[2]) orelse "0";
+                const ptr_inst = getDef(module, inst.words[1]);
+                var expr: []const u8 = ptr;
+                if (ptr_inst) |pi| {
+                    if (pi.op == .AccessChain) {
+                        expr = try buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc);
+                    }
+                }
+                try w.print("    {s} = {s};\n", .{ expr, val });
+            },
+
+            // AccessChain
+            .AccessChain => {
+                const result_id = inst.words[2];
+                const base_id = inst.words[3];
+                const expr = try buildAccessExpr(module, names, base_id, inst.words[4..], alloc);
+                if (try names.fetchPut(result_id, expr)) |old| alloc.free(old.value);
+            },
+
+            // CompositeConstruct
+            .CompositeConstruct => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                var parts = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
+                defer parts.deinit(alloc);
+                for (inst.words[3..], 0..) |comp_id, ci| {
+                    if (ci > 0) try parts.appendSlice(alloc, ", ");
+                    const comp_name = names.get(comp_id) orelse "0";
+                    try parts.appendSlice(alloc, comp_name);
+                }
+                try w.print("    var {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, parts.items });
+            },
+
+            // CompositeExtract
+            .CompositeExtract => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const composite = names.get(inst.words[3]) orelse "c";
+                var expr = std.ArrayList(u8).initCapacity(alloc, 64) catch return;
+                defer expr.deinit(alloc);
+                try expr.appendSlice(alloc, composite);
+                for (inst.words[4..]) |idx| {
+                    try expr.print(alloc, "[{d}]", .{idx});
+                }
+                try w.print("    var {s}: {s} = {s};\n", .{ result_name, rt, expr.items });
+            },
+
+            // CopyObject
+            .CopyObject => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const val = names.get(inst.words[3]) orelse "0";
+                try w.print("    var {s}: {s} = {s};\n", .{ result_name, rt, val });
+            },
+
+            // VectorShuffle
+            .VectorShuffle => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const v1 = names.get(inst.words[3]) orelse "v1";
+                const v2 = names.get(inst.words[4]) orelse "v2";
+                var swizzle = std.ArrayList(u8).initCapacity(alloc, 16) catch return;
+                defer swizzle.deinit(alloc);
+                for (inst.words[5..]) |idx| {
+                    const src = if (idx < 4) v1 else v2;
+                    const comp = idx % 4;
+                    if (swizzle.items.len > 0 and std.mem.endsWith(u8, swizzle.items, src)) {
+                        try swizzle.append(alloc, switch (comp) { 0 => 'x', 1 => 'y', 2 => 'z', 3 => 'w', else => 'x' });
+                    } else {
+                        // Different source vector — can't use simple swizzle
+                        try swizzle.print(alloc, "{s}[{d}]", .{ src, comp });
+                    }
+                }
+                try w.print("    // shuffle: {s}\n", .{swizzle.items});
+                // Simple approach: construct from components
+                try w.print("    var {s}: {s} = {s}(", .{ result_name, rt, rt });
+                var first = true;
+                for (inst.words[5..]) |idx| {
+                    if (!first) try w.writeAll(", ");
+                    first = false;
+                    const src = if (idx < 4) v1 else v2;
+                    const comp = idx % 4;
+                    const sw = switch (comp) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" };
+                    try w.print("{s}{s}", .{ src, sw });
+                }
+                try w.writeAll(");\n");
+            },
+
+            // Arithmetic
+            .FAdd, .IAdd => try emitBinOp(module, names, inst, "+", w, alloc),
+            .FSub, .ISub => try emitBinOp(module, names, inst, "-", w, alloc),
+            .FMul, .IMul => try emitBinOp(module, names, inst, "*", w, alloc),
+            .FDiv, .SDiv, .UDiv => try emitBinOp(module, names, inst, "/", w, alloc),
+            .FMod => try emitBinOp(module, names, inst, "%", w, alloc),
+            .UMod, .SRem, .SMod, .FRem => try emitBinOp(module, names, inst, "%", w, alloc),
+            .ShiftLeftLogical => try emitBinOp(module, names, inst, "<<", w, alloc),
+            .ShiftRightLogical => try emitBinOp(module, names, inst, ">>", w, alloc),
+            .FNegate, .SNegate => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                try w.print("    var {s}: {s} = -{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+            },
+            .VectorTimesScalar, .MatrixTimesScalar => try emitBinOp(module, names, inst, "*", w, alloc),
+            .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => {
+                // WGSL uses mul() — wait, WGSL doesn't have mul(). Use matrix multiplication operator *
+                try emitBinOp(module, names, inst, "*", w, alloc);
+            },
+
+            // Dot product
+            .Dot => try emitCall(module, names, inst, "dot", w, alloc),
+
+            // Comparisons
+            .FOrdEqual, .IEqual => try emitBinOp(module, names, inst, "==", w, alloc),
+            .FOrdNotEqual, .INotEqual => try emitBinOp(module, names, inst, "!=", w, alloc),
+            .FOrdLessThan, .SLessThan, .ULessThan => try emitBinOp(module, names, inst, "<", w, alloc),
+            .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, inst, ">", w, alloc),
+            .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, inst, "<=", w, alloc),
+            .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(module, names, inst, ">=", w, alloc),
+
+            // Logical
+            .LogicalOr => try emitBinOp(module, names, inst, "or", w, alloc),
+            .LogicalAnd => try emitBinOp(module, names, inst, "and", w, alloc),
+            .LogicalNot => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                try w.print("    var {s}: {s} = !{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "true" });
+            },
+
+            // Select (ternary)
+            .Select => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const cond = names.get(inst.words[3]) orelse "c";
+                const true_val = names.get(inst.words[4]) orelse "t";
+                const false_val = names.get(inst.words[5]) orelse "f";
+                try w.print("    var {s}: {s} = select({s}, {s}, {s});\n", .{ result_name, rt, false_val, true_val, cond });
+            },
+
+            // Conversions
+            .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
+            .UConvert, .SConvert, .FConvert, .Bitcast => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const val = names.get(inst.words[3]) orelse "0";
+                try w.print("    var {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, val });
+            },
+
+            // Texture sampling
+            .ImageSampleImplicitLod => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const coord = names.get(inst.words[4]) orelse "uv";
+                // Find the texture name from the sampled image
+                const si_inst = getDef(module, inst.words[3]);
+                var tex_name: []const u8 = "tex";
+                if (si_inst) |sii| {
+                    if (sii.op == .SampledImage and sii.words.len > 3) {
+                        tex_name = names.get(sii.words[2]) orelse "tex";
+                    }
+                }
+                try w.print("    var {s}: {s} = textureSample({s}, {s}_sampler, {s});\n", .{ result_name, rt, tex_name, tex_name, coord });
+            },
+
+            .ImageFetch => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const si = names.get(inst.words[3]) orelse "tex";
+                const coord = names.get(inst.words[4]) orelse "uv";
+                try w.print("    var {s}: {s} = textureLoad({s}, {s});\n", .{ result_name, rt, si, coord });
+            },
+
+            // Return
+            .Return => {
+                if (!is_fragment or output_var_id == null) {
+                    // No explicit return needed — handled by wrapper
+                }
+            },
+
+            // ExtInst (GLSL.std.450)
+            .ExtInst => {
+                if (inst.words.len > 4) {
+                    const set_id = inst.words[3];
+                    const instruction = inst.words[4];
+                    // Check if this is GLSL.std.450 (set_id should match)
+                    const ext_name = names.get(set_id) orelse "";
+                    if (std.mem.indexOf(u8, ext_name, "GLSL.std.450") != null or true) {
+                        // instruction is the GLSL opcode
+                        const rt = try wgslType(module, inst.words[1], names, alloc);
+                        const result_name = names.get(inst.words[2]) orelse "v";
+                        const func_name = switch (instruction) {
+                            0 => "round",
+                            1 => "round", // RoundEven
+                            2 => "trunc",
+                            3 => "fAbs", // FAbs → abs
+                            4 => "fAbs", // SAbs → abs
+                            5 => "fSign",
+                            6 => "fSign",
+                            7 => "floor",
+                            8 => "ceil",
+                            9 => "fract",
+                            10 => "radians",
+                            11 => "degrees",
+                            12 => "sin",
+                            13 => "cos",
+                            14 => "tan",
+                            15 => "asin",
+                            16 => "acos",
+                            17 => "atan",
+                            18 => "atan2",
+                            19 => "pow",
+                            20 => "exp",
+                            21 => "log",
+                            22 => "exp2",
+                            23 => "log2",
+                            24 => "sqrt",
+                            25 => "inverseSqrt",
+                            26 => "abs",
+                            27 => "sign",
+                            28 => "clamp",
+                            29 => "mix",
+                            30 => "step",
+                            31 => "smoothstep",
+                            32 => "fma",
+                            33 => "frexp",
+                            34 => "ldexp",
+                            35 => "packSnorm4x8",
+                            36 => "packUnorm4x8",
+                            37 => "packSnorm2x16",
+                            38 => "packUnorm2x16",
+                            39 => "packHalf2x16",
+                            40 => "packDouble2x32",
+                            41 => "unpackSnorm2x16",
+                            42 => "unpackUnorm2x16",
+                            43 => "unpackHalf2x16",
+                            44 => "unpackSnorm4x8",
+                            45 => "unpackUnorm4x8",
+                            46 => "unpackDouble2x32",
+                            47 => "length",
+                            48 => "distance",
+                            49 => "cross",
+                            50 => "normalize",
+                            51 => "faceForward",
+                            52 => "reflect",
+                            53 => "refract",
+                            54 => "findILsb",
+                            55 => "findSMsb",
+                            56 => "findUMsb",
+                            57 => "interpolateAtCentroid",
+                            58 => "interpolateAtSample",
+                            59 => "interpolateAtOffset",
+                            65 => "countOneBits", // BitCount
+                            66 => "reverseBits",
+                            else => "unknown",
+                        };
+                        // Build args
+                        var args = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
+                        defer args.deinit(alloc);
+                        for (inst.words[5..], 0..) |arg_id, ai| {
+                            if (ai > 0) try args.appendSlice(alloc, ", ");
+                            try args.appendSlice(alloc, names.get(arg_id) orelse "0");
+                        }
+                        // Map some GLSL names to WGSL equivalents
+                        const wgsl_name = if (std.mem.eql(u8, func_name, "fAbs")) "abs" else if (std.mem.eql(u8, func_name, "fSign")) "sign" else func_name;
+                        try w.print("    var {s}: {s} = {s}({s});\n", .{ result_name, rt, wgsl_name, args.items });
+                    }
+                }
+            },
+
+            // Function call
+            .FunctionCall => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const func_id = inst.words[3];
+                const func_name = names.get(func_id) orelse "func";
+                var args = std.ArrayList(u8).initCapacity(alloc, 64) catch return;
+                defer args.deinit(alloc);
+                for (inst.words[4..], 0..) |arg_id, ai| {
+                    if (ai > 0) try args.appendSlice(alloc, ", ");
+                    try args.appendSlice(alloc, names.get(arg_id) orelse "0");
+                }
+                if (std.mem.eql(u8, rt, "void")) {
+                    try w.print("    {s}({s});\n", .{ func_name, args.items });
+                } else {
+                    try w.print("    var {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                }
+            },
+
+            // Bitwise
+            .BitwiseOr => try emitBinOp(module, names, inst, "|", w, alloc),
+            .BitwiseXor => try emitBinOp(module, names, inst, "^", w, alloc),
+            .BitwiseAnd => try emitBinOp(module, names, inst, "&", w, alloc),
+            .Not => {
+                const rt = try wgslType(module, inst.words[1], names, alloc);
+                try w.print("    var {s}: {s} = ~{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+            },
+
+            // Derivatives
+            .DPdx => try emitCall(module, names, inst, "dpdx", w, alloc),
+            .DPdy => try emitCall(module, names, inst, "dpdy", w, alloc),
+            .Fwidth => try emitCall(module, names, inst, "fwidth", w, alloc),
+
+            else => {
+                // Try to handle as a simple assignment
+                if (inst.words.len > 2) {
+                    const rt = try wgslType(module, inst.words[1], names, alloc);
+                    const rn = names.get(inst.words[2]) orelse "v";
+                    try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});
+                    try w.print("    var {s}: {s};\n", .{ rn, rt });
+                }
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Emit helpers
+// ---------------------------------------------------------------------------
+
+fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
+    const rt = try wgslType(module, inst.words[1], names, alloc);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    const lhs = names.get(inst.words[3]) orelse "a";
+    const rhs = names.get(inst.words[4]) orelse "b";
+    try w.print("    var {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
+}
+
+fn emitCall(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, func: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
+    const rt = try wgslType(module, inst.words[1], names, alloc);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    var args = std.ArrayList(u8).initCapacity(alloc, 64) catch return;
+    defer args.deinit(alloc);
+    for (inst.words[3..], 0..) |arg_id, ai| {
+        if (ai > 0) try args.appendSlice(alloc, ", ");
+        try args.appendSlice(alloc, names.get(arg_id) orelse "0");
+    }
+    try w.print("    var {s}: {s} = {s}({s});\n", .{ result_name, rt, func, args.items });
+}

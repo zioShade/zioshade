@@ -13,6 +13,7 @@ pub const codegen = @import("codegen.zig");
 pub const spirv_to_hlsl = @import("spirv_to_hlsl.zig");
 pub const spirv_to_glsl = @import("spirv_to_glsl.zig");
 pub const spirv_to_msl = @import("spirv_to_msl.zig");
+pub const spirv_to_wgsl = @import("spirv_to_wgsl.zig");
 pub const kernel_fusion = @import("kernel_fusion.zig");
 const compact_ids = @import("compact_ids.zig");
 
@@ -300,6 +301,16 @@ pub fn spirvToMSL(
     options: spirv_to_msl.MslCompileOptions,
 ) ![]const u8 {
     return spirv_to_msl.spirvToMSL(alloc, spirv_words, options);
+}
+
+/// Cross-compile SPIR-V binary to WGSL source.
+/// Targets WebGPU Shading Language.
+pub fn spirvToWGSL(
+    alloc: std.mem.Allocator,
+    spirv_words: []const u32,
+    options: spirv_to_wgsl.WgslCompileOptions,
+) ![]const u8 {
+    return spirv_to_wgsl.spirvToWGSL(alloc, spirv_words, options);
 }
 
 /// One-shot: compile Shadertoy-style GLSL to HLSL.
