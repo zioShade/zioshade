@@ -13853,3 +13853,4 @@ test "HLSL: SSBO struct forward declaration from SPIR-V binary" {
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "struct UBO") != null);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "RWStructuredBuffer<UBO>") != null);
 }
+
