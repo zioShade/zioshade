@@ -440,12 +440,14 @@ const Codegen = struct {
         var has_subgroup_vote = false;
         var has_float_atomic = false;
         var has_input_attachment = false;
+        var has_interlock = false;
 
         for (self.module.functions) |func| {
             for (func.body) |inst| {
                 switch (inst.tag) {
                     .group_all, .group_any => has_subgroup_vote = true,
                     .atomic_fadd => has_float_atomic = true,
+                    .begin_invocation_interlock, .end_invocation_interlock => has_interlock = true,
                     else => {},
                 }
             }
@@ -548,6 +550,14 @@ const Codegen = struct {
         if (has_input_attachment) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.input_attachment));
+        }
+        if (has_interlock) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.fragment_shader_pixel_interlock_ext));
+        }
+        if (self.module.sample_interlock_ordered or self.module.sample_interlock_unordered) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.fragment_shader_sample_interlock_ext));
         }
         if (self.hasBufferReference()) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
@@ -883,6 +893,20 @@ const Codegen = struct {
         if (self.stage == .mesh or self.stage == .task) {
             try self.emitExtensionString("SPV_EXT_mesh_shader");
         }
+        // Fragment shader interlock extension
+        var has_interlock_ext = false;
+        for (self.module.functions) |func| {
+            for (func.body) |inst| {
+                if (inst.tag == .begin_invocation_interlock or inst.tag == .end_invocation_interlock) {
+                    has_interlock_ext = true;
+                    break;
+                }
+            }
+            if (has_interlock_ext) break;
+        }
+        if (has_interlock_ext) {
+            try self.emitExtensionString("SPV_EXT_fragment_shader_interlock");
+        }
     }
 
     fn emitExtensionString(self: *Codegen, ext_name: []const u8) !void {
@@ -1003,6 +1027,26 @@ const Codegen = struct {
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
                 try self.emitWord(entry_id);
                 try self.emitWord(@intFromEnum(spirv.ExecutionMode.EarlyFragmentTests));
+            }
+            if (self.module.pixel_interlock_ordered) {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.PixelInterlockOrderedEXT));
+            }
+            if (self.module.pixel_interlock_unordered) {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.PixelInterlockUnorderedEXT));
+            }
+            if (self.module.sample_interlock_ordered) {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.SampleInterlockOrderedEXT));
+            }
+            if (self.module.sample_interlock_unordered) {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.SampleInterlockUnorderedEXT));
             }
             // If gl_FragDepth is used, emit DepthReplacing
             var has_frag_depth = false;
@@ -4908,6 +4952,12 @@ const Codegen = struct {
                 try self.emitWord(self.operandId(resolved, 8));  // direction
                 try self.emitWord(self.operandId(resolved, 9));  // tMax
                 try self.emitWord(self.operandId(resolved, 10)); // payload
+            },
+            .begin_invocation_interlock => {
+                try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.BeginInvocationInterlockEXT)));
+            },
+            .end_invocation_interlock => {
+                try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.EndInvocationInterlockEXT)));
             },
         }
     }

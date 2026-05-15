@@ -22,6 +22,10 @@ pub const Module = struct {
     depth_less: bool = false,
     depth_unchanged: bool = false,
     early_fragment_tests: bool = false,
+    pixel_interlock_ordered: bool = false,
+    pixel_interlock_unordered: bool = false,
+    sample_interlock_ordered: bool = false,
+    sample_interlock_unordered: bool = false,
     origin_upper_left: bool = false,
     uses_qcom_image_processing: bool = false,
     uses_ray_query: bool = false,
@@ -261,6 +265,8 @@ pub const Instruction = struct {
         terminate_ray,
         execute_callable,
         trace_ray,
+        begin_invocation_interlock,
+        end_invocation_interlock,
     };
 
     pub const Operand = union(enum) {

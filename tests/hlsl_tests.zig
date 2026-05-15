@@ -13687,7 +13687,7 @@ test "HLSL: constant composite array emission" {
     try assertContains(hlsl, "struct ResType");
 }
 
-test "HLSL: SSBO pixel-interlock produces RWStructuredBuffer" {
+test "HLSL: SSBO pixel-interlock with interlock produces RasterizerOrdered" {
     const src =
         \\#version 450
         \\#extension GL_ARB_fragment_shader_interlock : require
@@ -13708,16 +13708,18 @@ test "HLSL: SSBO pixel-interlock produces RWStructuredBuffer" {
     defer alloc.free(spv);
     const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
-    // SSBO should be emitted as RWStructuredBuffer
-    try assertContains(hlsl, "RWStructuredBuffer");
+    // With interlock extension, SSBO becomes RasterizerOrderedByteAddressBuffer
+    try assertContains(hlsl, "RasterizerOrderedByteAddressBuffer");
+    // Storage images become RasterizerOrderedTexture2D
+    try assertContains(hlsl, "RasterizerOrderedTexture2D");
     // Access should use [0].memberName pattern
     try assertContains(hlsl, "[0].foo");
     try assertContains(hlsl, "[0].bar");
 }
 
-test "HLSL: SSBO interlock (glslang-compiled) uses RasterizerOrderedByteAddressBuffer" {
-    // Note: internal compiler doesn't support interlock extension, so the body gets
-    // optimized away. This test just verifies no crash.
+test "HLSL: SSBO interlock (spirv_cross_shaders) no crash" {
+    // The spirv_cross_shaders version uses #ifdef/#error which may not fully work
+    // with our preprocessor. Just verify no crash.
     const raw = @embedFile("spirv_cross_shaders/pixel-interlock-ordered.frag");
     const source: [:0]const u8 = @ptrCast(raw);
     const hlsl = try compileToHlsl(source);

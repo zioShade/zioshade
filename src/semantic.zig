@@ -93,6 +93,10 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .depth_less = analyzer.has_depth_less,
         .depth_unchanged = analyzer.has_depth_unchanged,
         .early_fragment_tests = analyzer.has_early_fragment_tests,
+        .pixel_interlock_ordered = analyzer.has_pixel_interlock_ordered,
+        .pixel_interlock_unordered = analyzer.has_pixel_interlock_unordered,
+        .sample_interlock_ordered = analyzer.has_sample_interlock_ordered,
+        .sample_interlock_unordered = analyzer.has_sample_interlock_unordered,
         .origin_upper_left = analyzer.has_origin_upper_left,
         .uses_qcom_image_processing = analyzer.uses_qcom_image_processing,
         .uses_ray_query = analyzer.uses_ray_query,
@@ -327,6 +331,10 @@ const Analyzer = struct {
     spec_constants: std.StringHashMapUnmanaged(ir.SpecConstant) = .{},
     // Fragment execution mode flags
     has_early_fragment_tests: bool = false,
+    has_pixel_interlock_ordered: bool = false,
+    has_pixel_interlock_unordered: bool = false,
+    has_sample_interlock_ordered: bool = false,
+    has_sample_interlock_unordered: bool = false,
     has_origin_upper_left: bool = false,
     has_depth_greater: bool = false,
     has_depth_less: bool = false,
@@ -1071,6 +1079,18 @@ const Analyzer = struct {
                         }
                         if (layout.early_fragment_tests) {
                             self.has_early_fragment_tests = true;
+                        }
+                        if (layout.pixel_interlock_ordered) {
+                            self.has_pixel_interlock_ordered = true;
+                        }
+                        if (layout.pixel_interlock_unordered) {
+                            self.has_pixel_interlock_unordered = true;
+                        }
+                        if (layout.sample_interlock_ordered) {
+                            self.has_sample_interlock_ordered = true;
+                        }
+                        if (layout.sample_interlock_unordered) {
+                            self.has_sample_interlock_unordered = true;
                         }
                         if (layout.origin_upper_left) {
                             self.has_origin_upper_left = true;
@@ -3353,7 +3373,28 @@ const Analyzer = struct {
                         return .{ .ty = .void, .id = result_id };
                     }
                     if (self.isBarrierBuiltin(node.data.name)) {
-                        // Remaining barrier builtins (beginInvocationInterlockARB, endInvocationInterlockARB, demote)
+                        // Fragment shader interlock: beginInvocationInterlockARB / endInvocationInterlockARB
+                        if (std.mem.eql(u8, node.data.name, "beginInvocationInterlockARB")) {
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .begin_invocation_interlock,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = &.{},
+                                .ty = .void,
+                            });
+                            return .{ .ty = .void, .id = result_id };
+                        }
+                        if (std.mem.eql(u8, node.data.name, "endInvocationInterlockARB")) {
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .end_invocation_interlock,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = &.{},
+                                .ty = .void,
+                            });
+                            return .{ .ty = .void, .id = result_id };
+                        }
+                        // Remaining barrier builtins (demote)
                         return .{ .ty = .void, .id = result_id };
                     }
                     // helperInvocationEXT() returns bool (constant false for now)
