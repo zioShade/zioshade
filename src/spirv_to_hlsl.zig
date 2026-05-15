@@ -909,37 +909,7 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
 // ---------------------------------------------------------------------------
 
 fn hlslGetArraySuffix(module: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
-    const ptr_inst = getDef(module, ptr_type_id) orelse return "";
-    if (ptr_inst.op != .TypePointer or ptr_inst.words.len <= 3) return "";
-
-    // Collect all array dimensions
-    var dims: [4]u32 = undefined;
-    var dim_count: usize = 0;
-    var current_id = ptr_inst.words[3];
-    while (dim_count < dims.len) {
-        const pt_inst = getDef(module, current_id) orelse break;
-        if (pt_inst.op != .TypeArray or pt_inst.words.len <= 3) break;
-        const len_id = pt_inst.words[3];
-        const len_def = getDef(module, len_id);
-        if (len_def) |ld| {
-            if (ld.op == .Constant and ld.words.len > 3) {
-                dims[dim_count] = ld.words[3];
-                dim_count += 1;
-            } else break;
-        } else break;
-        current_id = pt_inst.words[2];
-    }
-    if (dim_count == 0) return "";
-
-    // Build suffix string like [2][2]
-    var buf: [64]u8 = undefined;
-    var pos: usize = 0;
-    for (dims[0..dim_count]) |d| {
-        const part = std.fmt.bufPrint(buf[pos..], "[{d}]", .{d}) catch break;
-        pos += part.len;
-    }
-    const suffix = buf[0..pos];
-    return try std.heap.page_allocator.dupe(u8, suffix);
+    return common.commonGetArraySuffix(module.instructions, module.id_defs, ptr_type_id, true);
 }
 
 fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
