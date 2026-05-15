@@ -726,58 +726,11 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
 /// Collect struct type IDs referenced (transitively) by a parent type, and emit forward declarations.
 /// Only emits types referenced INSIDE the root type (not the root type itself).
 fn emitStructForwardDecls(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
-    const inst = getDef(m, root_type_id) orelse return;
-    if (inst.op != .TypeStruct) return;
-    // Recursively emit forward decls for all member types (but NOT root_type_id itself)
-    if (inst.words.len > 2) {
-        for (inst.words[2..]) |mt_id| {
-            try emitOneStructForwardDecl(m, names, mt_id, w, alloc, emitted, emitted_names);
-        }
-    }
+    return common.commonEmitStructForwardDecls(m, names, root_type_id, w, alloc, emitted, emitted_names, glslType, getMemberName);
 }
 
 fn emitOneStructForwardDecl(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
-    const inst = getDef(m, type_id) orelse return;
-    switch (inst.op) {
-        .TypeStruct => {
-            // First, recursively emit children
-            if (inst.words.len > 2) {
-                for (inst.words[2..]) |mt_id| {
-                    try emitOneStructForwardDecl(m, names, mt_id, w, alloc, emitted, emitted_names);
-                }
-            }
-            // Skip if already emitted
-            if (emitted.get(type_id) != null) return;
-            const sname = names.get(type_id) orelse "Struct";
-            if (emitted_names.get(sname) != null) return;
-            emitted.put(type_id, {}) catch return;
-            try emitted_names.put(sname, {});
-            try w.print("struct {s}\n{{\n", .{sname});
-            for (inst.words[2..], 0..) |mt_id, mi| {
-                const mti = getDef(m, mt_id);
-                if (mti) |mi2| {
-                    if (mi2.op == .TypeArray and mi2.words.len > 3) {
-                        const et = try glslType(m, mi2.words[2], names, alloc);
-                        const li = getDef(m, mi2.words[3]);
-                        const lv: u32 = if(li)|l| l.words[3] else 1;
-                        var mname_buf: [32]u8 = undefined;
-                        const mname = getMemberName(m, type_id, @intCast(mi), &mname_buf);
-                        try w.print("    {s} {s}[{d}];\n", .{et, mname, lv});
-                        continue;
-                    }
-                }
-                const mt = try glslType(m, mt_id, names, alloc);
-                var mname_buf: [32]u8 = undefined;
-                const mname = getMemberName(m, type_id, @intCast(mi), &mname_buf);
-                try w.print("    {s} {s};\n", .{mt, mname});
-            }
-            try w.writeAll("};\n\n");
-        },
-        .TypeArray => {
-            if (inst.words.len > 2) try emitOneStructForwardDecl(m, names, inst.words[2], w, alloc, emitted, emitted_names);
-        },
-        else => return,
-    }
+    return common.commonEmitOneStructForwardDecl(m, names, type_id, w, alloc, emitted, emitted_names, glslType, getMemberName);
 }
 
 fn detectOutParams(m: *const ParsedModule, entry_id: u32, opi: *std.AutoHashMap(u32, std.ArrayList(usize)), alloc: std.mem.Allocator) void {
