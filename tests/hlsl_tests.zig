@@ -13728,3 +13728,27 @@ test "HLSL: SSBO interlock (spirv_cross_shaders) no crash" {
     try std.testing.expect(hlsl.len > 0);
 }
 
+test "HLSL: selection-block-dominator do-while(false)" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) flat in int vIndex;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    do {
+        \\        if (vIndex != 1) {
+        \\            FragColor = vec4(1.0);
+        \\            break;
+        \\        }
+        \\        FragColor = vec4(10.0);
+        \\        break;
+        \\    } while(false);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    std.debug.print("\n=== selection-block-dominator HLSL ===\n{s}\n", .{hlsl});
+    try std.testing.expect(hlsl.len > 0);
+}
+
