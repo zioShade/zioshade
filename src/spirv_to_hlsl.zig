@@ -10,6 +10,8 @@ const compat = @import("compat.zig");
 const std = @import("std");
 const spirv = @import("spirv.zig");
 
+const common = @import("spirv_cross_common.zig");
+
 const log = std.log.scoped(.spirv_to_hlsl);
 
 // ---------------------------------------------------------------------------
@@ -3107,14 +3109,7 @@ fn swizzleChar(index: u32) []const u8 {
 }
 
 fn hlslGetMemberName(module: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
-    for (module.instructions) |inst| {
-        if (inst.op == .MemberName and inst.words.len >= 4 and inst.words[1] == struct_id and inst.words[2] == member_idx) {
-            var name_len: usize = 0;
-            for (inst.words[3..]) |word| { const bytes = std.mem.asBytes(&word); for (bytes) |b| { if (b == 0) break; if (name_len < buf.len - 1) { buf[name_len] = b; name_len += 1; } } }
-            return buf[0..name_len];
-        }
-    }
-    return std.fmt.bufPrint(buf, "_m{d}", .{member_idx}) catch "_m0";
+    return common.commonGetMemberName(module.instructions, struct_id, member_idx, buf, "_m");
 }
 
 fn splitPair(pair: []const u8) [2][]const u8 {

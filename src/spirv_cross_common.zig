@@ -367,6 +367,33 @@ pub fn swizzleChar(index: u32) []const u8 {
 }
 
 // ---------------------------------------------------------------------------
+// Unified Backend Helpers (used by GLSL, HLSL, MSL, WGSL backends)
+// ---------------------------------------------------------------------------
+
+/// Get the name of a struct member from OpMemberName, with configurable fallback prefix.
+/// GLSL uses "m" (m0, m1, ...), HLSL/MSL use "_m" (_m0, _m1, ...)
+/// Takes instruction slice directly to work across different ParsedModule types.
+pub fn commonGetMemberName(instructions: anytype, struct_id: u32, member_idx: u32, buf: *[32]u8, fallback_prefix: []const u8) []const u8 {
+    for (instructions) |inst| {
+        if (inst.op == .MemberName and inst.words.len >= 4 and inst.words[1] == struct_id and inst.words[2] == member_idx) {
+            var name_len: usize = 0;
+            for (inst.words[3..]) |word| {
+                const bytes = std.mem.asBytes(&word);
+                for (bytes) |b| {
+                    if (b == 0) break;
+                    if (name_len < buf.len - 1) {
+                        buf[name_len] = b;
+                        name_len += 1;
+                    }
+                }
+            }
+            if (name_len > 0) return buf[0..name_len];
+        }
+    }
+    return std.fmt.bufPrint(buf, "{s}{d}", .{ fallback_prefix, member_idx }) catch fallback_prefix;
+}
+
+// ---------------------------------------------------------------------------
 // Resource collection (backend-agnostic)
 // ---------------------------------------------------------------------------
 
