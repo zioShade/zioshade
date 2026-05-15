@@ -302,6 +302,8 @@ pub const BuiltIn = enum(u32) {
     base_vertex = 4424,
     device_index = 4440,
     mesh_per_vertex_ext = 5285,
+    bary_coord_khr = 5286,
+    bary_coord_no_persp_khr = 5287,
     primitive_triangle_indices_ext = 5294,
     primitive_line_indices_ext = 5295,
     primitive_point_indices_ext = 5296,
@@ -395,6 +397,8 @@ pub const Decoration = enum(u32) {
     offset = 35,
     input_attachment_index = 43,
     spec_id = 1,
+    per_vertex_khr = 4285,
+    per_vertex_nv = 5285,
     _,
 };
 
