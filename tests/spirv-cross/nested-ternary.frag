@@ -5,10 +5,9 @@ layout(location = 0) out vec4 fragColor;
 
 void main()
 {
-    // Test nested ternary chains
-    float x = uv.x;
-    float y = uv.y;
-    float a = x > 0.5 ? (y > 0.5 ? 1.0 : 0.75) : (y > 0.5 ? 0.5 : 0.25);
-    float b = x < 0.25 ? 0.0 : (x < 0.5 ? 0.33 : (x < 0.75 ? 0.66 : 1.0));
-    fragColor = vec4(a, b, a * b, 1.0);
+    // Test ternary chains and nested conditionals
+    float r = uv.x > 0.5 ? (uv.y > 0.5 ? 1.0 : 0.5) : 0.0;
+    float g = uv.x < 0.5 ? (uv.y < 0.5 ? 0.8 : 0.3) : 0.1;
+    float b = uv.x > uv.y ? 1.0 : (uv.y > 0.5 ? 0.7 : 0.2);
+    fragColor = vec4(r, g, b, 1.0);
 }
