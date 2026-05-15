@@ -797,8 +797,6 @@ const Analyzer = struct {
         self.ac_result_to_base.clearRetainingCapacity();
         self.load_cache.clearRetainingCapacity();
         self.pure_op_cache.clearRetainingCapacity();
-        // Note: global_load_cache is NOT cleared — it persists across blocks
-        // But we only cache global loads from entry block and loop headers (cache_globals flag)
         try self.instructions.append(self.alloc, .{
             .tag = .label,
             .result_id = label_id,
@@ -1883,18 +1881,6 @@ const Analyzer = struct {
                 try self.emitLabel(merge_label);
                 self.cache_globals = true; // loop merge dominates
 
-                // Invalidate load caches: any loads performed inside the loop body
-                // are not guaranteed to dominate code after the merge block.
-                // Without this, SSA values from the loop body leak into post-loop code,
-                // causing SPIR-V dominance violations.
-                self.load_cache.deinit(self.alloc);
-                self.load_cache = .empty;
-                self.global_load_cache.deinit(self.alloc);
-                self.global_load_cache = .empty;
-                self.pure_op_cache.deinit(self.alloc);
-                self.pure_op_cache = .empty;
-                self.global_pure_op_cache.deinit(self.alloc);
-                self.global_pure_op_cache = .empty;
 
                 self.popScope();
             },
@@ -1937,16 +1923,6 @@ const Analyzer = struct {
                 try self.emitLabel(merge_label);
                 self.cache_globals = true; // loop merge dominates
 
-                // Invalidate load caches: any loads performed inside the loop body
-                // are not guaranteed to dominate code after the merge block.
-                self.load_cache.deinit(self.alloc);
-                self.load_cache = .empty;
-                self.global_load_cache.deinit(self.alloc);
-                self.global_load_cache = .empty;
-                self.pure_op_cache.deinit(self.alloc);
-                self.pure_op_cache = .empty;
-                self.global_pure_op_cache.deinit(self.alloc);
-                self.global_pure_op_cache = .empty;
             },
             .do_while_stmt => {
                 const body_label = self.allocId();
@@ -1988,16 +1964,6 @@ const Analyzer = struct {
                 try self.emitLabel(merge_label);
                 self.cache_globals = true; // loop merge dominates
 
-                // Invalidate load caches: any loads performed inside the loop body
-                // are not guaranteed to dominate code after the merge block.
-                self.load_cache.deinit(self.alloc);
-                self.load_cache = .empty;
-                self.global_load_cache.deinit(self.alloc);
-                self.global_load_cache = .empty;
-                self.pure_op_cache.deinit(self.alloc);
-                self.pure_op_cache = .empty;
-                self.global_pure_op_cache.deinit(self.alloc);
-                self.global_pure_op_cache = .empty;
             },
             .return_stmt => {
                 if (node.data.children.len > 0) {
