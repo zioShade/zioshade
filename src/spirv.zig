@@ -265,6 +265,8 @@ pub const Capability = enum(u32) {
     derivative_control = 51,
     input_attachment = 40,
     atomic_float32_add_ext = 6033,
+    fragment_shader_pixel_interlock_ext = 5378,
+    fragment_shader_sample_interlock_ext = 5363,
     texture_sample_weighted_qcom = 4484,
     texture_box_filter_qcom = 4485,
     texture_block_match_qcom = 4486,
@@ -409,6 +411,10 @@ pub const ExecutionMode = enum(u32) {
     OutputTrianglesEXT = 5298,
     OutputPrimitivesEXT = 5270,
     OutputVertices = 26,
+    PixelInterlockOrderedEXT = 5366,
+    PixelInterlockUnorderedEXT = 5367,
+    SampleInterlockOrderedEXT = 5368,
+    SampleInterlockUnorderedEXT = 5369,
     _,
 };
 

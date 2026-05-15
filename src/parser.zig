@@ -471,6 +471,14 @@ const Parser = struct {
                     layout.origin_upper_left = true;
                 } else if (std.mem.eql(u8, ident_text, "early_fragment_tests")) {
                     layout.early_fragment_tests = true;
+                } else if (std.mem.eql(u8, ident_text, "pixel_interlock_ordered")) {
+                    layout.pixel_interlock_ordered = true;
+                } else if (std.mem.eql(u8, ident_text, "pixel_interlock_unordered")) {
+                    layout.pixel_interlock_unordered = true;
+                } else if (std.mem.eql(u8, ident_text, "sample_interlock_ordered")) {
+                    layout.sample_interlock_ordered = true;
+                } else if (std.mem.eql(u8, ident_text, "sample_interlock_unordered")) {
+                    layout.sample_interlock_unordered = true;
                 } else if (std.mem.eql(u8, ident_text, "depth_greater")) {
                     layout.depth_greater = true;
                 } else if (std.mem.eql(u8, ident_text, "depth_less")) {
