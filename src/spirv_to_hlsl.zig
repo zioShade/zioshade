@@ -981,55 +981,11 @@ fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
 // ---------------------------------------------------------------------------
 
 fn hlslEmitStructForwardDecls(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
-    const inst = getDef(module, root_type_id) orelse return;
-    if (inst.op != .TypeStruct) return;
-    if (inst.words.len > 2) {
-        for (inst.words[2..]) |mt_id| {
-            try hlslEmitOneStructForwardDecl(module, names, mt_id, w, alloc, emitted, emitted_names);
-        }
-    }
+    return common.commonEmitStructForwardDecls(module, names, root_type_id, w, alloc, emitted, emitted_names, hlslType, hlslGetMemberName);
 }
 
 fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
-    const inst = getDef(module, type_id) orelse return;
-    switch (inst.op) {
-        .TypeStruct => {
-            // Recursively emit children first
-            if (inst.words.len > 2) {
-                for (inst.words[2..]) |mt_id| {
-                    try hlslEmitOneStructForwardDecl(module, names, mt_id, w, alloc, emitted, emitted_names);
-                }
-            }
-            if (emitted.get(type_id) != null) return;
-            const sname = names.get(type_id) orelse "Struct";
-            if (emitted_names.get(sname) != null) return;
-            emitted.put(type_id, {}) catch return;
-            try emitted_names.put(sname, {});
-            try w.print("struct {s}\n{{\n", .{sname});
-            for (inst.words[2..], 0..) |mt_id, mi| {
-                const mti = getDef(module, mt_id);
-                if (mti) |mi2| {
-                    if (mi2.op == .TypeArray and mi2.words.len > 3) {
-                        const et = try hlslType(module, mi2.words[2], names, alloc);
-                        const li = getDef(module, mi2.words[3]);
-                        const lv: u32 = if(li)|l| l.words[3] else 1;
-                        var mname_buf: [32]u8 = undefined;
-                        const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
-                        try w.print("    {s} {s}[{d}];\n", .{et, mname, lv});
-                        continue;
-                    }
-                }
-                const mt = try hlslType(module, mt_id, names, alloc);
-                var mname_buf: [32]u8 = undefined;
-                const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
-                try w.print("    {s} {s};\n", .{mt, mname});
-            }
-            try w.writeAll("};\n");
-        },
-        .TypeArray => if (inst.words.len > 2) try hlslEmitOneStructForwardDecl(module, names, inst.words[2], w, alloc, emitted, emitted_names),
-        .TypeMatrix, .TypeVector => if (inst.words.len > 2) try hlslEmitOneStructForwardDecl(module, names, inst.words[2], w, alloc, emitted, emitted_names),
-        else => {},
-    }
+    return common.commonEmitOneStructForwardDecl(module, names, type_id, w, alloc, emitted, emitted_names, hlslType, hlslGetMemberName);
 }
 
 // ---------------------------------------------------------------------------

@@ -366,6 +366,86 @@ pub fn swizzleChar(index: u32) []const u8 {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Unified Backend Helpers (used by GLSL, HLSL, MSL, WGSL backends)
+// ---------------------------------------------------------------------------
+
+/// Emit struct forward declarations for types referenced by a root type.
+/// `ctx` is the backend's ParsedModule pointer. `type_fn(ctx, type_id, names, alloc)` and
+/// `member_fn(ctx, struct_id, member_idx, buf)` are backend-specific.
+pub fn commonEmitStructForwardDecls(
+    ctx: anytype,
+    names: *std.AutoHashMap(u32, []const u8),
+    root_type_id: u32,
+    w: anytype,
+    alloc: std.mem.Allocator,
+    emitted: *std.AutoHashMap(u32, void),
+    emitted_names: *std.StringHashMap(void),
+    comptime type_fn: anytype,
+    comptime member_fn: anytype,
+) !void {
+    const inst = localGetDef(ctx.instructions, ctx.id_defs, root_type_id) orelse return;
+    if (inst.op != .TypeStruct) return;
+    if (inst.words.len > 2) {
+        for (inst.words[2..]) |mt_id| {
+            try commonEmitOneStructForwardDecl(ctx, names, mt_id, w, alloc, emitted, emitted_names, type_fn, member_fn);
+        }
+    }
+}
+
+pub fn commonEmitOneStructForwardDecl(
+    ctx: anytype,
+    names: *std.AutoHashMap(u32, []const u8),
+    type_id: u32,
+    w: anytype,
+    alloc: std.mem.Allocator,
+    emitted: *std.AutoHashMap(u32, void),
+    emitted_names: *std.StringHashMap(void),
+    comptime type_fn: anytype,
+    comptime member_fn: anytype,
+) !void {
+    const instructions = ctx.instructions;
+    const id_defs = ctx.id_defs;
+    const inst = localGetDef(instructions, id_defs, type_id) orelse return;
+    switch (inst.op) {
+        .TypeStruct => {
+            if (inst.words.len > 2) {
+                for (inst.words[2..]) |mt_id| {
+                    try commonEmitOneStructForwardDecl(ctx, names, mt_id, w, alloc, emitted, emitted_names, type_fn, member_fn);
+                }
+            }
+            if (emitted.get(type_id) != null) return;
+            const sname = names.get(type_id) orelse "Struct";
+            if (emitted_names.get(sname) != null) return;
+            emitted.put(type_id, {}) catch return;
+            try emitted_names.put(sname, {});
+            try w.print("struct {s}\n{{\n", .{sname});
+            for (inst.words[2..], 0..) |mt_id, mi| {
+                const mti = localGetDef(instructions, id_defs, mt_id);
+                if (mti) |mi2| {
+                    if (mi2.op == .TypeArray and mi2.words.len > 3) {
+                        const et = try type_fn(ctx, mi2.words[2], names, alloc);
+                        const li = localGetDef(instructions, id_defs, mi2.words[3]);
+                        const lv: u32 = if (li) |l| l.words[3] else 1;
+                        var mname_buf: [32]u8 = undefined;
+                        const mname = member_fn(ctx, type_id, @as(u32, @intCast(mi)), &mname_buf);
+                        try w.print("    {s} {s}[{d}];\n", .{ et, mname, lv });
+                        continue;
+                    }
+                }
+                const mt = try type_fn(ctx, mt_id, names, alloc);
+                var mname_buf: [32]u8 = undefined;
+                const mname = member_fn(ctx, type_id, @as(u32, @intCast(mi)), &mname_buf);
+                try w.print("    {s} {s};\n", .{ mt, mname });
+            }
+            try w.writeAll("};\n");
+        },
+        .TypeArray => if (inst.words.len > 2) try commonEmitOneStructForwardDecl(ctx, names, inst.words[2], w, alloc, emitted, emitted_names, type_fn, member_fn),
+        .TypeMatrix, .TypeVector => if (inst.words.len > 2) try commonEmitOneStructForwardDecl(ctx, names, inst.words[2], w, alloc, emitted, emitted_names, type_fn, member_fn),
+        else => {},
+    }
+}
+
 /// Get array dimension suffix for a pointer type. E.g., "[4]" or "[2][3]" for multi-dim.
 /// HLSL uses multi_dim=true to unwrap nested TypeArray layers.
 /// Takes instruction slice + id_defs to work across different ParsedModule types.
