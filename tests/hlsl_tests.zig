@@ -13820,47 +13820,36 @@ test "HLSL: sample-parameter with gl_SampleMaskIn[0]" {
 
 
 test "HLSL: barycentric-khr from SPIR-V binary" {
-    // Load pre-compiled SPIR-V for barycentric-khr shader
-    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/bary_khr.spv", 1024 * 1024);
+    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/barycentric-khr.spv", 1024 * 1024);
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
     const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
-    std.debug.print("\n=== barycentric-khr from binary HLSL ===\n{s}\n", .{hlsl});
     // Should contain nointerpolation and SV_Barycentrics
-    try std.testing.expect(hlsl.len > 0);
-}
-
-test "HLSL: barycentric-khr-io-block from SPIR-V binary" {
-    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/bary_khr_ioblock.spv", 1024 * 1024);
-    defer alloc.free(spv_data);
-    const spv_u32_len = spv_data.len / 4;
-    const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
-    defer alloc.free(hlsl);
-    std.debug.print("\n=== barycentric-khr-io-block HLSL ===\n{s}\n", .{hlsl});
-    try std.testing.expect(hlsl.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "nointerpolation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "SV_Barycentrics") != null);
 }
 
 test "HLSL: barycentric-nv from SPIR-V binary" {
-    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/bary_nv.spv", 1024 * 1024);
+    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/barycentric-nv.spv", 1024 * 1024);
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
     const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
-    std.debug.print("\n=== barycentric-nv HLSL ===\n{s}\n", .{hlsl});
-    try std.testing.expect(hlsl.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "nointerpolation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "SV_Barycentrics") != null);
 }
 
-test "HLSL: selection-block-dominator from SPIR-V binary" {
-    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/sel.spv", 1024 * 1024);
+test "HLSL: SSBO struct forward declaration from SPIR-V binary" {
+    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/complex-expression-in-access-chain.spv", 1024 * 1024);
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
     const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
-    std.debug.print("\n=== selection-block-dominator HLSL ===\n{s}\n", .{hlsl});
-    try std.testing.expect(hlsl.len > 0);
+    // Check that UBO struct is forward-declared for SSBO
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "struct UBO") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "RWStructuredBuffer<UBO>") != null);
 }

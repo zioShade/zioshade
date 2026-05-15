@@ -299,6 +299,8 @@ pub fn spirvToHLSL(
             };
             // Strip __ssbo_buf__ prefix from the name for emission
             const clean_name = if (std.mem.startsWith(u8, cb.name, "__ssbo_buf__")) cb.name["__ssbo_buf__".len..] else cb.name;
+            // Emit struct forward declaration for the SSBO struct type
+            hlslEmitOneStructForwardDecl(&module, &names, cb.type_id, w, aa, &emitted_structs, &emitted_names2) catch {};
             if (has_interlock) {
                 const uav_binding: u32 = @intCast(binding);
                 try w.print("globallycoherent RasterizerOrderedByteAddressBuffer {s} : register(u{d});\n\n", .{ clean_name, uav_binding });
@@ -1465,7 +1467,8 @@ fn emitFunction(
                     const alias_name = try std.fmt.allocPrint(alloc, "{s}_in", .{iv_name});
                     if (try names.fetchPut(ivid, alias_name)) |old| alloc.free(old.value);
                 } else if (bi == .sample_position) {
-                    try w.print("float2 {s}", .{iv_name});
+                    // gl_SamplePosition → no direct DXC semantic; use TEXCOORD8
+                    try w.print("float2 {s} : TEXCOORD8", .{iv_name});
                 } else if (bi == .sample_id) {
                     try w.print("uint {s} : {s}", .{ iv_name, semantic });
                 } else if (bi == .bary_coord_khr) {

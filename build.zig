@@ -104,6 +104,21 @@ pub fn build(b: *std.Build) void {
     hlsl_test_step.dependOn(&run_hlsl_tests.step);
     test_step.dependOn(&run_hlsl_tests.step);
 
+    // DXC batch test — run with: zig build test-dxc
+    const dxc_test_step = b.step("test-dxc", "Run DXC compilation test on all SPIR-V → HLSL outputs");
+    const dxc_test_mod = b.createModule(.{
+        .root_source_file = b.path("tools/dxc_batch_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dxc_test_mod.addImport("glslpp", glslpp_mod);
+    const dxc_exe = b.addExecutable(.{
+        .name = "dxc-batch-test",
+        .root_module = dxc_test_mod,
+    });
+    const run_dxc_test = b.addRunArtifact(dxc_exe);
+    dxc_test_step.dependOn(&run_dxc_test.step);
+
     // GLSL backend tests — run with: zig build test-glsl
     const glsl_test_step = b.step("test-glsl", "Run GLSL backend tests (GLSL → SPIR-V → GLSL pipeline)");
     const glsl_test_mod = b.createModule(.{
