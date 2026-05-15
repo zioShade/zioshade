@@ -5259,10 +5259,28 @@ const Analyzer = struct {
                 // Matrix-from-scalar diagonal constructor: mat3(1.0) → identity-like matrix
                 // Creates N columns, each with the scalar on the diagonal position and 0 elsewhere
                 if (arg_tids.items.len == 1 and result_ty.isMatrix() and arg_tids.items[0].ty.isScalar()) {
-                    const scalar_id = arg_tids.items[0].id;
                     const col_type = result_ty.columnType();
+                    const elem_ty = col_type.elementType();
                     const num_cols = result_ty.numColumns();
                     const col_n = col_type.numComponents();
+                    // Convert scalar to element type if needed (e.g. int → float for mat3(1))
+                    var scalar_id = arg_tids.items[0].id;
+                    if (!std.meta.eql(arg_tids.items[0].ty, elem_ty)) {
+                        if (elem_ty == .float and (arg_tids.items[0].ty == .int or arg_tids.items[0].ty == .uint)) {
+                            const conv_tag: ir.Instruction.Tag = if (arg_tids.items[0].ty == .uint) .convert_utof else .convert_itof;
+                            const conv_id = self.allocId();
+                            const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            conv_ops[0] = .{ .id = scalar_id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = conv_tag,
+                                .result_type = null,
+                                .result_id = conv_id,
+                                .operands = conv_ops,
+                                .ty = .float,
+                            });
+                            scalar_id = conv_id;
+                        }
+                    }
                     const zero_id = try self.getConstFloat(0.0);
                     const col_ids = try self.alloc.alloc(u32, num_cols);
                     for (0..num_cols) |ci| {
@@ -5292,17 +5310,33 @@ const Analyzer = struct {
                     const col_type = result_ty.columnType();
                     const num_cols = result_ty.numColumns();
                     const col_n = col_type.numComponents();
-                    // Group scalars into column vectors
+                    const elem_ty = col_type.elementType();
+                    // Group scalars into column vectors, converting to element type
                     const col_ids = try self.alloc.alloc(u32, num_cols);
                     for (0..num_cols) |col| {
                         const vec_result_id = self.allocId();
                         const vec_ops = try self.alloc.alloc(ir.Instruction.Operand, col_n);
                         for (0..col_n) |row| {
                             const idx = col * col_n + row;
-                            if (idx < arg_tids.items.len) {
-                                vec_ops[row] = .{ .id = arg_tids.items[idx].id };
+                            const src = if (idx < arg_tids.items.len) arg_tids.items[idx] else arg_tids.items[arg_tids.items.len - 1];
+                            // Convert scalar to matrix element type if needed
+                            if (std.meta.eql(src.ty, elem_ty)) {
+                                vec_ops[row] = .{ .id = src.id };
+                            } else if (elem_ty == .float and (src.ty == .int or src.ty == .uint)) {
+                                const conv_tag: ir.Instruction.Tag = if (src.ty == .uint) .convert_utof else .convert_itof;
+                                const conv_id = self.allocId();
+                                const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                conv_ops[0] = .{ .id = src.id };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = conv_tag,
+                                    .result_type = null,
+                                    .result_id = conv_id,
+                                    .operands = conv_ops,
+                                    .ty = .float,
+                                });
+                                vec_ops[row] = .{ .id = conv_id };
                             } else {
-                                vec_ops[row] = .{ .id = arg_tids.items[arg_tids.items.len - 1].id };
+                                vec_ops[row] = .{ .id = src.id };
                             }
                         }
                         try self.instructions.append(self.alloc, .{
