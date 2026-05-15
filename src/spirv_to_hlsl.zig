@@ -519,6 +519,9 @@ pub fn spirvToHLSL(
                 const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                 if (sc == .Output) {
                     const vid = inst.words[2];
+                    // Skip builtin outputs
+                    const out_builtin = getDecorationValue(&decorations, vid, .built_in);
+                    if (out_builtin != null) continue;
                     var loc: u32 = 0;
                     if (decorations.get(vid)) |dec_list| {
                         for (dec_list.items) |d| {
@@ -1157,12 +1160,21 @@ fn emitFunction(
     const OutputVar = struct { id: u32, location: u32 };
     var output_vars = std.ArrayList(OutputVar).initCapacity(alloc, 4) catch return error.OutOfMemory;
     defer output_vars.deinit(alloc);
+    // Collect builtin output variables (e.g., gl_SampleMask)
+    var builtin_output_ids = std.ArrayList(u32).initCapacity(alloc, 2) catch return error.OutOfMemory;
+    defer builtin_output_ids.deinit(alloc);
     if (is_fragment) {
         for (module.instructions) |inst| {
             if (inst.op == .Variable and inst.words.len >= 4) {
                 const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                 if (sc == .Output) {
                     const vid = inst.words[2];
+                    // Skip builtin outputs — they get special handling
+                    const out_builtin = getDecorationValue(decorations, vid, .built_in);
+                    if (out_builtin != null) {
+                        builtin_output_ids.append(alloc, vid) catch {};
+                        continue;
+                    }
                     // Find location decoration
                     var loc: u32 = 0;
                     if (decorations.get(vid)) |dec_list| {
@@ -1408,9 +1420,9 @@ fn emitFunction(
         }
     }
 
-    // Add input variables as parameters for fragment entry function
+    // Add input variables and builtin outputs as parameters for fragment entry function
+    var first_input = if (is_fragment) param_ids.items.len == 0 else true;
     if (is_fragment) {
-        var first_input = param_ids.items.len == 0;
         for (input_var_ids.items) |ivid| {
             const iv_inst = getDef(module, ivid) orelse continue;
             const iv_name = names.get(ivid) orelse "input_var";
@@ -1423,7 +1435,20 @@ fn emitFunction(
                 const semantic = builtInToSemantic(b);
                 if (!first_input) try w.writeAll(", ");
                 first_input = false;
-                try w.print("{s} {s} : {s}", .{ iv_type, iv_name, semantic });
+                // Special type overrides for HLSL builtins
+                if (bi == .sample_mask) {
+                    // gl_SampleMaskIn → input uint SV_Coverage (scalar, not array)
+                    try w.print("uint {s}_in : {s}", .{ iv_name, semantic });
+                    // Alias the variable name to include _in suffix for clarity
+                    const alias_name = try std.fmt.allocPrint(alloc, "{s}_in", .{iv_name});
+                    if (try names.fetchPut(ivid, alias_name)) |old| alloc.free(old.value);
+                } else if (bi == .sample_position) {
+                    try w.print("float2 {s}", .{iv_name});
+                } else if (bi == .sample_id) {
+                    try w.print("uint {s} : {s}", .{ iv_name, semantic });
+                } else {
+                    try w.print("{s} {s} : {s}", .{ iv_type, iv_name, semantic });
+                }
             } else {
                 const loc = getDecorationValue(decorations, ivid, .location);
                 if (loc) |l| {
@@ -1434,6 +1459,25 @@ fn emitFunction(
                     if (!first_input) try w.writeAll(", ");
                     first_input = false;
                     try w.print("{s} {s}", .{ iv_type, iv_name });
+                }
+            }
+        }
+    }
+
+    // Add builtin output variables as out params (e.g., gl_SampleMask → SV_Coverage)
+    if (is_fragment) {
+        for (builtin_output_ids.items) |boid| {
+            const bo_name = names.get(boid) orelse "builtin_out";
+            const bo_builtin = getDecorationValue(decorations, boid, .built_in);
+            if (bo_builtin) |bb| {
+                const bi: spirv.BuiltIn = @enumFromInt(bb);
+                const semantic = builtInToSemantic(bb);
+                if (!first_input) try w.writeAll(", ");
+                first_input = false;
+                if (bi == .sample_mask) {
+                    try w.print("out uint {s} : {s}", .{ bo_name, semantic });
+                } else {
+                    try w.print("out {s} {s} : {s}", .{ "int", bo_name, semantic });
                 }
             }
         }
@@ -1459,6 +1503,19 @@ fn emitFunction(
                 const ov_type = try hlslType(module, ov_inst.words[1], names, alloc);
                 const ov_name = names.get(ov.id) orelse "out";
                 try w.print("    {s} {s};\n", .{ ov_type, ov_name });
+            }
+            // Also declare builtin outputs as locals (e.g., gl_SampleMask as uint)
+            for (builtin_output_ids.items) |boid| {
+                const bo_name = names.get(boid) orelse "builtin_out";
+                const bo_builtin = getDecorationValue(decorations, boid, .built_in);
+                if (bo_builtin) |bb| {
+                    const bi: spirv.BuiltIn = @enumFromInt(bb);
+                    if (bi == .sample_mask) {
+                        try w.print("    uint {s};\n", .{bo_name});
+                    } else {
+                        try w.print("    int {s};\n", .{bo_name});
+                    }
+                }
             }
         } else if (output_var_id != null) {
             // Single output: only declare the primary one
@@ -1503,6 +1560,9 @@ fn builtInToSemantic(b: u32) []const u8 {
         .front_facing => "SV_IsFrontFace",
         .layer => "SV_RenderTargetArrayIndex",
         .view_index => "SV_ViewID",
+        .sample_id => "SV_SampleIndex",
+        .sample_mask => "SV_Coverage",
+        .sample_position => "SV_Position",
         else => "TEXCOORD0",
     };
 }
@@ -2086,9 +2146,34 @@ fn emitInstruction(
             // Update the name to be the access expression
             const result_id = inst.words[2];
             const base_id = inst.words[3];
-            const expr = try buildAccessExpr(module, names, base_id, inst.words[4..], alloc);
-            // Replace the name
-            if (try names.fetchPut(result_id, expr)) |old| alloc.free(old.value);
+            // Check if accessing [0] on a builtin array (gl_SampleMask, gl_SampleMaskIn)
+            // In HLSL these are scalar (SV_Coverage), not arrays
+            var skip_chain = false;
+            if (inst.words.len == 5) {
+                // Single index — check if it's constant 0 and base is a sample_mask builtin
+                const idx_id = inst.words[4];
+                const idx_inst = getDef(module, idx_id);
+                if (idx_inst) |ii| {
+                    if (ii.op == .Constant and ii.words.len > 3 and ii.words[3] == 0) {
+                        const base_builtin = getDecorationValue(decorations, base_id, .built_in);
+                        if (base_builtin) |bb| {
+                            const bi: spirv.BuiltIn = @enumFromInt(bb);
+                            if (bi == .sample_mask) {
+                                // Strip [0] subscript — just use the variable name
+                                const base_name = names.get(base_id) orelse "base";
+                                const alias = try alloc.dupe(u8, base_name);
+                                if (try names.fetchPut(result_id, alias)) |old| alloc.free(old.value);
+                                skip_chain = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if (!skip_chain) {
+                const expr = try buildAccessExpr(module, names, base_id, inst.words[4..], alloc);
+                // Replace the name
+                if (try names.fetchPut(result_id, expr)) |old| alloc.free(old.value);
+            }
         },
 
         // Arithmetic
@@ -3114,6 +3199,21 @@ fn splitPair(pair: []const u8) [2][]const u8 {
 }
 
 fn writeResolvePointer(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32, w: anytype) !void {
+    // First check if there's a pre-mapped name for this ID
+    if (names.get(ptr_id)) |mapped_name| {
+        // If the mapped name doesn't look like a raw access chain expression, use it directly
+        const inst = getDef(module, ptr_id);
+        if (inst != null and inst.?.op == .AccessChain) {
+            // Check if the mapped name was set by our builtin [0] stripping filter
+            // by checking if it's different from what buildAccessExpr would produce
+            const base_name = names.get(inst.?.words[3]) orelse "";
+            // If the mapped name equals the base name, it was stripped
+            if (std.mem.eql(u8, mapped_name, base_name)) {
+                try w.writeAll(mapped_name);
+                return;
+            }
+        }
+    }
     const inst = getDef(module, ptr_id) orelse {
         try w.writeAll(names.get(ptr_id) orelse "var");
         return;
