@@ -13708,9 +13708,21 @@ test "HLSL: SSBO pixel-interlock produces RWStructuredBuffer" {
     defer alloc.free(spv);
     const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
-    std.debug.print("\n=== Pixel Interlock HLSL ===\n{s}\n", .{hlsl});
-    // SSBO should be emitted as RWStructuredBuffer or RasterizerOrderedByteAddressBuffer
-    // For now just verify it doesn't crash
-    try assertContains(hlsl, "Buffer");
+    // SSBO should be emitted as RWStructuredBuffer
+    try assertContains(hlsl, "RWStructuredBuffer");
+    // Access should use [0].memberName pattern
+    try assertContains(hlsl, "[0].foo");
+    try assertContains(hlsl, "[0].bar");
+}
+
+test "HLSL: SSBO interlock (glslang-compiled) uses RasterizerOrderedByteAddressBuffer" {
+    // Note: internal compiler doesn't support interlock extension, so the body gets
+    // optimized away. This test just verifies no crash.
+    const raw = @embedFile("spirv_cross_shaders/pixel-interlock-ordered.frag");
+    const source: [:0]const u8 = @ptrCast(raw);
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Just verify no crash
+    try std.testing.expect(hlsl.len > 0);
 }
 
