@@ -31,6 +31,7 @@ const ParsedModule = struct {
     entry_point_id: ?u32 = null,
     execution_model: spirv.ExecutionModel = .Fragment,
     local_size: [3]u32 = [3]u32{ 1, 1, 1 },
+    early_fragment_tests: bool = false,
 
     pub fn deinit(self: *ParsedModule, alloc: std.mem.Allocator) void {
         // instructions was allocated via ArrayList.initCapacity
@@ -101,6 +102,9 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
                     inst.words[4],
                     inst.words[5],
                 };
+            }
+            if (mode == .EarlyFragmentTests) {
+                module.early_fragment_tests = true;
             }
         }
     }
@@ -1343,6 +1347,10 @@ fn emitFunction(
         }
         const stage_name: []const u8 = if (is_raygen) "raygeneration" else if (is_closesthit) "closesthit" else if (is_miss) "miss" else if (is_intersection) "intersection" else if (is_anyhit) "anyhit" else "callable";
         try w.print("[shader(\"{s}\")]\n", .{stage_name});
+    }
+    // Emit [earlydepthstencil] for fragment shaders with EarlyFragmentTests
+    if (is_fragment and module.early_fragment_tests) {
+        try w.writeAll("[earlydepthstencil]\n");
     }
     // Emit Private storage class variables as static globals
     for (module.instructions) |inst| {
