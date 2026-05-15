@@ -5254,6 +5254,37 @@ const Analyzer = struct {
                     return .{ .ty = result_ty, .id = result_id };
                 }
 
+                // Matrix-from-scalar diagonal constructor: mat3(1.0) → identity-like matrix
+                // Creates N columns, each with the scalar on the diagonal position and 0 elsewhere
+                if (arg_tids.items.len == 1 and result_ty.isMatrix() and arg_tids.items[0].ty.isScalar()) {
+                    const scalar_id = arg_tids.items[0].id;
+                    const col_type = result_ty.columnType();
+                    const num_cols = result_ty.numColumns();
+                    const col_n = col_type.numComponents();
+                    const zero_id = try self.getConstFloat(0.0);
+                    const col_ids = try self.alloc.alloc(u32, num_cols);
+                    for (0..num_cols) |ci| {
+                        const elem_ids = try self.alloc.alloc(ir.Instruction.Operand, col_n);
+                        for (0..col_n) |ei| {
+                            elem_ids[ei] = if (ei == ci) .{ .id = scalar_id } else .{ .id = zero_id };
+                        }
+                        col_ids[ci] = try self.emitPureOp(.composite_construct, elem_ids, col_type);
+                    }
+                    const mat_ops = try self.alloc.alloc(ir.Instruction.Operand, num_cols);
+                    for (col_ids, 0..) |cid, i| {
+                        mat_ops[i] = .{ .id = cid };
+                    }
+                    self.alloc.free(col_ids);
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .composite_construct,
+                        .result_type = null,
+                        .result_id = result_id,
+                        .operands = mat_ops,
+                        .ty = result_ty,
+                    });
+                    return .{ .ty = result_ty, .id = result_id };
+                }
+
                 // Matrix construction from individual scalars: mat2x3(a,b,c,d,e,f) → construct column vectors then matrix
                 if (result_ty.isMatrix() and arg_tids.items.len > 1 and arg_tids.items[0].ty.isScalar()) {
                     const col_type = result_ty.columnType();
