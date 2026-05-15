@@ -366,6 +366,65 @@ pub fn swizzleChar(index: u32) []const u8 {
     };
 }
 
+/// Get array dimension suffix for a pointer type. E.g., "[4]" or "[2][3]" for multi-dim.
+/// HLSL uses multi_dim=true to unwrap nested TypeArray layers.
+/// Takes instruction slice + id_defs to work across different ParsedModule types.
+pub fn commonGetArraySuffix(instructions: anytype, id_defs: anytype, ptr_type_id: u32, multi_dim: bool) ![]const u8 {
+    const ptr_inst = localGetDef(instructions, id_defs, ptr_type_id) orelse return "";
+    if (ptr_inst.op != .TypePointer or ptr_inst.words.len <= 3) return "";
+
+    if (!multi_dim) {
+        const pointee_id = ptr_inst.words[3];
+        const pt_inst = localGetDef(instructions, id_defs, pointee_id) orelse return "";
+        if (pt_inst.op == .TypeArray and pt_inst.words.len > 3) {
+            const len_id = pt_inst.words[3];
+            const len_def = localGetDef(instructions, id_defs, len_id);
+            if (len_def) |ld| {
+                if (ld.op == .Constant and ld.words.len > 3) {
+                    var buf: [32]u8 = undefined;
+                    const s = std.fmt.bufPrint(&buf, "[{d}]", .{ld.words[3]}) catch return "";
+                    return try std.heap.page_allocator.dupe(u8, s);
+                }
+            }
+        }
+        return "";
+    }
+
+    // Multi-dimension path (HLSL): collect all nested TypeArray dimensions
+    var dims: [4]u32 = undefined;
+    var dim_count: usize = 0;
+    var current_id = ptr_inst.words[3];
+    while (dim_count < dims.len) {
+        const pt_inst = localGetDef(instructions, id_defs, current_id) orelse break;
+        if (pt_inst.op != .TypeArray or pt_inst.words.len <= 3) break;
+        const len_id = pt_inst.words[3];
+        const len_def = localGetDef(instructions, id_defs, len_id);
+        if (len_def) |ld| {
+            if (ld.op == .Constant and ld.words.len > 3) {
+                dims[dim_count] = ld.words[3];
+                dim_count += 1;
+            } else break;
+        } else break;
+        current_id = pt_inst.words[2];
+    }
+    if (dim_count == 0) return "";
+
+    var buf: [64]u8 = undefined;
+    var pos: usize = 0;
+    for (dims[0..dim_count]) |d| {
+        const part = std.fmt.bufPrint(buf[pos..], "[{d}]", .{d}) catch break;
+        pos += part.len;
+    }
+    const suffix = buf[0..pos];
+    return try std.heap.page_allocator.dupe(u8, suffix);
+}
+
+fn localGetDef(instructions: anytype, id_defs: anytype, id: u32) ?@TypeOf(instructions[0]) {
+    const idx = if (id < id_defs.len) id_defs[id] orelse return null else return null;
+    if (idx >= instructions.len) return null;
+    return instructions[idx];
+}
+
 // ---------------------------------------------------------------------------
 // Unified Backend Helpers (used by GLSL, HLSL, MSL, WGSL backends)
 // ---------------------------------------------------------------------------
