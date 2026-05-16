@@ -4681,6 +4681,39 @@ const Analyzer = struct {
                                 else => 74, // FindSMsb
                             };
                         }
+                        // Scalar-to-vector promotion for clamp/min/max/mix (but NOT refract/step/smoothstep)
+                        // GLSL allows clamp(vec3, float, float) but SPIR-V needs vec3 args
+                        const first_ty = arg_tids.items[0].ty;
+                        const needs_promotion = std.mem.eql(u8, node.data.name, "clamp") or
+                            std.mem.eql(u8, node.data.name, "min") or
+                            std.mem.eql(u8, node.data.name, "max") or
+                            std.mem.eql(u8, node.data.name, "mix");
+                        if (needs_promotion and first_ty.isVector() and arg_tids.items.len >= 2) {
+                            for (arg_tids.items[1..], 1..) |*tid, i| {
+                                if (!tid.ty.isVector()) {
+                                    // Promote scalar to vector via OpCompositeConstruct
+                                    const vec_id = self.allocId();
+                                    const num_comps: usize = switch (first_ty) {
+                                        .vec2 => 2, .vec3 => 3, .vec4 => 4,
+                                        .ivec2 => 2, .ivec3 => 3, .ivec4 => 4,
+                                        .uvec2 => 2, .uvec3 => 3, .uvec4 => 4,
+                                        .bvec2 => 2, .bvec3 => 3, .bvec4 => 4,
+                                        else => unreachable,
+                                    };
+                                    const comp_ops = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
+                                    for (comp_ops) |*op| op.* = .{ .id = tid.id };
+                                    try self.instructions.append(self.alloc, .{
+                                        .tag = .composite_construct,
+                                        .result_type = null,
+                                        .result_id = vec_id,
+                                        .operands = comp_ops,
+                                        .ty = first_ty,
+                                    });
+                                    tid.* = .{ .id = vec_id, .ty = first_ty };
+                                    _ = i;
+                                }
+                            }
+                        }
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
                         operands[0] = .{ .literal_int = glsl_id };
                         for (arg_tids.items, 1..) |tid, i| {
