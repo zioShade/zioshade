@@ -3280,6 +3280,30 @@ const Analyzer = struct {
                     // mod(x, y) → OpFMod (core SPIR-V, not GLSL.std.450)
                     if (std.mem.eql(u8, node.data.name, "mod")) {
                         const ret_ty = if (arg_tids.items.len > 0) arg_tids.items[0].ty else .float;
+                        // Scalar-to-vector promotion for mod(vec, scalar)
+                        if (ret_ty.isVector() and arg_tids.items.len >= 2) {
+                            for (arg_tids.items[1..]) |*tid| {
+                                if (!tid.ty.isVector()) {
+                                    const vec_id = self.allocId();
+                                    const num_comps: usize = switch (ret_ty) {
+                                        .vec2 => 2, .vec3 => 3, .vec4 => 4,
+                                        .ivec2 => 2, .ivec3 => 3, .ivec4 => 4,
+                                        .uvec2 => 2, .uvec3 => 3, .uvec4 => 4,
+                                        else => unreachable,
+                                    };
+                                    const comp_ops = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
+                                    for (comp_ops) |*op| op.* = .{ .id = tid.id };
+                                    try self.instructions.append(self.alloc, .{
+                                        .tag = .composite_construct,
+                                        .result_type = null,
+                                        .result_id = vec_id,
+                                        .operands = comp_ops,
+                                        .ty = ret_ty,
+                                    });
+                                    tid.* = .{ .id = vec_id, .ty = ret_ty };
+                                }
+                            }
+                        }
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                         for (arg_tids.items, 0..) |tid, i| {
                             operands[i] = .{ .id = tid.id };
