@@ -4602,7 +4602,7 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
                 // Clear first_loads when leaving the entry block
                 // (entry block loads dominate all blocks, other blocks don't)
-                if (fop == 1) { // OpLabel
+                if (fop == 248) { // OpLabel
                     if (in_entry_block) {
                         in_entry_block = false;
                         // Keep first_loads from entry block — they dominate all blocks
