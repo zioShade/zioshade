@@ -1879,7 +1879,9 @@ const Analyzer = struct {
 
                 _ = self.loop_stack.pop();
                 try self.emitLabel(merge_label);
-                self.cache_globals = true; // loop merge dominates
+                // NOTE: Do NOT set cache_globals = true here. Loop merge blocks are inside
+                // the enclosing scope, so loads here don't dominate beyond the enclosing loop.
+                // Only entry block and loop headers get cache_globals = true.
 
                 self.popScope();
             },
@@ -1920,7 +1922,7 @@ const Analyzer = struct {
 
                 _ = self.loop_stack.pop();
                 try self.emitLabel(merge_label);
-                self.cache_globals = true; // loop merge dominates
+                // Do NOT set cache_globals = true — loop merge is inside enclosing scope
 
             },
             .do_while_stmt => {
@@ -1961,7 +1963,7 @@ const Analyzer = struct {
 
                 _ = self.loop_stack.pop();
                 try self.emitLabel(merge_label);
-                self.cache_globals = true; // loop merge dominates
+                // Do NOT set cache_globals = true — loop merge is inside enclosing scope
 
             },
             .return_stmt => {
