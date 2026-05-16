@@ -4641,6 +4641,10 @@ const Analyzer = struct {
                         return .{ .ty = bitcast_ty, .id = result_id };
                     } else {
                         var glsl_id = self.glslExtInstruction(node.data.name) orelse 1;
+                        // Argument-count dispatch for atan(y,x) -> Atan2
+                        if (std.mem.eql(u8, node.data.name, "atan") and arg_tids.items.len >= 2) {
+                            glsl_id = 25; // Atan2 (2-argument form)
+                        }
                         // Type-based dispatch for min/max/clamp
                         if (std.mem.eql(u8, node.data.name, "min")) {
                             glsl_id = switch (result_ty) {
