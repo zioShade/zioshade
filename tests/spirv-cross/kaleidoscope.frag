@@ -3,26 +3,27 @@
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 fragColor;
 
+// Test kaleidoscope pattern
 void main() {
-    // Kaleidoscope pattern
-    vec2 p = uv * 2.0 - 1.0;
-    float angle = atan(p.y, p.x);
+    vec2 p = uv - 0.5;
+    float a = atan(p.y, p.x);
     float r = length(p);
-
-    // Fold into 8 segments
-    float segments = 8.0;
+    
+    // Fold into 6 segments
+    float segments = 6.0;
     float seg_angle = 6.28318 / segments;
-    angle = mod(angle, seg_angle);
-    angle = abs(angle - seg_angle * 0.5);
-
-    vec2 q = vec2(cos(angle), sin(angle)) * r;
-
-    // Pattern within segment
-    float pattern = sin(q.x * 10.0) * cos(q.y * 10.0);
+    float folded_a = mod(a, seg_angle);
+    folded_a = min(folded_a, seg_angle - folded_a);
+    
+    // Reconstruct folded position
+    vec2 folded = vec2(cos(folded_a), sin(folded_a)) * r;
+    
+    // Pattern in folded space
+    float pattern = sin(folded.x * 20.0) * sin(folded.y * 20.0);
     pattern = pattern * 0.5 + 0.5;
-
-    vec3 col = mix(vec3(0.1, 0.0, 0.2), vec3(0.9, 0.5, 0.1), pattern);
-    col *= smoothstep(1.0, 0.2, r);
-
+    
+    vec3 col = vec3(pattern, pattern * folded_a / seg_angle, pattern * r * 2.0);
+    col *= smoothstep(0.5, 0.1, r);
+    
     fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
