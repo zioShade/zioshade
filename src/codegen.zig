@@ -3748,6 +3748,30 @@ const Codegen = struct {
                 try self.emitWord(one_id);
                 try self.emitWord(zero_id);
             },
+            .int_to_bool, .uint_to_bool => {
+                // int/uint → bool: use OpINotEqual(bool, value, 0)
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const val_id = self.operandId(resolved, 0);
+                const zero_id: u32 = if (resolved.tag == .int_to_bool) try self.emitSignedIntConstant(0) else try self.emitIntConstant(0);
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.INotEqual)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(val_id);
+                try self.emitWord(zero_id);
+            },
+            .float_to_bool => {
+                // float → bool: use OpFOrdNotEqual(bool, value, 0.0)
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const val_id = self.operandId(resolved, 0);
+                const zero_id = try self.emitFloatConstant(0.0);
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.FOrdNotEqual)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(val_id);
+                try self.emitWord(zero_id);
+            },
             .is_nan => try self.emitUnaryOp(spirv.Op.IsNan, resolved),
             .is_inf => try self.emitUnaryOp(spirv.Op.IsInf, resolved),
             .any => try self.emitUnaryOp(spirv.Op.Any, resolved),

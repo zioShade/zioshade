@@ -5263,6 +5263,11 @@ const Analyzer = struct {
                             if (from == .float or from == .double) break :blk .convert_ftou;
                             if (from == .int) break :blk .convert_iti;
                         }
+                        if (to == .bool) {
+                            if (from == .int) break :blk .int_to_bool;
+                            if (from == .uint) break :blk .uint_to_bool;
+                            if (from == .float or from == .double) break :blk .float_to_bool;
+                        }
                         // Try generic conversion (handles 8-bit/16-bit types)
                         if (self.getConversionTag(to, from)) |tag| break :blk tag;
                         break :blk .composite_construct; // fallback
