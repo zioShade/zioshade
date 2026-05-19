@@ -8506,6 +8506,8 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     // ---- Phase 3: Build maps ----
     var load_map = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer load_map.deinit(alloc);
+    var pred_load_map = std.AutoHashMapUnmanaged(u32, u32).empty; // load results in pred blocks -> dominator store value
+    defer pred_load_map.deinit(alloc);
     var remove_vars = std.AutoHashMapUnmanaged(u32, void).empty;
     defer remove_vars.deinit(alloc);
     var remove_stores = std.AutoHashMapUnmanaged(u64, void).empty;
@@ -8519,6 +8521,41 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         // Map ALL loads (including those outside the merge block)
         for (c.all_load_results.items) |lr| {
             try load_map.put(alloc, lr, next_id);
+        }
+        // For loads in predecessor blocks that also load the variable,
+        // map them to the dominator store value (the value before the branch).
+        // This avoids circular phi references where OpFAdd uses the phi result.
+        const mb_preds = block_map.get(c.merge_block).?.preds.items;
+        // Find the dominator store value: the store from a pred that doesn't also load the variable
+        var dominator_store_val: ?u32 = null;
+        for (mb_preds) |pred| {
+            if (block_map.get(pred)) |pb| {
+                if (pb.stores.contains(c.var_id) and !pb.loads.contains(c.var_id)) {
+                    dominator_store_val = pb.stores.get(c.var_id).?;
+                    break;
+                }
+            }
+        }
+        if (dominator_store_val == null) {
+            for (mb_preds) |pred| {
+                if (block_map.get(pred)) |pb| {
+                    if (pb.stores.get(c.var_id)) |val| { dominator_store_val = val; break; }
+                }
+            }
+        }
+        if (dominator_store_val) |dval| {
+            for (mb_preds) |pred| {
+                if (block_map.get(pred)) |pb| {
+                    if (pb.loads.contains(c.var_id)) {
+                        var lri = pb.loads.iterator();
+                        while (lri.next()) |lr| {
+                            if (lr.key_ptr.* == c.var_id) {
+                                try pred_load_map.put(alloc, lr.value_ptr.*, dval);
+                            }
+                        }
+                    }
+                }
+            }
         }
         var bit2 = block_map.iterator();
         while (bit2.next()) |e| {
@@ -8597,6 +8634,7 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     }
 
     // ---- Phase 5: ID substitution ----
+    // Use pred_load_map as override for loads in predecessor blocks (to avoid circular phi refs)
     var spos: u32 = 5;
     while (spos < out.len) {
         const shdr = out[spos]; const swc: u32 = shdr >> 16; const sop: u16 = @truncate(shdr & 0xFFFF);
@@ -8612,12 +8650,26 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         for (info.ops) |ch| {
             if (wi >= sie) break;
             switch (ch) {
-                'i' => { if (load_map.get(out[wi])) |v| out[wi] = v; wi += 1; },
+                'i' => {
+                    if (pred_load_map.get(out[wi])) |v| { out[wi] = v; }
+                    else if (load_map.get(out[wi])) |v| { out[wi] = v; }
+                    wi += 1;
+                },
                 'l' => { wi += 1; },
-                'I' => { while (wi < sie) : (wi += 1) { if (load_map.get(out[wi])) |v| out[wi] = v; } },
+                'I' => { while (wi < sie) : (wi += 1) {
+                    if (pred_load_map.get(out[wi])) |v| { out[wi] = v; }
+                    else if (load_map.get(out[wi])) |v| { out[wi] = v; }
+                } },
                 'L', 's' => { while (wi < sie) : (wi += 1) {} },
-                'M' => { if (wi < sie) wi += 1; while (wi < sie) : (wi += 1) { if (load_map.get(out[wi])) |v| out[wi] = v; } },
-                'W' => { while (wi + 1 < sie) { wi += 1; if (load_map.get(out[wi])) |v| out[wi] = v; wi += 1; } },
+                'M' => { if (wi < sie) wi += 1; while (wi < sie) : (wi += 1) {
+                    if (pred_load_map.get(out[wi])) |v| { out[wi] = v; }
+                    else if (load_map.get(out[wi])) |v| { out[wi] = v; }
+                } },
+                'W' => { while (wi + 1 < sie) { wi += 1;
+                    if (pred_load_map.get(out[wi])) |v| { out[wi] = v; }
+                    else if (load_map.get(out[wi])) |v| { out[wi] = v; }
+                    wi += 1;
+                } },
                 else => { wi += 1; },
             }
         }
