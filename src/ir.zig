@@ -38,6 +38,11 @@ pub const Module = struct {
     mesh_max_vertices: ?u32 = null,
     mesh_max_primitives: ?u32 = null,
     mesh_output_topology: ?ast.OutputTopology = null,
+    geometry_input_topology: ?ast.InputTopology = null,
+    geometry_output_topology: ?ast.OutputTopology = null,
+    geometry_max_vertices: ?u32 = null,
+    tess_vertices: ?u32 = null,
+    tess_input_topology: ?ast.InputTopology = null,
 
     pub fn deinit(self: *Module) void {
         for (self.functions) |func| {
@@ -270,6 +275,8 @@ pub const Instruction = struct {
         trace_ray,
         begin_invocation_interlock,
         end_invocation_interlock,
+        emit_vertex,
+        end_primitive,
     };
 
     pub const Operand = union(enum) {

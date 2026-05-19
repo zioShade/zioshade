@@ -106,6 +106,11 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .mesh_max_vertices = analyzer.mesh_max_vertices,
         .mesh_max_primitives = analyzer.mesh_max_primitives,
         .mesh_output_topology = analyzer.mesh_output_topology,
+        .geometry_input_topology = analyzer.geometry_input_topology,
+        .geometry_output_topology = analyzer.geometry_output_topology,
+        .geometry_max_vertices = analyzer.geometry_max_vertices,
+        .tess_vertices = analyzer.tess_vertices,
+        .tess_input_topology = analyzer.tess_input_topology,
     };
     // Dead function elimination: only keep functions reachable from main()
     mod = try eliminateDeadFunctions(alloc, mod);
@@ -343,6 +348,11 @@ const Analyzer = struct {
     uses_ext_mesh_shader: bool = false,
     // Mesh shader layout parameters
     mesh_max_vertices: ?u32 = null,
+    geometry_input_topology: ?ast.InputTopology = null,
+    geometry_output_topology: ?ast.OutputTopology = null,
+    geometry_max_vertices: ?u32 = null,
+    tess_vertices: ?u32 = null,
+    tess_input_topology: ?ast.InputTopology = null,
     mesh_max_primitives: ?u32 = null,
     mesh_output_topology: ?ast.OutputTopology = null,
     uses_ray_query: bool = false,
@@ -949,6 +959,9 @@ const Analyzer = struct {
         try self.declare("dFdxCoarse", .{ .kind = .func, .ty = .float, .ir_id = 0 });
         try self.declare("dFdyCoarse", .{ .kind = .func, .ty = .float, .ir_id = 0 });
         try self.declare("fwidthCoarse", .{ .kind = .func, .ty = .float, .ir_id = 0 });
+        // Geometry shader builtins
+        try self.declare("EmitVertex", .{ .kind = .func, .ty = .void, .ir_id = 0 });
+        try self.declare("EndPrimitive", .{ .kind = .func, .ty = .void, .ir_id = 0 });
     }
 
 
@@ -979,6 +992,13 @@ const Analyzer = struct {
             .{ .name = "gl_SubgroupSize", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_ViewIndex", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_DeviceIndex", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            // Geometry shader builtins
+            .{ .name = "gl_PrimitiveIDIn", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_PrimitiveID", .ty = .int, .is_in = false, .is_out = true, .sc = .output },
+            .{ .name = "gl_InvocationID", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            // Tessellation builtins
+            .{ .name = "gl_PatchVerticesIn", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_TessCoord", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_BaseVertex", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_BaseVertexARB", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_VertexIndex", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
@@ -1093,6 +1113,11 @@ const Analyzer = struct {
                         if (layout.origin_upper_left) {
                             self.has_origin_upper_left = true;
                         }
+                        // Geometry/Tessellation input topology
+                        if (layout.input_topology) |t| {
+                            self.geometry_input_topology = t;
+                            self.tess_input_topology = t;
+                        }
                     }
                 }
                 // Check for depth layout qualifiers on output declarations
@@ -1101,9 +1126,25 @@ const Analyzer = struct {
                         if (layout.depth_greater) self.has_depth_greater = true;
                         if (layout.depth_less) self.has_depth_less = true;
                         if (layout.depth_unchanged) self.has_depth_unchanged = true;
-                        if (layout.max_vertices) |mv| self.mesh_max_vertices = mv;
+                        // Distinguish geometry from mesh: mesh uses max_primitives, geometry doesn't
+                        const is_mesh = layout.max_primitives != null;
+                        const is_geom = !is_mesh and (layout.max_vertices != null or layout.is_triangle_strip or layout.is_line_strip);
+                        if (layout.max_vertices) |mv| {
+                            if (is_geom) {
+                                self.geometry_max_vertices = mv;
+                            } else {
+                                self.mesh_max_vertices = mv;
+                            }
+                        }
                         if (layout.max_primitives) |mp| self.mesh_max_primitives = mp;
-                        if (layout.output_topology) |t| self.mesh_output_topology = t;
+                        if (layout.output_topology) |t| {
+                            if (is_geom) {
+                                self.geometry_output_topology = t;
+                            } else {
+                                self.mesh_output_topology = t;
+                            }
+                        }
+                        if (layout.vertices) |v| self.tess_vertices = v;
                     }
                 }
                 // Skip creating a global for standalone layout qualifiers (e.g. layout(local_size_x=1) in;)
@@ -3427,6 +3468,27 @@ const Analyzer = struct {
                         }
                         // Remaining barrier builtins (demote)
                         return .{ .ty = .void, .id = result_id };
+                    }
+                    // Geometry shader builtins: EmitVertex, EndPrimitive
+                    if (std.mem.eql(u8, node.data.name, "EmitVertex")) {
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .emit_vertex,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = &.{},
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = 0 };
+                    }
+                    if (std.mem.eql(u8, node.data.name, "EndPrimitive")) {
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .end_primitive,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = &.{},
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = 0 };
                     }
                     // helperInvocationEXT() returns bool (constant false for now)
                     if (std.mem.eql(u8, node.data.name, "helperInvocationEXT")) {
@@ -6249,6 +6311,8 @@ const Analyzer = struct {
             "beginInvocationInterlockARB", "endInvocationInterlockARB",
             // Demote helper invocation
             "demote",
+            // Geometry shader builtins
+            "EmitVertex", "EndPrimitive",
             // Helper invocation query (returns bool)
             "helperInvocationEXT",
             // Atomic builtins

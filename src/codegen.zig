@@ -454,6 +454,14 @@ const Codegen = struct {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.ray_tracing_khr));
         }
+        if (self.stage == .geometry) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.geometry));
+        }
+        if (self.stage == .tessellation_control or self.stage == .tessellation_evaluation) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.tessellation));
+        }
 
         // Only emit additional capabilities if the module actually uses them
         var has_subgroup_vote = false;
@@ -1151,6 +1159,79 @@ const Codegen = struct {
             }
         }
         // Ray tracing stages: no LocalSize needed (not supported for these execution models)
+
+        // Geometry shader execution modes
+        if (stage == .geometry) {
+            if (self.module.geometry_input_topology) |topo| {
+                const topo_mode: spirv.ExecutionMode = switch (topo) {
+                    .points => .InputPoints,
+                    .lines => .InputLines,
+                    .lines_adjacency => .InputLinesAdjacency,
+                    .triangles => .Triangles,
+                    .triangles_adjacency => .InputTrianglesAdjacency,
+                };
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(topo_mode));
+            }
+            if (self.module.geometry_output_topology) |topo| {
+                const topo_mode: spirv.ExecutionMode = switch (topo) {
+                    .triangles => .OutputTriangleStrip,
+                    .lines => .OutputLineStrip,
+                    .points => .OutputPoints,
+                };
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(topo_mode));
+            }
+            if (self.module.geometry_max_vertices) |mv| {
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.OutputVertices));
+                try self.emitWord(mv);
+            }
+        }
+        // Tessellation execution modes
+        if (stage == .tessellation_control) {
+            if (self.module.tess_vertices) |v| {
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.OutputVertices));
+                try self.emitWord(v);
+            }
+        }
+        if (stage == .tessellation_evaluation) {
+            if (self.module.tess_vertices) |v| {
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.OutputVertices));
+                try self.emitWord(v);
+            }
+            // Default spacing = equal
+            {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.SpacingEqual));
+            }
+            // Default vertex order = ccw
+            {
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(spirv.ExecutionMode.VertexOrderCcw));
+            }
+            // Input topology: default triangles
+            {
+                const topo = self.module.geometry_input_topology orelse .triangles;
+                const topo_mode: spirv.ExecutionMode = switch (topo) {
+                    .triangles => .Triangles,
+                    .lines => .Isolines,
+                    else => .Triangles,
+                };
+                try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
+                try self.emitWord(entry_id);
+                try self.emitWord(@intFromEnum(topo_mode));
+            }
+        }
     }
 
     fn findEntryPoint(self: *Codegen) ?*const ir.Function {
@@ -5016,6 +5097,12 @@ const Codegen = struct {
             },
             .end_invocation_interlock => {
                 try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.EndInvocationInterlockEXT)));
+            },
+            .emit_vertex => {
+                try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.EmitVertex)));
+            },
+            .end_primitive => {
+                try self.emitWord(spirv.encodeInstructionHeader(1, @intFromEnum(spirv.Op.EndPrimitive)));
             },
         }
     }
