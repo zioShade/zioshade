@@ -186,6 +186,8 @@ fn runDir(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []const u8, sta
         if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
             !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
             !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task") and
+            !std.mem.eql(u8, ext, ".geom") and !std.mem.eql(u8, ext, ".tesc") and
+            !std.mem.eql(u8, ext, ".tese") and
             !std.mem.eql(u8, ext, ".rgen") and !std.mem.eql(u8, ext, ".rchit") and
             !std.mem.eql(u8, ext, ".rmiss") and !std.mem.eql(u8, ext, ".rahit") and
             !std.mem.eql(u8, ext, ".rint") and !std.mem.eql(u8, ext, ".rcall"))
@@ -264,6 +266,8 @@ fn mainImpl() !void {
         .{ "mesh-task", "tests/mesh_task" },
         .{ "ray-tracing", "tests/ray_tracing" },
         .{ "compute", "tests/compute" },
+        .{ "geometry", "tests/geometry" },
+        .{ "tessellation", "tests/tessellation" },
     };
 
     if (target_arg) |target| {
