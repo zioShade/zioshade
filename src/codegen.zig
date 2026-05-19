@@ -269,9 +269,10 @@ pub fn generate(
     if (final_dce2.ptr != final_cse.ptr) alloc.free(final_cse);
     const no_id_stores = opt.elimIdentityStores(alloc, final_dce2) catch final_dce2;
     if (no_id_stores.ptr != final_dce2.ptr) alloc.free(final_dce2);
-    // copyMemoryOpt disabled — it can produce invalid OpCopyMemory with undefined source IDs
-    // when the AccessChain that computes the source pointer was eliminated by prior DCE.
-    // TODO: investigate and re-enable with proper validation.
+    // copyMemoryOpt disabled: scatterStoreToComposite eliminates AccessChain instructions
+    // for array elements, but copyMemoryOpt then emits OpCopyMemory referencing those
+    // now-undefined AccessChain results. Re-enabling requires coordinating the two passes
+    // or adding a reachability check in the DCE that follows.
     const copy_mem = no_id_stores;
     //const copy_mem = opt.copyMemoryOpt(alloc, no_id_stores) catch return no_id_stores;
     //if (copy_mem.ptr != no_id_stores.ptr) alloc.free(no_id_stores);
