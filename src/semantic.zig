@@ -1697,10 +1697,13 @@ const Analyzer = struct {
                         self.has_returned = saved_has_returned;
                     }
                 }
-                // Merge block dominates all subsequent blocks in this scope
-                // so caching loads here is safe (set after emitLabel which clears it)
+                // Merge block dominates subsequent code within this scope,
+                // but NOT if we're inside a loop body (the if-merge is still inside the loop,
+                // so its AccessChains don't dominate the loop exit).
                 try self.emitLabel(merge_label);
-                self.cache_globals = true;
+                if (self.loop_stack.items.len == 0) {
+                    self.cache_globals = true;
+                }
                 _ = self.if_insert_points.pop();
             },
             .switch_stmt => {
