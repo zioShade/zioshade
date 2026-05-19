@@ -267,17 +267,15 @@ pub fn generate(
     if (final_cse.ptr != retargeted.ptr) alloc.free(retargeted);
     const final_dce2 = opt.deadCodeElim(alloc, final_cse) catch return final_cse;
     if (final_dce2.ptr != final_cse.ptr) alloc.free(final_cse);
-    const no_id_stores = opt.elimIdentityStores(alloc, final_dce2) catch final_dce2;
+    const no_id_stores = opt.elimIdentityStores(alloc, final_dce2) catch return final_dce2;
     if (no_id_stores.ptr != final_dce2.ptr) alloc.free(final_dce2);
-    // copyMemoryOpt disabled: scatterStoreToComposite eliminates AccessChain instructions
-    // for array elements, but copyMemoryOpt then emits OpCopyMemory referencing those
-    // now-undefined AccessChain results. Re-enabling requires coordinating the two passes
-    // or adding a reachability check in the DCE that follows.
-    const copy_mem = no_id_stores;
-    //const copy_mem = opt.copyMemoryOpt(alloc, no_id_stores) catch return no_id_stores;
-    //if (copy_mem.ptr != no_id_stores.ptr) alloc.free(no_id_stores);
-    const final_dce3 = opt.deadCodeElim(alloc, copy_mem) catch return copy_mem;
-    if (final_dce3.ptr != copy_mem.ptr) alloc.free(copy_mem);
+    // copyMemoryOpt disabled permanently: the pass replaces Load+Store with OpCopyMemory,
+    // but interacts poorly with scatterStoreToComposite and DCE passes. The optimization
+    // saves one instruction but produces invalid SPIR-V for array/struct patterns.
+    // The validateCopyMemory pass was added but doesn't fully resolve the issue because
+    // the AccessChain elimination happens between validation and final output.
+    const final_dce3 = opt.deadCodeElim(alloc, no_id_stores) catch return no_id_stores;
+    if (final_dce3.ptr != no_id_stores.ptr) alloc.free(no_id_stores);
     const compacted2 = compact_ids.compactIds(alloc, final_dce3) catch return final_dce3;
     if (compacted2.ptr != final_dce3.ptr) alloc.free(final_dce3);
 
