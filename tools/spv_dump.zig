@@ -18,7 +18,15 @@ pub fn main() !void {
     const input: [:0]const u8 = try alloc.dupeZ(u8, raw);
     defer alloc.free(input);
 
-    const spv = try glslpp.compileToSPIRV(alloc, input, .{ .stage = .compute });
+    const stage: glslpp.Stage = if (std.mem.endsWith(u8, args[1], ".comp")) .compute else if (std.mem.endsWith(u8, args[1], ".vert")) .vertex else .fragment;
+    const result = glslpp.compileToSPIRV(alloc, input, .{ .stage = stage });
+    const spv = result catch |err| {
+        std.debug.print("Compile error: {}\n", .{err});
+        if (glslpp.last_compile_detail) |d| {
+            std.debug.print("Detail: {s}\n", .{@tagName(d)});
+        }
+        return err;
+    };
     defer alloc.free(spv);
 
     const bytes = std.mem.sliceAsBytes(spv);
