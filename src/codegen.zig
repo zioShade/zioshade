@@ -269,8 +269,12 @@ pub fn generate(
     if (final_dce2.ptr != final_cse.ptr) alloc.free(final_cse);
     const no_id_stores = opt.elimIdentityStores(alloc, final_dce2) catch final_dce2;
     if (no_id_stores.ptr != final_dce2.ptr) alloc.free(final_dce2);
-    const copy_mem = opt.copyMemoryOpt(alloc, no_id_stores) catch return no_id_stores;
-    if (copy_mem.ptr != no_id_stores.ptr) alloc.free(no_id_stores);
+    // copyMemoryOpt disabled — it can produce invalid OpCopyMemory with undefined source IDs
+    // when the AccessChain that computes the source pointer was eliminated by prior DCE.
+    // TODO: investigate and re-enable with proper validation.
+    const copy_mem = no_id_stores;
+    //const copy_mem = opt.copyMemoryOpt(alloc, no_id_stores) catch return no_id_stores;
+    //if (copy_mem.ptr != no_id_stores.ptr) alloc.free(no_id_stores);
     const final_dce3 = opt.deadCodeElim(alloc, copy_mem) catch return copy_mem;
     if (final_dce3.ptr != copy_mem.ptr) alloc.free(copy_mem);
     const compacted2 = compact_ids.compactIds(alloc, final_dce3) catch return final_dce3;
