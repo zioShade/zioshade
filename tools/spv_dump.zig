@@ -18,7 +18,7 @@ pub fn main() !void {
     const input: [:0]const u8 = try alloc.dupeZ(u8, raw);
     defer alloc.free(input);
 
-    const stage: glslpp.Stage = if (std.mem.endsWith(u8, args[1], ".comp")) .compute else if (std.mem.endsWith(u8, args[1], ".vert")) .vertex else .fragment;
+    const stage: glslpp.Stage = if (std.mem.endsWith(u8, args[1], ".comp")) .compute else if (std.mem.endsWith(u8, args[1], ".vert")) .vertex else if (std.mem.endsWith(u8, args[1], ".geom")) .geometry else if (std.mem.endsWith(u8, args[1], ".tesc")) .tessellation_control else if (std.mem.endsWith(u8, args[1], ".tese")) .tessellation_evaluation else .fragment;
     const result = glslpp.compileToSPIRV(alloc, input, .{ .stage = stage });
     const spv = result catch |err| {
         std.debug.print("Compile error: {}\n", .{err});

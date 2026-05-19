@@ -487,10 +487,23 @@ const Parser = struct {
                     layout.depth_unchanged = true;
                 } else if (std.mem.eql(u8, ident_text, "triangles")) {
                     layout.output_topology = .triangles;
+                    layout.input_topology = .triangles;
                 } else if (std.mem.eql(u8, ident_text, "lines")) {
                     layout.output_topology = .lines;
+                    layout.input_topology = .lines;
                 } else if (std.mem.eql(u8, ident_text, "points")) {
                     layout.output_topology = .points;
+                    layout.input_topology = .points;
+                } else if (std.mem.eql(u8, ident_text, "triangles_adjacency")) {
+                    layout.input_topology = .triangles_adjacency;
+                } else if (std.mem.eql(u8, ident_text, "lines_adjacency")) {
+                    layout.input_topology = .lines_adjacency;
+                } else if (std.mem.eql(u8, ident_text, "triangle_strip")) {
+                    layout.output_topology = .triangles;
+                    layout.is_triangle_strip = true;
+                } else if (std.mem.eql(u8, ident_text, "line_strip")) {
+                    layout.output_topology = .lines;
+                    layout.is_line_strip = true;
                 } else if (self.current().tag == .eq) {
                     _ = self.advance();
                     const val_text = self.text(self.current());
@@ -515,6 +528,8 @@ const Parser = struct {
                         layout.max_vertices = std.fmt.parseInt(u32, val_text, 10) catch null;
                     } else if (std.mem.eql(u8, ident_text, "max_primitives")) {
                         layout.max_primitives = std.fmt.parseInt(u32, val_text, 10) catch null;
+                    } else if (std.mem.eql(u8, ident_text, "vertices")) {
+                        layout.vertices = std.fmt.parseInt(u32, val_text, 10) catch null;
                     }
                 }
             } else {

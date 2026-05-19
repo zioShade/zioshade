@@ -448,6 +448,8 @@ pub const Qualifier = packed struct {
     is_incoming_callable_data: bool = false,
 };
 
+pub const InputTopology = enum { points, lines, lines_adjacency, triangles, triangles_adjacency };
+
 pub const OutputTopology = enum { triangles, lines, points };
 
 pub const Layout = struct {
@@ -477,6 +479,10 @@ pub const Layout = struct {
     max_vertices: ?u32 = null,
     max_primitives: ?u32 = null,
     output_topology: ?OutputTopology = null,
+    input_topology: ?InputTopology = null,
+    vertices: ?u32 = null,
+    is_triangle_strip: bool = false,
+    is_line_strip: bool = false,
 };
 
 pub const StructMember = struct {
