@@ -2,8 +2,7 @@
 layout(location = 0) out vec4 FragColor;
 void main() {
     vec2 uv = gl_FragCoord.xy / vec2(128.0);
-    vec3 a = vec3(uv.x, uv.y, 0.5);
-    vec3 b = a;
-    b.x += 0.1;
-    FragColor = vec4(a * 0.5 + b * 0.5, 1.0);
+    mat4 m = mat4(1.0);
+    vec4 v = m * vec4(uv, 0.0, 1.0);
+    FragColor = vec4(v.xy, 0.0, 1.0);
 }
