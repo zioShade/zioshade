@@ -414,4 +414,22 @@ pub fn build(b: *std.Build) void {
         for (a) |arg| run_spv_dump.addArg(arg);
     }
     spv_dump_step.dependOn(&run_spv_dump.step);
+
+    // Tool: Fuzz test — generate random GLSL and validate through glslpp
+    const fuzz_step = b.step("fuzz", "Run structured GLSL fuzzer");
+    const fuzz_mod = b.createModule(.{
+        .root_source_file = b.path("tools/fuzz_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fuzz_mod.addImport("glslpp", glslpp_mod);
+    const fuzz_exe = b.addExecutable(.{
+        .name = "fuzz-test",
+        .root_module = fuzz_mod,
+    });
+    const run_fuzz = b.addRunArtifact(fuzz_exe);
+    if (b.args) |a| {
+        for (a) |arg| run_fuzz.addArg(arg);
+    }
+    fuzz_step.dependOn(&run_fuzz.step);
 }
