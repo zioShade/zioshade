@@ -7723,6 +7723,104 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
     return result3.toOwnedSlice(alloc) catch return words;
 }
 
+/// Validate OpCopyMemory instructions: remove any whose source or target pointer
+/// ID is not defined by an OpVariable, OpAccessChain, or OpFunctionParameter.
+/// This is needed because earlier passes (scatterStoreToComposite) may eliminate
+/// AccessChain instructions that copyMemoryOpt referenced.
+pub fn validateCopyMemory(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    const bound = words[3];
+    if (bound <= 1) return words;
+
+    // Build set of defined pointer IDs
+    var defined_ids = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer defined_ids.deinit();
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        // Mark result IDs from Variable, AccessChain, FunctionParameter
+        switch (opcode) {
+            59 => { // OpVariable
+                if (wc >= 3 and words[pos + 2] > 0 and words[pos + 2] < bound)
+                    defined_ids.set(words[pos + 2]);
+            },
+            65 => { // OpAccessChain
+                if (wc >= 3 and words[pos + 2] > 0 and words[pos + 2] < bound)
+                    defined_ids.set(words[pos + 2]);
+            },
+            55 => { // OpFunctionParameter
+                if (wc >= 3 and words[pos + 2] > 0 and words[pos + 2] < bound)
+                    defined_ids.set(words[pos + 2]);
+            },
+            else => {},
+        }
+        // Also mark all result-producing instructions (for generic IDs)
+        const info = compact_ids.getOpInfo(opcode) orelse {
+            pos = ie;
+            continue;
+        };
+        switch (info.fixed) {
+            2 => { if (pos + 2 < ie) { const rid = words[pos + 2]; if (rid > 0 and rid < bound) defined_ids.set(rid); } },
+            3 => { if (pos + 1 < ie) { const rid = words[pos + 1]; if (rid > 0 and rid < bound) defined_ids.set(rid); } },
+            else => {},
+        }
+        pos = ie;
+    }
+
+    // Check for invalid CopyMemory instructions
+    var any_invalid = false;
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 63 and wc >= 3) { // OpCopyMemory
+            const dst = words[pos + 1];
+            const src = words[pos + 2];
+            if ((dst == 0 or dst >= bound or !defined_ids.isSet(dst)) or
+                (src == 0 or src >= bound or !defined_ids.isSet(src))) {
+                any_invalid = true;
+                break;
+            }
+        }
+        pos = ie;
+    }
+
+    if (!any_invalid) return words;
+
+    // Rebuild: replace invalid CopyMemory with Load+Store
+    var result = try std.ArrayList(u32).initCapacity(alloc, words.len);
+    result.appendSliceAssumeCapacity(words[0..5]);
+    pos = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const opcode: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+
+        if (opcode == 63 and wc >= 3) { // OpCopyMemory
+            const dst = words[pos + 1];
+            const src = words[pos + 2];
+            const dst_ok = dst > 0 and dst < bound and defined_ids.isSet(dst);
+            const src_ok = src > 0 and src < bound and defined_ids.isSet(src);
+            if (!dst_ok or !src_ok) {
+                // Skip this invalid CopyMemory instruction
+                pos = ie;
+                continue;
+            }
+        }
+        result.appendSliceAssumeCapacity(words[pos..ie]);
+        pos = ie;
+    }
+    return result.toOwnedSlice(alloc);
+}
+
 /// Remove identity stores: Load(P) -> Store(P, load_result) where load result is used only in the store.
 /// This is a no-op store that can be safely removed along with the load.
 pub fn elimIdentityStores(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
