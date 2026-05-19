@@ -3681,8 +3681,8 @@ const Codegen = struct {
             .div => try self.emitBinOp(spirv.Op.SDiv, resolved),
             .rem => try self.emitBinOp(spirv.Op.SRem, resolved),
             .umod => try self.emitBinOp(spirv.Op.UMod, resolved),
-            .fadd => try self.emitBinOp(spirv.Op.FAdd, resolved),
-            .fsub => try self.emitBinOp(spirv.Op.FSub, resolved),
+            .fadd => try self.emitFloatBinOp(spirv.Op.FAdd, resolved),
+            .fsub => try self.emitFloatBinOp(spirv.Op.FSub, resolved),
             .fmod => try self.emitBinOp(spirv.Op.FMod, resolved),
             .fmul => try self.emitBinOp(spirv.Op.FMul, resolved),
             .mat_vec_mul => try self.emitBinOp(spirv.Op.MatrixTimesVector, resolved),
@@ -5030,6 +5030,58 @@ const Codegen = struct {
         try self.emitWord(result_id);
         try self.emitWord(op1);
         try self.emitWord(op2);
+    }
+
+    /// Emit floating-point binary op (FAdd, FSub). For matrix types, decomposes
+    /// into per-column vector operations since SPIR-V doesn't support matrix arithmetic directly.
+    fn emitFloatBinOp(self: *Codegen, op: spirv.Op, inst: ir.Instruction) !void {
+        if (!inst.ty.isMatrix()) {
+            return self.emitBinOp(op, inst);
+        }
+
+        const result_type_id = inst.result_type orelse return;
+        const result_id = inst.result_id orelse return;
+        const op1 = self.operandId(inst, 0);
+        const op2 = self.operandId(inst, 1);
+
+        // Matrix: decompose into per-column vector operations
+        const n: u32 = inst.ty.numColumns();
+        const col_type = inst.ty.columnType();
+        const col_type_id = try self.ensureType(col_type);
+        var col_ids: [4]u32 = undefined;
+        for (0..n) |i| {
+            const ci: u32 = @intCast(i);
+            // Extract column from op1
+            const c1 = self.allocId();
+            try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
+            try self.emitWord(col_type_id);
+            try self.emitWord(c1);
+            try self.emitWord(op1);
+            try self.emitWord(ci);
+            // Extract column from op2
+            const c2 = self.allocId();
+            try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
+            try self.emitWord(col_type_id);
+            try self.emitWord(c2);
+            try self.emitWord(op2);
+            try self.emitWord(ci);
+            // Per-column op
+            const cr = self.allocId();
+            try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(op)));
+            try self.emitWord(col_type_id);
+            try self.emitWord(cr);
+            try self.emitWord(c1);
+            try self.emitWord(c2);
+            col_ids[i] = cr;
+        }
+        // Reconstruct matrix: 3 words (header, result_type, result_id) + n columns
+        const wc: u16 = 3 + @as(u16, @intCast(n));
+        try self.emitWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.CompositeConstruct)));
+        try self.emitWord(result_type_id);
+        try self.emitWord(result_id);
+        for (col_ids[0..n]) |cid| {
+            try self.emitWord(cid);
+        }
     }
 
     fn emitUnaryOp(self: *Codegen, op: spirv.Op, inst: ir.Instruction) !void {
