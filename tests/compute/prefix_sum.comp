@@ -1,0 +1,33 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Data {
+    uint values[];
+};
+shared uint shared_data[256];
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    shared_data[tid] = (gid < values.length()) ? values[gid] : 0u;
+    barrier();
+    // Up-sweep (reduce)
+    for (uint stride = 1; stride < 256; stride *= 2) {
+        uint index = (tid + 1) * stride * 2 - 1;
+        if (index < 256) {
+            shared_data[index] += shared_data[index - stride];
+        }
+        barrier();
+    }
+    if (tid == 0) shared_data[255] = 0;
+    barrier();
+    // Down-sweep
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        uint index = (tid + 1) * stride * 2 - 1;
+        if (index < 256) {
+            uint temp = shared_data[index - stride];
+            shared_data[index - stride] = shared_data[index];
+            shared_data[index] += temp;
+        }
+        barrier();
+    }
+    if (gid < values.length()) values[gid] = shared_data[tid];
+}

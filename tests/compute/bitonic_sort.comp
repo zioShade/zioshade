@@ -1,0 +1,26 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Data {
+    float values[];
+};
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= values.length()) return;
+    // Simple compare-and-swap for bitonic sort step
+    uint partner = idx ^ 1;
+    if (partner < values.length()) {
+        float a = values[idx];
+        float b = values[partner];
+        if ((idx & 1) == 0) {
+            if (a > b) {
+                values[idx] = b;
+                values[partner] = a;
+            }
+        } else {
+            if (a < b) {
+                values[idx] = b;
+                values[partner] = a;
+            }
+        }
+    }
+}

@@ -1,0 +1,20 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) readonly buffer MatA {
+    float matA[];
+};
+layout(std430, binding = 1) readonly buffer MatB {
+    float matB[];
+};
+layout(std430, binding = 2) writeonly buffer MatC {
+    float matC[];
+};
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    float sum = 0.0;
+    for (uint k = 0; k < 16; k++) {
+        sum += matA[y * 16 + k] * matB[k * 16 + x];
+    }
+    matC[y * 16 + x] = sum;
+}

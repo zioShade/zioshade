@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Output {
+    float result[];
+};
+float compute(int idx) {
+    float x = float(idx) / 64.0;
+    return sin(x * 6.28318) * cos(x * 3.14159) + sqrt(abs(x));
+}
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < result.length()) {
+        result[idx] = compute(int(idx));
+    }
+}
