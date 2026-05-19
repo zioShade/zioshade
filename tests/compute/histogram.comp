@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Input {
+    float data[];
+};
+layout(std430, binding = 1) buffer Output {
+    uint bins[16];
+};
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= data.length()) return;
+    float val = data[idx];
+    int bin = int(clamp(val * 16.0, 0.0, 15.0));
+    atomicAdd(bins[bin], 1u);
+}

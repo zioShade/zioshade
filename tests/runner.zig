@@ -263,6 +263,7 @@ fn mainImpl() !void {
         .{ "ghostty", "tests/ghostty" },
         .{ "mesh-task", "tests/mesh_task" },
         .{ "ray-tracing", "tests/ray_tracing" },
+        .{ "compute", "tests/compute" },
     };
 
     if (target_arg) |target| {
