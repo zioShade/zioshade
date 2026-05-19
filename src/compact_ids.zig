@@ -147,11 +147,17 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         178 => rt(2, "ii"),        // OpULessThanEqual
         179 => rt(2, "ii"),        // OpSLessThanEqual
         180 => rt(2, "ii"),        // OpFOrdEqual
+        181 => rt(2, "ii"),        // OpFUnordEqual
         182 => rt(2, "ii"),        // OpFOrdNotEqual
+        183 => rt(2, "ii"),        // OpFUnordNotEqual
         184 => rt(2, "ii"),        // OpFOrdLessThan
+        185 => rt(2, "ii"),        // OpFUnordLessThan
         186 => rt(2, "ii"),        // OpFOrdGreaterThan
+        187 => rt(2, "ii"),        // OpFUnordGreaterThan
         188 => rt(2, "ii"),        // OpFOrdLessThanEqual
+        189 => rt(2, "ii"),        // OpFUnordLessThanEqual
         190 => rt(2, "ii"),        // OpFOrdGreaterThanEqual
+        191 => rt(2, "ii"),        // OpFUnordGreaterThanEqual
         // --- Bit ---
         194 => rt(2, "ii"),        // OpShiftRightLogical
         195 => rt(2, "ii"),        // OpShiftRightArithmetic

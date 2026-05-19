@@ -151,6 +151,8 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ULessThan, .SLessThan, .ULessThanEqual, .SLessThanEqual,
         .FOrdEqual, .FOrdNotEqual, .FOrdLessThan, .FOrdGreaterThan,
         .FOrdLessThanEqual, .FOrdGreaterThanEqual,
+        .FUnordEqual, .FUnordNotEqual, .FUnordLessThan, .FUnordGreaterThan,
+        .FUnordLessThanEqual, .FUnordGreaterThanEqual,
         .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical,
         .BitwiseOr, .BitwiseXor, .BitwiseAnd, .Not,
         .IsNan, .IsInf, .All, .Any,
@@ -2496,12 +2498,12 @@ fn emitInstruction(
         .Transpose => try emitCall(module, names, inst, "transpose", w, alloc),
 
         // Comparisons
-        .FOrdEqual, .IEqual => try emitBinOp(module, names, inst, "==", w, alloc),
-        .FOrdNotEqual, .INotEqual => try emitBinOp(module, names, inst, "!=", w, alloc),
-        .FOrdLessThan, .SLessThan, .ULessThan => try emitBinOp(module, names, inst, "<", w, alloc),
-        .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, inst, ">", w, alloc),
-        .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, inst, "<=", w, alloc),
-        .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(module, names, inst, ">=", w, alloc),
+        .FOrdEqual, .FUnordEqual, .IEqual => try emitBinOp(module, names, inst, "==", w, alloc),
+        .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitBinOp(module, names, inst, "!=", w, alloc),
+        .FOrdLessThan, .FUnordLessThan, .SLessThan, .ULessThan => try emitBinOp(module, names, inst, "<", w, alloc),
+        .FOrdGreaterThan, .FUnordGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, inst, ">", w, alloc),
+        .FOrdLessThanEqual, .FUnordLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, inst, "<=", w, alloc),
+        .FOrdGreaterThanEqual, .FUnordGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(module, names, inst, ">=", w, alloc),
 
         .LogicalOr => try emitBinOp(module, names, inst, "||", w, alloc),
         .LogicalAnd => try emitBinOp(module, names, inst, "&&", w, alloc),
