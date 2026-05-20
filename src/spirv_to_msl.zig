@@ -1914,6 +1914,8 @@ fn emitInstruction(
         .MemoryBarrier => {
             try w.writeAll("    threadgroup_barrier(mem_flags::mem_device);\n");
         },
+        .EmitVertex => try w.writeAll("    // EmitVertex (geometry shader)\n"),
+        .EndPrimitive => try w.writeAll("    // EndPrimitive (geometry shader)\n"),
         .ImageTexelPointer => {
             // No code emission needed — result used by atomic ops which resolve via classifyMslAtomicPtr
         },

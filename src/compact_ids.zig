@@ -168,6 +168,9 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         200 => rt(2, "i"),         // OpNot
         // --- Derivatives ---
         207...215 => rt(2, "i"),   // OpDPdx..OpFwidthCoarse
+        // --- Geometry emission ---
+        218 => rt(0, ""),          // OpEmitVertex
+        219 => rt(0, ""),          // OpEndPrimitive
         // --- Atomic ---
         224 => rt(0, "iii"),       // OpControlBarrier: exec-scope, mem-scope, semantics
         225 => rt(0, "ii"),        // OpMemoryBarrier: scope, semantics

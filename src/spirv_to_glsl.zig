@@ -2016,6 +2016,8 @@ fn emitInstruction(
             // No code emission needed — result used by atomic ops which resolve via classifyAtomicPtr
         },
         .MemoryBarrier => try w.writeAll("    memoryBarrier();\n"),
+        .EmitVertex => try w.writeAll("    EmitVertex();\n"),
+        .EndPrimitive => try w.writeAll("    EndPrimitive();\n"),
 
         // Atomic operations → GLSL atomic* builtins
         .AtomicIAdd => {

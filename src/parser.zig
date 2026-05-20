@@ -504,6 +504,20 @@ const Parser = struct {
                 } else if (std.mem.eql(u8, ident_text, "line_strip")) {
                     layout.output_topology = .lines;
                     layout.is_line_strip = true;
+                } else if (std.mem.eql(u8, ident_text, "equal_spacing")) {
+                    layout.equal_spacing = true;
+                } else if (std.mem.eql(u8, ident_text, "fractional_even_spacing")) {
+                    layout.fractional_even_spacing = true;
+                } else if (std.mem.eql(u8, ident_text, "fractional_odd_spacing")) {
+                    layout.fractional_odd_spacing = true;
+                } else if (std.mem.eql(u8, ident_text, "ccw")) {
+                    layout.vertex_order_ccw = true;
+                } else if (std.mem.eql(u8, ident_text, "cw")) {
+                    layout.vertex_order_cw = true;
+                } else if (std.mem.eql(u8, ident_text, "isolines")) {
+                    layout.isolines = true;
+                } else if (std.mem.eql(u8, ident_text, "quads")) {
+                    layout.quads = true;
                 } else if (self.current().tag == .eq) {
                     _ = self.advance();
                     const val_text = self.text(self.current());

@@ -1207,21 +1207,29 @@ const Codegen = struct {
                 try self.emitWord(@intFromEnum(spirv.ExecutionMode.OutputVertices));
                 try self.emitWord(v);
             }
-            // Default spacing = equal
+            // Spacing
             {
+                const spacing = self.module.tess_spacing orelse .equal;
+                const mode: spirv.ExecutionMode = switch (spacing) {
+                    .equal => .SpacingEqual,
+                    .fractional_even => .SpacingFractionalEven,
+                    .fractional_odd => .SpacingFractionalOdd,
+                };
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
                 try self.emitWord(entry_id);
-                try self.emitWord(@intFromEnum(spirv.ExecutionMode.SpacingEqual));
+                try self.emitWord(@intFromEnum(mode));
             }
-            // Default vertex order = ccw
+            // Vertex order
             {
+                const ccw = self.module.tess_vertex_order_ccw orelse true;
+                const mode: spirv.ExecutionMode = if (ccw) .VertexOrderCcw else .VertexOrderCw;
                 try self.emitWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.ExecutionMode)));
                 try self.emitWord(entry_id);
-                try self.emitWord(@intFromEnum(spirv.ExecutionMode.VertexOrderCcw));
+                try self.emitWord(@intFromEnum(mode));
             }
-            // Input topology: default triangles
+            // Input topology
             {
-                const topo = self.module.geometry_input_topology orelse .triangles;
+                const topo = self.module.tess_input_topology orelse .triangles;
                 const topo_mode: spirv.ExecutionMode = switch (topo) {
                     .triangles => .Triangles,
                     .lines => .Isolines,

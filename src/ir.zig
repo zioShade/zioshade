@@ -43,6 +43,8 @@ pub const Module = struct {
     geometry_max_vertices: ?u32 = null,
     tess_vertices: ?u32 = null,
     tess_input_topology: ?ast.InputTopology = null,
+    tess_spacing: ?ast.TessSpacing = null,
+    tess_vertex_order_ccw: ?bool = null,
 
     pub fn deinit(self: *Module) void {
         for (self.functions) |func| {
