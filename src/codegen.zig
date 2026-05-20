@@ -2653,6 +2653,10 @@ const Codegen = struct {
             if (std.mem.eql(u8, global.name, "gl_in")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.position));
             }
+            // TCS gl_out array (array of vec4 with Position)
+            if (std.mem.eql(u8, global.name, "gl_out")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.position));
+            }
             if (std.mem.eql(u8, global.name, "gl_Position")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.position));
             }
