@@ -465,9 +465,11 @@ const Codegen = struct {
         // Check if gl_Layer/gl_ViewportIndex are used — they need ShaderLayer/ShaderViewportIndex caps
         var has_layer = false;
         var has_viewport = false;
+        var has_point_size = false;
         for (self.module.globals) |global| {
             if (std.mem.eql(u8, global.name, "gl_Layer")) has_layer = true;
             if (std.mem.eql(u8, global.name, "gl_ViewportIndex")) has_viewport = true;
+            if (std.mem.eql(u8, global.name, "gl_PointSize")) has_point_size = true;
         }
         if (has_layer and self.stage != .geometry) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
@@ -476,6 +478,15 @@ const Codegen = struct {
         if (has_viewport and self.stage != .geometry) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.shader_viewport_index));
+        }
+        if (has_point_size) {
+            if (self.stage == .geometry) {
+                try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+                try self.emitWord(@intFromEnum(spirv.Capability.geometry_point_size));
+            } else if (self.stage == .tessellation_control or self.stage == .tessellation_evaluation) {
+                try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+                try self.emitWord(@intFromEnum(spirv.Capability.tessellation_point_size));
+            }
         }
 
         // Only emit additional capabilities if the module actually uses them
@@ -2674,6 +2685,9 @@ const Codegen = struct {
             }
             if (std.mem.eql(u8, global.name, "gl_Position")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.position));
+            }
+            if (std.mem.eql(u8, global.name, "gl_PointSize")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.point_size));
             }
             // Geometry/Tessellation builtins
             if (std.mem.eql(u8, global.name, "gl_PrimitiveIDIn")) {

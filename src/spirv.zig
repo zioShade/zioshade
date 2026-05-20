@@ -285,6 +285,8 @@ pub const Capability = enum(u32) {
     tensors_arm = 4174,
     geometry = 2,
     tessellation = 3,
+    geometry_point_size = 24,
+    tessellation_point_size = 23,
     shader_layer = 69,
     shader_viewport_index = 70,
     _,
