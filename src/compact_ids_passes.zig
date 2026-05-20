@@ -4796,6 +4796,36 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
         pos = ie;
     }
 
+    // Phase 1b: Build set of IDs that are vector-typed values (for safe extract folding)
+    var vector_type_ids = std.AutoHashMapUnmanaged(u32, void).empty;
+    defer vector_type_ids.deinit(alloc);
+    var vector_value_ids = std.AutoHashMapUnmanaged(u32, void).empty;
+    defer vector_value_ids.deinit(alloc);
+    pos = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (opcode == 23 and wc >= 4) { // OpTypeVector
+            vector_type_ids.put(alloc, words[pos + 1], {}) catch {};
+        }
+        // Track IDs whose type is a vector
+        const info = compact_ids.getOpInfo(opcode) orelse { pos = ie; continue; };
+        switch (info.fixed) {
+            2 => { // type + result
+                if (pos + 2 < ie and vector_type_ids.contains(words[pos + 1])) {
+                    vector_value_ids.put(alloc, words[pos + 2], {}) catch {};
+                }
+            },
+            3 => { // result only (no type word in instruction)
+                // Skip — can't determine type without context
+            },
+            else => {},
+        }
+        pos = ie;
+    }
+
     if (construct_map.count() == 0 and insert_map.count() == 0) return words;
 
     // Phase 1b: Also build map of OpVectorShuffle: result_id -> (vec1_id, vec2_id, []shuffle_indices)
@@ -4847,9 +4877,15 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
             const composite_id = words[pos + 3];
             const index = words[ie - 1]; // last word is the index
             // Try CompositeConstruct/ConstantComposite folding
+            // Safe: only fold when constituent is a scalar (not a vector/matrix)
+            // When constituent is multi-component (e.g., vec3 in vec4(vec3, 1.0)),
+            // the extract index refers to a flattened component, not the constituent index
             if (construct_map.get(composite_id)) |components| {
                 if (index < components.items.len) {
-                    try sub_map.put(alloc, result_id, components.items[index]);
+                    const constituent = components.items[index];
+                    if (!vector_value_ids.contains(constituent)) {
+                        try sub_map.put(alloc, result_id, constituent);
+                    }
                 }
             }
             // Try CompositeInsert folding: Extract(Insert(obj, comp, idx), extract_idx)
