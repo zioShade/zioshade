@@ -3270,34 +3270,40 @@ const Analyzer = struct {
                 return .{ .ty = .void, .id = 0 };
             },
             .func_call => {
-                // Early check: array .length() method
+                // Early check: array .length() method — return array size as int constant
                 if (std.mem.eql(u8, node.data.name, "length") and node.data.children.len == 1) {
+                    var arr_size: ?u32 = null;
                     const first_child = node.data.children[0];
+                    // Try identifier lookup first (avoids emitting unnecessary IR)
                     if (first_child.tag == .identifier) {
                         if (self.lookup(first_child.data.name)) |sym| {
-                            switch (sym.ty) {
-                                .array => |arr| {
-                                    const val: u32 = arr.size;
-                                    const key = (@as(u64, @intFromEnum(ast.Type.int)) << 32) | @as(u64, val);
-                                    if (self.const_cache.get(key)) |cached| {
-                                        return .{ .ty = .int, .id = cached };
-                                    }
-                                    const id = self.allocId();
-                                    const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                                    operands[0] = .{ .literal_int = val };
-                                    try self.instructions.append(self.alloc, .{
-                                        .tag = .constant_int,
-                                        .result_type = null,
-                                        .result_id = id,
-                                        .operands = operands,
-                                        .ty = .int,
-                                    });
-                                    try self.const_cache.put(self.alloc, key, id);
-                                    return .{ .ty = .int, .id = id };
-                                },
-                                else => {},
-                            }
+                            if (sym.ty == .array) arr_size = sym.ty.array.size;
                         }
+                    }
+                    // Fallback: evaluate expression and check type
+                    if (arr_size == null) {
+                        if (self.analyzeExpression(first_child)) |tid| {
+                            if (tid.ty == .array) arr_size = tid.ty.array.size;
+                        } else |_| {}
+                    }
+                    if (arr_size) |size| {
+                        const val: u32 = size;
+                        const key = (@as(u64, @intFromEnum(ast.Type.int)) << 32) | @as(u64, val);
+                        if (self.const_cache.get(key)) |cached| {
+                            return .{ .ty = .int, .id = cached };
+                        }
+                        const id = self.allocId();
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .literal_int = val };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .constant_int,
+                            .result_type = null,
+                            .result_id = id,
+                            .operands = operands,
+                            .ty = .int,
+                        });
+                        try self.const_cache.put(self.alloc, key, id);
+                        return .{ .ty = .int, .id = id };
                     }
                 }
                 var arg_tids = std.ArrayListUnmanaged(TypedId).empty;
