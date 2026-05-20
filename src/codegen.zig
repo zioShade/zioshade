@@ -2649,8 +2649,28 @@ const Codegen = struct {
             } else if (std.mem.eql(u8, global.name, "gl_HelperInvocation")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.helper_invocation));
             }
+            // Geometry shader gl_in array (array of vec4 with Position)
+            if (std.mem.eql(u8, global.name, "gl_in")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.position));
+            }
             if (std.mem.eql(u8, global.name, "gl_Position")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.position));
+            }
+            // Geometry/Tessellation builtins
+            if (std.mem.eql(u8, global.name, "gl_PrimitiveIDIn")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.primitive_id));
+            }
+            if (std.mem.eql(u8, global.name, "gl_PrimitiveID")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.primitive_id));
+            }
+            if (std.mem.eql(u8, global.name, "gl_InvocationID")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.invocation_id));
+            }
+            if (std.mem.eql(u8, global.name, "gl_TessCoord")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.tess_coord));
+            }
+            if (std.mem.eql(u8, global.name, "gl_PatchVerticesIn")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.patch_vertices));
             }
             if (std.mem.eql(u8, global.name, "gl_VertexID") or std.mem.eql(u8, global.name, "gl_VertexIndex")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), 42); // VertexIndex
