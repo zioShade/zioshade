@@ -1,47 +1,24 @@
-#version 450
+#version 310 es
+precision highp float;
+out vec4 fragColor;
 
-// Test nested struct types and member access
-struct Light {
-    vec3 position;
-    vec3 color;
-    float intensity;
-};
-
-struct Material {
-    vec3 albedo;
-    float roughness;
-    float metallic;
-};
-
-struct Scene {
-    Light lights[2];
-    Material mat;
-    vec3 ambient;
-};
-
-vec3 shade(Scene s, vec3 pos) {
-    vec3 result = s.ambient * s.mat.albedo;
-    for (int i = 0; i < 2; i++) {
-        float d = distance(pos, s.lights[i].position);
-        float atten = s.lights[i].intensity / (1.0 + d * d);
-        vec3 diff = max(dot(normalize(s.lights[i].position - pos), vec3(0.0, 1.0, 0.0)), 0.0);
-        result += s.lights[i].color * diff * atten * s.mat.albedo;
-    }
-    return result;
-}
+struct Material { vec3 color; float roughness; };
 
 void main() {
-    Scene s;
-    s.lights[0].position = vec3(2.0, 3.0, 1.0);
-    s.lights[0].color = vec3(1.0, 0.9, 0.8);
-    s.lights[0].intensity = 5.0;
-    s.lights[1].position = vec3(-1.0, 2.0, 3.0);
-    s.lights[1].color = vec3(0.3, 0.4, 1.0);
-    s.lights[1].intensity = 3.0;
-    s.mat.albedo = vec3(0.8, 0.6, 0.4);
-    s.mat.roughness = 0.5;
-    s.mat.metallic = 0.0;
-    s.ambient = vec3(0.05, 0.05, 0.1);
-    vec3 col = shade(s, vec3(0.0));
-    gl_FragColor = vec4(col, 1.0);
+    vec2 uv = (gl_FragCoord.xy - 150.0) / 150.0;
+    Material m1 = Material(vec3(0.8, 0.3, 0.2), 0.5);
+    Material m2 = Material(vec3(0.2, 0.3, 0.8), 0.3);
+    
+    float d1 = length(uv - vec2(-0.3, 0.0)) - 0.5;
+    float d2 = length(uv - vec2(0.3, 0.0)) - 0.4;
+    
+    vec3 col = vec3(0.1);
+    if (d1 < 0.0) {
+        float shade = 0.5 + 0.5 * m1.roughness;
+        col = m1.color * shade;
+    } else if (d2 < 0.0) {
+        float shade = 0.5 + 0.5 * m2.roughness;
+        col = m2.color * shade;
+    }
+    fragColor = vec4(col, 1.0);
 }
