@@ -44,7 +44,16 @@ pub fn main() !void {
             continue;
         };
 
-        const result = glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch {
+        // Detect stage from generated source
+        const stage: glslpp.Stage = if (std.mem.indexOf(u8, source, "EmitVertex") != null or std.mem.indexOf(u8, source, "EndPrimitive") != null)
+            .geometry
+        else if (std.mem.indexOf(u8, source, "gl_InvocationID") != null or std.mem.indexOf(u8, source, "gl_TessLevelOuter") != null)
+            .tessellation_control
+        else if (std.mem.indexOf(u8, source, "gl_TessCoord") != null or std.mem.indexOf(u8, source, "equal_spacing") != null or std.mem.indexOf(u8, source, "fractional_even_spacing") != null or std.mem.indexOf(u8, source, "fractional_odd_spacing") != null)
+            .tessellation_evaluation
+        else
+            .fragment;
+        const result = glslpp.compileToSPIRV(alloc, source, .{ .stage = stage }) catch {
             pass_count += 1;
             continue;
         };
@@ -171,7 +180,7 @@ fn generateShader(alloc: std.mem.Allocator, seed: u64) error{OutOfMemory}![:0]co
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
 
-    const templates = 10;
+    const templates = 12;
     const pick_template = rng.intRangeAtMost(usize, 0, templates - 1);
 
     var list = std.ArrayList(u8){};
@@ -188,6 +197,8 @@ fn generateShader(alloc: std.mem.Allocator, seed: u64) error{OutOfMemory}![:0]co
         7 => try genMixedTypes(&list, alloc, rng),
         8 => try genArray(&list, alloc, rng),
         9 => try genStruct(&list, alloc, rng),
+        10 => try genGeometry(&list, alloc, rng),
+        11 => try genTessellation(&list, alloc, rng),
         else => unreachable,
     }
 
@@ -694,5 +705,122 @@ fn genStruct(list: *std.ArrayList(u8), alloc: std.mem.Allocator, rng: std.Random
             \\
         ),
         else => unreachable,
+    }
+}
+
+fn genGeometry(list: *std.ArrayList(u8), alloc: std.mem.Allocator, rng: std.Random) !void {
+    const input_topos = [_][]const u8{ "points", "lines", "lines_adjacency", "triangles", "triangles_adjacency" };
+    const output_prims = [_][]const u8{ "points", "line_strip", "triangle_strip" };
+    const input_topo = input_topos[rng.intRangeAtMost(usize, 0, input_topos.len - 1)];
+    const output_prim = output_prims[rng.intRangeAtMost(usize, 0, output_prims.len - 1)];
+    const max_verts = rng.intRangeAtMost(u32, 1, 6);
+    const num_iterations = rng.intRangeAtMost(u32, 1, max_verts);
+
+    const variant = rng.intRangeAtMost(usize, 0, 2);
+
+    var buf: [2048]u8 = undefined;
+    const shader = switch (variant) {
+        0 => std.fmt.bufPrint(&buf,
+            \\#version 450
+            \\layout({s}) in;
+            \\layout({s}, max_vertices = {d}) out;
+            \\void main() {{
+            \\    for (int i = 0; i < {d}; i++) {{
+            \\        float x = float(i) * {d}.1 - 0.5;
+            \\        gl_Position = vec4(x, 0.0, 0.0, 1.0);
+            \\        EmitVertex();
+            \\    }}
+            \\    EndPrimitive();
+            \\}}
+        , .{ input_topo, output_prim, max_verts, num_iterations, num_iterations }) catch unreachable,
+        1 => std.fmt.bufPrint(&buf,
+            \\#version 450
+            \\layout({s}) in;
+            \\layout({s}, max_vertices = {d}) out;
+            \\void main() {{
+            \\    float angle = 0.0;
+            \\    for (int i = 0; i < {d}; i++) {{
+            \\        angle = angle + 0.5;
+            \\        gl_Position = vec4(cos(angle) * 0.5, sin(angle) * 0.5, 0.0, 1.0);
+            \\        EmitVertex();
+            \\    }}
+            \\    EndPrimitive();
+            \\}}
+        , .{ input_topo, output_prim, max_verts, num_iterations }) catch unreachable,
+        else => std.fmt.bufPrint(&buf,
+            \\#version 450
+            \\layout({s}) in;
+            \\layout({s}, max_vertices = {d}) out;
+            \\void main() {{
+            \\    int pid = gl_PrimitiveIDIn;
+            \\    float off = float(pid) * 0.1;
+            \\    gl_Position = vec4(off, off, 0.0, 1.0);
+            \\    EmitVertex();
+            \\    EndPrimitive();
+            \\}}
+        , .{ input_topo, output_prim, max_verts }) catch unreachable,
+    };
+    try list.appendSlice(alloc, shader);
+}
+
+fn genTessellation(list: *std.ArrayList(u8), alloc: std.mem.Allocator, rng: std.Random) !void {
+    const is_tcs = rng.boolean();
+
+    var buf: [2048]u8 = undefined;
+    if (is_tcs) {
+        const vertices = rng.intRangeAtMost(u32, 1, 8);
+        const use_invocation = rng.boolean();
+        const shader = if (use_invocation)
+            std.fmt.bufPrint(&buf,
+                \\#version 450
+                \\layout(vertices = {d}) out;
+                \\void main() {{
+                \\    int id = gl_InvocationID;
+                \\    float x = float(id) * 0.3;
+                \\    gl_Position = vec4(x, 0.0, 0.0, 1.0);
+                \\    gl_TessLevelOuter[0] = 1.0;
+                \\    gl_TessLevelOuter[1] = 1.0;
+                \\    gl_TessLevelInner[0] = 1.0;
+                \\}}
+            , .{vertices}) catch unreachable
+        else
+            std.fmt.bufPrint(&buf,
+                \\#version 450
+                \\layout(vertices = {d}) out;
+                \\void main() {{
+                \\    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+                \\    gl_TessLevelOuter[0] = 2.0;
+                \\    gl_TessLevelOuter[1] = 2.0;
+                \\    gl_TessLevelOuter[2] = 2.0;
+                \\    gl_TessLevelInner[0] = 2.0;
+                \\}}
+            , .{vertices}) catch unreachable;
+        try list.appendSlice(alloc, shader);
+    } else {
+        const spacings = [_][]const u8{ "equal_spacing", "fractional_even_spacing", "fractional_odd_spacing" };
+        const topologies = [_][]const u8{ "triangles", "quads", "isolines" };
+        const orders = [_][]const u8{ "ccw", "cw" };
+        const spacing = spacings[rng.intRangeAtMost(usize, 0, spacings.len - 1)];
+        const topology = topologies[rng.intRangeAtMost(usize, 0, topologies.len - 1)];
+        const order = orders[rng.intRangeAtMost(usize, 0, orders.len - 1)];
+        const use_tess_coord = rng.boolean();
+
+        const shader = if (use_tess_coord)
+            std.fmt.bufPrint(&buf,
+                \\#version 450
+                \\layout({s}, {s}, {s}) in;
+                \\void main() {{
+                \\    gl_Position = vec4(gl_TessCoord, 1.0);
+                \\}}
+            , .{ topology, spacing, order }) catch unreachable
+        else
+            std.fmt.bufPrint(&buf,
+                \\#version 450
+                \\layout({s}, {s}, {s}) in;
+                \\void main() {{
+                \\    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+                \\}}
+            , .{ topology, spacing, order }) catch unreachable;
+        try list.appendSlice(alloc, shader);
     }
 }
