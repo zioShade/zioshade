@@ -1,19 +1,20 @@
-#version 450
+#version 310 es
+precision highp float;
+out vec4 fragColor;
 
-// Test while loop with complex condition
 void main() {
-    vec2 uv = gl_FragCoord.xy / vec2(128.0);
-    float x = uv.x;
-    float y = uv.y;
-    float sum = 0.0;
-    int count = 0;
-
-    while (sum < 0.9 && count < 20) {
-        sum += x * y * 0.1;
-        x *= 0.9;
-        y *= 0.95;
-        count++;
+    float x = gl_FragCoord.x * 0.01;
+    float acc = 1.0;
+    int i = 0;
+    while (acc > 0.01 && i < 20) {
+        acc *= x;
+        i++;
     }
-
-    gl_FragColor = vec4(clamp(sum, 0.0, 1.0), float(count) / 20.0, x, 1.0);
+    float y = gl_FragCoord.y * 0.01;
+    float sum = 0.0;
+    while (sum < 1.0) {
+        sum += y * 0.1;
+        if (sum > 0.8) break;
+    }
+    fragColor = vec4(acc, sum, float(i) * 0.05, 1.0);
 }
