@@ -1,23 +1,20 @@
-#version 450
-
-layout(location = 0) in vec2 uv;
-layout(location = 0) out vec4 fragColor;
+#version 310 es
+precision highp float;
+out vec4 fragColor;
 
 void main() {
+    vec2 uv = (gl_FragCoord.xy - 150.0) / 150.0;
     // Lissajous curve
-    float t = uv.x * 6.28318 * 3.0;
-    vec2 p = uv * 2.0 - 1.0;
-
-    float a = 3.0;
-    float b = 2.0;
-    float x = sin(a * t) * 0.7;
-    float y = sin(b * t + 1.57) * 0.7;
-
-    float dist = length(p - vec2(x, y));
-    float col = smoothstep(0.05, 0.0, dist);
-
-    vec3 color = vec3(col * 0.8, col * 0.3, col * 1.0);
-    color += vec3(0.02, 0.02, 0.05);
-
-    fragColor = vec4(color, 1.0);
+    float t = gl_FragCoord.x * 0.02;
+    float ax = 3.0;
+    float ay = 2.0;
+    float px = sin(ax * t + 1.0) * 0.7;
+    float py = sin(ay * t) * 0.7;
+    float d = length(uv - vec2(px, py));
+    float curve = smoothstep(0.02, 0.01, d);
+    vec3 col = vec3(0.05, 0.1, 0.15);
+    col += vec3(0.2, 0.6, 1.0) * curve;
+    // Glow
+    col += vec3(0.1, 0.3, 0.5) * smoothstep(0.08, 0.02, d);
+    fragColor = vec4(col, 1.0);
 }
