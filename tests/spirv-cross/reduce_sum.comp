@@ -1,0 +1,32 @@
+#version 310 es
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(std430, binding = 1) buffer Output {
+    float result;
+} output_buf;
+
+shared float s_temp[64];
+
+void main() {
+    uint idx = gl_LocalInvocationID.x;
+    s_temp[idx] = input_buf.data[gl_GlobalInvocationID.x];
+    memoryBarrierShared();
+    barrier();
+    
+    // Parallel reduction
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (idx < stride) {
+            s_temp[idx] += s_temp[idx + stride];
+        }
+        memoryBarrierShared();
+        barrier();
+    }
+    
+    if (idx == 0u) {
+        atomicAdd(output_buf.result, s_temp[0]);
+    }
+}
