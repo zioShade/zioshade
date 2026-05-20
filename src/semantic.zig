@@ -3270,6 +3270,36 @@ const Analyzer = struct {
                 return .{ .ty = .void, .id = 0 };
             },
             .func_call => {
+                // Early check: array .length() method
+                if (std.mem.eql(u8, node.data.name, "length") and node.data.children.len == 1) {
+                    const first_child = node.data.children[0];
+                    if (first_child.tag == .identifier) {
+                        if (self.lookup(first_child.data.name)) |sym| {
+                            switch (sym.ty) {
+                                .array => |arr| {
+                                    const val: u32 = arr.size;
+                                    const key = (@as(u64, @intFromEnum(ast.Type.int)) << 32) | @as(u64, val);
+                                    if (self.const_cache.get(key)) |cached| {
+                                        return .{ .ty = .int, .id = cached };
+                                    }
+                                    const id = self.allocId();
+                                    const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                    operands[0] = .{ .literal_int = val };
+                                    try self.instructions.append(self.alloc, .{
+                                        .tag = .constant_int,
+                                        .result_type = null,
+                                        .result_id = id,
+                                        .operands = operands,
+                                        .ty = .int,
+                                    });
+                                    try self.const_cache.put(self.alloc, key, id);
+                                    return .{ .ty = .int, .id = id };
+                                },
+                                else => {},
+                            }
+                        }
+                    }
+                }
                 var arg_tids = std.ArrayListUnmanaged(TypedId).empty;
                 defer arg_tids.deinit(self.alloc);
                 const is_atomic_fn = std.mem.eql(u8, node.data.name, "atomicAdd") or
