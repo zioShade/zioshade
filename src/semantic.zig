@@ -35,6 +35,8 @@ pub const AnalyzeOptions = struct {
     /// returning a partial module. When false, any error causes analyze() to return
     /// an error (used by unit tests to verify error detection).
     tolerate_errors: bool = false,
+    /// Shader stage (needed for stage-dependent builtin variables like gl_TessLevelOuter)
+    stage: ?@import("root.zig").Stage = null,
 };
 
 pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
@@ -57,6 +59,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .loop_stack = .empty,
         .overloads = .empty,
         .tolerate_errors = options.tolerate_errors,
+        .stage = options.stage,
     };
     defer analyzer.deinit();
 
@@ -316,6 +319,7 @@ const Analyzer = struct {
     // Function overloads: maps function name to list of (param_types, ir_id)
     overloads: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(OverloadEntry)),
     tolerate_errors: bool = false,
+    stage: ?@import("root.zig").Stage = null,
     has_returned: bool = false, // Dead code suppression after return
     if_insert_points: std.ArrayListUnmanaged(usize) = .empty, // stack of instruction indices before each if's SelectionMerge
     next_id: u32 = 1,
@@ -1004,6 +1008,7 @@ const Analyzer = struct {
             // Tessellation builtins
             .{ .name = "gl_PatchVerticesIn", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_TessCoord", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
+            // gl_TessLevelOuter/Inner are array-of-float patch variables — handled in ensureBuiltinVar
             .{ .name = "gl_BaseVertex", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_BaseVertexARB", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_VertexIndex", .ty = .int, .is_in = true, .is_out = false, .sc = .input },
@@ -1103,6 +1108,40 @@ const Analyzer = struct {
             const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
             self.scopes.items[0].put(self.alloc, "gl_in", sym) catch return null;
             self.gl_in_id = id;
+            return sym;
+        }
+
+        // gl_TessLevelOuter[4] — patch output in TCS, patch input in TES
+        if (std.mem.eql(u8, name, "gl_TessLevelOuter")) {
+            const id = self.allocId();
+            const arr_base = self.alloc.create(ast.Type) catch return null;
+            arr_base.* = .float;
+            self.heap_types.append(self.alloc, arr_base) catch {};
+            const ty: ast.Type = .{ .array = .{ .base = arr_base, .size = 4 } };
+            const is_tcs = self.stage != null and self.stage.? == .tessellation_control;
+            const sc: ir.SPIRVStorageClass = if (is_tcs) .output else .input;
+            const qual: ast.Qualifier = if (is_tcs) .{ .is_out = true } else .{ .is_in = true };
+            self.globals.append(self.alloc, .{ .name = "gl_TessLevelOuter", .ty = ty, .qualifier = qual, .layout = null, .storage_class = sc, .result_id = id }) catch return null;
+            self.global_ptr_ids.put(self.alloc, id, {}) catch {};
+            const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
+            self.scopes.items[0].put(self.alloc, "gl_TessLevelOuter", sym) catch return null;
+            return sym;
+        }
+
+        // gl_TessLevelInner[2] — patch output in TCS, patch input in TES
+        if (std.mem.eql(u8, name, "gl_TessLevelInner")) {
+            const id = self.allocId();
+            const arr_base = self.alloc.create(ast.Type) catch return null;
+            arr_base.* = .float;
+            self.heap_types.append(self.alloc, arr_base) catch {};
+            const ty: ast.Type = .{ .array = .{ .base = arr_base, .size = 2 } };
+            const is_tcs = self.stage != null and self.stage.? == .tessellation_control;
+            const sc: ir.SPIRVStorageClass = if (is_tcs) .output else .input;
+            const qual: ast.Qualifier = if (is_tcs) .{ .is_out = true } else .{ .is_in = true };
+            self.globals.append(self.alloc, .{ .name = "gl_TessLevelInner", .ty = ty, .qualifier = qual, .layout = null, .storage_class = sc, .result_id = id }) catch return null;
+            self.global_ptr_ids.put(self.alloc, id, {}) catch {};
+            const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
+            self.scopes.items[0].put(self.alloc, "gl_TessLevelInner", sym) catch return null;
             return sym;
         }
 
