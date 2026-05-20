@@ -489,6 +489,30 @@ const Codegen = struct {
             }
         }
 
+        // DrawParameters capability for gl_BaseVertex/gl_BaseInstance/gl_DrawID
+        var has_draw_params = false;
+        var has_device_group = false;
+        var has_multi_view = false;
+        for (self.module.globals) |global| {
+            if (std.mem.eql(u8, global.name, "gl_BaseVertex") or
+                std.mem.eql(u8, global.name, "gl_BaseInstance") or
+                std.mem.eql(u8, global.name, "gl_DrawID")) has_draw_params = true;
+            if (std.mem.eql(u8, global.name, "gl_DeviceIndex")) has_device_group = true;
+            if (std.mem.eql(u8, global.name, "gl_ViewIndex")) has_multi_view = true;
+        }
+        if (has_draw_params) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.draw_parameters));
+        }
+        if (has_device_group) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.device_group));
+        }
+        if (has_multi_view) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.multi_view));
+        }
+
         // Only emit additional capabilities if the module actually uses them
         var has_subgroup_vote = false;
         var has_float_atomic = false;
@@ -2738,6 +2762,21 @@ const Codegen = struct {
             }
             if (std.mem.eql(u8, global.name, "gl_LocalInvocationIndex")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.local_invocation_index));
+            }
+            if (std.mem.eql(u8, global.name, "gl_BaseVertex")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.base_vertex));
+            }
+            if (std.mem.eql(u8, global.name, "gl_BaseInstance")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.base_instance));
+            }
+            if (std.mem.eql(u8, global.name, "gl_DrawID")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.draw_index));
+            }
+            if (std.mem.eql(u8, global.name, "gl_DeviceIndex")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.device_index));
+            }
+            if (std.mem.eql(u8, global.name, "gl_ViewIndex")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.view_index));
             }
             // KHR_ray_tracing builtin decorations
             if (std.mem.eql(u8, global.name, "gl_LaunchIDEXT")) {
