@@ -1,26 +1,15 @@
-#version 450
+#version 310 es
+precision highp float;
+out vec4 fragColor;
 
-layout(location = 0) in vec2 uv;
-layout(location = 0) out vec4 fragColor;
-
-// Cross-hatch shading
 void main() {
-    vec2 p = uv * 20.0;
-    
-    float brightness = sin(uv.x * 3.14) * sin(uv.y * 3.14);
-    
-    // Diagonal lines in both directions
-    float diag1 = sin(p.x + p.y);
-    float diag2 = sin(p.x - p.y);
-    
-    float hatch1 = smoothstep(0.0, 0.3, diag1);
-    float hatch2 = smoothstep(0.0, 0.3, diag2);
-    
-    float darkness = 1.0 - brightness;
-    float hatching = 1.0;
-    if (darkness > 0.3) hatching = min(hatching, hatch1);
-    if (darkness > 0.6) hatching = min(hatching, hatch2);
-    
-    vec3 col = vec3(hatching * brightness);
+    vec2 uv = (gl_FragCoord.xy - 150.0) / 150.0;
+    // Cross-hatch shading
+    float r = length(uv);
+    float hatch1 = smoothstep(0.02, 0.0, abs(mod(uv.x + uv.y, 0.1) - 0.05));
+    float hatch2 = smoothstep(0.02, 0.0, abs(mod(uv.x - uv.y, 0.1) - 0.05));
+    float shade = smoothstep(1.0, 0.3, r);
+    float hatching = max(hatch1, hatch2) * shade;
+    vec3 col = vec3(hatching * 0.7 + 0.1);
     fragColor = vec4(col, 1.0);
 }
