@@ -1,20 +1,22 @@
-#version 450
+#version 310 es
+precision highp float;
+out vec4 fragColor;
 
-// Test: boolean logic chains with short-circuit patterns
 void main() {
-    vec2 uv = gl_FragCoord.xy / vec2(128.0);
-    float x = uv.x;
-    float y = uv.y;
-
-    bool a = x > 0.3 && y > 0.3;
-    bool b = x > 0.6 || y > 0.6;
-    bool c = !(x > 0.5);
-    bool d = (x > 0.2 && x < 0.8) && (y > 0.2 && y < 0.8);
-
-    float r = a ? 1.0 : 0.0;
-    float g = b ? 1.0 : 0.0;
-    float bl = c ? 0.8 : 0.2;
-    float al = d ? 1.0 : 0.5;
-
-    gl_FragColor = vec4(r, g, bl, al);
+    vec2 uv = (gl_FragCoord.xy - 150.0) / 150.0;
+    // Complex boolean logic
+    float x = step(0.0, uv.x);
+    float y = step(0.0, uv.y);
+    // AND
+    float both = x * y;
+    // OR
+    float either = min(x + y, 1.0);
+    // XOR
+    float exclusive = abs(x - y);
+    // Color each quadrant differently
+    vec3 col = vec3(0.05);
+    col += vec3(1.0, 0.3, 0.2) * both * 0.5;      // NE: warm
+    col += vec3(0.2, 0.3, 1.0) * exclusive * 0.5;   // NW/SE: cool
+    col += vec3(0.8, 0.8, 0.2) * (1.0 - either) * 0.3; // SW: golden
+    fragColor = vec4(col, 1.0);
 }
