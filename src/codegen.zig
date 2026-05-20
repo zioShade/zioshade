@@ -2672,6 +2672,12 @@ const Codegen = struct {
             if (std.mem.eql(u8, global.name, "gl_PatchVerticesIn")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.patch_vertices));
             }
+            if (std.mem.eql(u8, global.name, "gl_TessLevelOuter")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.tess_level_outer));
+            }
+            if (std.mem.eql(u8, global.name, "gl_TessLevelInner")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.tess_level_inner));
+            }
             if (std.mem.eql(u8, global.name, "gl_VertexID") or std.mem.eql(u8, global.name, "gl_VertexIndex")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), 42); // VertexIndex
             }
