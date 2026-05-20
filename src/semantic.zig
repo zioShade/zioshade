@@ -5363,6 +5363,30 @@ const Analyzer = struct {
                         return .{ .ty = result_ty, .id = conv_id };
                     }
 
+                    // Handle shorter-vector to longer-vector: vec4(vec3) → extract components + fill
+                    if (arg_ty.isVector() and arg_n < n) {
+                        const result_scalar2: ast.Type = switch (result_ty) {
+                            .vec2, .vec3, .vec4 => .float,
+                            .ivec2, .ivec3, .ivec4 => .int,
+                            .uvec2, .uvec3, .uvec4 => .uint,
+                            else => .float,
+                        };
+                        const one_id: u32 = if (result_scalar2 == .float) try self.getConstFloat(1.0) else try self.getConstInt(1, result_scalar2);
+                        const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, 1 + (n - arg_n));
+                        cc_ops[0] = .{ .id = arg_tids.items[0].id }; // the shorter vector
+                        for (arg_n..n) |i| {
+                            cc_ops[1 + i - arg_n] = .{ .id = one_id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_construct,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = cc_ops,
+                            .ty = result_ty,
+                        });
+                        return .{ .ty = result_ty, .id = result_id };
+                    }
+
                     // Convert scalar type if needed (e.g., vec4(int_val) → convert int→float first)
                     var splat_id = arg_tids.items[0].id;
                     const splat_ty = arg_ty;
