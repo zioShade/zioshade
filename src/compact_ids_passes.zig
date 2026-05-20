@@ -1196,7 +1196,8 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                     if (!safe_ptrs.isSet(words[pos + 1])) has_side_effects = true;
                 } else if (opcode == 63 or opcode == 234 or opcode == 235 or
                            (opcode >= 57 and opcode <= 60) or
-                           (opcode >= 68 and opcode <= 76) or opcode == 99) {
+                           (opcode >= 68 and opcode <= 76) or opcode == 99 or
+                           opcode == 218 or opcode == 219) { // OpEmitVertex, OpEndPrimitive
                     has_side_effects = true;
                 }
             }
@@ -7165,6 +7166,7 @@ pub fn elimDeadVoidCalls(alloc: std.mem.Allocator, words: []const u32) error{Out
                 if (fop == 236) has_side_effect = true; // OpControlBarrier
                 if (fop >= 237 and fop <= 244) has_side_effect = true; // OpAtomic*
                 if (fop >= 378 and fop <= 385) has_side_effect = true;
+                if (fop == 218 or fop == 219) has_side_effect = true; // OpEmitVertex, OpEndPrimitive
                 fp = fie;
             }
             if (!has_side_effect) try pure_funcs.put(alloc, func_id, {});
