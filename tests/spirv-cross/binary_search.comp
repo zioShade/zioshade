@@ -1,0 +1,29 @@
+#version 310 es
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 0) buffer Data {
+    float values[];
+} data;
+
+layout(std430, binding = 1) buffer Output {
+    int result_index;
+} output_buf;
+
+int binary_search(float target, int lo, int hi) {
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (data.values[mid] == target) return mid;
+        if (data.values[mid] < target) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return -1;
+}
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    float target = float(idx) * 0.5;
+    output_buf.result_index = binary_search(target, 0, 99);
+}
