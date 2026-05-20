@@ -1111,6 +1111,21 @@ const Analyzer = struct {
             return sym;
         }
 
+        // gl_out[] for tessellation control shaders — array of vec4 (position-only)
+        if (std.mem.eql(u8, name, "gl_out")) {
+            const arr_size = self.tess_vertices orelse 3;
+            const id = self.allocId();
+            const arr_base = self.alloc.create(ast.Type) catch return null;
+            arr_base.* = .vec4;
+            self.heap_types.append(self.alloc, arr_base) catch {};
+            const ty: ast.Type = .{ .array = .{ .base = arr_base, .size = arr_size } };
+            self.globals.append(self.alloc, .{ .name = "gl_out", .ty = ty, .qualifier = .{ .is_out = true }, .layout = null, .storage_class = .output, .result_id = id }) catch return null;
+            self.global_ptr_ids.put(self.alloc, id, {}) catch {};
+            const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
+            self.scopes.items[0].put(self.alloc, "gl_out", sym) catch return null;
+            return sym;
+        }
+
         // gl_TessLevelOuter[4] — patch output in TCS, patch input in TES
         if (std.mem.eql(u8, name, "gl_TessLevelOuter")) {
             const id = self.allocId();
@@ -2299,6 +2314,22 @@ const Analyzer = struct {
             },
             .member_access => {
                 if (node.data.children.len < 1) return error.InvalidAssignment;
+
+                // Handle gl_out[i].gl_Position = val (and gl_in[i].gl_Position = val)
+                // These arrays are arrays of vec4 (simplified gl_PerVertex),
+                // so arr[i] already IS the position. Just return the indexed pointer.
+                const base_child = node.data.children[0];
+                if (base_child.tag == .index_access and base_child.data.children.len >= 1) {
+                    const arr_base = base_child.data.children[0];
+                    if (arr_base.tag == .identifier and
+                        (std.mem.eql(u8, arr_base.data.name, "gl_in") or std.mem.eql(u8, arr_base.data.name, "gl_out")))
+                    {
+                        if (std.mem.eql(u8, node.data.name, "gl_Position")) {
+                            return self.analyzeLValue(base_child);
+                        }
+                    }
+                }
+
                 const base_lv = try self.analyzeLValue(node.data.children[0]);
                 const member_name = node.data.name;
                 // Struct member access: base_ptr + member_index → member_ptr
@@ -5921,13 +5952,15 @@ const Analyzer = struct {
                     }
                 }
 
-                // Handle gl_in[i].gl_Position pattern for geometry shaders
-                // gl_in is declared as array of vec4 (simplified gl_PerVertex),
-                // so gl_in[i] already IS the position. Skip the member access.
+                // Handle gl_in[i].gl_Position and gl_out[i].gl_Position patterns
+                // These arrays are declared as arrays of vec4 (simplified gl_PerVertex),
+                // so arr[i] already IS the position. Skip the member access.
                 if (base_child.tag == .index_access and base_child.data.children.len >= 1) {
                     const arr_base = base_child.data.children[0];
-                    if (arr_base.tag == .identifier and std.mem.eql(u8, arr_base.data.name, "gl_in")) {
-                        // gl_in[i].gl_Position or gl_in[i].gl_PointSize etc.
+                    if (arr_base.tag == .identifier and
+                        (std.mem.eql(u8, arr_base.data.name, "gl_in") or std.mem.eql(u8, arr_base.data.name, "gl_out")))
+                    {
+                        // gl_in[i].gl_Position or gl_out[i].gl_Position etc.
                         // For now, just return the indexed element (vec4 = position)
                         if (std.mem.eql(u8, node.data.name, "gl_Position")) {
                             const base_tid = try self.analyzeExpression(base_child);
