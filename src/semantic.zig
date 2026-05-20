@@ -2776,6 +2776,48 @@ const Analyzer = struct {
                     else => .add,
                 };
 
+                // Logical operators require bool operands — convert float/int to bool
+                if (op == .logical_and or op == .logical_or) {
+                    if (left.ty == .float or left.ty == .double) {
+                        const zero_id = try self.getConstFloat(0.0);
+                        const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        cvt_ops[0] = .{ .id = left_id };
+                        cvt_ops[1] = .{ .id = zero_id };
+                        left_id = try self.emitPureOp(.compare_fneq, cvt_ops, .bool);
+                    } else if (left.ty == .int) {
+                        const zero_id = try self.getConstInt(0, .int);
+                        const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        cvt_ops[0] = .{ .id = left_id };
+                        cvt_ops[1] = .{ .id = zero_id };
+                        left_id = try self.emitPureOp(.compare_neq, cvt_ops, .bool);
+                    } else if (left.ty == .uint) {
+                        const zero_id = try self.getConstInt(0, .uint);
+                        const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        cvt_ops[0] = .{ .id = left_id };
+                        cvt_ops[1] = .{ .id = zero_id };
+                        left_id = try self.emitPureOp(.compare_neq, cvt_ops, .bool);
+                    }
+                    if (right.ty == .float or right.ty == .double) {
+                        const zero_id = try self.getConstFloat(0.0);
+                        const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        cvt_ops[0] = .{ .id = right_id };
+                        cvt_ops[1] = .{ .id = zero_id };
+                        right_id = try self.emitPureOp(.compare_fneq, cvt_ops, .bool);
+                    } else if (right.ty == .int) {
+                        const zero_id = try self.getConstInt(0, .int);
+                        const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        cvt_ops[0] = .{ .id = right_id };
+                        cvt_ops[1] = .{ .id = zero_id };
+                        right_id = try self.emitPureOp(.compare_neq, cvt_ops, .bool);
+                    } else if (right.ty == .uint) {
+                        const zero_id = try self.getConstInt(0, .uint);
+                        const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        cvt_ops[0] = .{ .id = right_id };
+                        cvt_ops[1] = .{ .id = zero_id };
+                        right_id = try self.emitPureOp(.compare_neq, cvt_ops, .bool);
+                    }
+                }
+
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                 operands[0] = .{ .id = left_id };
                 operands[1] = .{ .id = right_id };

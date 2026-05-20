@@ -17,8 +17,8 @@ void main() {
     vec3 col = dark;
     col = mix(col, red, stripe_h);
     col = mix(col, green, stripe_v);
-    // Intersection highlight
-    float both = stripe_h * stripe_v;
+    // Intersection highlight using && on floats
+    float both = stripe_h && stripe_v;
     col = mix(col, vec3(0.9, 0.7, 0.2), both * 0.5);
     fragColor = vec4(col, 1.0);
 }
