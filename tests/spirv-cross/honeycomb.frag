@@ -1,48 +1,21 @@
-#version 450
+#version 310 es
+precision highp float;
+out vec4 fragColor;
 
-layout(location = 0) in vec2 uv;
-layout(location = 0) out vec4 fragColor;
-
-// Test honeycomb hex grid pattern
 void main() {
-    vec2 p = uv * 12.0;
-    
+    vec2 uv = gl_FragCoord.xy * 0.01;
+    // Honeycomb (hex grid fill)
+    float scale = 8.0;
+    vec2 p = uv * scale;
     // Hex grid coordinates
-    float row_h = 0.866;
-    float row = floor(p.y / row_h);
-    float x_offset = mod(row, 2.0) * 0.5;
-    float col = floor(p.x - x_offset);
-    
-    vec2 fp;
-    fp.y = fract(p.y / row_h);
-    fp.x = fract(p.x - x_offset);
-    
-    // Hex distance (approximate using triangle method)
-    vec2 hex_p = abs(fp - 0.5);
-    float hex_d = max(hex_p.x, dot(hex_p, normalize(vec2(0.5, 0.866))));
-    
-    // Cell fill and edge
-    float cell_fill = smoothstep(0.45, 0.42, hex_d);
-    float cell_edge = smoothstep(0.42, 0.40, hex_d) * (1.0 - smoothstep(0.38, 0.36, hex_d));
-    
-    // Honey color per cell with depth variation
-    float h = fract(sin(dot(vec2(col, row), vec2(127.1, 311.7))) * 43758.5);
-    float depth = 0.5 + 0.5 * sin(h * 6.2832);
-    
-    vec3 honey_dark = vec3(0.6, 0.4, 0.05);
-    vec3 honey_light = vec3(0.9, 0.7, 0.15);
-    vec3 wax = vec3(0.85, 0.8, 0.4);
-    vec3 bg = vec3(0.15, 0.12, 0.05);
-    
-    vec3 honey = mix(honey_dark, honey_light, depth);
-    
-    vec3 col = bg;
-    col = mix(col, wax, cell_edge);
-    col = mix(col, honey, cell_fill);
-    
-    // Specular highlight on honey
-    float spec = exp(-dot(fp - vec2(0.35, 0.4), fp - vec2(0.35, 0.4)) * 15.0);
-    col += spec * cell_fill * 0.2;
-    
-    fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+    vec2 r = vec2(1.0, 1.732);
+    vec2 h = vec2(r.x * 0.5, r.y);
+    vec2 a_val = mod(p, r) - h * 0.5;
+    vec2 b_val = mod(p + h * 0.5, r) - h * 0.5;
+    float d = min(length(a_val), length(b_val));
+    float hex = smoothstep(0.5, 0.45, d);
+    float h2 = fract(sin(dot(floor(p / r + 0.5), vec2(127.1, 311.7))) * 43758.5);
+    vec3 col = vec3(0.8, 0.65, 0.1) * hex * (0.7 + 0.3 * h2);
+    col += vec3(0.1) * (1.0 - hex);
+    fragColor = vec4(col, 1.0);
 }
