@@ -111,6 +111,8 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .geometry_max_vertices = analyzer.geometry_max_vertices,
         .tess_vertices = analyzer.tess_vertices,
         .tess_input_topology = analyzer.tess_input_topology,
+        .tess_spacing = analyzer.tess_spacing,
+        .tess_vertex_order_ccw = analyzer.tess_vertex_order_ccw,
     };
     // Dead function elimination: only keep functions reachable from main()
     mod = try eliminateDeadFunctions(alloc, mod);
@@ -353,7 +355,10 @@ const Analyzer = struct {
     geometry_max_vertices: ?u32 = null,
     tess_vertices: ?u32 = null,
     tess_input_topology: ?ast.InputTopology = null,
+    tess_spacing: ?ast.TessSpacing = null,
+    tess_vertex_order_ccw: ?bool = null,
     mesh_max_primitives: ?u32 = null,
+    gl_in_id: ?u32 = null,
     mesh_output_topology: ?ast.OutputTopology = null,
     uses_ray_query: bool = false,
     uses_ray_query_position_fetch: bool = false,
@@ -1079,6 +1084,28 @@ const Analyzer = struct {
             return sym;
         }
 
+        // gl_in[] for geometry shaders — array of vec4 (position-only simplified gl_PerVertex)
+        if (std.mem.eql(u8, name, "gl_in")) {
+            const arr_size: u32 = switch (self.geometry_input_topology orelse .triangles) {
+                .points => 1,
+                .lines => 2,
+                .lines_adjacency => 4,
+                .triangles => 3,
+                .triangles_adjacency => 6,
+            };
+            const id = self.allocId();
+            const arr_base = self.alloc.create(ast.Type) catch return null;
+            arr_base.* = .vec4;
+            self.heap_types.append(self.alloc, arr_base) catch {};
+            const ty: ast.Type = .{ .array = .{ .base = arr_base, .size = arr_size } };
+            self.globals.append(self.alloc, .{ .name = "gl_in", .ty = ty, .qualifier = .{ .is_in = true }, .layout = null, .storage_class = .input, .result_id = id }) catch return null;
+            self.global_ptr_ids.put(self.alloc, id, {}) catch {};
+            const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
+            self.scopes.items[0].put(self.alloc, "gl_in", sym) catch return null;
+            self.gl_in_id = id;
+            return sym;
+        }
+
         return null;
     }
 
@@ -1145,6 +1172,16 @@ const Analyzer = struct {
                             }
                         }
                         if (layout.vertices) |v| self.tess_vertices = v;
+                        // Tessellation spacing
+                        if (layout.equal_spacing) self.tess_spacing = .equal;
+                        if (layout.fractional_even_spacing) self.tess_spacing = .fractional_even;
+                        if (layout.fractional_odd_spacing) self.tess_spacing = .fractional_odd;
+                        // Tessellation vertex order
+                        if (layout.vertex_order_ccw) self.tess_vertex_order_ccw = true;
+                        if (layout.vertex_order_cw) self.tess_vertex_order_ccw = false;
+                        // Tessellation input topology overrides
+                        if (layout.isolines) self.tess_input_topology = .lines;
+                        if (layout.quads) self.tess_input_topology = .triangles;
                     }
                 }
                 // Skip creating a global for standalone layout qualifiers (e.g. layout(local_size_x=1) in;)
@@ -5841,6 +5878,26 @@ const Analyzer = struct {
                                     return .{ .ty = member_ty, .id = result_id, .is_ptr = true };
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Handle gl_in[i].gl_Position pattern for geometry shaders
+                // gl_in is declared as array of vec4 (simplified gl_PerVertex),
+                // so gl_in[i] already IS the position. Skip the member access.
+                if (base_child.tag == .index_access and base_child.data.children.len >= 1) {
+                    const arr_base = base_child.data.children[0];
+                    if (arr_base.tag == .identifier and std.mem.eql(u8, arr_base.data.name, "gl_in")) {
+                        // gl_in[i].gl_Position or gl_in[i].gl_PointSize etc.
+                        // For now, just return the indexed element (vec4 = position)
+                        if (std.mem.eql(u8, node.data.name, "gl_Position")) {
+                            const base_tid = try self.analyzeExpression(base_child);
+                            // base_tid is a pointer to vec4 from the AccessChain
+                            if (base_tid.is_ptr) {
+                                const ld = try self.emitLoadCached(base_tid.id, base_tid.ty);
+                                return .{ .ty = base_tid.ty, .id = ld };
+                            }
+                            return base_tid;
                         }
                     }
                 }

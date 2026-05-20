@@ -451,6 +451,7 @@ pub const Qualifier = packed struct {
 pub const InputTopology = enum { points, lines, lines_adjacency, triangles, triangles_adjacency };
 
 pub const OutputTopology = enum { triangles, lines, points };
+pub const TessSpacing = enum { equal, fractional_even, fractional_odd };
 
 pub const Layout = struct {
     location: ?u32 = null,
@@ -483,6 +484,14 @@ pub const Layout = struct {
     vertices: ?u32 = null,
     is_triangle_strip: bool = false,
     is_line_strip: bool = false,
+    // Tessellation layout qualifiers
+    equal_spacing: bool = false,
+    fractional_even_spacing: bool = false,
+    fractional_odd_spacing: bool = false,
+    vertex_order_ccw: bool = false,
+    vertex_order_cw: bool = false,
+    isolines: bool = false,
+    quads: bool = false,
 };
 
 pub const StructMember = struct {
