@@ -1,0 +1,15 @@
+#version 310 es
+layout(local_size_x = 1) in;
+
+layout(rgba32f, binding = 0) uniform image2D img;
+layout(std430, binding = 1) buffer Result {
+    vec4 values[];
+} result;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    vec4 val = imageLoad(img, coord);
+    val = val * 2.0 + vec4(0.1);
+    imageStore(img, coord, val);
+    result.values[gl_GlobalInvocationID.x] = val;
+}

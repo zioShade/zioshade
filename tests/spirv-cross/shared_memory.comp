@@ -1,0 +1,16 @@
+#version 310 es
+layout(local_size_x = 4) in;
+
+shared float s_data[16];
+
+void main() {
+    uint idx = gl_LocalInvocationID.x;
+    s_data[idx] = float(idx) * 2.0;
+    memoryBarrierShared();
+    barrier();
+    float sum = 0.0;
+    for (uint i = 0u; i < 4u; i++) {
+        sum += s_data[i];
+    }
+    s_data[idx] = sum;
+}
