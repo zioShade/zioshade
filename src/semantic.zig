@@ -1089,15 +1089,18 @@ const Analyzer = struct {
             return sym;
         }
 
-        // gl_in[] for geometry shaders — array of vec4 (position-only simplified gl_PerVertex)
+        // gl_in[] for geometry and tessellation shaders — array of vec4 (position-only simplified gl_PerVertex)
         if (std.mem.eql(u8, name, "gl_in")) {
-            const arr_size: u32 = switch (self.geometry_input_topology orelse .triangles) {
-                .points => 1,
-                .lines => 2,
-                .lines_adjacency => 4,
-                .triangles => 3,
-                .triangles_adjacency => 6,
-            };
+            const arr_size: u32 = if (self.geometry_input_topology) |topo|
+                switch (topo) {
+                    .points => 1,
+                    .lines => 2,
+                    .lines_adjacency => 4,
+                    .triangles => 3,
+                    .triangles_adjacency => 6,
+                }
+            else
+                self.tess_vertices orelse 32; // TCS: use tess_vertices or max patch vertices
             const id = self.allocId();
             const arr_base = self.alloc.create(ast.Type) catch return null;
             arr_base.* = .vec4;
