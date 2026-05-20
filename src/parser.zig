@@ -1652,6 +1652,31 @@ const Parser = struct {
                         .data = .{ .name = member_name, .children = try self.dupeNodes(&.{base}) },
                     };
                 },
+                .l_paren => {
+                    // Method call: expr.method(args) — transform member_access into func_call
+                    if (expr.tag == .member_access) {
+                        _ = self.advance(); // consume '('
+                        var args = std.ArrayListUnmanaged(ast.Node).empty;
+                        defer args.deinit(self.alloc);
+                        // First arg is the base expression
+                        if (expr.data.children.len > 0)
+                            try args.append(self.alloc, expr.data.children[0]);
+                        while (self.current().tag != .r_paren and self.current().tag != .eof) {
+                            try args.append(self.alloc, try self.parseExpression());
+                            if (self.current().tag == .comma) _ = self.advance();
+                        }
+                        _ = self.expect(.r_paren) catch {};
+                        expr = .{
+                            .tag = .func_call,
+                            .loc = expr.loc,
+                            .data = .{ .name = expr.data.name, .children = try self.ownedChildren(&args) },
+                        };
+                    } else {
+                        // Not a method call — function-style call on expression
+                        // This shouldn't normally happen in valid GLSL
+                        break;
+                    }
+                },
                 .plus_plus => {
                     _ = self.advance();
                     const pp_base = expr;
