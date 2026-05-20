@@ -1,0 +1,18 @@
+#version 310 es
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Histogram {
+    uint bins[256];
+} hist;
+
+layout(std430, binding = 1) readonly buffer Pixels {
+    uint data[];
+} pixels;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= 1024u) return;
+    uint val = pixels.data[idx];
+    uint r = (val >> 16u) & 0xFFu;
+    atomicAdd(hist.bins[r], 1u);
+}
