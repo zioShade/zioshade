@@ -462,6 +462,21 @@ const Codegen = struct {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.tessellation));
         }
+        // Check if gl_Layer/gl_ViewportIndex are used — they need ShaderLayer/ShaderViewportIndex caps
+        var has_layer = false;
+        var has_viewport = false;
+        for (self.module.globals) |global| {
+            if (std.mem.eql(u8, global.name, "gl_Layer")) has_layer = true;
+            if (std.mem.eql(u8, global.name, "gl_ViewportIndex")) has_viewport = true;
+        }
+        if (has_layer and self.stage != .geometry) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.shader_layer));
+        }
+        if (has_viewport and self.stage != .geometry) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.shader_viewport_index));
+        }
 
         // Only emit additional capabilities if the module actually uses them
         var has_subgroup_vote = false;
@@ -2688,12 +2703,11 @@ const Codegen = struct {
             if (std.mem.eql(u8, global.name, "gl_InstanceID") or std.mem.eql(u8, global.name, "gl_InstanceIndex")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), 43); // InstanceIndex
             }
-            // Only emit BuiltIn decorations for builtins that don't require extra capabilities
-            // gl_Layer, gl_ViewportIndex require Geometry capability — skip
-            if (false and std.mem.eql(u8, global.name, "gl_Layer")) {
+            // gl_Layer, gl_ViewportIndex — layer/viewport output (geometry) or input (fragment)
+            if (std.mem.eql(u8, global.name, "gl_Layer")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.layer));
             }
-            if (false and std.mem.eql(u8, global.name, "gl_ViewportIndex")) {
+            if (std.mem.eql(u8, global.name, "gl_ViewportIndex")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.view_index));
             }
             if (std.mem.eql(u8, global.name, "gl_GlobalInvocationID")) {
