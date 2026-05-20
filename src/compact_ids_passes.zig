@@ -3956,10 +3956,13 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 var repl = std.AutoHashMapUnmanaged(u32, u32).empty;
                 errdefer repl.deinit(alloc);
 
-                // Param -> arg
+                // Param -> arg (apply sub_map to resolve previous inlines)
                 const arg_start = pos + 4;
                 for (fi.param_ids, 0..) |pid, i| {
-                    if (arg_start + i < ie) try repl.put(alloc, pid, words[arg_start + i]);
+                    if (arg_start + i < ie) {
+                        const arg = sub_map.get(words[arg_start + i]) orelse words[arg_start + i];
+                        try repl.put(alloc, pid, arg);
+                    }
                 }
 
                 // Allocate fresh IDs for body result IDs (except return value)
