@@ -1,0 +1,19 @@
+#version 310 es
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Input {
+    float data[];
+} input_buf;
+
+layout(std430, binding = 1) buffer Output {
+    float result[];
+} output_buf;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    float sum = 0.0;
+    for (uint i = 0u; i <= idx; i++) {
+        sum += input_buf.data[i];
+    }
+    output_buf.result[idx] = sum;
+}

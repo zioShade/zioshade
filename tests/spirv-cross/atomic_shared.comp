@@ -1,0 +1,17 @@
+#version 310 es
+layout(local_size_x = 32) in;
+
+shared uint s_counter;
+
+layout(std430, binding = 0) buffer Result {
+    uint total;
+} result;
+
+void main() {
+    uint idx = gl_LocalInvocationID.x;
+    if (idx == 0u) s_counter = 0u;
+    barrier();
+    atomicAdd(s_counter, 1u);
+    barrier();
+    if (idx == 0u) result.total = s_counter;
+}

@@ -1,0 +1,18 @@
+#version 310 es
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Values {
+    float data[];
+} vals;
+
+layout(std430, binding = 1) buffer Bins {
+    uint counts[10];
+} bins;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    float v = vals.data[idx];
+    int bin = int(v * 10.0);
+    bin = clamp(bin, 0, 9);
+    atomicAdd(bins.counts[bin], 1u);
+}
