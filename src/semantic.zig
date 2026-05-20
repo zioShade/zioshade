@@ -1089,6 +1089,38 @@ const Analyzer = struct {
             return sym;
         }
 
+        // gl_ClipDistance[] — output array of float (vertex/geometry/tessellation)
+        if (std.mem.eql(u8, name, "gl_ClipDistance")) {
+            const id = self.allocId();
+            const arr_base = self.alloc.create(ast.Type) catch return null;
+            arr_base.* = .float;
+            self.heap_types.append(self.alloc, arr_base) catch {};
+            const ty: ast.Type = .{ .array = .{ .base = arr_base, .size = 8 } };
+            const is_input = self.stage == .fragment or self.stage == .tessellation_evaluation;
+            const sc: ir.SPIRVStorageClass = if (is_input) .input else .output;
+            const qual: ast.Qualifier = if (is_input) .{ .is_in = true } else .{ .is_out = true };
+            self.globals.append(self.alloc, .{ .name = "gl_ClipDistance", .ty = ty, .qualifier = qual, .layout = null, .storage_class = sc, .result_id = id }) catch return null;
+            const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
+            self.scopes.items[0].put(self.alloc, "gl_ClipDistance", sym) catch return null;
+            return sym;
+        }
+
+        // gl_CullDistance[] — output array of float (vertex/geometry/tessellation)
+        if (std.mem.eql(u8, name, "gl_CullDistance")) {
+            const id = self.allocId();
+            const arr_base = self.alloc.create(ast.Type) catch return null;
+            arr_base.* = .float;
+            self.heap_types.append(self.alloc, arr_base) catch {};
+            const ty: ast.Type = .{ .array = .{ .base = arr_base, .size = 8 } };
+            const is_input = self.stage == .fragment or self.stage == .tessellation_evaluation;
+            const sc: ir.SPIRVStorageClass = if (is_input) .input else .output;
+            const qual: ast.Qualifier = if (is_input) .{ .is_in = true } else .{ .is_out = true };
+            self.globals.append(self.alloc, .{ .name = "gl_CullDistance", .ty = ty, .qualifier = qual, .layout = null, .storage_class = sc, .result_id = id }) catch return null;
+            const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
+            self.scopes.items[0].put(self.alloc, "gl_CullDistance", sym) catch return null;
+            return sym;
+        }
+
         // gl_in[] for geometry and tessellation shaders — array of vec4 (position-only simplified gl_PerVertex)
         if (std.mem.eql(u8, name, "gl_in")) {
             const arr_size: u32 = if (self.geometry_input_topology) |topo|

@@ -493,12 +493,16 @@ const Codegen = struct {
         var has_draw_params = false;
         var has_device_group = false;
         var has_multi_view = false;
+        var has_clip_dist = false;
+        var has_cull_dist = false;
         for (self.module.globals) |global| {
             if (std.mem.eql(u8, global.name, "gl_BaseVertex") or
                 std.mem.eql(u8, global.name, "gl_BaseInstance") or
                 std.mem.eql(u8, global.name, "gl_DrawID")) has_draw_params = true;
             if (std.mem.eql(u8, global.name, "gl_DeviceIndex")) has_device_group = true;
             if (std.mem.eql(u8, global.name, "gl_ViewIndex")) has_multi_view = true;
+            if (std.mem.eql(u8, global.name, "gl_ClipDistance")) has_clip_dist = true;
+            if (std.mem.eql(u8, global.name, "gl_CullDistance")) has_cull_dist = true;
         }
         if (has_draw_params) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
@@ -511,6 +515,14 @@ const Codegen = struct {
         if (has_multi_view) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.multi_view));
+        }
+        if (has_clip_dist) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.clip_distance));
+        }
+        if (has_cull_dist) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.cull_distance));
         }
 
         // Only emit additional capabilities if the module actually uses them
@@ -2712,6 +2724,12 @@ const Codegen = struct {
             }
             if (std.mem.eql(u8, global.name, "gl_PointSize")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.point_size));
+            }
+            if (std.mem.eql(u8, global.name, "gl_ClipDistance")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.clip_distance));
+            }
+            if (std.mem.eql(u8, global.name, "gl_CullDistance")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.cull_distance));
             }
             // Geometry/Tessellation builtins
             if (std.mem.eql(u8, global.name, "gl_PrimitiveIDIn")) {
