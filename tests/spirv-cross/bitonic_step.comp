@@ -1,0 +1,32 @@
+#version 310 es
+layout(local_size_x = 4) in;
+
+layout(std430, binding = 0) buffer Data {
+    float values[];
+} data;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    // Bitonic sort step
+    uint half_size = 2u;
+    for (uint step = half_size; step > 0u; step >>= 1u) {
+        uint j = idx ^ step;
+        if (j > idx) {
+            if ((idx & half_size) == 0u) {
+                if (data.values[idx] > data.values[j]) {
+                    float temp = data.values[idx];
+                    data.values[idx] = data.values[j];
+                    data.values[j] = temp;
+                }
+            } else {
+                if (data.values[idx] < data.values[j]) {
+                    float temp = data.values[idx];
+                    data.values[idx] = data.values[j];
+                    data.values[j] = temp;
+                }
+            }
+        }
+        memoryBarrierBuffer();
+        barrier();
+    }
+}
