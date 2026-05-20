@@ -2927,17 +2927,54 @@ const Analyzer = struct {
 
                 const is_float = operand.ty == .float or operand.ty == .double or operand.ty.isVector();
 
-                const tag: ir.Instruction.Tag = switch (node.data.op orelse .sub) {
-                    .sub => if (is_float) .fneg else .neg,
-                    .logical_not => .logical_not,
-                    .bit_not => .bit_not,
-                    else => .neg,
-                };
-
-                const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                operands[0] = .{ .id = operand.id };
-                const result_id = try self.emitPureOp(tag, operands, operand.ty);
-                return .{ .ty = operand.ty, .id = result_id };
+                switch (node.data.op orelse .sub) {
+                    .sub => {
+                        const tag: ir.Instruction.Tag = if (is_float) .fneg else .neg;
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = operand.id };
+                        const result_id = try self.emitPureOp(tag, operands, operand.ty);
+                        return .{ .ty = operand.ty, .id = result_id };
+                    },
+                    .logical_not => {
+                        // LogicalNot requires bool operand — convert float/int to bool
+                        var op_id = operand.id;
+                        if (operand.ty == .float or operand.ty == .double) {
+                            const zero_id = try self.getConstFloat(0.0);
+                            const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            cvt_ops[0] = .{ .id = op_id };
+                            cvt_ops[1] = .{ .id = zero_id };
+                            op_id = try self.emitPureOp(.compare_fneq, cvt_ops, .bool);
+                        } else if (operand.ty == .int) {
+                            const zero_id = try self.getConstInt(0, .int);
+                            const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            cvt_ops[0] = .{ .id = op_id };
+                            cvt_ops[1] = .{ .id = zero_id };
+                            op_id = try self.emitPureOp(.compare_neq, cvt_ops, .bool);
+                        } else if (operand.ty == .uint) {
+                            const zero_id = try self.getConstInt(0, .uint);
+                            const cvt_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            cvt_ops[0] = .{ .id = op_id };
+                            cvt_ops[1] = .{ .id = zero_id };
+                            op_id = try self.emitPureOp(.compare_neq, cvt_ops, .bool);
+                        }
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = op_id };
+                        const result_id = try self.emitPureOp(.logical_not, operands, .bool);
+                        return .{ .ty = .bool, .id = result_id };
+                    },
+                    .bit_not => {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = operand.id };
+                        const result_id = try self.emitPureOp(.bit_not, operands, operand.ty);
+                        return .{ .ty = operand.ty, .id = result_id };
+                    },
+                    else => {
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = operand.id };
+                        const result_id = try self.emitPureOp(.neg, operands, operand.ty);
+                        return .{ .ty = operand.ty, .id = result_id };
+                    },
+                }
             },
             .assign_op => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
