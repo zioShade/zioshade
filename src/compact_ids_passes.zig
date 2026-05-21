@@ -6095,25 +6095,70 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                 continue;
             }
 
-            // Rewrite ID operands using bool_replacements
+            // Rewrite ID operands using bool_replacements (using getOpInfo to skip literals)
+            // First, scan ONLY ID positions for any replacements
+            const br_opcode: u16 = @truncate(bhdr & 0xFFFF);
+            const br_info = compact_ids.getOpInfo(br_opcode);
             var any_replaced = false;
-            var bw: u32 = pos;
-            while (bw < bie) : (bw += 1) {
-                if (bool_replacements.contains(br_result[bw])) {
-                    any_replaced = true;
-                    break;
+            if (br_info) |info| {
+                var bw: u32 = pos + 1;
+                switch (info.fixed) {
+                    1 => { if (bw < bie) { if (bool_replacements.contains(br_result[bw])) any_replaced = true; bw += 1; } },
+                    2 => {
+                        if (bw < bie) { if (bool_replacements.contains(br_result[bw])) any_replaced = true; bw += 1; }
+                        if (bw < bie) { bw += 1; } // result_id, skip
+                    },
+                    3 => { if (bw < bie) { bw += 1; } }, // result_id, skip
+                    else => {},
+                }
+                if (!any_replaced) {
+                    for (info.ops) |ch| {
+                        if (bw >= bie) break;
+                        switch (ch) {
+                            'i' => { if (bool_replacements.contains(br_result[bw])) { any_replaced = true; break; } bw += 1; },
+                            'I' => { while (bw < bie) : (bw += 1) { if (bool_replacements.contains(br_result[bw])) { any_replaced = true; break; } } },
+                            'l' => { bw += 1; },
+                            'L', 's' => { bw = bie; },
+                            'M' => { if (bw < bie) bw += 1; while (bw < bie) : (bw += 1) { if (bool_replacements.contains(br_result[bw])) { any_replaced = true; break; } } },
+                            'W' => { while (bw + 1 < bie) { bw += 1; bw += 1; if (bool_replacements.contains(br_result[bw])) { any_replaced = true; break; } } },
+                            'E' => { while (bw < bie) { const w = br_result[bw]; bw += 1; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (bw < bie) : (bw += 1) { if (bool_replacements.contains(br_result[bw])) { any_replaced = true; break; } } },
+                            else => { bw += 1; },
+                        }
+                    }
                 }
             }
-            if (any_replaced) {
+            if (any_replaced and br_info != null) {
+                const info = br_info.?;
                 var br_buf = std.ArrayListUnmanaged(u32).initCapacity(alloc, bwc) catch {
                     br_out.appendSlice(alloc, br_result[pos..bie]) catch return br_result;
                     pos = bie;
                     continue;
                 };
-                bw = pos;
-                while (bw < bie) : (bw += 1) {
-                    br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                br_buf.append(alloc, bhdr) catch return br_result; // header
+                var bw: u32 = pos + 1;
+                switch (info.fixed) {
+                    1 => { if (bw < bie) { br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; bw += 1; } },
+                    2 => {
+                        if (bw < bie) { br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; bw += 1; }
+                        if (bw < bie) { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; } // result_id
+                    },
+                    3 => { if (bw < bie) { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; } },
+                    else => {},
                 }
+                for (info.ops) |ch| {
+                    if (bw >= bie) break;
+                    switch (ch) {
+                        'i' => { br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; bw += 1; },
+                        'I' => { while (bw < bie) : (bw += 1) { br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; } },
+                        'l' => { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; },
+                        'L', 's' => { while (bw < bie) : (bw += 1) { br_buf.append(alloc, br_result[bw]) catch return br_result; } },
+                        'M' => { if (bw < bie) { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; } while (bw < bie) : (bw += 1) { br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; } },
+                        'W' => { while (bw + 1 < bie) { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; bw += 1; } if (bw < bie) { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; } },
+                        'E' => { while (bw < bie) { const w = br_result[bw]; bw += 1; br_buf.append(alloc, w) catch return br_result; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (bw < bie) : (bw += 1) { br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; } },
+                        else => { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; },
+                    }
+                }
+                while (bw < bie) : (bw += 1) { br_buf.append(alloc, br_result[bw]) catch return br_result; }
                 br_out.appendSlice(alloc, br_buf.items) catch return br_result;
                 br_buf.deinit(alloc);
             } else {
