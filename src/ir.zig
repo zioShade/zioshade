@@ -268,6 +268,7 @@ pub const Instruction = struct {
         function_call,
         group_all,
         group_any,
+        group_non_uniform_elect,
         set_mesh_outputs,
         emit_mesh_tasks,
         report_intersection,

@@ -270,6 +270,7 @@ pub const Capability = enum(u32) {
     storage_push_constant8 = 4450,
     storage_buffer8_bit = 4448,
     subgroup_vote_khr = 4431,
+    group_non_uniform = 67,
     image_1d = 44,
     derivative_control = 51,
     input_attachment = 40,
