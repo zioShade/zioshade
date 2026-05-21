@@ -36,6 +36,29 @@ pub fn generate(
     glsl_version: u32,
     is_essl: bool,
 ) error{OutOfMemory, CodegenFailed}![]const u32 {
+    return generateInternal(alloc, module, stage, spirv_version, glsl_version, is_essl, false);
+}
+
+pub fn generateNoOpt(
+    alloc: std.mem.Allocator,
+    module: *const ir.Module,
+    stage: Stage,
+    spirv_version: SPIRVVersion,
+    glsl_version: u32,
+    is_essl: bool,
+) error{OutOfMemory, CodegenFailed}![]const u32 {
+    return generateInternal(alloc, module, stage, spirv_version, glsl_version, is_essl, true);
+}
+
+fn generateInternal(
+    alloc: std.mem.Allocator,
+    module: *const ir.Module,
+    stage: Stage,
+    spirv_version: SPIRVVersion,
+    glsl_version: u32,
+    is_essl: bool,
+    no_opt: bool,
+) error{OutOfMemory, CodegenFailed}![]const u32 {
     var cg = Codegen{
         .alloc = alloc,
         .module = module,
@@ -130,6 +153,9 @@ pub fn generate(
     cg.words.items[3] = cg.next_id;
 
     const raw = try cg.words.toOwnedSlice(alloc);
+    if (no_opt) return raw;
+
+    // NOTE: raw is the unoptimized SPIR-V output. generateNoOpt() returns this directly.
     // === Streamlined optimization pipeline ===
     // Single pass of each optimization category. Removes repeated iterations
     // that provided diminishing returns for compute shaders.

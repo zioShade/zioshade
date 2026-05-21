@@ -6489,14 +6489,27 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
                 whole_loads += 1;
             }
 
-            // AccessChain into var (only single-index ACs: result_type, result_id, base, 1_index = 5 words)
-            if (opcode == 65 and wc == 5 and words[pos + 3] == var_id) {
+            // AccessChain into var (any number of indices — merged ACs may have wc > 5)
+            // Track all ACs, but also flag multi-index ACs for disqualification
+            if (opcode == 65 and wc >= 5 and words[pos + 3] == var_id) {
                 try ac_to_var.put(alloc, words[pos + 2], {});
                 try ac_positions.append(alloc, pos);
+                // Multi-index ACs (merged by mergeAccessChains) access nested struct members.
+                // The replacement logic only handles single-index ACs, so disqualify.
+                if (wc > 5) {
+                    ac_non_load_use = true;
+                }
             }
 
             // Store to an AC result of this var (disqualify)
             if (opcode == 62 and wc >= 3 and ac_to_var.contains(words[pos + 1])) {
+                ac_non_load_use = true;
+            }
+
+            // AccessChain where the base is an AC result of this var (nested AC — disqualify)
+            // This handles patterns like: struct { Material mat; } s; s.mat.roughness
+            // where AccessChain(s, 2) gives a Material ptr, then AccessChain(mat_ptr, 1) gives float ptr
+            if (opcode == 65 and wc >= 5 and ac_to_var.contains(words[pos + 3])) {
                 ac_non_load_use = true;
             }
 
