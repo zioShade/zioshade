@@ -344,8 +344,10 @@ fn emitRemap(
             },
             'W' => {
                 while (wi + 1 < end) {
-                    wi += 1; try out.append(alloc, words[wi]);
-                    wi += 1; { const w = words[wi]; try out.append(alloc, idmap.get(w) orelse w); }
+                    try out.append(alloc, words[wi]); // literal
+                    wi += 1;
+                    { const w = words[wi]; try out.append(alloc, idmap.get(w) orelse w); } // target
+                    wi += 1;
                 }
                 if (wi < end) { try out.append(alloc, words[wi]); wi += 1; }
             },

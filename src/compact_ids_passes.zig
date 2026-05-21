@@ -3845,8 +3845,10 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                         },
                         'W' => {
                             while (wi + 1 < bie) {
-                                wi += 1; try out.append(allocator, w[wi]);
-                                wi += 1; try out.append(allocator, repl.get(w[wi]) orelse w[wi]);
+                                try out.append(allocator, w[wi]); // literal
+                                wi += 1;
+                                try out.append(allocator, repl.get(w[wi]) orelse w[wi]); // target
+                                wi += 1;
                             }
                             if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; }
                         },
@@ -3915,8 +3917,10 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                     },
                     'W' => {
                         while (wi + 1 < bie) {
-                            wi += 1; try out.append(allocator, w[wi]);
-                            wi += 1; try out.append(allocator, sm.get(w[wi]) orelse w[wi]);
+                            try out.append(allocator, w[wi]); // literal
+                            wi += 1;
+                            try out.append(allocator, sm.get(w[wi]) orelse w[wi]); // target
+                            wi += 1;
                         }
                         if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; }
                     },
