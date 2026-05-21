@@ -554,6 +554,7 @@ const Codegen = struct {
 
         // Only emit additional capabilities if the module actually uses them
         var has_subgroup_vote = false;
+        var has_group_non_uniform = false;
         var has_float_atomic = false;
         var has_input_attachment = false;
         var has_interlock = false;
@@ -562,6 +563,7 @@ const Codegen = struct {
             for (func.body) |inst| {
                 switch (inst.tag) {
                     .group_all, .group_any => has_subgroup_vote = true,
+                    .group_non_uniform_elect => has_group_non_uniform = true,
                     .atomic_fadd => has_float_atomic = true,
                     .begin_invocation_interlock, .end_invocation_interlock => has_interlock = true,
                     else => {},
@@ -658,6 +660,10 @@ const Codegen = struct {
         if (has_subgroup_vote) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.subgroup_vote_khr));
+        }
+        if (has_group_non_uniform) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.group_non_uniform));
         }
         if (has_float_atomic) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
@@ -5186,6 +5192,17 @@ const Codegen = struct {
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
                 try self.emitWord(predicate_id);
+            },
+            .group_non_uniform_elect => {
+                // OpGroupNonUniformElect: <result_type> <result_id> <scope>
+                // Returns bool: true for one invocation in the group
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const scope_id = self.operandId(resolved, 0);
+                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.GroupNonUniformElect)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(scope_id);
             },
             .set_mesh_outputs => {
                 // OpSetMeshOutputsEXT <vertex_count> <primitive_count> (no result type)

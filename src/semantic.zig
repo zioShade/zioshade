@@ -4728,6 +4728,19 @@ const Analyzer = struct {
                             .ty = .bool,
                         });
                         return .{ .ty = .bool, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "subgroupElect")) {
+                        // subgroupElect() → OpGroupNonUniformElect (no args, just scope)
+                        const scope_id = try self.getConstInt(3, .uint); // Workgroup = 3
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = scope_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .group_non_uniform_elect,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = .bool,
+                        });
+                        return .{ .ty = .bool, .id = result_id };
                     } else if (std.mem.eql(u8, node.data.name, "lessThan") or std.mem.eql(u8, node.data.name, "greaterThan") or std.mem.eql(u8, node.data.name, "lessThanEqual") or std.mem.eql(u8, node.data.name, "greaterThanEqual") or std.mem.eql(u8, node.data.name, "equal") or std.mem.eql(u8, node.data.name, "notEqual")) {
                         // Vector comparison builtins → same as binary comparison operators
                         if (arg_tids.items.len >= 2) {
