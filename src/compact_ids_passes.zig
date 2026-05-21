@@ -872,7 +872,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                                     'I' => { while (wi < ie) : (wi += 1) try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); },
                                     'L', 's' => { while (wi < ie) : (wi += 1) try xb_result.append(alloc, current_words[wi]); },
                                     'M' => { if (wi < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; } while (wi < ie) : (wi += 1) try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); },
-                                    'W' => { while (wi + 1 < ie) { wi += 1; try xb_result.append(alloc, current_words[wi]); wi += 1; try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); } if (wi < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; } },
+                                    'W' => { while (wi + 1 < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); wi += 1; } if (wi < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; } },
                                     'E' => { while (wi < ie) { const w = current_words[wi]; wi += 1; try xb_result.append(alloc, w); if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); },
                                     else => { try xb_result.append(alloc, current_words[wi]); wi += 1; },
                                 }
@@ -8829,10 +8829,10 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                     if (pred_load_map.get(out[wi])) |v| { out[wi] = v; }
                     else if (load_map.get(out[wi])) |v| { out[wi] = v; }
                 } },
-                'W' => { while (wi + 1 < sie) { wi += 1;
+                'W' => { while (wi + 1 < sie) { wi += 1; // skip literal, now at target
                     if (pred_load_map.get(out[wi])) |v| { out[wi] = v; }
                     else if (load_map.get(out[wi])) |v| { out[wi] = v; }
-                    wi += 1;
+                    wi += 1; // advance past target
                 } },
                 else => { wi += 1; },
             }
