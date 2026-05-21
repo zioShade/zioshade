@@ -273,6 +273,67 @@ pub fn compileToSPIRV(
     };
 }
 
+/// Compile GLSL source to SPIR-V without optimization (for debugging).
+pub fn compileToSPIRVNoOpt(
+    alloc: std.mem.Allocator,
+    source: [:0]const u8,
+    options: CompileOptions,
+) Error![]const u32 {
+    last_compile_detail = null;
+    const tokens = lexer.tokenize(alloc, source) catch {
+        last_compile_detail = .lex_failed;
+        return error.LexFailed;
+    };
+    defer alloc.free(tokens);
+
+    var pp = preprocessor.Preprocessor.init(alloc);
+    defer pp.deinit();
+    const pp_tokens = pp.process(source, tokens) catch tokens;
+    defer if (pp_tokens.ptr != tokens.ptr) alloc.free(pp_tokens);
+
+    var root_node = parser.parse(alloc, source, pp_tokens) catch {
+        last_compile_detail = .parse_failed;
+        return error.ParseFailed;
+    };
+    defer parser.freeTree(alloc, &root_node);
+
+    var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = true, .stage = options.stage }) catch {
+        last_compile_detail = .semantic_failed;
+        return error.SemanticFailed;
+    };
+    defer module.deinit();
+
+    const stage: codegen.Stage = switch (options.stage) {
+        .vertex => .vertex,
+        .fragment => .fragment,
+        .compute => .compute,
+        .geometry => .geometry,
+        .tessellation_control => .tessellation_control,
+        .tessellation_evaluation => .tessellation_evaluation,
+        .mesh => .mesh,
+        .task => .task,
+        .raygen => .raygen,
+        .closesthit => .closesthit,
+        .miss => .miss,
+        .intersection => .intersection,
+        .anyhit => .anyhit,
+        .callable => .callable,
+    };
+    const spirv_ver: codegen.SPIRVVersion = switch (options.spirv_version) {
+        .@"1.0" => .@"1.0",
+        .@"1.1" => .@"1.1",
+        .@"1.2" => .@"1.2",
+        .@"1.3" => .@"1.3",
+        .@"1.4" => .@"1.4",
+        .@"1.5" => .@"1.5",
+        .@"1.6" => .@"1.6",
+    };
+    return codegen.generateNoOpt(alloc, &module, stage, spirv_ver, pp.version, pp.is_essl) catch {
+        last_compile_detail = .codegen_failed;
+        return error.CodegenFailed;
+    };
+}
+
 /// Cross-compile SPIR-V binary to GLSL source.
 /// Targets GLSL 430 by default.
 pub fn spirvToGLSL(

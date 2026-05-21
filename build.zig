@@ -415,6 +415,24 @@ pub fn build(b: *std.Build) void {
     }
     spv_dump_step.dependOn(&run_spv_dump.step);
 
+    // Tool: Dump SPIR-V without optimization (for debugging optimizer bugs)
+    const spv_noopt_step = b.step("spv-noopt", "Compile GLSL to unoptimized SPIR-V");
+    const spv_noopt_mod = b.createModule(.{
+        .root_source_file = b.path("tools/spv_dump_noopt.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    spv_noopt_mod.addImport("glslpp", glslpp_mod);
+    const spv_noopt_exe = b.addExecutable(.{
+        .name = "spv-noopt",
+        .root_module = spv_noopt_mod,
+    });
+    const run_spv_noopt = b.addRunArtifact(spv_noopt_exe);
+    if (b.args) |a| {
+        for (a) |arg| run_spv_noopt.addArg(arg);
+    }
+    spv_noopt_step.dependOn(&run_spv_noopt.step);
+
     // Tool: Fuzz test — generate random GLSL and validate through glslpp
     const fuzz_step = b.step("fuzz", "Run structured GLSL fuzzer");
     const fuzz_mod = b.createModule(.{
