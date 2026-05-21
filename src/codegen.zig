@@ -155,6 +155,7 @@ fn generateInternal(
     const raw = try cg.words.toOwnedSlice(alloc);
     if (no_opt) return raw;
 
+
     // NOTE: raw is the unoptimized SPIR-V output. generateNoOpt() returns this directly.
     // === Streamlined optimization pipeline ===
     // Single pass of each optimization category. Removes repeated iterations
