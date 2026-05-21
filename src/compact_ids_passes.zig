@@ -8664,8 +8664,13 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     defer remove_vars.deinit(alloc);
     var remove_stores = std.AutoHashMapUnmanaged(u64, void).empty;
     defer remove_stores.deinit(alloc);
-    var phi_blocks = std.AutoHashMapUnmanaged(u32, u32).empty; // merge_block -> index in cands
-    defer phi_blocks.deinit(alloc);
+    const PhiBlockList = std.ArrayListUnmanaged(u32);
+    var phi_blocks = std.AutoHashMapUnmanaged(u32, PhiBlockList).empty; // merge_block -> list of candidate indices
+    defer {
+        var pbit = phi_blocks.iterator();
+        while (pbit.next()) |e| e.value_ptr.deinit(alloc);
+        phi_blocks.deinit(alloc);
+    }
     var next_id: u32 = bound;
     for (cands.items, 0..) |c, ci| {
         try load_map.put(alloc, c.first_load_result, next_id);
@@ -8715,7 +8720,9 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                 try remove_stores.put(alloc, (@as(u64, e.key_ptr.*) << 32) | @as(u64, c.var_id), {});
             }
         }
-        try phi_blocks.put(alloc, c.merge_block, @as(u32, @intCast(ci)));
+        const gop = try phi_blocks.getOrPut(alloc, c.merge_block);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        try gop.value_ptr.append(alloc, @as(u32, @intCast(ci)));
         next_id += 1;
     }
 
@@ -8734,9 +8741,12 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
             if (remove_stores.contains((@as(u64, cur_block) << 32) | @as(u64, words[pos + 1]))) { pos = ie; continue; }
         }
         out_words += wc;
-        if (op == 248 and phi_blocks.contains(cur_block)) {
-            const ci = phi_blocks.get(cur_block).?;
-            out_words += 3 + 2 * cands.items[ci].pred_count; // OpPhi
+        if (op == 248) {
+            if (phi_blocks.get(cur_block)) |ci_list| {
+                for (ci_list.items) |ci| {
+                    out_words += 3 + 2 * cands.items[ci].pred_count; // OpPhi
+                }
+            }
         }
         pos = ie;
     }
@@ -8766,20 +8776,22 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         opos += wc;
         // Insert OpPhi after OpLabel for merge blocks
         if (op == 248) {
-            if (phi_blocks.get(cur_block)) |ci| {
-                const c = cands.items[ci];
-                const phi_wc: u32 = 3 + 2 * c.pred_count;
-                out[opos] = (phi_wc << 16) | 245; // OpPhi = 245
-                out[opos + 1] = c.result_type;
-                out[opos + 2] = load_map.get(c.first_load_result).?;
-                var pi: u32 = 0;
-                for (block_map.get(c.merge_block).?.preds.items) |pred| {
-                    const val = block_map.get(pred).?.stores.get(c.var_id).?;
-                    out[opos + 3 + pi * 2] = val;
-                    out[opos + 3 + pi * 2 + 1] = pred;
-                    pi += 1;
+            if (phi_blocks.get(cur_block)) |ci_list| {
+                for (ci_list.items) |ci| {
+                    const c = cands.items[ci];
+                    const phi_wc: u32 = 3 + 2 * c.pred_count;
+                    out[opos] = (phi_wc << 16) | 245; // OpPhi = 245
+                    out[opos + 1] = c.result_type;
+                    out[opos + 2] = load_map.get(c.first_load_result).?;
+                    var pi: u32 = 0;
+                    for (block_map.get(c.merge_block).?.preds.items) |pred| {
+                        const val = block_map.get(pred).?.stores.get(c.var_id).?;
+                        out[opos + 3 + pi * 2] = val;
+                        out[opos + 3 + pi * 2 + 1] = pred;
+                        pi += 1;
+                    }
+                    opos += phi_wc;
                 }
-                opos += phi_wc;
             }
         }
         pos = ie;
