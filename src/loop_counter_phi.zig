@@ -352,8 +352,10 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
                 },
                 'W' => {
                     while (wi + 1 < ie) {
-                        wi += 1; try result.append(alloc, words[wi]);
-                        wi += 1; try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]);
+                        try result.append(alloc, words[wi]); // literal
+                        wi += 1;
+                        try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]); // target
+                        wi += 1;
                     }
                     if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
                 },
