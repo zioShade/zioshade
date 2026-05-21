@@ -2246,7 +2246,34 @@ const Analyzer = struct {
                         .ty = .void,
                     };
                     if (self.if_insert_points.items.len > 0) {
-                        const insert_idx = self.if_insert_points.items[0];
+                        // Insert after the init_value instruction.
+                        // The init_value is in the same scope where the variable was declared.
+                        // Find it by scanning backwards from current position.
+                        const insert_idx = blk: {
+                            // If the init_value is a constant or was computed before the
+                            // outermost if, use the outermost insert point (before SelectionMerge).
+                            // Otherwise, append at current position (init was computed in current scope).
+                            var init_pos: ?usize = null;
+                            for (self.instructions.items, 0..) |inst, i| {
+                                if (inst.result_id != null and inst.result_id.? == init_val) {
+                                    init_pos = i;
+                                    break;
+                                }
+                            }
+                            if (init_pos) |ip| {
+                                // Check if init_value is before the outermost if-insert point
+                                if (ip < self.if_insert_points.items[0]) {
+                                    // init computed before the if — safe to place store before if
+                                    break :blk self.if_insert_points.items[0];
+                                } else {
+                                    // init computed inside a branch — append at current position
+                                    break :blk self.instructions.items.len;
+                                }
+                            } else {
+                                // init_value not found as instruction result (might be constant)
+                                break :blk self.if_insert_points.items[0];
+                            }
+                        };
                         self.instructions.insert(self.alloc, insert_idx, store_inst) catch return null;
                     } else {
                         self.instructions.append(self.alloc, store_inst) catch return null;
@@ -2326,9 +2353,24 @@ const Analyzer = struct {
                                 .ty = .void,
                             };
                             if (self.if_insert_points.items.len > 0) {
-                                // Inside a conditional: insert init store before outermost
-                                // if's SelectionMerge to ensure it always executes.
-                                const insert_idx = self.if_insert_points.items[0];
+                                const insert_idx = blk: {
+                                    var init_pos: ?usize = null;
+                                    for (self.instructions.items, 0..) |inst, i| {
+                                        if (inst.result_id != null and inst.result_id.? == init_val) {
+                                            init_pos = i;
+                                            break;
+                                        }
+                                    }
+                                    if (init_pos) |ip| {
+                                        if (ip < self.if_insert_points.items[0]) {
+                                            break :blk self.if_insert_points.items[0];
+                                        } else {
+                                            break :blk self.instructions.items.len;
+                                        }
+                                    } else {
+                                        break :blk self.if_insert_points.items[0];
+                                    }
+                                };
                                 self.instructions.insert(self.alloc, insert_idx, store_inst) catch return error.OutOfMemory;
                             } else {
                                 try self.instructions.append(self.alloc, store_inst);
