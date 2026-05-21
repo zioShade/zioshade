@@ -4700,8 +4700,10 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 },
                 'W' => {
                     while (wi + 1 < ie) {
-                        wi += 1; result.append(alloc, words[wi]) catch return words;
-                        wi += 1; result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                        result.append(alloc, words[wi]) catch return words; // literal
+                        wi += 1;
+                        result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; // target
+                        wi += 1;
                     }
                     if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
                 },
@@ -5040,8 +5042,10 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
                 },
                 'W' => {
                     while (wi + 1 < ie) {
-                        wi += 1; result.append(alloc, words[wi]) catch return words;
-                        wi += 1; result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                        result.append(alloc, words[wi]) catch return words; // literal
+                        wi += 1;
+                        result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; // target
+                        wi += 1;
                     }
                     if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
                 },
@@ -5328,8 +5332,10 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
                 },
                 'W' => {
                     while (wi + 1 < ie) {
-                        wi += 1; result.append(alloc, words[wi]) catch return words;
-                        wi += 1; result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                        result.append(alloc, words[wi]) catch return words; // literal
+                        wi += 1;
+                        result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; // target
+                        wi += 1;
                     }
                     if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
                 },
@@ -8479,8 +8485,10 @@ pub fn hoistInvariantACs(alloc: std.mem.Allocator, words: []const u32) error{Out
                 },
                 'W' => {
                     while (wi + 1 < ie) {
-                        wi += 1; result.append(alloc, words[wi]) catch return words;
-                        wi += 1; const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words;
+                        result.append(alloc, words[wi]) catch return words; // literal
+                        wi += 1;
+                        const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; // target
+                        wi += 1;
                     }
                     if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
                 },
@@ -9910,8 +9918,10 @@ pub fn foldConstCompositeExtract(alloc: std.mem.Allocator, words: []const u32) e
                 },
                 'W' => {
                     while (wi + 1 < ie) {
-                        wi += 1; result.append(alloc, words[wi]) catch return words;
-                        wi += 1; result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                        result.append(alloc, words[wi]) catch return words; // literal
+                        wi += 1;
+                        result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; // target
+                        wi += 1;
                     }
                     if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
                 },
@@ -10057,10 +10067,11 @@ pub fn simplifyTrivialPhi(alloc: std.mem.Allocator, words: []const u32) error{Ou
                     }
                 },
                 'W' => {
-                    while (wi + 1 < ie) : (wi += 1) {
-                        result.append(alloc, words[wi]) catch return words;
+                    while (wi + 1 < ie) {
+                        result.append(alloc, words[wi]) catch return words; // literal
                         wi += 1;
-                        result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                        result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; // target
+                        wi += 1;
                     }
                     if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
                 },
