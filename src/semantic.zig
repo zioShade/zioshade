@@ -6063,6 +6063,15 @@ const Analyzer = struct {
                     return .{ .ty = result_ty, .id = result_id };
                 }
 
+                // Truncate to target vector size (e.g., vec3(0.0, uv, 0.0) → only take first 3 components)
+                // Only for vector types — arrays and matrices may have different sizes
+                if (result_ty.isVector()) {
+                    const target_n = result_ty.numComponents();
+                    if (flat_ids.items.len > target_n) {
+                        flat_ids.shrinkRetainingCapacity(target_n);
+                    }
+                }
+
                 // Allocate operand array
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, flat_ids.items.len);
                 for (flat_ids.items, 0..) |cid, i| {
