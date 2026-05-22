@@ -2,6 +2,7 @@
 const std = @import("std");
 const lexer = @import("lexer.zig");
 const ast = @import("ast.zig");
+const semantic = @import("semantic.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -156,6 +157,13 @@ const Parser = struct {
 
     // ── Navigation ────────────────────────────────────────────
 
+    /// Record the current token's location as the error position.
+    fn recordErrorLoc(self: *Parser) void {
+        const tok = self.current();
+        semantic.last_error_line = tok.loc.line;
+        semantic.last_error_column = tok.loc.column;
+    }
+
     fn current(self: *Parser) lexer.Token {
         if (self.pos >= self.tokens.len) return self.tokens[self.tokens.len - 1];
         return self.tokens[self.pos];
@@ -179,7 +187,10 @@ const Parser = struct {
 
     fn expect(self: *Parser, tag: lexer.Token.Tag) Error!lexer.Token {
         const tok = self.current();
-        if (tok.tag != tag) return error.UnexpectedToken;
+        if (tok.tag != tag) {
+            self.recordErrorLoc();
+            return error.UnexpectedToken;
+        }
         return self.advance();
     }
 
@@ -345,7 +356,10 @@ const Parser = struct {
             }
         }
 
-        const ty = self.tryType() orelse return error.UnexpectedToken;
+        const ty = self.tryType() orelse {
+            self.recordErrorLoc();
+            return error.UnexpectedToken;
+        };
         // Handle array dimensions on type (e.g., vec4[2] for function return types)
         var final_ty = ty;
         if (self.current().tag == .l_bracket) {
@@ -378,7 +392,10 @@ const Parser = struct {
             }
         }
         const name_tok = self.current();
-        if (name_tok.tag != .identifier) return error.UnexpectedToken;
+        if (name_tok.tag != .identifier) {
+            self.recordErrorLoc();
+            return error.UnexpectedToken;
+        }
         _ = self.advance();
 
         if (self.current().tag == .l_paren) {
@@ -746,7 +763,10 @@ const Parser = struct {
         }
         while (self.current().tag != .r_paren and self.current().tag != .eof) {
             const p_qual = self.tryQualifier();
-            const p_type = self.tryType() orelse return error.UnexpectedToken;
+            const p_type = self.tryType() orelse {
+                self.recordErrorLoc();
+                return error.UnexpectedToken;
+            };
             // Handle unnamed parameters: type followed by , or ) without identifier
             if (self.current().tag == .comma or self.current().tag == .r_paren) {
                 try params.append(self.alloc, .{
@@ -758,7 +778,10 @@ const Parser = struct {
                 continue;
             }
             const p_name = self.current();
-            if (p_name.tag != .identifier) return error.UnexpectedToken;
+            if (p_name.tag != .identifier) {
+                self.recordErrorLoc();
+                return error.UnexpectedToken;
+            }
             _ = self.advance();
             // Handle array dimensions after param name: e.g. texture2D tex[4]
             var final_type = p_type;
@@ -869,7 +892,10 @@ const Parser = struct {
     fn parseStructDecl(self: *Parser) Error!ast.Node {
         const tok = self.advance(); // 'struct'
         const name_tok = self.current();
-        if (name_tok.tag != .identifier) return error.UnexpectedToken;
+        if (name_tok.tag != .identifier) {
+            self.recordErrorLoc();
+            return error.UnexpectedToken;
+        }
         _ = self.advance();
         // Register struct name for local var decl detection
         const owned_name = try self.alloc.dupe(u8, self.text(name_tok));
@@ -886,9 +912,15 @@ const Parser = struct {
             var member_layout: ?ast.Layout = null;
             if (self.current().tag == .kw_layout) member_layout = try self.tryLayout();
             const member_qual = self.tryQualifier();
-            const member_ty = self.tryType() orelse return error.UnexpectedToken;
+            const member_ty = self.tryType() orelse {
+                self.recordErrorLoc();
+                return error.UnexpectedToken;
+            };
             const member_name = self.current();
-            if (member_name.tag != .identifier) return error.UnexpectedToken;
+            if (member_name.tag != .identifier) {
+                self.recordErrorLoc();
+                return error.UnexpectedToken;
+            }
             _ = self.advance();
             // Check for array size suffix: vec2 a[1] (supports multi-dim: vec2 a[2][3])
             var member_ty_final = member_ty;
@@ -942,9 +974,15 @@ const Parser = struct {
             var member_layout: ?ast.Layout = null;
             if (self.current().tag == .kw_layout) member_layout = try self.tryLayout();
             const member_qual = self.tryQualifier();
-            const member_ty = self.tryType() orelse return error.UnexpectedToken;
+            const member_ty = self.tryType() orelse {
+                self.recordErrorLoc();
+                return error.UnexpectedToken;
+            };
             const member_name = self.current();
-            if (member_name.tag != .identifier) return error.UnexpectedToken;
+            if (member_name.tag != .identifier) {
+                self.recordErrorLoc();
+                return error.UnexpectedToken;
+            }
             _ = self.advance();
             // Check for array size suffix: vec2 a[1] (supports multi-dim: vec2 a[2][3])
             var member_ty_final = member_ty;
@@ -1109,10 +1147,14 @@ const Parser = struct {
                 _ = self.advance();
                 break :blk ast.Type{ .named = name };
             }
+            self.recordErrorLoc();
             return error.UnexpectedToken;
         };
         const name_tok = self.current();
-        if (name_tok.tag != .identifier) return error.UnexpectedToken;
+        if (name_tok.tag != .identifier) {
+            self.recordErrorLoc();
+            return error.UnexpectedToken;
+        }
         _ = self.advance();
         // Handle array size suffix: float a[4]
         var local_arr_dims: std.ArrayListUnmanaged(u32) = .empty;
