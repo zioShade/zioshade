@@ -43,6 +43,14 @@ pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
     return analyzeWithOptions(alloc, root, .{});
 }
 
+/// Clear the last error state. Useful before compiling a new shader.
+pub fn clearError() void {
+    last_error_inner = "";
+    last_error_ctx = "";
+    last_error_line = 0;
+    last_error_column = 0;
+}
+
 pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: AnalyzeOptions) Error!ir.Module {
     last_error_inner = "";
     last_error_ctx = "";
@@ -1695,6 +1703,7 @@ const Analyzer = struct {
                         init = .{ .ty = init.ty, .id = loaded_id };
                     }
                     if (!self.typesCompatible(ty, init.ty)) {
+                        last_error_ctx = "type-mismatch";
                         return error.TypeMismatch;
                     }
                     // Convert initializer type to match declared type if needed
@@ -2177,11 +2186,17 @@ const Analyzer = struct {
                 });
             },
             .break_stmt => {
-                if (self.loop_stack.items.len == 0) return error.SemanticFailed;
+                if (self.loop_stack.items.len == 0) {
+                    last_error_ctx = "break-outside-loop";
+                    return error.SemanticFailed;
+                }
                 try self.emitBranch(self.loop_stack.items[self.loop_stack.items.len - 1].merge_label);
             },
             .continue_stmt => {
-                if (self.loop_stack.items.len == 0) return error.SemanticFailed;
+                if (self.loop_stack.items.len == 0) {
+                    last_error_ctx = "continue-outside-loop";
+                    return error.SemanticFailed;
+                }
                 try self.emitBranch(self.loop_stack.items[self.loop_stack.items.len - 1].continue_label);
             },
             .expr_stmt => {
@@ -2642,7 +2657,10 @@ const Analyzer = struct {
                     const ld = try self.emitLoadCached(right.id, right.ty);
                     right = .{ .ty = right.ty, .id = ld };
                 }
-                const result_ty = self.promoteTypes(left.ty, right.ty) orelse return error.TypeMismatch;
+                const result_ty = self.promoteTypes(left.ty, right.ty) orelse {
+                    last_error_ctx = "type-mismatch";
+                    return error.TypeMismatch;
+                };
                 // NOTE: result_id is allocated later, after pure_op_cache check
 
                 // Convert int/uint to float if needed for mixed comparisons/arithmetic
