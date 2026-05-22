@@ -1,4 +1,4 @@
-// Tests: vec4 construction + component assignment + conditional
+// Tests: vec4 swizzle write + conditional swizzle write
 precision mediump float;
 uniform vec2 u_resolution;
 
@@ -8,13 +8,11 @@ void main() {
     vec4 col = vec4(0.0);
     col.x = uv.x;
     col.y = uv.y;
-    col.z = 0.5;
-    col.w = 1.0;
+    col.xy = col.yx;
     
     if (uv.x > 0.5) {
-        col.x *= 2.0;
-        col.y += 0.2;
+        col.zw = vec2(0.8, 0.9);
     }
     
-    gl_FragColor = clamp(col, 0.0, 1.0);
+    gl_FragColor = col;
 }
