@@ -268,6 +268,7 @@ fn mainImpl() !void {
         .{ "compute", "tests/compute" },
         .{ "geometry", "tests/geometry" },
         .{ "tessellation", "tests/tessellation" },
+        .{ "stress", "tests/conformance/stress" },
     };
 
     if (target_arg) |target| {
