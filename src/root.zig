@@ -442,13 +442,24 @@ pub fn compileGlslToGlsl(
     glsl_source: [:0]const u8,
     stage: Stage,
 ) ![:0]const u8 {
+    return compileGlslToGlslVersion(alloc, glsl_source, stage, 430);
+}
+
+/// One-shot GLSL -> GLSL compilation with explicit output version.
+/// `glsl_version` controls the `#version` header (330, 410, 430, 450, 460).
+pub fn compileGlslToGlslVersion(
+    alloc: std.mem.Allocator,
+    glsl_source: [:0]const u8,
+    stage: Stage,
+    glsl_version: u32,
+) ![:0]const u8 {
     const spirv_words = try compileToSPIRV(alloc, glsl_source, .{
         .stage = stage,
         .version = 430,
     });
     defer alloc.free(spirv_words);
 
-    const glsl = try spirvToGLSL(alloc, spirv_words, .{ .version = 430 });
+    const glsl = try spirvToGLSL(alloc, spirv_words, .{ .version = glsl_version });
     return try alloc.dupeZ(u8, glsl);
 }
 
@@ -1033,4 +1044,41 @@ test "linkSPIRVModules merges two pre-compiled modules" {
         p += wc;
     }
     try std.testing.expectEqual(@as(u32, 2), entry_count);
+}
+
+test "GLSL backend outputs #version 330" {
+    const alloc = std.testing.allocator;
+    const spv = try compileToSPIRV(alloc,
+        \\#version 430
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = vec4(1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const glsl_out = try spirvToGLSL(alloc, spv, .{ .version = 330 });
+    defer alloc.free(glsl_out);
+    try std.testing.expect(std.mem.indexOf(u8, glsl_out, "#version 330") != null);
+}
+
+test "GLSL backend outputs #version 460" {
+    const alloc = std.testing.allocator;
+    const spv2 = try compileToSPIRV(alloc,
+        \\#version 430
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = vec4(1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv2);
+    const glsl_out2 = try spirvToGLSL(alloc, spv2, .{ .version = 460 });
+    defer alloc.free(glsl_out2);
+    try std.testing.expect(std.mem.indexOf(u8, glsl_out2, "#version 460") != null);
+}
+
+test "compileGlslToGlslVersion outputs requested version" {
+    const alloc = std.testing.allocator;
+    const glsl_v450 = try compileGlslToGlslVersion(alloc,
+        \\#version 430
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = vec4(1.0); }
+    , .fragment, 450);
+    defer alloc.free(glsl_v450);
+    try std.testing.expect(std.mem.indexOf(u8, glsl_v450, "#version 450") != null);
 }
