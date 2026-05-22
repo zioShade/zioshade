@@ -8681,6 +8681,19 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                 }
                 if (bad) continue;
 
+                // Safety: skip variables that have OpAccessChain instructions
+                // pointing into them — removing the variable would leave
+                // dangling AccessChain references
+                var has_ac = false;
+                var acp: u32 = 5;
+                while (acp < words.len) {
+                    const ach = words[acp]; const acwc: u32 = ach >> 16; const acop: u16 = @truncate(ach & 0xFFFF);
+                    if (acwc == 0) break; const acie = acp + acwc; if (acie > words.len) break;
+                    if (acop == 65 and acwc >= 5 and words[acp + 3] == var_id) { has_ac = true; break; }
+                    acp = acie;
+                }
+                if (has_ac) continue;
+
                 // Find ALL loads of this variable across all blocks
                 var all_loads = std.ArrayListUnmanaged(u32).empty;
                 var rtype: u32 = 0;
