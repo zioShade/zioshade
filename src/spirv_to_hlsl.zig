@@ -3085,8 +3085,13 @@ fn emitInstruction(
         .BeginInvocationInterlockEXT => {}, // no-op in HLSL (use rasterizerOrdered views)
         .EndInvocationInterlockEXT => {},
         .ReadClockKHR => {
+            // HLSL has no direct clock() equivalent. Emit a stub with unique name.
             const rtt = try hlslType(module, inst.words[1], names, alloc);
-            try w.print("    {s} {s} = clock();\n", .{ rtt, names.get(inst.words[2]) orelse "t" });
+            const rn = names.get(inst.words[2]) orelse blk: {
+                const uname = try std.fmt.allocPrint(alloc, "_clk_{d}", .{inst.words[2]});
+                break :blk uname;
+            };
+            try w.print("    {s} {s} = ({s})0; // ReadClockKHR stub\n", .{ rtt, rn, rtt });
         },
         .ImageWrite => {
             // OpImageWrite: image, coordinate, texel
