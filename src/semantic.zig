@@ -6387,7 +6387,35 @@ const Analyzer = struct {
 
                 // Use emitAccessChainCached for pointer-based array/buffer indexing
                 if (!base_tid.ty.isVector()) {
-                    const ptr_id = try self.emitAccessChainCached(base_tid.id, &[1]ir.Instruction.Operand{.{ .id = index_tid.id }}, element_ty);
+                    // If base is a value (not a pointer), materialize into a local variable
+                    // so we can use OpAccessChain (which requires a pointer base)
+                    var base_ptr_id = base_tid.id;
+                    if (!base_tid.is_ptr) {
+                        // Create local variable, store value, use as pointer base
+                        const var_id = self.allocId();
+                        const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        sc_operands[0] = .{ .literal_int = 7 }; // Function storage class
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .local_variable,
+                            .result_type = null,
+                            .result_id = var_id,
+                            .operands = sc_operands,
+                            .ty = base_tid.ty,
+                        });
+                        const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        store_ops[0] = .{ .id = var_id };
+                        store_ops[1] = .{ .id = base_tid.id };
+                        _ = self.load_cache.remove(var_id);
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .store,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = store_ops,
+                            .ty = base_tid.ty,
+                        });
+                        base_ptr_id = var_id;
+                    }
+                    const ptr_id = try self.emitAccessChainCached(base_ptr_id, &[1]ir.Instruction.Operand{.{ .id = index_tid.id }}, element_ty);
                     return .{ .ty = element_ty, .id = ptr_id, .is_ptr = true };
                 }
 
