@@ -296,11 +296,9 @@ fn generateInternal(
     if (final_dce2.ptr != final_cse.ptr) alloc.free(final_cse);
     const no_id_stores = opt.elimIdentityStores(alloc, final_dce2) catch return final_dce2;
     if (no_id_stores.ptr != final_dce2.ptr) alloc.free(final_dce2);
-    // copyMemoryOpt disabled permanently: the pass replaces Load+Store with OpCopyMemory,
-    // but interacts poorly with scatterStoreToComposite and DCE passes. The optimization
-    // saves one instruction but produces invalid SPIR-V for array/struct patterns.
-    // The validateCopyMemory pass was added but doesn't fully resolve the issue because
-    // the AccessChain elimination happens between validation and final output.
+    // copyMemoryOpt disabled: replaces Load+Store with OpCopyMemory but produces
+    // undefined IDs when DCE later eliminates AccessChain sources. The pass also
+    // causes hangs on some shaders. Not worth the risk for saving one instruction.
     const final_dce3 = opt.deadCodeElim(alloc, no_id_stores) catch return no_id_stores;
     if (final_dce3.ptr != no_id_stores.ptr) alloc.free(no_id_stores);
     const compacted2 = compact_ids.compactIds(alloc, final_dce3) catch return final_dce3;
