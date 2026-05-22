@@ -937,8 +937,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const result_id = inst.words[2];
                     const image_name = names.get(inst.words[3]) orelse "tex";
                     // Store the image name as the result
-                    if (try names.fetchPut(result_id, try arena.dupe(u8, image_name))) |old| {
-                        _ = old;
+                    if (try names.fetchPut(result_id, try alloc.dupe(u8, image_name))) |old| {
+                        alloc.free(old.value);
                     }
                 }
             },
@@ -948,8 +948,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (inst.words.len > 3) {
                     const result_id = inst.words[2];
                     const image_name = names.get(inst.words[3]) orelse "tex";
-                    if (try names.fetchPut(result_id, try arena.dupe(u8, image_name))) |old| {
-                        _ = old;
+                    if (try names.fetchPut(result_id, try alloc.dupe(u8, image_name))) |old| {
+                        alloc.free(old.value);
                     }
                 }
             },
@@ -1012,8 +1012,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const result_id = inst.words[2];
                     const image = names.get(inst.words[3]) orelse "img";
                     const coord = names.get(inst.words[4]) orelse "uv";
-                    const expr = try std.fmt.allocPrint(arena, "textureLoad({s}, {s})", .{ image, coord });
-                    if (try names.fetchPut(result_id, expr)) |old| _ = old;
+                    const expr = try std.fmt.allocPrint(alloc, "textureLoad({s}, {s})", .{ image, coord });
+                    if (try names.fetchPut(result_id, expr)) |old| alloc.free(old.value);
                 }
             },
 
