@@ -2441,7 +2441,7 @@ const Analyzer = struct {
                 return error.InvalidAssignment;
             },
             .index_access => {
-                // array[index] as l-value: get pointer to element via access chain
+                // array[index] or matrix[column] as l-value: get pointer to element via access chain
                 if (node.data.children.len < 2) return error.SemanticFailed;
                 const base_lv = try self.analyzeLValue(node.data.children[0]);
                 const index_tid = try self.analyzeExpression(node.data.children[1]);
@@ -2450,6 +2450,8 @@ const Analyzer = struct {
                     base_lv.ty.array.base.*
                 else if (base_lv.ty.isVector())
                     base_lv.ty.elementType()
+                else if (base_lv.ty.isMatrix())
+                    base_lv.ty.columnType()
                 else
                     return error.TypeMismatch;
                 const ptr_id = try self.emitAccessChainCached(base_lv.id, &[1]ir.Instruction.Operand{.{ .id = index_tid.id }}, element_ty);
