@@ -124,6 +124,19 @@ pub fn build(b: *std.Build) void {
     }));
     corr_test_step.dependOn(&run_corr_tests.step);
 
+    // Diagnostic tests (G3) — run with: zig build test-diagnostic
+    const diag_test_step = b.step("test-diagnostic", "Run diagnostic quality tests");
+    const diag_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/diagnostic_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    diag_test_mod.addImport("glslpp", glslpp_mod);
+    const run_diag_tests = b.addRunArtifact(b.addTest(.{
+        .root_module = diag_test_mod,
+    }));
+    diag_test_step.dependOn(&run_diag_tests.step);
+
     const run_hlsl_tests = b.addRunArtifact(b.addTest(.{
         .name = "hlsl-tests",
         .root_module = hlsl_test_mod,

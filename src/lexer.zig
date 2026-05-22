@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 const std = @import("std");
 
+/// Last error location set by the lexer before returning an error.
+/// Callers can read these to produce diagnostics.
+pub threadlocal var last_error_line: u32 = 0;
+pub threadlocal var last_error_column: u32 = 0;
+
 pub const Token = struct {
     tag: Tag,
     loc: Loc,
@@ -551,6 +556,8 @@ const Tokenizer = struct {
             }
 
             // Invalid token
+            last_error_line = self.loc.line;
+            last_error_column = self.loc.column;
             return error.InvalidToken;
         }
     }
@@ -590,11 +597,17 @@ const Tokenizer = struct {
         }
 
         if (start == self.offset) {
+            last_error_line = self.loc.line;
+            last_error_column = self.loc.column;
             return error.InvalidToken;
         }
 
         const directive = self.source[start..self.offset];
-        const tag = pp_directive_map.get(directive) orelse return error.InvalidToken;
+        const tag = pp_directive_map.get(directive) orelse {
+            last_error_line = self.loc.line;
+            last_error_column = self.loc.column;
+            return error.InvalidToken;
+        };
 
         return tag;
     }
@@ -651,6 +664,8 @@ const Tokenizer = struct {
                 return self.offset - start;
             }
             if (c == '\n') {
+                last_error_line = self.loc.line;
+                last_error_column = self.loc.column;
                 return error.InvalidToken;
             }
             if (c == '\\' and self.offset + 1 < self.source.len) {
@@ -662,6 +677,8 @@ const Tokenizer = struct {
             }
         }
 
+        last_error_line = self.loc.line;
+        last_error_column = self.loc.column;
         return error.InvalidToken;
     }
 

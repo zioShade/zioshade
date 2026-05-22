@@ -221,6 +221,8 @@ pub fn compileToSPIRV(
     last_compile_detail = null;
     const tokens = lexer.tokenize(alloc, source) catch {
         last_compile_detail = .lex_failed;
+        semantic.last_error_line = lexer.last_error_line;
+        semantic.last_error_column = lexer.last_error_column;
         return error.LexFailed;
     };
     defer alloc.free(tokens);
@@ -283,6 +285,8 @@ pub fn compileToSPIRVNoOpt(
     last_compile_detail = null;
     const tokens = lexer.tokenize(alloc, source) catch {
         last_compile_detail = .lex_failed;
+        semantic.last_error_line = lexer.last_error_line;
+        semantic.last_error_column = lexer.last_error_column;
         return error.LexFailed;
     };
     defer alloc.free(tokens);
