@@ -1,0 +1,25 @@
+// Tests: compute shader with shared memory and barrier
+#version 450
+layout(local_size_x = 64) in;
+
+shared float s_data[64];
+
+uniform float u_scale;
+
+void main() {
+    uint idx = gl_LocalInvocationID.x;
+    
+    // Load into shared memory
+    s_data[idx] = float(idx) * u_scale;
+    
+    barrier();
+    
+    // Read from different index (cross-lane read)
+    uint other = (idx + 32u) % 64u;
+    float result = s_data[other] + s_data[idx];
+    
+    // Write back
+    s_data[idx] = result;
+    
+    barrier();
+}
