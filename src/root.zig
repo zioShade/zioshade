@@ -2,6 +2,7 @@
 const std = @import("std");
 pub const compat = @import("compat.zig");
 pub const diagnostic = @import("diagnostic.zig");
+pub const reflection = @import("reflection.zig");
 pub const lexer = @import("lexer.zig");
 pub const preprocessor = @import("preprocessor.zig");
 pub const ast = @import("ast.zig");
@@ -696,6 +697,21 @@ pub fn compileToSPIRVWithFusion(
     return fused;
 }
 
+/// Reflect on a SPIR-V binary to extract shader resource information.
+/// Returns structured data about uniform buffers, inputs/outputs, samplers, etc.
+/// Caller must call `deinit()` on the result to free memory.
+pub fn reflectSPIRV(alloc: std.mem.Allocator, spirv_words: []const u32) !reflection.ShaderResources {
+    return reflection.reflect(alloc, spirv_words);
+}
+
+/// Compile GLSL source and reflect on the resulting SPIR-V.
+/// Convenience function that combines compileToSPIRV + reflectSPIRV.
+pub fn reflectGLSL(alloc: std.mem.Allocator, source: [:0]const u8, options: CompileOptions) !reflection.ShaderResources {
+    const spirv_bin = try compileToSPIRV(alloc, source, options);
+    defer alloc.free(spirv_bin);
+    return reflection.reflect(alloc, spirv_bin);
+}
+
 /// Validate a SPIR-V binary using spirv-val. Returns true if validation passed,
 /// false if spirv-val is not found on PATH.
 pub fn validateSPIRV(alloc: std.mem.Allocator, spirv_words: []const u32) !bool {
@@ -1082,3 +1098,5 @@ test "compileGlslToGlslVersion outputs requested version" {
     defer alloc.free(glsl_v450);
     try std.testing.expect(std.mem.indexOf(u8, glsl_v450, "#version 450") != null);
 }
+
+

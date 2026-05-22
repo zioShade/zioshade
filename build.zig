@@ -97,6 +97,20 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     hlsl_test_mod.addImport("glslpp", glslpp_mod);
+
+    // Reflection tests — run with: zig build test-reflection
+    const refl_test_step = b.step("test-reflection", "Run SPIR-V reflection API tests");
+    const refl_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/reflection_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    refl_test_mod.addImport("glslpp", glslpp_mod);
+    const run_refl_tests = b.addRunArtifact(b.addTest(.{
+        .root_module = refl_test_mod,
+    }));
+    refl_test_step.dependOn(&run_refl_tests.step);
+
     const run_hlsl_tests = b.addRunArtifact(b.addTest(.{
         .name = "hlsl-tests",
         .root_module = hlsl_test_mod,
