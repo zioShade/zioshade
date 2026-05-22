@@ -816,11 +816,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             else => "unknown",
                         };
                         // Build args
-                        var args = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
-                        defer args.deinit(alloc);
+                        var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
+                        defer args.deinit(arena);
                         for (inst.words[5..], 0..) |arg_id, ai| {
-                            if (ai > 0) try args.appendSlice(alloc, ", ");
-                            try args.appendSlice(alloc, names.get(arg_id) orelse "0");
+                            if (ai > 0) try args.appendSlice(arena, ", ");
+                            try args.appendSlice(arena, names.get(arg_id) orelse "0");
                         }
                         // Map some GLSL names to WGSL equivalents
                         const wgsl_name = if (std.mem.eql(u8, func_name, "fAbs")) "abs" else if (std.mem.eql(u8, func_name, "fSign")) "sign" else func_name;
@@ -835,11 +835,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const func_id = inst.words[3];
                 const func_name = names.get(func_id) orelse "func";
-                var args = std.ArrayList(u8).initCapacity(alloc, 64) catch return;
-                defer args.deinit(alloc);
+                var args = std.ArrayList(u8).initCapacity(arena, 64) catch return;
+                defer args.deinit(arena);
                 for (inst.words[4..], 0..) |arg_id, ai| {
-                    if (ai > 0) try args.appendSlice(alloc, ", ");
-                    try args.appendSlice(alloc, names.get(arg_id) orelse "0");
+                    if (ai > 0) try args.appendSlice(arena, ", ");
+                    try args.appendSlice(arena, names.get(arg_id) orelse "0");
                 }
                 if (std.mem.eql(u8, rt, "void")) {
                     try w.print("    {s}({s});\n", .{ func_name, args.items });
@@ -860,7 +860,215 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // Derivatives
             .DPdx => try emitCall(module, names, inst, "dpdx", w, arena),
             .DPdy => try emitCall(module, names, inst, "dpdy", w, arena),
+            .DPdxCoarse => try emitCall(module, names, inst, "dpdxCoarse", w, arena),
+            .DPdyCoarse => try emitCall(module, names, inst, "dpdyCoarse", w, arena),
+            .FwidthCoarse => try emitCall(module, names, inst, "fwidthCoarse", w, arena),
             .Fwidth => try emitCall(module, names, inst, "fwidth", w, arena),
+
+            // Return value
+            .ReturnValue => {
+                const val = names.get(inst.words[1]) orelse "v";
+                try w.print("    return {s};\n", .{val});
+            },
+
+            // Kill (discard in fragment)
+            .Kill => {
+                try w.writeAll("    discard;\n");
+            },
+
+            // Unreachable
+            .Unreachable => {
+                try w.writeAll("    unreachable;\n");
+            },
+
+            // Undef — zero-initialize
+            .Undef => {
+                if (inst.words.len > 2) {
+                    const rt = try wgslType(module, inst.words[1], names, arena);
+                    const rn = names.get(inst.words[2]) orelse "v";
+                    try w.print("    var {s}: {s}; // undef\n", .{ rn, rt });
+                }
+            },
+
+            // Nop
+            .Nop => {},
+
+            // All/Any (vector boolean reduction)
+            .All => try emitCall(module, names, inst, "all", w, arena),
+            .Any => try emitCall(module, names, inst, "any", w, arena),
+
+            // IsInf/IsNan
+            .IsInf => try emitCall(module, names, inst, "isinf", w, arena),
+            .IsNan => try emitCall(module, names, inst, "isnan", w, arena),
+
+            // CompositeInsert
+            .CompositeInsert => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const composite = names.get(inst.words[3]) orelse "c";
+                const object = names.get(inst.words[4]) orelse "o";
+                // Build access chain from indices
+                var access = std.ArrayList(u8).initCapacity(arena, 64) catch return;
+                defer access.deinit(arena);
+                for (inst.words[5..]) |idx| {
+                    const sw = switch (idx) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => "[0]" };
+                    try access.appendSlice(arena, sw);
+                }
+                // First copy composite, then set the field
+                try w.print("    var {s}: {s} = {s};\n", .{ result_name, rt, composite });
+                try w.print("    {s}{s} = {s};\n", .{ result_name, access.items, object });
+            },
+
+            // VectorExtractDynamic
+            .VectorExtractDynamic => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const vector = names.get(inst.words[3]) orelse "vec";
+                const index = names.get(inst.words[4]) orelse "i";
+                try w.print("    var {s}: {s} = {s}[{s}];\n", .{ result_name, rt, vector, index });
+            },
+
+            // Transpose
+            .Transpose => try emitCall(module, names, inst, "transpose", w, arena),
+
+            // SampledImage — just pass through the image ID
+            .SampledImage => {
+                if (inst.words.len > 4) {
+                    const result_id = inst.words[2];
+                    const image_name = names.get(inst.words[3]) orelse "tex";
+                    // Store the image name as the result
+                    if (try names.fetchPut(result_id, try arena.dupe(u8, image_name))) |old| {
+                        _ = old;
+                    }
+                }
+            },
+
+            // OpImage — extract image from sampled image
+            .OpImage => {
+                if (inst.words.len > 3) {
+                    const result_id = inst.words[2];
+                    const image_name = names.get(inst.words[3]) orelse "tex";
+                    if (try names.fetchPut(result_id, try arena.dupe(u8, image_name))) |old| {
+                        _ = old;
+                    }
+                }
+            },
+
+            // ImageQuerySize
+            .ImageQuerySize => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const image = names.get(inst.words[3]) orelse "tex";
+                try w.print("    var {s}: {s} = textureDimensions({s});\n", .{ result_name, rt, image });
+            },
+
+            // ImageQuerySizeLod
+            .ImageQuerySizeLod => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const image = names.get(inst.words[3]) orelse "tex";
+                const lod = names.get(inst.words[4]) orelse "0";
+                try w.print("    var {s}: {s} = textureDimensions({s}, {s});\n", .{ result_name, rt, image, lod });
+            },
+
+            // ImageGather
+            .ImageGather => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const si_inst = getDef(module, inst.words[3]);
+                var tex_name: []const u8 = "tex";
+                if (si_inst) |sii| {
+                    if (sii.op == .SampledImage and sii.words.len > 3) {
+                        tex_name = names.get(sii.words[2]) orelse "tex";
+                    } else {
+                        tex_name = names.get(inst.words[3]) orelse "tex";
+                    }
+                }
+                const coord = names.get(inst.words[4]) orelse "uv";
+                const component = names.get(inst.words[5]) orelse "0";
+                try w.print("    var {s}: {s} = textureGather({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, component });
+            },
+
+            // ImageRead (storage image load)
+            .ImageRead => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const image = names.get(inst.words[3]) orelse "img";
+                const coord = names.get(inst.words[4]) orelse "uv";
+                try w.print("    var {s}: {s} = textureLoad({s}, {s});\n", .{ result_name, rt, image, coord });
+            },
+
+            // ImageWrite (storage image store)
+            .ImageWrite => {
+                const image = names.get(inst.words[1]) orelse "img";
+                const coord = names.get(inst.words[2]) orelse "uv";
+                const texel = names.get(inst.words[3]) orelse "color";
+                try w.print("    textureStore({s}, {s}, {s});\n", .{ image, coord, texel });
+            },
+
+            // ImageTexelPointer
+            .ImageTexelPointer => {
+                if (inst.words.len > 4) {
+                    const result_id = inst.words[2];
+                    const image = names.get(inst.words[3]) orelse "img";
+                    const coord = names.get(inst.words[4]) orelse "uv";
+                    const expr = try std.fmt.allocPrint(arena, "textureLoad({s}, {s})", .{ image, coord });
+                    if (try names.fetchPut(result_id, expr)) |old| _ = old;
+                }
+            },
+
+            // CopyLogical
+            .CopyLogical => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const val = names.get(inst.words[3]) orelse "0";
+                try w.print("    var {s}: {s} = {s};\n", .{ result_name, rt, val });
+            },
+
+            // CopyMemory
+            .CopyMemory => {
+                if (inst.words.len >= 3) {
+                    const dst = names.get(inst.words[1]) orelse "dst";
+                    const src = names.get(inst.words[2]) orelse "src";
+                    try w.print("    {s} = {s};\n", .{ dst, src });
+                }
+            },
+
+            // ShiftRightArithmetic
+            .ShiftRightArithmetic => try emitBinOp(module, names, inst, ">>", w, arena),
+
+            // ControlBarrier / MemoryBarrier
+            .ControlBarrier => {
+                try w.writeAll("    workgroupBarrier();\n");
+            },
+            .MemoryBarrier => {
+                try w.writeAll("    storageBarrier();\n");
+            },
+
+            // Atomic operations
+            .AtomicIAdd => try emitAtomicBinOp(module, names, inst, "add", w, arena),
+            .AtomicISub => try emitAtomicBinOp(module, names, inst, "sub", w, arena),
+            .AtomicAnd => try emitAtomicBinOp(module, names, inst, "and", w, arena),
+            .AtomicOr => try emitAtomicBinOp(module, names, inst, "or", w, arena),
+            .AtomicXor => try emitAtomicBinOp(module, names, inst, "xor", w, arena),
+            .AtomicUMin, .AtomicSMin => try emitAtomicBinOp(module, names, inst, "min", w, arena),
+            .AtomicUMax, .AtomicSMax => try emitAtomicBinOp(module, names, inst, "max", w, arena),
+            .AtomicExchange => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const ptr = names.get(inst.words[3]) orelse "ptr";
+                const val = names.get(inst.words[4]) orelse "0";
+                try w.print("    var {s}: {s} = atomicExchange(&{s}, {s});\n", .{ rn, rt, ptr, val });
+            },
+            .AtomicCompareExchange => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const ptr = names.get(inst.words[3]) orelse "ptr";
+                // words[4] = scope, words[5] = memory semantics
+                const cmp = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+                const val = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
+                try w.print("    var {s}: {s} = atomicCompareExchangeWeak(&{s}, {s}, {s}).old_value;\n", .{ rn, rt, ptr, cmp, val });
+            },
 
             else => {
                 // Try to handle as a simple assignment
@@ -897,4 +1105,12 @@ fn emitCall(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         try args.appendSlice(arena, names.get(arg_id) orelse "0");
     }
     try w.print("    var {s}: {s} = {s}({s});\n", .{ result_name, rt, func, args.items });
+}
+
+fn emitAtomicBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, arena: std.mem.Allocator) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    const ptr = names.get(inst.words[3]) orelse "ptr";
+    const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
+    try w.print("    var {s}: {s} = atomic{s}(&{s}, {s});\n", .{ result_name, rt, op, ptr, val });
 }
