@@ -4,7 +4,6 @@
 const std = @import("std");
 const compact_ids = @import("compact_ids.zig");
 
-
 /// Dead code elimination: remove instructions whose result ID is never referenced.
 /// Returns the same slice if nothing changed, or a new shorter slice with dead instructions removed.
 pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
@@ -647,15 +646,17 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                                 }
                             },
                             'W' => {
+                                // wi is at the first literal (after ii was processed)
+                                // Read literal first, then target with replacement
                                 while (wi + 1 < inst_end) {
-                                    wi += 1;
                                     try fwd_result.append(alloc, current_words[wi]); // literal
                                     wi += 1;
                                     const w = current_words[wi];
-                                    try fwd_result.append(alloc, replacements.get(w) orelse w);
+                                    try fwd_result.append(alloc, replacements.get(w) orelse w); // target
+                                    wi += 1;
                                 }
                                 if (wi < inst_end) {
-                                    try fwd_result.append(alloc, current_words[wi]);
+                                    try fwd_result.append(alloc, current_words[wi]); // trailing literal
                                     wi += 1;
                                 }
                             },
