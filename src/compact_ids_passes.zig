@@ -4078,10 +4078,12 @@ pub fn moveVarToEntry(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         }
 
         // Scan rest of function body until OpFunctionEnd
-        // Separate OpVariable instructions from everything else
-        var var_insts = std.ArrayList(u32).initCapacity(alloc, 64) catch return words;
-        var other_insts = std.ArrayList(u32).initCapacity(alloc, words.len - pos) catch { var_insts.deinit(alloc); return words; };
+        // Collect ALL OpVariable instructions from ALL blocks to hoist to entry block
+        // SPIR-V spec: All OpVariable instructions in a function must be in the first block
+        var func_body = std.ArrayList(u32).initCapacity(alloc, words.len - pos) catch return words;
+        var all_vars = std.ArrayList(u32).initCapacity(alloc, 64) catch { func_body.deinit(alloc); return words; };
         var found_misplaced = false;
+        var label_count: u32 = 0;
 
         while (pos < words.len) {
             const bh = words[pos];
@@ -4091,36 +4093,33 @@ pub fn moveVarToEntry(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
             const bie = pos + bwc;
 
             if (bop == 56) { // OpFunctionEnd
-                // Emit: all vars, then all others, then OpFunctionEnd
-                if (var_insts.items.len > 0) result.appendSliceAssumeCapacity(var_insts.items);
-                if (other_insts.items.len > 0) result.appendSliceAssumeCapacity(other_insts.items);
+                // Emit: entry vars (from all blocks), then body, then FunctionEnd
+                if (all_vars.items.len > 0) result.appendSliceAssumeCapacity(all_vars.items);
+                if (func_body.items.len > 0) result.appendSliceAssumeCapacity(func_body.items);
                 result.appendSliceAssumeCapacity(words[pos..bie]);
                 pos = bie;
                 break;
             }
 
-            if (bop == 248) { // OpLabel — new block starts, flush buffers
-                if (var_insts.items.len > 0) result.appendSliceAssumeCapacity(var_insts.items);
-                if (other_insts.items.len > 0) result.appendSliceAssumeCapacity(other_insts.items);
-                var_insts.clearRetainingCapacity();
-                other_insts.clearRetainingCapacity();
-                result.appendSliceAssumeCapacity(words[pos..bie]);
+            if (bop == 248) { // OpLabel
+                label_count += 1;
+                try func_body.appendSlice(alloc, words[pos..bie]);
                 pos = bie;
                 continue;
             }
 
             if (bop == 59) { // OpVariable
-                if (other_insts.items.len > 0) found_misplaced = true;
-                var_insts.appendSliceAssumeCapacity(words[pos..bie]);
+                if (label_count > 1 or func_body.items.len > 0) found_misplaced = true; // var after others or in non-entry block
+                try all_vars.appendSlice(alloc, words[pos..bie]);
             } else {
-                other_insts.appendSliceAssumeCapacity(words[pos..bie]);
+                try func_body.appendSlice(alloc, words[pos..bie]);
             }
             pos = bie;
         }
 
         if (found_misplaced) any_moved = true;
-        var_insts.deinit(alloc);
-        other_insts.deinit(alloc);
+        all_vars.deinit(alloc);
+        func_body.deinit(alloc);
     }
 
     if (!any_moved) {
