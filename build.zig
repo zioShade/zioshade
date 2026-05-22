@@ -111,6 +111,19 @@ pub fn build(b: *std.Build) void {
     }));
     refl_test_step.dependOn(&run_refl_tests.step);
 
+    // Correctness tests (G1/G4/G10) — run with: zig build test-correctness
+    const corr_test_step = b.step("test-correctness", "Run correctness tests for reflection, GLSL versions, HLSL SM5");
+    const corr_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/correctness_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    corr_test_mod.addImport("glslpp", glslpp_mod);
+    const run_corr_tests = b.addRunArtifact(b.addTest(.{
+        .root_module = corr_test_mod,
+    }));
+    corr_test_step.dependOn(&run_corr_tests.step);
+
     const run_hlsl_tests = b.addRunArtifact(b.addTest(.{
         .name = "hlsl-tests",
         .root_module = hlsl_test_mod,
