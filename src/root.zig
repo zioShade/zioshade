@@ -408,11 +408,10 @@ pub fn compileGlslToHlsl(
     defer alloc.free(spirv_words);
 
     const hlsl = try spirvToHLSL(alloc, spirv_words, .{
-        .binding_shift = -1, // remap binding=1 (shadertoy Globals) -> register(b0)
+        .binding_shift = -1,
         .shader_model = 60,
     });
-    // The result from spirvToHLSL is []const u8, not null-terminated.
-    // Dupe with sentinel for wintty compatibility.
+    defer alloc.free(hlsl);
     return try alloc.dupeZ(u8, hlsl);
 }
 
@@ -432,6 +431,7 @@ pub fn compileGlslToMsl(
     defer alloc.free(spirv_words);
 
     const msl = try spirvToMSL(alloc, spirv_words, .{});
+    defer alloc.free(msl);
     return try alloc.dupeZ(u8, msl);
 }
 
@@ -461,6 +461,7 @@ pub fn compileGlslToGlslVersion(
     defer alloc.free(spirv_words);
 
     const glsl = try spirvToGLSL(alloc, spirv_words, .{ .version = glsl_version });
+    defer alloc.free(glsl);
     return try alloc.dupeZ(u8, glsl);
 }
 
