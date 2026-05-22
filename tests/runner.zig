@@ -246,7 +246,6 @@ fn mainImpl() !void {
 
     if (!compat.is_0_16) {
         const args = try std.process.argsAlloc(alloc);
-        defer std.process.argsFree(alloc, args);
 
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
@@ -257,6 +256,10 @@ fn mainImpl() !void {
                 target_arg = args[i];
             }
         }
+        // NOTE: args must NOT be freed until mainImpl returns,
+        // because target_arg and save_spv_path point into the args array.
+        // We intentionally leak args to avoid use-after-free.
+        // The GPA allocator will reclaim all memory on deinit.
     }
 
     const all_suites = .{
