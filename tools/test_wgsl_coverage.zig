@@ -29,7 +29,7 @@ pub fn main() !void {
     while (try walker.next()) |entry| {
         if (entry.kind != .file) continue;
         const path = entry.path;
-        if (!std.mem.endsWith(u8, path, ".frag") and !std.mem.endsWith(u8, path, ".vert") and !std.mem.endsWith(u8, path, ".comp")) continue;
+        if (!std.mem.endsWith(u8, path, ".frag") and !std.mem.endsWith(u8, path, ".vert") and !std.mem.endsWith(u8, path, ".comp") and !std.mem.endsWith(u8, path, ".geom") and !std.mem.endsWith(u8, path, ".tese") and !std.mem.endsWith(u8, path, ".tesc")) continue;
 
         total += 1;
 
@@ -44,6 +44,12 @@ pub fn main() !void {
             .vertex
         else if (std.mem.endsWith(u8, path, ".comp"))
             .compute
+        else if (std.mem.endsWith(u8, path, ".geom"))
+            .geometry
+        else if (std.mem.endsWith(u8, path, ".tesc"))
+            .tessellation_control
+        else if (std.mem.endsWith(u8, path, ".tese"))
+            .tessellation_evaluation
         else
             .fragment;
 
