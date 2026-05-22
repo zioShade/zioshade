@@ -401,11 +401,15 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         } else {
             try w.print("@group({d}) @binding({d})\nvar<uniform> {s}: ", .{ group, binding, cb.name });
         }
-        const struct_name = blk: {
-            const struct_inst = getDef(&module, cb.type_id);
-            break :blk if (struct_inst) |si| names.get(si.words[1]) orelse "Struct" else "Struct";
+        const type_name = blk: {
+            // Resolve pointer type to pointee type
+            const ptr_inst = getDef(&module, cb.type_id);
+            const actual_type = if (ptr_inst) |pi|
+                if (pi.op == .TypePointer and pi.words.len > 3) pi.words[3] else cb.type_id
+            else cb.type_id;
+            break :blk try wgslType(&module, actual_type, &names, arena);
         };
-        try w.print("{s};\n\n", .{struct_name});
+        try w.print("{s};\n\n", .{type_name});
     }
 
     // Emit textures and samplers
