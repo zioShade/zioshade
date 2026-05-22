@@ -353,7 +353,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     defer emitted_names.deinit();
 
     for (cbuffers.items) |cb| {
-        try emitStructForwardDecls(&module, &names, cb.type_id, w, alloc, &emitted_structs, &emitted_names);
+        try emitStructForwardDecls(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names);
     }
 
     // Emit struct forward declarations for types used as local variables
@@ -383,7 +383,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                         if (ti) |tinst| {
                             if (tinst.op == .TypeStruct and local_structs.get(tid) == null) {
                                 local_structs.put(tid, {}) catch {};
-                                try emitOneStructForwardDecl(&module, &names, tid, w, alloc, &emitted_structs, &emitted_names);
+                                try emitOneStructForwardDecl(&module, &names, tid, w, arena, &emitted_structs, &emitted_names);
                             }
                         }
                     }
@@ -415,7 +415,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     for (textures.items) |tex| {
         const group = @divFloor(tex.binding, 2);
         const binding = tex.binding;
-        const tex_type = try wgslType(&module, tex.image_type_id, &names, alloc);
+        const tex_type = try wgslType(&module, tex.image_type_id, &names, arena);
         if (tex.is_storage) {
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, binding, tex.name, tex_type });
         } else {
@@ -442,7 +442,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         if (ptr_inst) |pi| {
             if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3];
         }
-        const type_name = try wgslType(&module, actual_type, &names, alloc);
+        const type_name = try wgslType(&module, actual_type, &names, arena);
         const var_name = names.get(iv.id) orelse "input";
         try w.print("@location({d}) {s}: {s}", .{ loc, var_name, type_name });
     }
@@ -455,7 +455,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         if (ptr_inst) |pi| {
             if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = ov;
         } else actual_type = ov;
-        const type_name = try wgslType(&module, actual_type, &names, alloc);
+        const type_name = try wgslType(&module, actual_type, &names, arena);
         try w.print(") -> @location(0) {s} {{\n", .{type_name});
     } else {
         try w.writeAll(") {\n");
@@ -470,13 +470,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         if (ptr_inst) |pi| {
             if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = var_inst.words[1];
         } else actual_type = var_inst.words[1];
-        const type_name = try wgslType(&module, actual_type, &names, alloc);
+        const type_name = try wgslType(&module, actual_type, &names, arena);
         const var_name = names.get(ov) orelse "out";
         try w.print("    var {s}: {s};\n", .{ var_name, type_name });
     }
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, is_fragment, output_var_id);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, is_fragment, output_var_id);
 
     // Return output var
     if (is_fragment and output_vars.items.len > 0) {
@@ -494,7 +494,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, is_fragment: bool, output_var_id: ?u32) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, is_fragment: bool, output_var_id: ?u32) !void {
     _ = decorations;
     // Skip function declaration instructions
     var i: usize = func_idx + 1;
@@ -505,7 +505,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         if (inst.op == .FunctionParameter) {
             // Declare parameter as local variable
             if (inst.words.len > 2) {
-                const param_type = try wgslType(module, inst.words[1], names, alloc);
+                const param_type = try wgslType(module, inst.words[1], names, arena);
                 const param_name = names.get(inst.words[2]) orelse "p";
                 try w.print("    var {s}: {s};\n", .{ param_name, param_type });
             }
@@ -525,12 +525,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (inst.words.len >= 4) {
                     const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                     if (sc == .Function) {
-                        const rt = try wgslType(module, inst.words[1], names, alloc);
+                        const rt = try wgslType(module, inst.words[1], names, arena);
                         const arr = try getArraySuffix(module, inst.words[1]);
                         const vn = names.get(inst.words[2]) orelse "v";
                         try w.print("    var {s}: {s}{s};\n", .{ vn, rt, arr });
                     } else if (sc == .Private) {
-                        const rt = try wgslType(module, inst.words[1], names, alloc);
+                        const rt = try wgslType(module, inst.words[1], names, arena);
                         const arr = try getArraySuffix(module, inst.words[1]);
                         const vn = names.get(inst.words[2]) orelse "v";
                         try w.print("    var {s}: {s}{s};\n", .{ vn, rt, arr });
@@ -541,7 +541,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // Load
             .Load => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const ptr = names.get(inst.words[3]) orelse "var";
                 const ptr_inst = getDef(module, inst.words[3]);
@@ -584,7 +584,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // CompositeConstruct
             .CompositeConstruct => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 var parts = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
                 defer parts.deinit(alloc);
@@ -598,7 +598,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // CompositeExtract
             .CompositeExtract => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const composite = names.get(inst.words[3]) orelse "c";
                 var expr = std.ArrayList(u8).initCapacity(alloc, 64) catch return;
@@ -612,7 +612,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // CopyObject
             .CopyObject => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const val = names.get(inst.words[3]) orelse "0";
                 try w.print("    var {s}: {s} = {s};\n", .{ result_name, rt, val });
@@ -620,7 +620,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // VectorShuffle
             .VectorShuffle => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const v1 = names.get(inst.words[3]) orelse "v1";
                 const v2 = names.get(inst.words[4]) orelse "v2";
@@ -652,46 +652,46 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             // Arithmetic
-            .FAdd, .IAdd => try emitBinOp(module, names, inst, "+", w, alloc),
-            .FSub, .ISub => try emitBinOp(module, names, inst, "-", w, alloc),
-            .FMul, .IMul => try emitBinOp(module, names, inst, "*", w, alloc),
-            .FDiv, .SDiv, .UDiv => try emitBinOp(module, names, inst, "/", w, alloc),
-            .FMod => try emitBinOp(module, names, inst, "%", w, alloc),
-            .UMod, .SRem, .SMod, .FRem => try emitBinOp(module, names, inst, "%", w, alloc),
-            .ShiftLeftLogical => try emitBinOp(module, names, inst, "<<", w, alloc),
-            .ShiftRightLogical => try emitBinOp(module, names, inst, ">>", w, alloc),
+            .FAdd, .IAdd => try emitBinOp(module, names, inst, "+", w, arena),
+            .FSub, .ISub => try emitBinOp(module, names, inst, "-", w, arena),
+            .FMul, .IMul => try emitBinOp(module, names, inst, "*", w, arena),
+            .FDiv, .SDiv, .UDiv => try emitBinOp(module, names, inst, "/", w, arena),
+            .FMod => try emitBinOp(module, names, inst, "%", w, arena),
+            .UMod, .SRem, .SMod, .FRem => try emitBinOp(module, names, inst, "%", w, arena),
+            .ShiftLeftLogical => try emitBinOp(module, names, inst, "<<", w, arena),
+            .ShiftRightLogical => try emitBinOp(module, names, inst, ">>", w, arena),
             .FNegate, .SNegate => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 try w.print("    var {s}: {s} = -{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
-            .VectorTimesScalar, .MatrixTimesScalar => try emitBinOp(module, names, inst, "*", w, alloc),
+            .VectorTimesScalar, .MatrixTimesScalar => try emitBinOp(module, names, inst, "*", w, arena),
             .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => {
                 // WGSL uses mul() — wait, WGSL doesn't have mul(). Use matrix multiplication operator *
-                try emitBinOp(module, names, inst, "*", w, alloc);
+                try emitBinOp(module, names, inst, "*", w, arena);
             },
 
             // Dot product
-            .Dot => try emitCall(module, names, inst, "dot", w, alloc),
+            .Dot => try emitCall(module, names, inst, "dot", w, arena),
 
             // Comparisons
-            .FOrdEqual, .IEqual => try emitBinOp(module, names, inst, "==", w, alloc),
-            .FOrdNotEqual, .INotEqual => try emitBinOp(module, names, inst, "!=", w, alloc),
-            .FOrdLessThan, .SLessThan, .ULessThan => try emitBinOp(module, names, inst, "<", w, alloc),
-            .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, inst, ">", w, alloc),
-            .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, inst, "<=", w, alloc),
-            .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(module, names, inst, ">=", w, alloc),
+            .FOrdEqual, .IEqual => try emitBinOp(module, names, inst, "==", w, arena),
+            .FOrdNotEqual, .INotEqual => try emitBinOp(module, names, inst, "!=", w, arena),
+            .FOrdLessThan, .SLessThan, .ULessThan => try emitBinOp(module, names, inst, "<", w, arena),
+            .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, inst, ">", w, arena),
+            .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, inst, "<=", w, arena),
+            .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(module, names, inst, ">=", w, arena),
 
             // Logical
-            .LogicalOr => try emitBinOp(module, names, inst, "or", w, alloc),
-            .LogicalAnd => try emitBinOp(module, names, inst, "and", w, alloc),
+            .LogicalOr => try emitBinOp(module, names, inst, "or", w, arena),
+            .LogicalAnd => try emitBinOp(module, names, inst, "and", w, arena),
             .LogicalNot => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 try w.print("    var {s}: {s} = !{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "true" });
             },
 
             // Select (ternary)
             .Select => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const cond = names.get(inst.words[3]) orelse "c";
                 const true_val = names.get(inst.words[4]) orelse "t";
@@ -702,7 +702,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // Conversions
             .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
             .UConvert, .SConvert, .FConvert, .Bitcast => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const val = names.get(inst.words[3]) orelse "0";
                 try w.print("    var {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, val });
@@ -710,7 +710,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // Texture sampling
             .ImageSampleImplicitLod => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const coord = names.get(inst.words[4]) orelse "uv";
                 // Find the texture name from the sampled image
@@ -725,7 +725,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             .ImageFetch => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const si = names.get(inst.words[3]) orelse "tex";
                 const coord = names.get(inst.words[4]) orelse "uv";
@@ -748,7 +748,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const ext_name = names.get(set_id) orelse "";
                     if (std.mem.indexOf(u8, ext_name, "GLSL.std.450") != null or true) {
                         // instruction is the GLSL opcode
-                        const rt = try wgslType(module, inst.words[1], names, alloc);
+                        const rt = try wgslType(module, inst.words[1], names, arena);
                         const result_name = names.get(inst.words[2]) orelse "v";
                         const func_name = switch (instruction) {
                             0 => "round",
@@ -831,7 +831,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // Function call
             .FunctionCall => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const func_id = inst.words[3];
                 const func_name = names.get(func_id) orelse "func";
@@ -849,23 +849,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             // Bitwise
-            .BitwiseOr => try emitBinOp(module, names, inst, "|", w, alloc),
-            .BitwiseXor => try emitBinOp(module, names, inst, "^", w, alloc),
-            .BitwiseAnd => try emitBinOp(module, names, inst, "&", w, alloc),
+            .BitwiseOr => try emitBinOp(module, names, inst, "|", w, arena),
+            .BitwiseXor => try emitBinOp(module, names, inst, "^", w, arena),
+            .BitwiseAnd => try emitBinOp(module, names, inst, "&", w, arena),
             .Not => {
-                const rt = try wgslType(module, inst.words[1], names, alloc);
+                const rt = try wgslType(module, inst.words[1], names, arena);
                 try w.print("    var {s}: {s} = ~{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
 
             // Derivatives
-            .DPdx => try emitCall(module, names, inst, "dpdx", w, alloc),
-            .DPdy => try emitCall(module, names, inst, "dpdy", w, alloc),
-            .Fwidth => try emitCall(module, names, inst, "fwidth", w, alloc),
+            .DPdx => try emitCall(module, names, inst, "dpdx", w, arena),
+            .DPdy => try emitCall(module, names, inst, "dpdy", w, arena),
+            .Fwidth => try emitCall(module, names, inst, "fwidth", w, arena),
 
             else => {
                 // Try to handle as a simple assignment
                 if (inst.words.len > 2) {
-                    const rt = try wgslType(module, inst.words[1], names, alloc);
+                    const rt = try wgslType(module, inst.words[1], names, arena);
                     const rn = names.get(inst.words[2]) orelse "v";
                     try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});
                     try w.print("    var {s}: {s};\n", .{ rn, rt });
@@ -879,22 +879,22 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 // Emit helpers
 // ---------------------------------------------------------------------------
 
-fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
-    const rt = try wgslType(module, inst.words[1], names, alloc);
+fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, arena: std.mem.Allocator) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
     const result_name = names.get(inst.words[2]) orelse "v";
     const lhs = names.get(inst.words[3]) orelse "a";
     const rhs = names.get(inst.words[4]) orelse "b";
     try w.print("    var {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
 }
 
-fn emitCall(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, func: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
-    const rt = try wgslType(module, inst.words[1], names, alloc);
+fn emitCall(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, func: []const u8, w: anytype, arena: std.mem.Allocator) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
     const result_name = names.get(inst.words[2]) orelse "v";
-    var args = std.ArrayList(u8).initCapacity(alloc, 64) catch return;
-    defer args.deinit(alloc);
+    var args = std.ArrayList(u8).initCapacity(arena, 64) catch return;
+    defer args.deinit(arena);
     for (inst.words[3..], 0..) |arg_id, ai| {
-        if (ai > 0) try args.appendSlice(alloc, ", ");
-        try args.appendSlice(alloc, names.get(arg_id) orelse "0");
+        if (ai > 0) try args.appendSlice(arena, ", ");
+        try args.appendSlice(arena, names.get(arg_id) orelse "0");
     }
     try w.print("    var {s}: {s} = {s}({s});\n", .{ result_name, rt, func, args.items });
 }
