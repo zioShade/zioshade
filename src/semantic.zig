@@ -2133,6 +2133,9 @@ const Analyzer = struct {
 
                 _ = self.loop_stack.pop();
                 try self.emitLabel(merge_label);
+                // Invalidate loads cached during condition evaluation — they don't dominate merge
+                // because the body can break directly to merge, skipping the continue block.
+                self.global_load_cache.clearRetainingCapacity();
                 // Do NOT set cache_globals = true — loop merge is inside enclosing scope
 
             },
