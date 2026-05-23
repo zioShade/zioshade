@@ -353,6 +353,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     const is_fragment = module.execution_model == .Fragment;
     const is_vertex = module.execution_model == .Vertex;
     const is_compute = module.execution_model == .GLCompute;
+    var use_vertex_struct = false;
 
     // Find entry point and function
     var entry_func_idx: ?usize = null;
@@ -630,6 +631,60 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         try w.writeAll("}\n\n");
     }
 
+    // Emit VertexOutput struct if vertex shader has multiple outputs
+    var vertex_output_fields = std.ArrayList(struct { name: []const u8, type_name: []const u8, builtin: ?[]const u8, location: ?u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    if (is_vertex and output_vars.items.len > 1) {
+        for (output_vars.items) |ovid| {
+            const builtin_val = getDecVal(&decorations, ovid, .built_in);
+            const loc_val = getDecVal(&decorations, ovid, .location);
+            const var_name = names.get(ovid) orelse continue;
+            const var_def = getDef(&module, ovid) orelse continue;
+            const ptr_def = getDef(&module, var_def.words[1]);
+            var actual_type: u32 = var_def.words[1];
+            if (ptr_def) |pi| {
+                if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3];
+            }
+            const type_name = try wgslType(&module, actual_type, &names, arena);
+            var bi_name: ?[]const u8 = null;
+            if (builtin_val) |bv| {
+                const bi: spirv.BuiltIn = @enumFromInt(bv);
+                bi_name = switch (bi) {
+                    .position => "position",
+                    .point_size => "__point_size", // not standard WGSL
+                    else => null,
+                };
+            }
+            try vertex_output_fields.append(arena, .{ .name = var_name, .type_name = type_name, .builtin = bi_name, .location = loc_val });
+        }
+    }
+
+    if (vertex_output_fields.items.len > 1) {
+        use_vertex_struct = true;
+        // Sort: builtin fields first (required by WGSL: @builtin(position) must be first)
+        {
+            var fi: usize = 1;
+            while (fi < vertex_output_fields.items.len) : (fi += 1) {
+                const key = vertex_output_fields.items[fi];
+                var j: usize = fi;
+                while (j > 0 and vertex_output_fields.items[j - 1].builtin == null and key.builtin != null) : (j -= 1) {
+                    vertex_output_fields.items[j] = vertex_output_fields.items[j - 1];
+                }
+                vertex_output_fields.items[j] = key;
+            }
+        }
+        try w.writeAll("struct VertexOutput {\n");
+        for (vertex_output_fields.items) |field| {
+            if (field.builtin) |bi| {
+                try w.print("    @builtin({s}) {s}: {s},\n", .{ bi, field.name, field.type_name });
+            } else if (field.location) |loc| {
+                try w.print("    @location({d}) {s}: {s},\n", .{ loc, field.name, field.type_name });
+            } else {
+                try w.print("    {s}: {s},\n", .{ field.name, field.type_name });
+            }
+        }
+        try w.writeAll("}\n\n");
+    }
+
     // Emit entry function
     const entry_stage: []const u8 = if (is_fragment) "@fragment" else if (is_vertex) "@vertex" else if (is_compute) "@compute" else "@fragment";
 
@@ -686,32 +741,47 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         const type_name = try wgslType(&module, actual_type, &names, arena);
         try w.print(") -> @location(0) {s} {{\n", .{type_name});
     } else if (is_vertex and output_vars.items.len > 0 and output_var_id != null) {
-        // For vertex shaders, use the selected output var (prefers builtin like gl_Position)
-        const ov = output_var_id.?;
-        const builtin = getDecVal(&decorations, ov, .built_in);
-        const ptr_inst = getDef(&module, getDef(&module, ov).?.words[1]);
-        var actual_type: u32 = undefined;
-        if (ptr_inst) |pi| {
-            if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = ov;
-        } else actual_type = ov;
-        const type_name = try wgslType(&module, actual_type, &names, arena);
-        if (builtin != null) {
-            const bi: spirv.BuiltIn = @enumFromInt(builtin.?);
-            const bi_name: []const u8 = switch (bi) {
-                .position => "position",
-                else => "position",
-            };
-            try w.print(") -> @builtin({s}) {s} {{\n", .{ bi_name, type_name });
+        if (output_vars.items.len == 1) {
+            // Single output — emit simple return type
+            const ov = output_var_id.?;
+            const builtin = getDecVal(&decorations, ov, .built_in);
+            const ptr_inst = getDef(&module, getDef(&module, ov).?.words[1]);
+            var actual_type: u32 = undefined;
+            if (ptr_inst) |pi| {
+                if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = ov;
+            } else actual_type = ov;
+            const type_name = try wgslType(&module, actual_type, &names, arena);
+            if (builtin != null) {
+                const bi: spirv.BuiltIn = @enumFromInt(builtin.?);
+                const bi_name: []const u8 = switch (bi) {
+                    .position => "position",
+                    else => "position",
+                };
+                try w.print(") -> @builtin({s}) {s} {{\n", .{ bi_name, type_name });
+            } else {
+                const loc = getDecVal(&decorations, ov, .location) orelse 0;
+                try w.print(") -> @location({d}) {s} {{\n", .{ loc, type_name });
+            }
         } else {
-            const loc = getDecVal(&decorations, ov, .location) orelse 0;
-            try w.print(") -> @location({d}) {s} {{\n", .{ loc, type_name });
+            // Multiple outputs — emit struct return type
+            try w.writeAll(") -> VertexOutput {\n");
+            use_vertex_struct = true;
         }
     } else {
         try w.writeAll(") {\n");
     }
 
-    // Declare output variable as local
-    if ((is_fragment or is_vertex) and output_var_id != null) {
+    // Declare output variable(s) as local
+    if (use_vertex_struct) {
+        // Vertex shader with multiple outputs — declare struct variable
+        try w.writeAll("    var vertex_out: VertexOutput;\n");
+        // Map each output var to vertex_out.field_name
+        for (output_vars.items) |ovid| {
+            const var_name = names.get(ovid) orelse continue;
+            const alias = try std.fmt.allocPrint(alloc, "vertex_out.{s}", .{var_name});
+            if (names.fetchPut(ovid, alias) catch null) |old| alloc.free(old.value);
+        }
+    } else if ((is_fragment or is_vertex) and output_var_id != null) {
         const ov = output_var_id.?;
         const var_inst = getDef(&module, ov).?;
         const ptr_inst = getDef(&module, var_inst.words[1]);
@@ -728,7 +798,9 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena);
 
     // Return output var
-    if ((is_fragment or is_vertex) and output_var_id != null) {
+    if (use_vertex_struct) {
+        try w.writeAll("    return vertex_out;\n");
+    } else if ((is_fragment or is_vertex) and output_var_id != null) {
         const var_name = names.get(output_var_id.?) orelse "out";
         try w.print("    return {s};\n", .{var_name});
     }
