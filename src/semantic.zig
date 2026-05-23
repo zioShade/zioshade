@@ -1685,7 +1685,23 @@ const Analyzer = struct {
         // Dead code elimination: skip instructions after return
         if (self.has_returned) return;
         errdefer {
-            if (last_error_ctx.len == 0) last_error_ctx = @tagName(node.tag);
+            if (last_error_ctx.len == 0) {
+                last_error_ctx = switch (node.tag) {
+                    .func_call => "function call",
+                    .binary_op => "binary expression",
+                    .assign_op => "assignment",
+                    .var_decl => "variable declaration",
+                    .return_stmt => "return statement",
+                    .if_stmt => "if statement",
+                    .for_stmt => "for loop",
+                    .while_stmt => "while loop",
+                    .do_while_stmt => "do-while loop",
+                    .switch_stmt => "switch statement",
+                    .struct_decl => "struct declaration",
+                    .function_decl => "function declaration",
+                    else => @tagName(node.tag),
+                };
+            }
             if (last_error_line == 0) {
                 last_error_line = node.loc.line;
                 last_error_column = node.loc.column;
