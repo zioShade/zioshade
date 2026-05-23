@@ -417,6 +417,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 const is_ssbo = hasDec(&decorations, pointee_type, .buffer_block);
                 try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = is_ssbo });
             },
+            .StorageBuffer => {
+                const binding = getDecVal(&decorations, result_id, .binding) orelse 0;
+                const set = getDecVal(&decorations, result_id, .descriptor_set) orelse 0;
+                const name = names.get(result_id) orelse "buffer";
+                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = true });
+            },
             .UniformConstant => {
                 const pointee_inst = getDef(&module, pointee_type) orelse continue;
                 const binding = getDecVal(&decorations, result_id, .binding) orelse 0;
@@ -447,6 +453,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
 
     for (cbuffers.items) |cb| {
         try emitStructForwardDecls(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names);
+        try emitOneStructForwardDecl(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names);
     }
 
     // Emit struct forward declarations for types used as local variables
@@ -503,6 +510,26 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             break :blk try wgslType(&module, actual_type, &names, arena);
         };
         try w.print("{s};\n\n", .{type_name});
+    }
+
+    // Emit workgroup variables (shared memory for compute shaders)
+    for (module.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Workgroup) {
+                const ptr_type = getDef(&module, inst.words[1]);
+                if (ptr_type) |pt| {
+                    if (pt.op == .TypePointer and pt.words.len > 3) {
+                        const pointee_type = pt.words[3];
+                        const type_name = try wgslType(&module, pointee_type, &names, arena);
+                        const var_name = names.get(inst.words[2]) orelse "shared";
+                        // Emit struct declaration for array element types
+                        try emitOneStructForwardDecl(&module, &names, pointee_type, w, arena, &emitted_structs, &emitted_names);
+                        try w.print("var<workgroup> {s}: {s};\n\n", .{ var_name, type_name });
+                    }
+                }
+            }
+        }
     }
 
     // Emit textures and samplers
@@ -597,6 +624,18 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 .position => "position",
                 .vertex_id => "vertex_id",
                 .instance_id => "instance_id",
+                .global_invocation_id => "global_invocation_id",
+                .local_invocation_id => "local_invocation_id",
+                .workgroup_id => "workgroup_id",
+                .num_workgroups => "num_workgroups",
+                .local_invocation_index => "local_invocation_index",
+                .workgroup_size => "workgroup_size",
+                .primitive_id => "primitive_id",
+                .invocation_id => "local_invocation_index",
+                .sample_id => "sample_index",
+                .sample_position => "sample_position",
+                .view_index => "view_index",
+                .layer => "view_index",
                 else => "position",
             };
             try w.print("@builtin({s}) {s}: {s}", .{ builtin_name, var_name, type_name });
