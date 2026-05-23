@@ -104,9 +104,18 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
                 6 => "texture_2d",
                 else => "texture_2d",
             };
-            // Check if multisampled (words[6])
+            // Check if multisampled (words[6]) or storage (words[7] == 2)
             const is_ms = if (inst.words.len > 6) inst.words[6] == 1 else false;
-            if (is_ms) {
+            const is_storage = if (inst.words.len > 7) inst.words[7] == 2 else false;
+            if (is_storage) {
+                // Storage image: texture_storage_2d<rgba8unorm, write>
+                const format: []const u8 = switch (dim) {
+                    1 => "texture_storage_2d<rgba8unorm, write>",
+                    2 => "texture_storage_3d<rgba8unorm, write>",
+                    else => "texture_storage_2d<rgba8unorm, write>",
+                };
+                break :blk format;
+            } else if (is_ms) {
                 break :blk std.fmt.allocPrint(alloc, "{s}_multisampled<{s}>", .{ tex_type, st }) catch "texture_2d<f32>";
             } else {
                 break :blk std.fmt.allocPrint(alloc, "{s}<{s}>", .{ tex_type, st }) catch "texture_2d<f32>";
