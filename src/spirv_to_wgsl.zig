@@ -212,7 +212,58 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
 }
 
 fn resolvePointee(module: *const ParsedModule, id: u32) ?u32 {
-    return common.resolvePointeeType(module, id);
+    // First try direct TypePointer
+    if (common.resolvePointeeType(module, id)) |pt| return pt;
+    // Try resolving through Variable → TypePointer → pointee
+    const inst = common.getDef(module, id) orelse return null;
+    if (inst.op == .Variable and inst.words.len > 1) {
+        return common.resolvePointeeType(module, inst.words[1]);
+    }
+    return null;
+}
+
+/// Resolve the value type of an ID by tracing its defining instruction.
+fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
+    const inst = common.getDef(module, id) orelse return null;
+    switch (inst.op) {
+        .Variable => {
+            if (inst.words.len > 1) return common.resolvePointeeType(module, inst.words[1]);
+            return null;
+        },
+        .Load, .CopyObject, .CompositeConstruct, .CompositeInsert,
+        .FunctionCall, .Phi, .Select, .CopyLogical,
+        .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
+        .UConvert, .SConvert, .FConvert, .Bitcast,
+        .VectorShuffle, .CompositeExtract, .VectorTimesScalar,
+        .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector,
+        .MatrixTimesMatrix, .OuterProduct, .ImageSampleImplicitLod,
+        .ImageSampleExplicitLod, .ImageFetch, .ImageRead,
+        .FNegate, .SNegate, .Not, .LogicalNot,
+        => {
+            // words[1] is result type (may be pointer)
+            if (inst.words.len > 1) {
+                const ti = common.getDef(module, inst.words[1]);
+                if (ti) |tinst| {
+                    if (tinst.op == .TypePointer and tinst.words.len > 3) return tinst.words[3];
+                    return inst.words[1]; // the type ID itself
+                }
+            }
+            return null;
+        },
+        .AccessChain => {
+            // Type of AccessChain result is a pointer to the element type
+            // We need the pointee, not the pointer
+            if (inst.words.len > 1) {
+                const ti = common.getDef(module, inst.words[1]);
+                if (ti) |tinst| {
+                    if (tinst.op == .TypePointer and tinst.words.len > 3) return tinst.words[3];
+                    return inst.words[1];
+                }
+            }
+            return null;
+        },
+        else => return null,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -695,10 +746,35 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const composite = names.get(inst.words[3]) orelse "c";
+                // Build type-aware access expression
                 var expr = std.ArrayList(u8).initCapacity(alloc, 64) catch return;
                 defer expr.deinit(alloc);
                 try expr.appendSlice(alloc, composite);
+                // Resolve composite type for member name resolution
+                var current_type: ?u32 = resolveTypeOf(module, inst.words[3]);
                 for (inst.words[4..]) |idx| {
+                    if (current_type) |ct| {
+                        const ct_inst = getDef(module, ct);
+                        if (ct_inst) |cti| {
+                            if (cti.op == .TypeStruct) {
+                                var mname_buf: [32]u8 = undefined;
+                                const mname = getMemberName(module, ct, idx, &mname_buf);
+                                try expr.print(alloc, ".{s}", .{mname});
+                                if (idx + 2 < cti.words.len) current_type = cti.words[idx + 2] else current_type = null;
+                                continue;
+                            } else if (cti.op == .TypeVector) {
+                                const sw = switch (idx) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" };
+                                try expr.appendSlice(alloc, sw);
+                                if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
+                                continue;
+                            } else if (cti.op == .TypeMatrix or cti.op == .TypeArray) {
+                                try expr.print(alloc, "[{d}]", .{idx});
+                                if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
+                                continue;
+                            }
+                        }
+                    }
+                    // Fallback: array index
                     try expr.print(alloc, "[{d}]", .{idx});
                 }
                 try w.print("    var {s}: {s} = {s};\n", .{ result_name, rt, expr.items });
@@ -1037,10 +1113,43 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const composite = names.get(inst.words[3]) orelse "c";
                 const object = names.get(inst.words[4]) orelse "o";
-                // Build access chain from indices
+                // Build access chain from indices with type-aware member names
                 var access = std.ArrayList(u8).initCapacity(arena, 64) catch return;
                 defer access.deinit(arena);
+                // Walk the type chain to resolve struct member names
+                var current_type: ?u32 = if (inst.words.len > 1) blk: {
+                    // result type is the composite type
+                    const ti = getDef(module, inst.words[1]);
+                    break :blk if (ti) |t| t.words[1] else null;
+                } else null;
                 for (inst.words[5..]) |idx| {
+                    if (current_type) |ct| {
+                        const ct_inst = getDef(module, ct);
+                        if (ct_inst) |cti| {
+                            if (cti.op == .TypeStruct) {
+                                var mname_buf: [32]u8 = undefined;
+                                const mname = getMemberName(module, ct, idx, &mname_buf);
+                                try access.print(arena, ".{s}", .{mname});
+                                // Walk to member type
+                                if (idx + 2 < cti.words.len) current_type = cti.words[idx + 2] else current_type = null;
+                                continue;
+                            } else if (cti.op == .TypeVector) {
+                                const sw = switch (idx) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" };
+                                try access.appendSlice(arena, sw);
+                                if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
+                                continue;
+                            } else if (cti.op == .TypeMatrix) {
+                                try access.print(arena, "[{d}]", .{idx});
+                                if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
+                                continue;
+                            } else if (cti.op == .TypeArray) {
+                                try access.print(arena, "[{d}]", .{idx});
+                                if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
+                                continue;
+                            }
+                        }
+                    }
+                    // Fallback: use vector swizzle
                     const sw = switch (idx) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => "[0]" };
                     try access.appendSlice(arena, sw);
                 }
