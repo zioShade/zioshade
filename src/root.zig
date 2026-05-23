@@ -50,6 +50,18 @@ pub const CompileDetail = enum {
 /// This threadlocal will be removed in a future version.
 pub threadlocal var last_compile_detail: ?CompileDetail = null;
 
+/// Returns the last semantic error context string (e.g., "function call", "variable declaration").
+pub fn lastErrorCtx() ?[]const u8 {
+    if (semantic.last_error_ctx.len == 0) return null;
+    return semantic.last_error_ctx;
+}
+
+/// Returns the last semantic error inner detail string.
+pub fn lastErrorInner() ?[]const u8 {
+    if (semantic.last_error_inner.len == 0) return null;
+    return semantic.last_error_inner;
+}
+
 /// Shader stage for compilation.
 pub const Stage = enum {
     vertex,
