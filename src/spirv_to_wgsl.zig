@@ -1409,13 +1409,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             // Atomic operations
-            .AtomicIAdd => try emitAtomicBinOp(module, names, inst, "add", w, arena),
-            .AtomicISub => try emitAtomicBinOp(module, names, inst, "sub", w, arena),
-            .AtomicAnd => try emitAtomicBinOp(module, names, inst, "and", w, arena),
-            .AtomicOr => try emitAtomicBinOp(module, names, inst, "or", w, arena),
-            .AtomicXor => try emitAtomicBinOp(module, names, inst, "xor", w, arena),
-            .AtomicUMin, .AtomicSMin => try emitAtomicBinOp(module, names, inst, "min", w, arena),
-            .AtomicUMax, .AtomicSMax => try emitAtomicBinOp(module, names, inst, "max", w, arena),
+            .AtomicIAdd => try emitAtomicBinOp(module, names, inst, "Add", w, arena),
+            .AtomicISub => try emitAtomicBinOp(module, names, inst, "Sub", w, arena),
+            .AtomicAnd => try emitAtomicBinOp(module, names, inst, "And", w, arena),
+            .AtomicOr => try emitAtomicBinOp(module, names, inst, "Or", w, arena),
+            .AtomicXor => try emitAtomicBinOp(module, names, inst, "Xor", w, arena),
+            .AtomicUMin, .AtomicSMin => try emitAtomicBinOp(module, names, inst, "Min", w, arena),
+            .AtomicUMax, .AtomicSMax => try emitAtomicBinOp(module, names, inst, "Max", w, arena),
             .AtomicExchange => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
