@@ -940,8 +940,21 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             if (ai > 0) try args.appendSlice(arena, ", ");
                             try args.appendSlice(arena, names.get(arg_id) orelse "0");
                         }
-                        // Map some GLSL names to WGSL equivalents
-                        const wgsl_name = if (std.mem.eql(u8, func_name, "fAbs")) "abs" else if (std.mem.eql(u8, func_name, "fSign")) "sign" else func_name;
+                        // Map GLSL.std.450 names to WGSL equivalents
+                        const wgsl_name = if (std.mem.eql(u8, func_name, "fAbs"))
+                            "abs"
+                        else if (std.mem.eql(u8, func_name, "fSign"))
+                            "sign"
+                        else if (std.mem.eql(u8, func_name, "faceForward"))
+                            "faceForward"
+                        else if (std.mem.eql(u8, func_name, "countOneBits"))
+                            "countOneBits"
+                        else if (std.mem.eql(u8, func_name, "findILsb"))
+                            "firstTrailingBit"
+                        else if (std.mem.eql(u8, func_name, "findSMsb") or std.mem.eql(u8, func_name, "findUMsb"))
+                            "firstLeadingBit"
+                        else
+                            func_name;
                         try w.print("    var {s}: {s} = {s}({s});\n", .{ result_name, rt, wgsl_name, args.items });
                     }
                 }
