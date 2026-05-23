@@ -90,7 +90,8 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
         .TypeSampler => "sampler",
         .TypeImage => blk: {
             // texture_2d<f32>, texture_1d<f32>, texture_3d<f32>, texture_cube<f32>, etc.
-            const dim = if (inst.words.len > 4) inst.words[4] else 1;
+            // OpTypeImage layout: [header, result_id, sampled_type, dim, depth, arrayed, ms, sampled, format]
+            const dim = if (inst.words.len > 3) inst.words[3] else 1;
             const sampled_type_id = inst.words[2];
             const st = try wgslType(module, sampled_type_id, names, alloc);
             const tex_type: []const u8 = switch (dim) {
@@ -103,8 +104,8 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
                 6 => "texture_2d",
                 else => "texture_2d",
             };
-            // Check if multisampled
-            const is_ms = if (inst.words.len > 7) inst.words[7] == 1 else false;
+            // Check if multisampled (words[6])
+            const is_ms = if (inst.words.len > 6) inst.words[6] == 1 else false;
             if (is_ms) {
                 break :blk std.fmt.allocPrint(alloc, "{s}_multisampled<{s}>", .{ tex_type, st }) catch "texture_2d<f32>";
             } else {
@@ -549,16 +550,47 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const ptr = names.get(inst.words[3]) orelse "var";
                 const ptr_inst = getDef(module, inst.words[3]);
-                var expr: []const u8 = ptr;
-                var expr_allocated = false;
+                var is_tex = false;
+                var is_output_load = false;
                 if (ptr_inst) |pi| {
-                    if (pi.op == .AccessChain) {
-                        expr = try buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc);
-                        expr_allocated = true;
+                    if (pi.op == .Variable and pi.words.len >= 4) {
+                        const sc: spirv.StorageClass = @enumFromInt(pi.words[3]);
+                        if (sc == .UniformConstant) {
+                            const pt = getDef(module, pi.words[1]);
+                            if (pt) |ptv| {
+                                if (ptv.op == .TypePointer and ptv.words.len > 3) {
+                                    const pe = getDef(module, ptv.words[3]);
+                                    if (pe) |pev| {
+                                        if (pev.op == .TypeSampler or pev.op == .TypeSampledImage or pev.op == .TypeImage) {
+                                            is_tex = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (sc == .Output) is_output_load = true;
                     }
                 }
-                try w.print("    var {s}: {s} = {s};\n", .{ result_name, rt, expr });
-                if (expr_allocated) alloc.free(expr);
+                if (is_tex) {
+                    // Texture/sampler load: just propagate the variable name
+                    const a = try alloc.dupe(u8, ptr);
+                    if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
+                } else if (is_output_load) {
+                    // Output variable load: just propagate the variable name
+                    const a = try alloc.dupe(u8, ptr);
+                    if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
+                } else {
+                    var expr: []const u8 = ptr;
+                    var expr_allocated = false;
+                    if (ptr_inst) |pi| {
+                        if (pi.op == .AccessChain) {
+                            expr = try buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc);
+                            expr_allocated = true;
+                        }
+                    }
+                    try w.print("    var {s}: {s} = {s};\n", .{ result_name, rt, expr });
+                    if (expr_allocated) alloc.free(expr);
+                }
             },
 
             // Store
@@ -939,7 +971,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .SampledImage => {
                 if (inst.words.len > 4) {
                     const result_id = inst.words[2];
-                    const image_name = names.get(inst.words[3]) orelse "tex";
+                    const image_id = inst.words[3];
+                    const image_name = names.get(image_id) orelse "tex";
                     // Store the image name as the result
                     if (try names.fetchPut(result_id, try alloc.dupe(u8, image_name))) |old| {
                         alloc.free(old.value);
