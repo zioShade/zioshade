@@ -9,6 +9,8 @@ const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
 const DecorationEntry = common.DecorationEntry;
 
+/// Options for SPIR-V → WGSL cross-compilation.
+/// Currently empty — reserved for future options.
 pub const WgslCompileOptions = struct {};
 
 // ---------------------------------------------------------------------------
