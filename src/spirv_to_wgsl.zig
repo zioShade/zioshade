@@ -749,15 +749,37 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const coord = names.get(inst.words[4]) orelse "uv";
-                // Find the texture name from the sampled image
-                const si_inst = getDef(module, inst.words[3]);
-                var tex_name: []const u8 = "tex";
-                if (si_inst) |sii| {
-                    if (sii.op == .SampledImage and sii.words.len > 3) {
-                        tex_name = names.get(sii.words[2]) orelse "tex";
-                    }
-                }
+                // Get texture name directly from combined sampler ID
+                const tex_name = names.get(inst.words[3]) orelse "tex";
                 try w.print("    var {s}: {s} = textureSample({s}, {s}_sampler, {s});\n", .{ result_name, rt, tex_name, tex_name, coord });
+            },
+
+            .ImageSampleExplicitLod => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const coord = names.get(inst.words[4]) orelse "uv";
+                const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+                const tex_name = names.get(inst.words[3]) orelse "tex";
+                try w.print("    var {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lod });
+            },
+
+            .ImageSampleDrefImplicitLod => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const coord = names.get(inst.words[4]) orelse "uv";
+                const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+                const tex_name = names.get(inst.words[3]) orelse "tex";
+                try w.print("    var {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
+            },
+
+            .ImageSampleDrefExplicitLod => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const coord = names.get(inst.words[4]) orelse "uv";
+                const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+                const lod = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
+                const tex_name = names.get(inst.words[3]) orelse "tex";
+                try w.print("    var {s}: {s} = textureSampleCompareLevel({s}, {s}_sampler, {s}, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref, lod });
             },
 
             .ImageFetch => {
