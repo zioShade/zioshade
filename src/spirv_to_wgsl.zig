@@ -754,12 +754,74 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         break;
     }
 
+    // Control flow state tracking
+    var pending_merge: ?u32 = null;
+    var pending_false_label: ?u32 = null; // false branch label (if has else)
+    var if_depth: u32 = 0;
+    var merge_stack = std.ArrayList(?u32).initCapacity(arena, 8) catch return;
+    defer merge_stack.deinit(arena);
+
     // Emit instructions
     while (i < module.instructions.len) : (i += 1) {
         const inst = module.instructions[i];
         switch (inst.op) {
-            .FunctionEnd => return,
-            .Label, .Branch, .BranchConditional, .LoopMerge, .SelectionMerge, .Phi => {},
+            .FunctionEnd => {
+                while (if_depth > 0) : (if_depth -= 1) {
+                    try w.writeAll("    }");
+                    try w.writeAll("\n");
+                }
+                return;
+            },
+            .SelectionMerge => {
+                if (inst.words.len > 1) {
+                    pending_merge = inst.words[1];
+                }
+            },
+            .BranchConditional => {
+                if (inst.words.len >= 4 and pending_merge != null) {
+                    const condition = names.get(inst.words[1]) orelse "true";
+                    const true_label = inst.words[2];
+                    const false_label = inst.words[3];
+                    const merge_label = pending_merge.?;
+                    _ = true_label;
+                    try w.print("    if ({s}) {{\n", .{condition});
+                    try merge_stack.append(arena, merge_label);
+                    if_depth += 1;
+                    if (false_label != merge_label) {
+                        pending_false_label = false_label;
+                    } else {
+                        pending_false_label = null;
+                    }
+                    pending_merge = null;
+                }
+            },
+            .Branch => {
+                // When true branch ends and there's a false branch, emit } else {
+                if (inst.words.len > 1 and if_depth > 0 and pending_false_label != null) {
+                    const target = inst.words[1];
+                    if (merge_stack.items.len > 0) {
+                        const cur_merge = merge_stack.items[merge_stack.items.len - 1];
+                        if (target == cur_merge) {
+                            try w.writeAll("    } else {");
+                            try w.writeAll("\n");
+                            pending_false_label = null;
+                        }
+                    }
+                }
+            },
+            .Label => {
+                if (inst.words.len > 1 and if_depth > 0 and merge_stack.items.len > 0) {
+                    const label_id = inst.words[1];
+                    const cur_merge = merge_stack.items[merge_stack.items.len - 1];
+                    if (label_id == cur_merge) {
+                        try w.writeAll("    }");
+                        try w.writeAll("\n");
+                        _ = merge_stack.pop();
+                        if_depth -= 1;
+                    }
+                }
+            },
+            .LoopMerge, .Phi => {},
 
             .Variable => {
                 if (inst.words.len >= 4) {
