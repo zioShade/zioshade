@@ -357,9 +357,21 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
             if (sc == .Output) {
                 const location = getDecVal(&decorations, inst.words[2], .location);
-                if (location != null or is_fragment) {
+                const builtin = getDecVal(&decorations, inst.words[2], .built_in);
+                if (location != null or is_fragment or is_vertex) {
                     try output_vars.append(arena, inst.words[2]);
-                    if (output_var_id == null) output_var_id = inst.words[2];
+                    if (is_fragment) {
+                        if (output_var_id == null) output_var_id = inst.words[2];
+                    } else if (is_vertex) {
+                        // For vertex shaders, prefer builtin output (gl_Position) as the return value
+                        if (builtin != null) {
+                            output_var_id = inst.words[2]; // builtin takes priority
+                        } else if (output_var_id == null) {
+                            output_var_id = inst.words[2];
+                        }
+                    } else {
+                        if (output_var_id == null) output_var_id = inst.words[2];
+                    }
                 }
             }
             if (sc == .Input) {
@@ -596,7 +608,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             param_count += 1;
         }
         try w.print(") -> {s} {{\n", .{ret_type});
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, false, null);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena);
         try w.writeAll("}\n\n");
     }
 
@@ -646,8 +658,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
 
     // Return type
-    if (is_fragment and output_vars.items.len > 0) {
-        const ov = output_vars.items[0];
+    if (is_fragment and output_vars.items.len > 0 and output_var_id != null) {
+        const ov = output_var_id.?;
         const ptr_inst = getDef(&module, getDef(&module, ov).?.words[1]);
         var actual_type: u32 = undefined;
         if (ptr_inst) |pi| {
@@ -655,13 +667,34 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         } else actual_type = ov;
         const type_name = try wgslType(&module, actual_type, &names, arena);
         try w.print(") -> @location(0) {s} {{\n", .{type_name});
+    } else if (is_vertex and output_vars.items.len > 0 and output_var_id != null) {
+        // For vertex shaders, use the selected output var (prefers builtin like gl_Position)
+        const ov = output_var_id.?;
+        const builtin = getDecVal(&decorations, ov, .built_in);
+        const ptr_inst = getDef(&module, getDef(&module, ov).?.words[1]);
+        var actual_type: u32 = undefined;
+        if (ptr_inst) |pi| {
+            if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = ov;
+        } else actual_type = ov;
+        const type_name = try wgslType(&module, actual_type, &names, arena);
+        if (builtin != null) {
+            const bi: spirv.BuiltIn = @enumFromInt(builtin.?);
+            const bi_name: []const u8 = switch (bi) {
+                .position => "position",
+                else => "position",
+            };
+            try w.print(") -> @builtin({s}) {s} {{\n", .{ bi_name, type_name });
+        } else {
+            const loc = getDecVal(&decorations, ov, .location) orelse 0;
+            try w.print(") -> @location({d}) {s} {{\n", .{ loc, type_name });
+        }
     } else {
         try w.writeAll(") {\n");
     }
 
     // Declare output variable as local
-    if (is_fragment and output_vars.items.len > 0) {
-        const ov = output_vars.items[0];
+    if ((is_fragment or is_vertex) and output_var_id != null) {
+        const ov = output_var_id.?;
         const var_inst = getDef(&module, ov).?;
         const ptr_inst = getDef(&module, var_inst.words[1]);
         var actual_type: u32 = undefined;
@@ -674,12 +707,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, is_fragment, output_var_id);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena);
 
     // Return output var
-    if (is_fragment and output_vars.items.len > 0) {
-        const ov = output_vars.items[0];
-        const var_name = names.get(ov) orelse "out";
+    if ((is_fragment or is_vertex) and output_var_id != null) {
+        const var_name = names.get(output_var_id.?) orelse "out";
         try w.print("    return {s};\n", .{var_name});
     }
 
@@ -692,7 +724,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, is_fragment: bool, output_var_id: ?u32) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator) !void {
     _ = decorations;
     // Skip function declaration instructions
     var i: usize = func_idx + 1;
@@ -1008,9 +1040,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // Return
             .Return => {
-                if (!is_fragment or output_var_id == null) {
-                    // No explicit return needed — handled by wrapper
-                }
+                // Return is handled by the wrapper code that returns the output var
             },
 
             // ExtInst (GLSL.std.450)
