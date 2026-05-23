@@ -995,6 +995,65 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     var defer_start: ?usize = null;
     var defer_active = false;
 
+    // Pre-scan: build use counts for result IDs to enable single-use load inlining
+    var use_count = std.AutoHashMapUnmanaged(u32, u32).empty;
+    var def_op = std.AutoHashMapUnmanaged(u32, spirv.Op).empty;
+    {
+        var si: usize = func_idx + 1;
+        while (si < module.instructions.len) : (si += 1) {
+            const scan_inst = module.instructions[si];
+            if (scan_inst.op == .FunctionEnd) break;
+            // Record the defining opcode for result IDs
+            if (scan_inst.words.len > 2) {
+                // Most opcodes: words[1]=type, words[2]=result
+                // Record only for opcodes that produce named results
+                if (scan_inst.op != .Label and scan_inst.op != .FunctionParameter) {
+                    try def_op.put(arena, scan_inst.words[2], scan_inst.op);
+                }
+            }
+            // Count uses of each ID referenced in the instruction
+            for (scan_inst.words[@min(1, scan_inst.words.len)..]) |word| {
+                // Count uses of each ID referenced in the instruction
+                const entry = try use_count.getOrPutValue(arena, word, 0);
+                entry.value_ptr.* += 1;
+            }
+        }
+    }
+
+    // For single-use OpLoad results, inline the source pointer name
+    // This eliminates unnecessary 'let vN = ptr;' declarations
+    var inline_loads = std.AutoHashMap(u32, void).init(arena);
+    {
+        var it = def_op.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* == .Load) {
+                const result_id = entry.key_ptr.*;
+                const uses = use_count.get(result_id) orelse 0;
+                if (uses == 2) { // 1 from definition + 1 actual use
+                    // Find the source pointer for this load
+                    const load_inst = getDef(module, result_id) orelse continue;
+                    if (load_inst.words.len > 3) {
+                        const ptr_id = load_inst.words[3];
+                        const ptr_name = names.get(ptr_id) orelse continue;
+                        // Only inline if the pointer has a meaningful name and inlining
+                        // doesn't create a self-assignment (e.g., let u_time = u_time)
+                        const current_name = names.get(result_id) orelse "";
+                        if (ptr_name.len > 0 and !std.mem.eql(u8, ptr_name, current_name)) {
+                            // Set the load result's name to the pointer's name
+                            // This effectively inlines the load
+                            const name_copy = try alloc.dupe(u8, ptr_name);
+                            // Store the old name so it gets freed in cleanup
+                            if (try names.fetchPut(result_id, name_copy)) |old| {
+                                alloc.free(old.value);
+                            }
+                            try inline_loads.put(result_id, {});
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Emit instructions
     while (i < module.instructions.len) : (i += 1) {
         const inst = module.instructions[i];
@@ -1345,6 +1404,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
                 } else if (is_input_load) {
                     // Input variable load: propagate the parameter name (e.g., gl_FragCoord)
+                    const a = try alloc.dupe(u8, ptr);
+                    if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
+                } else if (inline_loads.contains(inst.words[2])) {
+                    // Single-use load: propagate name, skip declaration
                     const a = try alloc.dupe(u8, ptr);
                     if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
                 } else {
