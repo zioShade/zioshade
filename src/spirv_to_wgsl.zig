@@ -612,7 +612,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             try w.print("{s}: {s}", .{p_name, pt});
             param_count += 1;
         }
-        try w.print(") -> {s} {{\n", .{ret_type});
+        if (std.mem.eql(u8, ret_type, "void")) {
+            try w.writeAll(") {\n");
+        } else {
+            try w.print(") -> {s} {{\n", .{ret_type});
+        }
         try emitBody(&module, &names, &decorations, fidx, w, alloc, arena);
         try w.writeAll("}\n\n");
     }
