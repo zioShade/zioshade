@@ -136,8 +136,9 @@ fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, sav
         stage == .intersection or stage == .anyhit or stage == .callable) .@"1.4" else .@"1.5";
     const words = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver }) catch {
         const detail = glslpp.last_compile_detail orelse .semantic_failed;
-        const ctx = glslpp.semantic.last_error_ctx;
-        std.debug.print("  COMPILE-{} {s} ctx={s} inner={s}\n", .{ detail, @tagName(detail), ctx, glslpp.semantic.last_error_inner });
+        const ctx = glslpp.lastErrorCtx() orelse "";
+        const inner = glslpp.lastErrorInner() orelse "";
+        std.debug.print("  COMPILE-{} {s} ctx={s} inner={s}\n", .{ detail, @tagName(detail), ctx, inner });
         return .compile_error;
     };
     defer alloc.free(words);
