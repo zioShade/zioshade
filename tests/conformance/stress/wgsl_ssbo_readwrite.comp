@@ -1,0 +1,13 @@
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer InputData {
+    float input_vals[];
+} in_buf;
+layout(std430, binding = 1) buffer OutputData {
+    float output_vals[];
+} out_buf;
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    float val = in_buf.input_vals[idx];
+    out_buf.output_vals[idx] = val * 2.0 + 1.0;
+}
