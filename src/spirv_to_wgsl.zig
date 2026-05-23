@@ -840,22 +840,44 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const true_label = inst.words[2];
                     const false_label = inst.words[3];
                     // Check if this is a loop exit condition (BranchConditional in loop header)
-                    if (in_loop and loop_merge_label != null and false_label == loop_merge_label.?) {
+                    if (in_loop and loop_merge_label != null and false_label == loop_merge_label.? and pending_merge == null) {
                         // Loop condition: if (!cond) { break; }
                         try w.print("        if (!({s})) {{ break; }}\n", .{condition});
                     } else if (pending_merge != null) {
-                        // Regular if/else
                         const merge_label = pending_merge.?;
-                        _ = true_label;
-                        try w.print("    if ({s}) {{\n", .{condition});
-                        try merge_stack.append(arena, merge_label);
-                        if_depth += 1;
-                        if (false_label != merge_label) {
-                            pending_false_label = false_label;
+                        // Check if this is a break/continue inside a loop
+                        const true_is_break = in_loop and loop_merge_label != null and true_label == loop_merge_label.?;
+                        const false_is_break = in_loop and loop_merge_label != null and false_label == loop_merge_label.?;
+                        const true_is_continue = in_loop and loop_continue_label != null and true_label == loop_continue_label.?;
+                        const false_is_continue = in_loop and loop_continue_label != null and false_label == loop_continue_label.?;
+                        if (true_is_break) {
+                            // if (cond) { break; }
+                            try w.print("        if ({s}) {{ break; }}\n", .{condition});
+                            pending_merge = null;
+                        } else if (false_is_break) {
+                            // if (!(cond)) { break; } — or equivalently if (cond) {} else { break; }
+                            try w.print("        if (!({s})) {{ break; }}\n", .{condition});
+                            pending_merge = null;
+                        } else if (true_is_continue) {
+                            // if (cond) { continue; }
+                            try w.print("        if ({s}) {{ continue; }}\n", .{condition});
+                            pending_merge = null;
+                        } else if (false_is_continue) {
+                            // if (!(cond)) { continue; }
+                            try w.print("        if (!({s})) {{ continue; }}\n", .{condition});
+                            pending_merge = null;
                         } else {
-                            pending_false_label = null;
+                            // Regular if/else
+                            try w.print("    if ({s}) {{\n", .{condition});
+                            try merge_stack.append(arena, merge_label);
+                            if_depth += 1;
+                            if (false_label != merge_label) {
+                                pending_false_label = false_label;
+                            } else {
+                                pending_false_label = null;
+                            }
+                            pending_merge = null;
                         }
-                        pending_merge = null;
                     }
                 }
             },
