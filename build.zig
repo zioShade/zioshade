@@ -23,6 +23,21 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
+    // CLI tool — build with: zig build cli
+    const cli_step = b.step("cli", "Build the glslpp CLI tool");
+    const cli_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_mod.addImport("glslpp", glslpp_mod);
+    const cli_exe = b.addExecutable(.{
+        .name = "glslpp",
+        .root_module = cli_mod,
+    });
+    b.installArtifact(cli_exe);
+    cli_step.dependOn(&cli_exe.step);
+
     const test_step = b.step("test", "Run all tests");
 
     const run_unit_tests = b.addRunArtifact(b.addTest(.{
