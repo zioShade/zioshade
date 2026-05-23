@@ -1194,6 +1194,94 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .FwidthCoarse => try emitCall(module, names, inst, "fwidthCoarse", w, arena),
             .Fwidth => try emitCall(module, names, inst, "fwidth", w, arena),
 
+            // Subgroup operations (WGSL subgroup functions)
+            .SubgroupAllKHR, .GroupNonUniformAll => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "true" else "true";
+                try w.print("    var {s}: {s} = subgroupAll({s});\n", .{ rn, rt, val });
+            },
+            .SubgroupAnyKHR, .GroupNonUniformAny => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "false" else "false";
+                try w.print("    var {s}: {s} = subgroupAny({s});\n", .{ rn, rt, val });
+            },
+            .GroupNonUniformElect => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                try w.print("    var {s}: {s} = subgroupElect();\n", .{ rn, rt });
+            },
+            .GroupNonUniformBroadcast => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
+                const id = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+                try w.print("    var {s}: {s} = subgroupBroadcast({s}, {s});\n", .{ rn, rt, val, id });
+            },
+            .GroupNonUniformBroadcastFirst => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
+                try w.print("    var {s}: {s} = subgroupBroadcastFirst({s});\n", .{ rn, rt, val });
+            },
+            .GroupNonUniformBallot => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "false" else "false";
+                try w.print("    var {s}: {s} = subgroupBallot({s});\n", .{ rn, rt, val });
+            },
+            .GroupNonUniformShuffle => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
+                const id = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+                try w.print("    var {s}: {s} = subgroupShuffle({s}, {s});\n", .{ rn, rt, val, id });
+            },
+            .GroupNonUniformShuffleXor => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
+                const mask = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+                try w.print("    var {s}: {s} = subgroupShuffleXor({s}, {s});\n", .{ rn, rt, val, mask });
+            },
+            .GroupNonUniformShuffleUp => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
+                const delta = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+                try w.print("    var {s}: {s} = subgroupShuffleUp({s}, {s});\n", .{ rn, rt, val, delta });
+            },
+            .GroupNonUniformShuffleDown => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
+                const delta = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+                try w.print("    var {s}: {s} = subgroupShuffleDown({s}, {s});\n", .{ rn, rt, val, delta });
+            },
+            // GroupNonUniform arithmetic: IAdd, FAdd, IMul, FMul
+            .GroupNonUniformIAdd, .GroupNonUniformFAdd => {
+                try emitSubgroupArith(module, names, inst, "Add", w, arena);
+            },
+            .GroupNonUniformIMul, .GroupNonUniformFMul => {
+                try emitSubgroupArith(module, names, inst, "Mul", w, arena);
+            },
+            .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => {
+                try emitSubgroupArith(module, names, inst, "Min", w, arena);
+            },
+            .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => {
+                try emitSubgroupArith(module, names, inst, "Max", w, arena);
+            },
+            .GroupNonUniformBitwiseAnd, .GroupNonUniformLogicalAnd => {
+                try emitSubgroupArith(module, names, inst, "And", w, arena);
+            },
+            .GroupNonUniformBitwiseOr, .GroupNonUniformLogicalOr => {
+                try emitSubgroupArith(module, names, inst, "Or", w, arena);
+            },
+            .GroupNonUniformBitwiseXor => {
+                try emitSubgroupArith(module, names, inst, "Xor", w, arena);
+            },
+
             // Return value
             .ReturnValue => {
                 const val = names.get(inst.words[1]) orelse "v";
@@ -1334,6 +1422,39 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try w.print("    var {s}: {s} = textureDimensions({s}, {s});\n", .{ result_name, rt, image, lod });
             },
 
+            // ImageQueryLevels
+            .ImageQueryLevels => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const image = names.get(inst.words[3]) orelse "tex";
+                try w.print("    var {s}: {s} = textureNumLevels({s});\n", .{ result_name, rt, image });
+            },
+
+            // ImageQuerySamples
+            .ImageQuerySamples => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const image = names.get(inst.words[3]) orelse "tex";
+                try w.print("    var {s}: {s} = textureNumSamples({s});\n", .{ result_name, rt, image });
+            },
+
+            // ImageQueryLod
+            .ImageQueryLod => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const si_inst = getDef(module, inst.words[3]);
+                var tex_name: []const u8 = "tex";
+                if (si_inst) |sii| {
+                    if (sii.op == .SampledImage and sii.words.len > 3) {
+                        tex_name = names.get(sii.words[2]) orelse "tex";
+                    } else {
+                        tex_name = names.get(inst.words[3]) orelse "tex";
+                    }
+                }
+                const coord = if (inst.words.len > 4) names.get(inst.words[4]) orelse "uv" else "uv";
+                try w.print("    var {s}: {s} = vec2f(f32(textureQueryLod({s}, {s})), 0.0);\n", .{ result_name, rt, tex_name, coord });
+            },
+
             // ImageGather
             .ImageGather => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
@@ -1451,6 +1572,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .AtomicXor => try emitAtomicBinOp(module, names, inst, "Xor", w, arena),
             .AtomicUMin, .AtomicSMin => try emitAtomicBinOp(module, names, inst, "Min", w, arena),
             .AtomicUMax, .AtomicSMax => try emitAtomicBinOp(module, names, inst, "Max", w, arena),
+            .AtomicFAddEXT => try emitAtomicBinOp(module, names, inst, "Add", w, arena),
             .AtomicExchange => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
@@ -1503,6 +1625,25 @@ fn emitCall(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         try args.appendSlice(arena, names.get(arg_id) orelse "0");
     }
     try w.print("    var {s}: {s} = {s}({s});\n", .{ result_name, rt, func, args.items });
+}
+
+fn emitSubgroupArith(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, arena: std.mem.Allocator) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    // words[3] = scope, words[4] = group_op (reduce/scan/etc), words[5] = value
+    const val = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+    // Map group_op to WGSL function
+    // 0=Reduce, 1=InclusiveScan, 2=ExclusiveScan, 3=ClusteredReduce
+    const group_op: u32 = if (inst.words.len > 4) inst.words[4] else 0;
+    if (group_op == 0) {
+        try w.print("    var {s}: {s} = subgroup{s}({s});\n", .{ result_name, rt, op, val });
+    } else if (group_op == 1) {
+        try w.print("    var {s}: {s} = subgroupInclusive{s}({s});\n", .{ result_name, rt, op, val });
+    } else if (group_op == 2) {
+        try w.print("    var {s}: {s} = subgroupExclusive{s}({s});\n", .{ result_name, rt, op, val });
+    } else {
+        try w.print("    var {s}: {s} = subgroup{s}({s});\n", .{ result_name, rt, op, val });
+    }
 }
 
 fn emitAtomicBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, arena: std.mem.Allocator) !void {
