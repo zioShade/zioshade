@@ -1177,6 +1177,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 try w.print("    var {s}: {s} = ~{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
+            .BitReverse => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                try w.print("    var {s}: {s} = reverseBits({s});\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+            },
+            .BitCount => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                try w.print("    var {s}: {s} = countOneBits({s});\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+            },
 
             // Derivatives
             .DPdx => try emitCall(module, names, inst, "dpdx", w, arena),
