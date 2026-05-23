@@ -298,7 +298,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     var entry_func_idx: ?usize = null;
     var output_var_id: ?u32 = null;
     var output_vars = std.ArrayList(u32).initCapacity(arena, 4) catch return error.OutOfMemory;
-    var input_vars = std.ArrayList(struct { id: u32, type_id: u32 }).initCapacity(arena, 8) catch return error.OutOfMemory;
+    var input_vars = std.ArrayList(struct { id: u32, type_id: u32, builtin: ?spirv.BuiltIn }).initCapacity(arena, 8) catch return error.OutOfMemory;
 
     // Collect input/output variables
     for (module.instructions) |inst| {
@@ -313,8 +313,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             }
             if (sc == .Input) {
                 const location = getDecVal(&decorations, inst.words[2], .location);
-                if (location != null) {
-                    try input_vars.append(arena, .{ .id = inst.words[2], .type_id = inst.words[1] });
+                const builtin_val = getDecVal(&decorations, inst.words[2], .built_in);
+                const builtin: ?spirv.BuiltIn = if (builtin_val) |bv| @enumFromInt(bv) else null;
+                if (location != null or builtin != null) {
+                    try input_vars.append(arena, .{ .id = inst.words[2], .type_id = inst.words[1], .builtin = builtin });
                 }
             }
         }
@@ -480,7 +482,6 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     // Input parameters
     for (input_vars.items, 0..) |iv, i| {
         if (i > 0) try w.writeAll(", ");
-        const loc = getDecVal(&decorations, iv.id, .location) orelse i;
         const ptr_inst = getDef(&module, iv.type_id);
         var actual_type = iv.type_id;
         if (ptr_inst) |pi| {
@@ -488,7 +489,21 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
         const type_name = try wgslType(&module, actual_type, &names, arena);
         const var_name = names.get(iv.id) orelse "input";
-        try w.print("@location({d}) {s}: {s}", .{ loc, var_name, type_name });
+        if (iv.builtin) |bi| {
+            const builtin_name: []const u8 = switch (bi) {
+                .frag_coord => "position",
+                .front_facing => "front_facing",
+                .frag_depth => "frag_depth",
+                .position => "position",
+                .vertex_id => "vertex_id",
+                .instance_id => "instance_id",
+                else => "position",
+            };
+            try w.print("@builtin({s}) {s}: {s}", .{ builtin_name, var_name, type_name });
+        } else {
+            const loc = getDecVal(&decorations, iv.id, .location) orelse i;
+            try w.print("@location({d}) {s}: {s}", .{ loc, var_name, type_name });
+        }
     }
 
     // Return type
@@ -591,6 +606,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const ptr_inst = getDef(module, inst.words[3]);
                 var is_tex = false;
                 var is_output_load = false;
+                var is_input_load = false;
                 if (ptr_inst) |pi| {
                     if (pi.op == .Variable and pi.words.len >= 4) {
                         const sc: spirv.StorageClass = @enumFromInt(pi.words[3]);
@@ -608,6 +624,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             }
                         }
                         if (sc == .Output) is_output_load = true;
+                        if (sc == .Input) is_input_load = true;
                     }
                 }
                 if (is_tex) {
@@ -616,6 +633,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
                 } else if (is_output_load) {
                     // Output variable load: just propagate the variable name
+                    const a = try alloc.dupe(u8, ptr);
+                    if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
+                } else if (is_input_load) {
+                    // Input variable load: propagate the parameter name (e.g., gl_FragCoord)
                     const a = try alloc.dupe(u8, ptr);
                     if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
                 } else {
