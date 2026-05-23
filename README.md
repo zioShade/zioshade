@@ -1,22 +1,24 @@
 # glslpp
 
-[![Sponsor](https://img.shields.io/github.com/sponsors/deblasis)](https://github.com/sponsors/deblasis)
+[![Sponsor](https://img.shields.io/github/sponsors/deblasis)](https://github.com/sponsors/deblasis)
 
-A pure-Zig GLSL-to-SPIR-V compiler and cross-compiler, designed as a drop-in replacement for [glslang](https://github.com/KhronosGroup/glslang) + [SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross) in projects like [wintty](https://github.com/deblasis/wintty).
+A pure-Zig GLSL-to-SPIR-V compiler and cross-compiler. Drop-in replacement for [glslang](https://github.com/KhronosGroup/glslang) + [SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross).
 
 **No C++ runtime. No system dependencies. No DLL isolation hacks.**
 
 ## Features
 
-- **GLSL → SPIR-V**: Compile GLSL 430 / ESSL shaders to SPIR-V 1.0–1.6
-- **SPIR-V → HLSL**: Cross-compile SPIR-V to HLSL Shader Model 6.0 (for DX12)
-- **SPIR-V → GLSL** (planned): Cross-compile back to GLSL
-- **SPIR-V → MSL** (planned): Cross-compile to Metal Shading Language (for macOS)
-- **Shadertoy support**: `compileShadertoyToHlsl()` one-shot API for Shadertoy-style shaders
+- **GLSL → SPIR-V**: Compile GLSL 330–460 / ESSL shaders to SPIR-V 1.0–1.6
+- **SPIR-V → HLSL**: Cross-compile to HLSL Shader Model 5.0+ (for DX12)
+- **SPIR-V → GLSL**: Round-trip / decompile back to GLSL 330–460
+- **SPIR-V → MSL**: Cross-compile to Metal Shading Language 2.1+ (for macOS/iOS)
+- **SPIR-V → WGSL**: Cross-compile to WebGPU Shading Language
+- **Reflection**: Extract uniform buffers, inputs/outputs, samplers from SPIR-V
+- **Kernel Fusion**: Merge multiple compute shaders to reduce bandwidth
+- **SPIR-V Linking**: Merge multiple SPIR-V modules into one
+- **Shadertoy support**: One-shot API for Shadertoy-style shaders
 - **Zero C++ dependency**: Pure Zig, compiles with `zig build`
 - **Thread-safe**: No global state, no process-wide init/finalize
-- **spirv-val conformance**: 548/566 test shaders pass SPIR-V validation
-- **DXC-validated**: HLSL output compiles with DXC for Shader Model 6.0
 
 ## Quick Start
 
@@ -28,7 +30,7 @@ Add to your `build.zig.zon`:
 .dependencies = .{
     .glslpp = .{
         .url = "https://github.com/deblasis/glslpp/archive/<commit>.tar.gz",
-        .hash = "...",
+        .hash = "<run zig fetch to get hash>",
     },
 },
 ```
@@ -43,7 +45,29 @@ const glslpp_dep = b.dependency("glslpp", .{
 step.root_module.addImport("glslpp", glslpp_dep.module("glslpp"));
 ```
 
-### Usage
+### CLI
+
+```bash
+# Build the CLI
+zig build cli
+
+# Compile GLSL to SPIR-V
+zig-out/bin/glslpp compile shader.frag -o shader.spv
+
+# Cross-compile to all targets
+zig-out/bin/glslpp hlsl shader.frag -o shader.hlsl
+zig-out/bin/glslpp glsl shader.frag -o shader.glsl
+zig-out/bin/glslpp msl shader.frag -o shader.msl
+zig-out/bin/glslpp wgsl shader.frag -o shader.wgsl
+
+# Reflect on a SPIR-V binary
+zig-out/bin/glslpp reflect shader.spv
+
+# Validate with spirv-val
+zig-out/bin/glslpp validate shader.spv
+```
+
+### Library Usage
 
 ```zig
 const glslpp = @import("glslpp");
@@ -54,61 +78,102 @@ const spirv = try glslpp.compileToSPIRV(alloc, source, .{
     .version = 430,
 });
 
-// SPIR-V → HLSL
-const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{
-    .binding_shift = -1,  // remap binding=1 → register(b0)
-    .shader_model = 60,   // Shader Model 6.0
-});
+// SPIR-V → any backend
+const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
+const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
 
-// One-shot GLSL → HLSL (for wintty/shadertoy integration)
-const hlsl = try glslpp.compileGlslToHlsl(alloc, glsl_source, .fragment);
+// One-shot: GLSL → any backend
+const hlsl = try glslpp.compileGlslToHlsl(alloc, source, .fragment);
+const msl = try glslpp.compileGlslToMsl(alloc, source, .fragment);
+const wgsl = try glslpp.compileGlslToWgsl(alloc, source, .fragment);
+const glsl = try glslpp.compileGlslToGlsl(alloc, source, .fragment);
+
+// Reflection
+const resources = try glslpp.reflectSPIRV(alloc, spirv);
+defer resources.deinit(alloc);
+for (resources.uniform_buffers) |ubo| {
+    std.debug.print("UBO: {s} (set={d}, binding={d})\n", .{ubo.name, ubo.set, ubo.binding});
+}
+
+// Error handling with diagnostics
+var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
+defer {
+    for (diags.items) |d| alloc.free(d.message);
+    diags.deinit(alloc);
+}
+const result = glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{.stage = .fragment}, &diags) catch |err| {
+    for (diags.items) |d| {
+        std.debug.print("{d}:{d}: {s}: {s}\n", .{d.line, d.column, @tagName(d.kind), d.message});
+    }
+    return err;
+};
 ```
 
-## Integration with wintty (Ghostty)
+## API Reference
 
-glslpp is designed as a drop-in replacement for glslang + SPIRV-Cross in wintty's
-shadertoy shader pipeline:
-
-1. Add glslpp to your `build.zig.zon` dependencies
-2. Replace the `shader_wrapper.dll` path with `glslpp.compileGlslToHlsl()`
-3. HLSL path no longer needs the 8MB stack thread spawn or MSVC-compiled DLL
-
-Benefits:
-- **~3.6ms** average compilation time per shader (50-iteration benchmark)
-- **No C++ runtime** — eliminates DLL isolation hacks
-- **No thread spawn** — glslpp is pure Zig, safe to call from any thread
-- **DXC-validated** output — 0 errors, 0 warnings on the CRT test shader
-
-## API
+### Compilation
 
 | Function | Description |
 |---|---|
 | `compileToSPIRV(alloc, source, options)` | GLSL → SPIR-V binary words |
+| `compileToSPIRVNoOpt(alloc, source, options)` | GLSL → SPIR-V without optimization |
 | `compileToSPIRVWithDiagnostics(alloc, source, options, diags)` | GLSL → SPIR-V with error collection |
+| `compileToSPIRVWithFusion(alloc, sources, options, fusion)` | Multiple sources → fused SPIR-V |
+
+### Cross-Compilation
+
+| Function | Description |
+|---|---|
 | `spirvToHLSL(alloc, spirv_words, options)` | SPIR-V → HLSL source |
-| `compileGlslToHlsl(alloc, glsl_source, stage)` | One-shot GLSL → HLSL (for wintty) |
-| `compileShadertoyToHlsl(alloc, glsl, options)` | Shadertoy GLSL → HLSL one-shot |
-| `spirvToGLSL(alloc, spirv_words, options)` | SPIR-V → GLSL source (planned) |
+| `spirvToGLSL(alloc, spirv_words, options)` | SPIR-V → GLSL source |
+| `spirvToMSL(alloc, spirv_words, options)` | SPIR-V → MSL source |
+| `spirvToWGSL(alloc, spirv_words, options)` | SPIR-V → WGSL source |
+
+### One-Shot (GLSL → Target)
+
+| Function | Description |
+|---|---|
+| `compileGlslToHlsl(alloc, source, stage)` | GLSL → HLSL (null-terminated) |
+| `compileGlslToMsl(alloc, source, stage)` | GLSL → MSL (null-terminated) |
+| `compileGlslToGlsl(alloc, source, stage)` | GLSL → GLSL round-trip |
+| `compileGlslToWgsl(alloc, source, stage)` | GLSL → WGSL (null-terminated) |
+| `compileShadertoyToHlsl(alloc, source, options)` | Shadertoy GLSL → HLSL |
+
+### Utilities
+
+| Function | Description |
+|---|---|
+| `reflectSPIRV(alloc, spirv_words)` | Extract shader resources from SPIR-V |
+| `reflectGLSL(alloc, source, options)` | Compile + reflect convenience |
+| `validateSPIRV(alloc, spirv_words)` | Validate via spirv-val (returns bool) |
+| `linkSPIRVModules(alloc, modules)` | Merge multiple SPIR-V binaries |
+| `compileMultiKernel(alloc, sources, options)` | Multiple GLSL → single SPIR-V |
 
 ## Supported Shader Stages
 
-| Stage | Status |
-|---|---|
-| Vertex | ✅ |
-| Fragment | ✅ |
-| Compute | ✅ |
-| Geometry | ✅ |
-| Tessellation Control | ✅ |
-| Tessellation Evaluation | ✅ |
-| Mesh / Task | ❌ Not supported |
+| Stage | SPIR-V | HLSL | GLSL | MSL | WGSL |
+|---|---|---|---|---|---|
+| Vertex | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Fragment | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Compute | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Geometry | ✅ | ✅ | ✅ | ✅ | — |
+| Tessellation | ✅ | ✅ | ✅ | ✅ | — |
+| Mesh / Task | ✅ | — | — | — | — |
+| Ray Tracing | ✅ | — | — | — | — |
+
+## Conformance
+
+- **1811/1811** shaders pass `spirv-val` validation
+- **51/51** external DXC SPIR-V binaries cross-validated across all backends
+- **180/180** WGSL outputs validated through naga
+- **50,000** fuzz iterations crash-free across all backends
 
 ## Building
 
 ```bash
 zig build              # Build the library
-zig build test         # Run unit tests
-zig build test-hlsl    # Run HLSL backend tests (128 tests)
-zig build bench        # Run wintty shader benchmark
+zig build cli          # Build the CLI tool
+zig build test         # Run all tests
 zig build conformance  # Run shader conformance tests (requires spirv-val)
 ```
 
