@@ -363,9 +363,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                     if (is_fragment) {
                         if (output_var_id == null) output_var_id = inst.words[2];
                     } else if (is_vertex) {
-                        // For vertex shaders, prefer builtin output (gl_Position) as the return value
+                        // For vertex shaders, prefer BuiltIn.position (gl_Position) as the return value
                         if (builtin != null) {
-                            output_var_id = inst.words[2]; // builtin takes priority
+                            const bi: spirv.BuiltIn = @enumFromInt(builtin.?);
+                            if (bi == .position) {
+                                output_var_id = inst.words[2]; // position always takes priority
+                            } else if (output_var_id == null) {
+                                output_var_id = inst.words[2];
+                            }
                         } else if (output_var_id == null) {
                             output_var_id = inst.words[2];
                         }
