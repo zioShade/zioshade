@@ -801,6 +801,75 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     pending_merge = inst.words[1];
                 }
             },
+            .Switch => {
+                // Switch selector default_label [literal target ...]
+                if (inst.words.len >= 3) {
+                    const selector = names.get(inst.words[1]) orelse "s";
+                    const default_label = inst.words[2];
+                    const merge_label = pending_merge;
+                    if (merge_label != null) {
+                        try w.print("    switch {s} {{\n", .{selector});
+                        // Emit default case
+                        if (default_label != merge_label.?) {
+                            try w.writeAll("    default: {\n");
+                            // Skip to default label block, emit until merge
+                            var si: usize = i + 1;
+                            while (si < module.instructions.len) : (si += 1) {
+                                const sinst = module.instructions[si];
+                                if (sinst.op == .Label and sinst.words.len > 1 and sinst.words[1] == default_label) {
+                                    // Found default label, emit instructions until merge label
+                                    si += 1;
+                                    while (si < module.instructions.len) : (si += 1) {
+                                        const dinst = module.instructions[si];
+                                        if (dinst.op == .Label and dinst.words.len > 1 and dinst.words[1] == merge_label.?) break;
+                                        if (dinst.op == .Branch or dinst.op == .BranchConditional) break;
+                                        if (dinst.op == .Switch) break;
+                                        try emitSimpleInstruction(module, names, dinst, w, alloc, arena);
+                                    }
+                                    break;
+                                }
+                            }
+                            try w.writeAll("    }\n");
+                        }
+                        // Emit case targets
+                        var wi: usize = 3;
+                        while (wi + 1 < inst.words.len) : (wi += 2) {
+                            const case_val = inst.words[wi];
+                            const target_label = inst.words[wi + 1];
+                            if (target_label == merge_label.?) continue;
+                            try w.print("    case {d}: {{\n", .{case_val});
+                            // Find and emit target block
+                            var si: usize = i + 1;
+                            while (si < module.instructions.len) : (si += 1) {
+                                const sinst = module.instructions[si];
+                                if (sinst.op == .Label and sinst.words.len > 1 and sinst.words[1] == target_label) {
+                                    si += 1;
+                                    while (si < module.instructions.len) : (si += 1) {
+                                        const dinst = module.instructions[si];
+                                        if (dinst.op == .Label) break;
+                                        if (dinst.op == .Branch or dinst.op == .BranchConditional) break;
+                                        if (dinst.op == .Switch) break;
+                                        try emitSimpleInstruction(module, names, dinst, w, alloc, arena);
+                                    }
+                                    break;
+                                }
+                            }
+                            try w.writeAll("    }\n");
+                        }
+                        try w.writeAll("    }\n");
+                        // Skip all instructions until merge label
+                        var skip_i: usize = i + 1;
+                        while (skip_i < module.instructions.len) : (skip_i += 1) {
+                            const sinst = module.instructions[skip_i];
+                            if (sinst.op == .Label and sinst.words.len > 1 and sinst.words[1] == merge_label.?) {
+                                i = skip_i;
+                                break;
+                            }
+                        }
+                        pending_merge = null;
+                    }
+                }
+            },
             .LoopMerge => {
                 // LoopMerge merge_label continue_label [control]
                 if (inst.words.len >= 3) {
