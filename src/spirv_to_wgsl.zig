@@ -773,9 +773,21 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     var loop_stack = std.ArrayList(struct { merge: u32, cont: u32, header: u32 }).initCapacity(arena, 4) catch return;
     defer loop_stack.deinit(arena);
 
+    // Deferred instruction range for loop header instructions
+    // Instructions between Phi and LoopMerge must be emitted INSIDE the loop
+    var defer_start: ?usize = null;
+    var defer_active = false;
+
     // Emit instructions
     while (i < module.instructions.len) : (i += 1) {
         const inst = module.instructions[i];
+
+        // If deferring loop header instructions, skip them for now
+        // They will be emitted inside the loop body when LoopMerge is encountered
+        if (defer_active and inst.op != .LoopMerge and inst.op != .Phi) {
+            continue;
+        }
+
         switch (inst.op) {
             .FunctionEnd => {
                 while (if_depth > 0) : (if_depth -= 1) {
@@ -813,6 +825,25 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     in_continue_block = false;
                     try loop_stack.append(arena, .{ .merge = merge, .cont = cont, .header = header });
                     try w.writeAll("    loop {\n");
+                    // Replay deferred loop header instructions inside the loop
+                    if (defer_active and defer_start != null) {
+                        defer_active = false;
+                        var di: usize = defer_start.?;
+                        while (di < i) : (di += 1) {
+                            const dinst = module.instructions[di];
+                            if (dinst.op == .Nop or dinst.op == .Label) continue;
+                            // Emit common instruction types inline
+                            switch (dinst.op) {
+                                .BranchConditional, .Branch, .SelectionMerge, .LoopMerge, .Phi, .FunctionEnd => {},
+                                else => {
+                                    // Re-emit by temporarily resetting index and falling through
+                                    // This is safe because deferred instructions are simple (comparisons, conversions)
+                                    try emitSimpleInstruction(module, names, dinst, w, alloc, arena);
+                                },
+                            }
+                        }
+                        defer_start = null;
+                    }
                 }
             },
             .Phi => {
@@ -824,12 +855,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const init_val = names.get(inst.words[3]) orelse "0";
                         try w.print("    var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val });
                         // Record phi update: result = value from second pair (words[5])
-                        // This is used for loop induction variable updates
                         if (inst.words.len >= 7) {
                             const update_val = names.get(inst.words[5]) orelse null;
                             if (update_val != null) {
                                 phi_updates.appendAssumeCapacity(.{ .result_name = phi_result.?, .value_name = update_val.? });
                             }
+                        }
+                        // Check if LoopMerge follows (within the next 20 instructions)
+                        var peek: usize = i + 1;
+                        const peek_end = @min(i + 20, module.instructions.len);
+                        while (peek < peek_end) : (peek += 1) {
+                            if (module.instructions[peek].op == .LoopMerge) {
+                                defer_active = true;
+                                defer_start = i + 1;
+                                break;
+                            }
+                            if (module.instructions[peek].op == .FunctionEnd or
+                                module.instructions[peek].op == .Label) break;
                         }
                     }
                 }
@@ -1820,6 +1862,109 @@ fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
     const lhs = names.get(inst.words[3]) orelse "a";
     const rhs = names.get(inst.words[4]) orelse "b";
     try w.print("    var {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
+}
+
+// Emit a single instruction — used for replaying deferred loop header instructions
+fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator) !void {
+    _ = alloc;
+    switch (inst.op) {
+        .Variable => {
+            if (inst.words.len >= 4) {
+                const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+                if (sc == .Function or sc == .Private) {
+                    const rt = try wgslType(module, inst.words[1], names, arena);
+                    const vn = names.get(inst.words[2]) orelse "v";
+                    try w.print("    var {s}: {s};\n", .{ vn, rt });
+                }
+            }
+        },
+        .Load => {
+            const rt = try wgslType(module, inst.words[1], names, arena);
+            const result_name = names.get(inst.words[2]) orelse "v";
+            const ptr = names.get(inst.words[3]) orelse "var";
+            try w.print("    var {s}: {s} = {s};\n", .{ result_name, rt, ptr });
+        },
+        .Store => {
+            const ptr = names.get(inst.words[1]) orelse "var";
+            const val = names.get(inst.words[2]) orelse "0";
+            try w.print("    {s} = {s};\n", .{ ptr, val });
+        },
+        else => {
+            // For all other instructions, try emitCall/emitBinOp patterns
+            // Comparison ops
+            const maybe_op = getBinOpSymbol(inst.op);
+            if (maybe_op != null) {
+                try emitBinOp(module, names, inst, maybe_op.?, w, arena);
+                return;
+            }
+            // Unary conversion ops
+            const maybe_conv = getConvFunc(inst.op);
+            if (maybe_conv != null) {
+                try emitCall(module, names, inst, maybe_conv.?, w, arena);
+                return;
+            }
+            // Generic: emit as function call using opcode name
+            const rt = try wgslType(module, inst.words[1], names, arena);
+            const result_name = names.get(inst.words[2]) orelse "v";
+            var args = std.ArrayList(u8).initCapacity(arena, 64) catch return;
+            defer args.deinit(arena);
+            for (inst.words[3..], 0..) |arg_id, ai| {
+                if (ai > 0) try args.appendSlice(arena, ", ");
+                try args.appendSlice(arena, names.get(arg_id) orelse "0");
+            }
+            try w.print("    var {s}: {s} = {s}({s});\n", .{ result_name, rt, @tagName(inst.op), args.items });
+        },
+    }
+}
+
+fn getBinOpSymbol(op: spirv.Op) ?[]const u8 {
+    return switch (op) {
+        .IAdd => "+",
+        .ISub => "-",
+        .IMul => "*",
+        .SDiv, .UDiv => "/",
+        .FAdd => "+",
+        .FSub => "-",
+        .FMul => "*",
+        .FDiv => "/",
+        .FMod, .SMod, .SRem, .FRem, .UMod => "%",
+        .ShiftRightLogical => ">>",
+        .ShiftLeftLogical => "<<",
+        .BitwiseAnd => "&",
+        .BitwiseOr => "|",
+        .BitwiseXor => "^",
+        .LogicalAnd => "and",
+        .LogicalOr => "or",
+        .SLessThan => "<",
+        .SGreaterThan => ">",
+        .ULessThan => "<",
+        .UGreaterThan => ">",
+        .FOrdLessThan => "<",
+        .FOrdGreaterThan => ">",
+        .FOrdLessThanEqual => "<=",
+        .FOrdGreaterThanEqual => ">=",
+        .FOrdEqual => "==",
+        .FOrdNotEqual => "!=",
+        .IEqual => "==",
+        .INotEqual => "!=",
+        else => null,
+    };
+}
+
+fn getConvFunc(op: spirv.Op) ?[]const u8 {
+    return switch (op) {
+        .ConvertFToU => "u32",
+        .ConvertFToS => "i32",
+        .ConvertSToF => "f32",
+        .ConvertUToF => "f32",
+        .UConvert => switch (op) { else => null },
+        .FConvert => "f32",
+        .SConvert => "i32",
+        .SNegate => "-",
+        .FNegate => "-",
+        .Not => "!",
+        else => null,
+    };
 }
 
 fn emitCall(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, func: []const u8, w: anytype, arena: std.mem.Allocator) !void {
