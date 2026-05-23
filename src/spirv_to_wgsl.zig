@@ -761,6 +761,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     var merge_stack = std.ArrayList(?u32).initCapacity(arena, 8) catch return;
     defer merge_stack.deinit(arena);
 
+    // Loop state tracking
+    var loop_merge_label: ?u32 = null;
+    var loop_continue_label: ?u32 = null;
+    var loop_header_label: ?u32 = null;
+    var in_loop: bool = false;
+    var in_continue_block: bool = false;
+    const PhiUpdate = struct { result_name: []const u8, value_name: []const u8 };
+    var phi_updates = std.ArrayList(PhiUpdate).initCapacity(arena, 4) catch return;
+    defer phi_updates.deinit(arena);
+    var loop_stack = std.ArrayList(struct { merge: u32, cont: u32, header: u32 }).initCapacity(arena, 4) catch return;
+    defer loop_stack.deinit(arena);
+
     // Emit instructions
     while (i < module.instructions.len) : (i += 1) {
         const inst = module.instructions[i];
@@ -777,51 +789,149 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     pending_merge = inst.words[1];
                 }
             },
+            .LoopMerge => {
+                // LoopMerge merge_label continue_label [control]
+                if (inst.words.len >= 3) {
+                    const merge = inst.words[1];
+                    const cont = inst.words[2];
+                    // The header label is the Label instruction for this block
+                    // Scan backward past non-Label instructions to find it
+                    var header: u32 = 0;
+                    if (i >= 1) {
+                        var prev: usize = if (i > 0) i - 1 else 0;
+                        while (prev > 0) : (prev -= 1) {
+                            if (module.instructions[prev].op == .Label and module.instructions[prev].words.len > 1) {
+                                header = module.instructions[prev].words[1];
+                                break;
+                            }
+                        }
+                    }
+                    loop_merge_label = merge;
+                    loop_continue_label = cont;
+                    loop_header_label = header;
+                    in_loop = true;
+                    in_continue_block = false;
+                    try loop_stack.append(arena, .{ .merge = merge, .cont = cont, .header = header });
+                    try w.writeAll("    loop {\n");
+                }
+            },
+            .Phi => {
+                // Emit phi as variable declaration with initial value
+                if (inst.words.len >= 7) {
+                    const phi_result = names.get(inst.words[2]) orelse null;
+                    if (phi_result != null) {
+                        const phi_type = try wgslType(module, inst.words[1], names, arena);
+                        const init_val = names.get(inst.words[3]) orelse "0";
+                        try w.print("    var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val });
+                        // Record phi update: result = value from second pair (words[5])
+                        // This is used for loop induction variable updates
+                        if (inst.words.len >= 7) {
+                            const update_val = names.get(inst.words[5]) orelse null;
+                            if (update_val != null) {
+                                phi_updates.appendAssumeCapacity(.{ .result_name = phi_result.?, .value_name = update_val.? });
+                            }
+                        }
+                    }
+                }
+            },
             .BranchConditional => {
-                if (inst.words.len >= 4 and pending_merge != null) {
+                if (inst.words.len >= 4) {
                     const condition = names.get(inst.words[1]) orelse "true";
                     const true_label = inst.words[2];
                     const false_label = inst.words[3];
-                    const merge_label = pending_merge.?;
-                    _ = true_label;
-                    try w.print("    if ({s}) {{\n", .{condition});
-                    try merge_stack.append(arena, merge_label);
-                    if_depth += 1;
-                    if (false_label != merge_label) {
-                        pending_false_label = false_label;
-                    } else {
-                        pending_false_label = null;
+                    // Check if this is a loop exit condition (BranchConditional in loop header)
+                    if (in_loop and loop_merge_label != null and false_label == loop_merge_label.?) {
+                        // Loop condition: if (!cond) { break; }
+                        try w.print("        if (!({s})) {{ break; }}\n", .{condition});
+                    } else if (pending_merge != null) {
+                        // Regular if/else
+                        const merge_label = pending_merge.?;
+                        _ = true_label;
+                        try w.print("    if ({s}) {{\n", .{condition});
+                        try merge_stack.append(arena, merge_label);
+                        if_depth += 1;
+                        if (false_label != merge_label) {
+                            pending_false_label = false_label;
+                        } else {
+                            pending_false_label = null;
+                        }
+                        pending_merge = null;
                     }
-                    pending_merge = null;
                 }
             },
             .Branch => {
-                // When true branch ends and there's a false branch, emit } else {
-                if (inst.words.len > 1 and if_depth > 0 and pending_false_label != null) {
+                if (inst.words.len > 1) {
                     const target = inst.words[1];
-                    if (merge_stack.items.len > 0) {
-                        const cur_merge = merge_stack.items[merge_stack.items.len - 1];
-                        if (target == cur_merge) {
-                            try w.writeAll("    } else {");
-                            try w.writeAll("\n");
-                            pending_false_label = null;
+                    // Check for loop-related branches
+                    if (in_loop) {
+                        if (target == loop_header_label) {
+                            // Back edge — emit phi updates
+                            for (phi_updates.items) |pu| {
+                                try w.print("        {s} = {s};\n", .{ pu.result_name, pu.value_name });
+                            }
+                            phi_updates.clearRetainingCapacity();
+                            continue;
+                        }
+                        if (loop_continue_label != null and target == loop_continue_label.?) {
+                            // Branch to continue block — skip
+                            continue;
+                        }
+                    }
+                    // When true branch ends and there's a false branch, emit } else {
+                    if (if_depth > 0 and pending_false_label != null) {
+                        if (merge_stack.items.len > 0) {
+                            const cur_merge = merge_stack.items[merge_stack.items.len - 1];
+                            if (target == cur_merge) {
+                                try w.writeAll("    } else {");
+                                try w.writeAll("\n");
+                                pending_false_label = null;
+                            }
                         }
                     }
                 }
             },
             .Label => {
-                if (inst.words.len > 1 and if_depth > 0 and merge_stack.items.len > 0) {
+                if (inst.words.len > 1) {
                     const label_id = inst.words[1];
-                    const cur_merge = merge_stack.items[merge_stack.items.len - 1];
-                    if (label_id == cur_merge) {
-                        try w.writeAll("    }");
-                        try w.writeAll("\n");
-                        _ = merge_stack.pop();
-                        if_depth -= 1;
+                    // Check if this is the continue block label
+                    if (in_loop and loop_continue_label != null and label_id == loop_continue_label.?) {
+                        in_continue_block = true;
+                        continue;
+                    }
+                    // Check if this label matches a loop merge (close loop)
+                    if (loop_stack.items.len > 0) {
+                        const top = loop_stack.items[loop_stack.items.len - 1];
+                        if (label_id == top.merge) {
+                            try w.writeAll("    }\n"); // close loop
+                            _ = loop_stack.pop();
+                            if (loop_stack.items.len > 0) {
+                                const prev = loop_stack.items[loop_stack.items.len - 1];
+                                loop_merge_label = prev.merge;
+                                loop_continue_label = prev.cont;
+                                loop_header_label = prev.header;
+                                in_loop = true;
+                            } else {
+                                loop_merge_label = null;
+                                loop_continue_label = null;
+                                loop_header_label = null;
+                                in_loop = false;
+                            }
+                            in_continue_block = false;
+                            continue;
+                        }
+                    }
+                    // Check if this label matches an if merge (close if)
+                    if (if_depth > 0 and merge_stack.items.len > 0) {
+                        const cur_merge = merge_stack.items[merge_stack.items.len - 1];
+                        if (label_id == cur_merge) {
+                            try w.writeAll("    }");
+                            try w.writeAll("\n");
+                            _ = merge_stack.pop();
+                            if_depth -= 1;
+                        }
                     }
                 }
             },
-            .LoopMerge, .Phi => {},
 
             .Variable => {
                 if (inst.words.len >= 4) {
