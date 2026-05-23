@@ -1352,6 +1352,41 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try w.print("    var {s}: {s} = textureGather({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, component });
             },
 
+            // ImageDrefGather — depth comparison gather
+            .ImageDrefGather => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const si_inst = getDef(module, inst.words[3]);
+                var tex_name: []const u8 = "tex";
+                if (si_inst) |sii| {
+                    if (sii.op == .SampledImage and sii.words.len > 3) {
+                        tex_name = names.get(sii.words[2]) orelse "tex";
+                    } else {
+                        tex_name = names.get(inst.words[3]) orelse "tex";
+                    }
+                }
+                const coord = names.get(inst.words[4]) orelse "uv";
+                const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+                try w.print("    var {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
+            },
+
+            // ImageSampleProjImplicitLod — projective texture sampling
+            .ImageSampleProjImplicitLod => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const coord = names.get(inst.words[4]) orelse "uv";
+                const tex_name = names.get(inst.words[3]) orelse "tex";
+                // Projective: divide xy by w (component 3)
+                try w.print("    var {s}: {s} = textureSample({s}, {s}_sampler, {s}.xy / {s}.w);\n", .{ result_name, rt, tex_name, tex_name, coord, coord });
+            },
+
+            // ReadClockKHR — shader clock
+            .ReadClockKHR => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                try w.print("    var {s}: {s} = 0u; // ReadClockKHR stub\n", .{ result_name, rt });
+            },
+
             // ImageRead (storage image load)
             .ImageRead => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
