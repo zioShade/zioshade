@@ -505,4 +505,22 @@ pub fn build(b: *std.Build) void {
         for (a) |arg| run_fuzz.addArg(arg);
     }
     fuzz_step.dependOn(&run_fuzz.step);
+
+    // Real-world WGSL validation — run with: zig build test-realworld
+    const realworld_step = b.step("test-realworld", "Run real-world WGSL validation (requires naga)");
+    const realworld_mod = b.createModule(.{
+        .root_source_file = b.path("tests/realworld_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    realworld_mod.addImport("glslpp", glslpp_mod);
+    const realworld_exe = b.addExecutable(.{
+        .name = "realworld-tests",
+        .root_module = realworld_mod,
+    });
+    const run_realworld = b.addRunArtifact(realworld_exe);
+    if (b.args) |a| {
+        for (a) |arg| run_realworld.addArg(arg);
+    }
+    realworld_step.dependOn(&run_realworld.step);
 }
