@@ -349,7 +349,11 @@ fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id:
 }
 
 // ---- Public API ----
-pub const MslCompileOptions = struct { metal_version: u32 = 21 };
+/// Options for SPIR-V → MSL cross-compilation.
+pub const MslCompileOptions = struct {
+    /// Target Metal version (21 = Metal 2.1, 30 = Metal 3.0).
+    metal_version: u32 = 21,
+};
 
 pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: MslCompileOptions) ![]const u8 {
     _ = options;

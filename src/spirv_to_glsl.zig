@@ -285,7 +285,13 @@ fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id:
 }
 
 // ---- Public API ----
-pub const GlslCompileOptions = struct { version: u32 = 430, es: bool = false };
+/// Options for SPIR-V → GLSL cross-compilation.
+pub const GlslCompileOptions = struct {
+    /// Target GLSL version: 330, 400, 410, 420, 430, 440, 450, 460.
+    version: u32 = 430,
+    /// Output OpenGL ES Shading Language (ESSL) instead of desktop GLSL.
+    es: bool = false,
+};
 
 // Use shared parse cache from root (avoids circular import — cache is passed via allocator context)
 pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: GlslCompileOptions) ![]const u8 {
