@@ -32,11 +32,49 @@ fn getArraySuffix(module: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
 }
 
 fn emitStructForwardDecls(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
-    return common.commonEmitStructForwardDecls(module, names, root_type_id, w, alloc, emitted, emitted_names, wgslType, getMemberName);
+    const inst = getDef(module, root_type_id) orelse return;
+    switch (inst.op) {
+        .TypeStruct => {
+            try emitOneStructForwardDecl(module, names, root_type_id, w, alloc, emitted, emitted_names);
+        },
+        .TypePointer => if (inst.words.len > 3) try emitStructForwardDecls(module, names, inst.words[3], w, alloc, emitted, emitted_names),
+        .TypeArray => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names),
+        .TypeMatrix, .TypeVector => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names),
+        else => {},
+    }
 }
 
 fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
-    return common.commonEmitOneStructForwardDecl(module, names, type_id, w, alloc, emitted, emitted_names, wgslType, getMemberName);
+    const inst = getDef(module, type_id) orelse return;
+    if (inst.op != .TypeStruct) return;
+    if (inst.words.len > 2) {
+        for (inst.words[2..]) |mt_id| {
+            try emitOneStructForwardDecl(module, names, mt_id, w, alloc, emitted, emitted_names);
+        }
+    }
+    if (emitted.get(type_id) != null) return;
+    const sname = names.get(type_id) orelse "Struct";
+    if (emitted_names.get(sname) != null) return;
+    emitted.put(type_id, {}) catch return;
+    try emitted_names.put(sname, {});
+    try w.print("struct {s} {{\n", .{sname});
+    for (inst.words[2..], 0..) |mt_id, mi| {
+        const mti = getDef(module, mt_id);
+        var mname_buf: [32]u8 = undefined;
+        const mname = getMemberName(module, type_id, @as(u32, @intCast(mi)), &mname_buf);
+        if (mti) |mi2| {
+            if (mi2.op == .TypeArray and mi2.words.len > 3) {
+                const et = try wgslType(module, mi2.words[2], names, alloc);
+                const li = getDef(module, mi2.words[3]);
+                const lv: u32 = if (li) |l| l.words[3] else 1;
+                try w.print("    {s}: array<{s}, {d}>,\n", .{ mname, et, lv });
+                continue;
+            }
+        }
+        const mt = try wgslType(module, mt_id, names, alloc);
+        try w.print("    {s}: {s},\n", .{ mname, mt });
+    }
+    try w.writeAll("}\n");
 }
 
 // ---------------------------------------------------------------------------
