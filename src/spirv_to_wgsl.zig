@@ -852,6 +852,97 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
 
     try w.writeAll("}\n");
 
+    // Post-process: replace 'var' with 'let' for immutable variables
+    const raw = try out.toOwnedSlice(alloc);
+    const result = try letVarOptimization(alloc, raw);
+    alloc.free(raw);
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// let/var optimization — replace 'var' with 'let' for immutable variables
+// ---------------------------------------------------------------------------
+
+fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
+    // Strategy: find all declarations of the form 'var <name>:' with initializers.
+    // If the name doesn't appear as a reassignment target ("<name> =" without preceding 'var'),
+    // replace 'var' with 'let'.
+
+    var arena_impl = std.heap.ArenaAllocator.init(alloc);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    var mutable_names = std.StringHashMap(void).init(arena);
+
+    // Pass 1: Find names that are reassigned (lines matching '<name> =' without 'var'/'let' prefix)
+    var line_start: usize = 0;
+    while (line_start < wgsl.len) {
+        const le = if (std.mem.indexOfScalarPos(u8, wgsl, line_start, '\n')) |e| e else wgsl.len;
+        const line = wgsl[line_start..le];
+
+        // Skip declaration lines
+        if (std.mem.indexOf(u8, line, "var ") != null or std.mem.indexOf(u8, line, "let ") != null) {
+            line_start = le + 1;
+            continue;
+        }
+
+        // Look for reassignment pattern: '<name> = ...' (not '==')
+        const trimmed = std.mem.trimLeft(u8, line, " ");
+        if (trimmed.len > 0) {
+            if (std.mem.indexOfScalar(u8, trimmed, ' ')) |space_idx| {
+                const potential_name = trimmed[0..space_idx];
+                if (space_idx + 2 < trimmed.len and trimmed[space_idx + 1] == '=' and trimmed[space_idx + 2] != '=') {
+                    const name_copy = try arena.dupe(u8, potential_name);
+                    try mutable_names.put(name_copy, {});
+                }
+            }
+        }
+
+        line_start = le + 1;
+    }
+
+    // Pass 2: Replace 'var <name>:' → 'let <name>:' for immutable variables
+    var out = std.ArrayList(u8).initCapacity(alloc, wgsl.len) catch return wgsl;
+    defer out.deinit(alloc);
+
+    var pos: usize = 0;
+    while (pos < wgsl.len) {
+        const var_pos = std.mem.indexOfPos(u8, wgsl, pos, "var ") orelse {
+            try out.appendSlice(alloc, wgsl[pos..]);
+            break;
+        };
+
+        try out.appendSlice(alloc, wgsl[pos..var_pos]);
+        const after_var = var_pos + 4;
+        if (after_var >= wgsl.len) {
+            try out.appendSlice(alloc, "var ");
+            pos = after_var;
+            continue;
+        }
+
+        const colon_pos = std.mem.indexOfScalarPos(u8, wgsl, after_var, ':') orelse {
+            try out.appendSlice(alloc, "var ");
+            pos = after_var;
+            continue;
+        };
+        const name = wgsl[after_var..colon_pos];
+
+        // Check for initializer on same line
+        const le2 = std.mem.indexOfScalarPos(u8, wgsl, colon_pos, '\n') orelse wgsl.len;
+        const rest_of_line = wgsl[colon_pos..le2];
+        const has_initializer = std.mem.indexOf(u8, rest_of_line, "= ") != null or
+            std.mem.endsWith(u8, rest_of_line, "=");
+
+        if (has_initializer and !mutable_names.contains(name)) {
+            try out.appendSlice(alloc, "let ");
+        } else {
+            try out.appendSlice(alloc, "var ");
+        }
+
+        pos = after_var;
+    }
+
     return out.toOwnedSlice(alloc);
 }
 
