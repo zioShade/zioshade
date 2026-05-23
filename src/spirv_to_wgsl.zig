@@ -869,68 +869,71 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const rt = try wgslType(module, inst.words[1], names, arena);
                         const result_name = names.get(inst.words[2]) orelse "v";
                         const func_name = switch (instruction) {
-                            0 => "round",
-                            1 => "round", // RoundEven
-                            2 => "trunc",
-                            3 => "fAbs", // FAbs → abs
-                            4 => "fAbs", // SAbs → abs
-                            5 => "fSign",
-                            6 => "fSign",
-                            7 => "floor",
-                            8 => "ceil",
-                            9 => "fract",
-                            10 => "radians",
-                            11 => "degrees",
-                            12 => "sin",
-                            13 => "cos",
-                            14 => "tan",
-                            15 => "asin",
-                            16 => "acos",
-                            17 => "atan",
-                            18 => "atan2",
-                            19 => "pow",
-                            20 => "exp",
-                            21 => "log",
-                            22 => "exp2",
-                            23 => "log2",
-                            24 => "sqrt",
-                            25 => "inverseSqrt",
-                            26 => "abs",
-                            27 => "sign",
-                            28 => "clamp",
-                            29 => "mix",
-                            30 => "step",
-                            31 => "smoothstep",
-                            32 => "fma",
-                            33 => "frexp",
-                            34 => "ldexp",
-                            35 => "packSnorm4x8",
-                            36 => "packUnorm4x8",
-                            37 => "packSnorm2x16",
-                            38 => "packUnorm2x16",
-                            39 => "packHalf2x16",
-                            40 => "packDouble2x32",
-                            41 => "unpackSnorm2x16",
-                            42 => "unpackUnorm2x16",
-                            43 => "unpackHalf2x16",
-                            44 => "unpackSnorm4x8",
-                            45 => "unpackUnorm4x8",
-                            46 => "unpackDouble2x32",
-                            47 => "length",
-                            48 => "distance",
-                            49 => "cross",
-                            50 => "normalize",
-                            51 => "faceForward",
-                            52 => "reflect",
-                            53 => "refract",
-                            54 => "findILsb",
-                            55 => "findSMsb",
-                            56 => "findUMsb",
-                            57 => "interpolateAtCentroid",
-                            58 => "interpolateAtSample",
-                            59 => "interpolateAtOffset",
-                            65 => "countOneBits", // BitCount
-                            66 => "reverseBits",
+                            // glslpp's internal GLSL.std.450 opcode numbering (from semantic.zig)
+                            1 => "round",
+                            2 => "round", // RoundEven
+                            3 => "trunc",
+                            4 => "abs", // FAbs
+                            5 => "abs", // SAbs → abs
+                            6 => "sign", // FSign
+                            7 => "sign", // SSign → sign
+                            8 => "floor",
+                            9 => "ceil",
+                            10 => "fract",
+                            11 => "radians",
+                            12 => "degrees",
+                            13 => "sin",
+                            14 => "cos",
+                            15 => "tan",
+                            16 => "asin",
+                            17 => "acos",
+                            18 => "atan",
+                            19 => "sinh",
+                            20 => "cosh",
+                            21 => "tanh",
+                            22 => "asinh",
+                            23 => "acosh",
+                            24 => "atanh",
+                            25 => "atan2",
+                            26 => "pow",
+                            27 => "exp",
+                            28 => "log",
+                            29 => "exp2",
+                            30 => "log2",
+                            31 => "sqrt",
+                            32 => "inverseSqrt",
+                            33 => "determinant",
+                            34 => "matrixInverse",
+                            36 => "modf",
+                            37 => "min",
+                            40 => "max",
+                            43 => "clamp",
+                            46 => "mix",
+                            48 => "step",
+                            49 => "smoothstep",
+                            50 => "fma",
+                            52 => "frexp",
+                            53 => "ldexp",
+                            54 => "packSnorm4x8",
+                            55 => "packUnorm4x8",
+                            56 => "packSnorm2x16",
+                            57 => "packUnorm2x16",
+                            58 => "packHalf2x16",
+                            60 => "unpackSnorm2x16",
+                            61 => "unpackUnorm2x16",
+                            62 => "unpackHalf2x16",
+                            63 => "unpackSnorm4x8",
+                            64 => "unpackUnorm4x8",
+                            // Geometric — glslpp numbering starts at 66
+                            66 => "length",
+                            67 => "distance",
+                            68 => "cross",
+                            69 => "normalize",
+                            70 => "faceForward",
+                            71 => "reflect",
+                            72 => "refract",
+                            73 => "findILsb",
+                            74 => "findSMsb",
                             else => "unknown",
                         };
                         // Build args
@@ -941,18 +944,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             try args.appendSlice(arena, names.get(arg_id) orelse "0");
                         }
                         // Map GLSL.std.450 names to WGSL equivalents
-                        const wgsl_name = if (std.mem.eql(u8, func_name, "fAbs"))
-                            "abs"
-                        else if (std.mem.eql(u8, func_name, "fSign"))
-                            "sign"
-                        else if (std.mem.eql(u8, func_name, "faceForward"))
+                        const wgsl_name = if (std.mem.eql(u8, func_name, "faceForward"))
                             "faceForward"
-                        else if (std.mem.eql(u8, func_name, "countOneBits"))
-                            "countOneBits"
                         else if (std.mem.eql(u8, func_name, "findILsb"))
                             "firstTrailingBit"
                         else if (std.mem.eql(u8, func_name, "findSMsb") or std.mem.eql(u8, func_name, "findUMsb"))
                             "firstLeadingBit"
+                        else if (std.mem.eql(u8, func_name, "modf"))
+                            "frexp" // WGSL frexp returns struct
                         else
                             func_name;
                         try w.print("    var {s}: {s} = {s}({s});\n", .{ result_name, rt, wgsl_name, args.items });
