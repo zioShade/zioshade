@@ -585,14 +585,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                     if (sc == .Function) {
                         const rt = try wgslType(module, inst.words[1], names, arena);
-                        const arr = try getArraySuffix(module, inst.words[1]);
                         const vn = names.get(inst.words[2]) orelse "v";
-                        try w.print("    var {s}: {s}{s};\n", .{ vn, rt, arr });
+                        try w.print("    var {s}: {s};\n", .{ vn, rt });
                     } else if (sc == .Private) {
                         const rt = try wgslType(module, inst.words[1], names, arena);
-                        const arr = try getArraySuffix(module, inst.words[1]);
                         const vn = names.get(inst.words[2]) orelse "v";
-                        try w.print("    var {s}: {s}{s};\n", .{ vn, rt, arr });
+                        try w.print("    var {s}: {s};\n", .{ vn, rt });
                     }
                     // Output/Input/Uniform/UniformConstant variables handled in entry point setup
                 }
@@ -708,10 +706,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // CopyObject
             .CopyObject => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const result_name = names.get(inst.words[2]) orelse "v";
-                const val = names.get(inst.words[3]) orelse "0";
-                try w.print("    var {s}: {s} = {s};\n", .{ result_name, rt, val });
+                // Just propagate the name, don't create a local var
+                if (inst.words.len > 3) {
+                    const val = names.get(inst.words[3]) orelse "0";
+                    const a = try alloc.dupe(u8, val);
+                    if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
+                }
             },
 
             // VectorShuffle
