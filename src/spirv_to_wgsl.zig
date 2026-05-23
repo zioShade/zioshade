@@ -232,6 +232,45 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
     collectNames(alloc, &module, &names);
 
+    // Post-process GLSL-style names to WGSL-style
+    {
+        var it = names.iterator();
+        var replacements = std.ArrayList(struct { key: u32, val: []const u8 }).initCapacity(alloc, 16) catch return error.OutOfMemory;
+        defer replacements.deinit(alloc);
+        while (it.next()) |e| {
+            const name = e.value_ptr.*;
+            // Replace float2(...) → vec2f(...), float3(...) → vec3f(...), float4(...) → vec4f(...)
+            if (std.mem.startsWith(u8, name, "float2(")) {
+                const rest = name["float2".len..];
+                const new_name = std.fmt.allocPrint(alloc, "vec2f{s}", .{rest}) catch continue;
+                replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
+            } else if (std.mem.startsWith(u8, name, "float3(")) {
+                const rest = name["float3".len..];
+                const new_name = std.fmt.allocPrint(alloc, "vec3f{s}", .{rest}) catch continue;
+                replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
+            } else if (std.mem.startsWith(u8, name, "float4(")) {
+                const rest = name["float4".len..];
+                const new_name = std.fmt.allocPrint(alloc, "vec4f{s}", .{rest}) catch continue;
+                replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
+            } else if (std.mem.startsWith(u8, name, "int2(")) {
+                const rest = name["int2".len..];
+                const new_name = std.fmt.allocPrint(alloc, "vec2i{s}", .{rest}) catch continue;
+                replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
+            } else if (std.mem.startsWith(u8, name, "int3(")) {
+                const rest = name["int3".len..];
+                const new_name = std.fmt.allocPrint(alloc, "vec3i{s}", .{rest}) catch continue;
+                replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
+            } else if (std.mem.startsWith(u8, name, "int4(")) {
+                const rest = name["int4".len..];
+                const new_name = std.fmt.allocPrint(alloc, "vec4i{s}", .{rest}) catch continue;
+                replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
+            }
+        }
+        for (replacements.items) |r| {
+            if (try names.fetchPut(r.key, r.val)) |old| alloc.free(old.value);
+        }
+    }
+
     var decorations = std.AutoHashMap(u32, std.ArrayList(DecorationEntry)).init(alloc);
     defer {
         var it = decorations.iterator();
@@ -267,7 +306,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
             if (sc == .Output) {
                 const location = getDecVal(&decorations, inst.words[2], .location);
-                if (location != null) {
+                if (location != null or is_fragment) {
                     try output_vars.append(arena, inst.words[2]);
                     if (output_var_id == null) output_var_id = inst.words[2];
                 }
