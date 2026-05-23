@@ -1,33 +1,44 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 const std = @import("std");
-pub const compat = @import("compat.zig");
+// Public types — used in return values, diagnostics, and test code
 pub const diagnostic = @import("diagnostic.zig");
 pub const reflection = @import("reflection.zig");
-pub const lexer = @import("lexer.zig");
-pub const preprocessor = @import("preprocessor.zig");
-pub const ast = @import("ast.zig");
-pub const ir = @import("ir.zig");
 pub const spirv = @import("spirv.zig");
-pub const parser = @import("parser.zig");
-pub const semantic = @import("semantic.zig");
-pub const codegen = @import("codegen.zig");
-pub const spirv_to_hlsl = @import("spirv_to_hlsl.zig");
-pub const spirv_to_glsl = @import("spirv_to_glsl.zig");
-pub const spirv_to_msl = @import("spirv_to_msl.zig");
-pub const spirv_to_wgsl = @import("spirv_to_wgsl.zig");
-pub const kernel_fusion = @import("kernel_fusion.zig");
+pub const compat = @import("compat.zig");
+
+// Internal modules — not part of the public API
+const lexer = @import("lexer.zig");
+const preprocessor = @import("preprocessor.zig");
+const ast = @import("ast.zig");
+const ir = @import("ir.zig");
+const parser = @import("parser.zig");
+const semantic = @import("semantic.zig");
+const codegen = @import("codegen.zig");
+const spirv_to_hlsl = @import("spirv_to_hlsl.zig");
+const spirv_to_glsl = @import("spirv_to_glsl.zig");
+const spirv_to_msl = @import("spirv_to_msl.zig");
+const spirv_to_wgsl = @import("spirv_to_wgsl.zig");
+const kernel_fusion = @import("kernel_fusion.zig");
 const compact_ids = @import("compact_ids.zig");
 
+/// Errors returned by compilation functions.
+/// Use `last_compile_detail` and `compileToSPIRVWithDiagnostics` for more information.
 pub const Error = error{
     OutOfMemory,
+    /// Lexer encountered invalid tokens or characters.
     LexFailed,
+    /// Preprocessor directives could not be resolved (#define, #if, etc.).
     PreprocessFailed,
+    /// GLSL source could not be parsed into a valid AST.
     ParseFailed,
+    /// Semantic analysis found type errors, undeclared variables, etc.
     SemanticFailed,
+    /// SPIR-V code generation failed.
     CodegenFailed,
 };
 
-/// Detailed compile result for diagnostics
+/// Detailed information about which compilation stage failed.
+/// Set by `compileToSPIRV` on error. Access via `last_compile_detail`.
 pub const CompileDetail = enum {
     lex_failed,
     parse_failed,
@@ -35,20 +46,48 @@ pub const CompileDetail = enum {
     codegen_failed,
 };
 
+/// **Deprecated:** Use `compileToSPIRVWithDiagnostics` for structured error reporting.
+/// This threadlocal will be removed in a future version.
 pub threadlocal var last_compile_detail: ?CompileDetail = null;
 
-pub const Stage = enum { vertex, fragment, compute, geometry, tessellation_control, tessellation_evaluation, mesh, task, raygen, closesthit, miss, intersection, anyhit, callable };
+/// Shader stage for compilation.
+pub const Stage = enum {
+    vertex,
+    fragment,
+    compute,
+    geometry,
+    tessellation_control,
+    tessellation_evaluation,
+    mesh,
+    task,
+    raygen,
+    closesthit,
+    miss,
+    intersection,
+    anyhit,
+    callable,
+};
+
+/// Target SPIR-V version for code generation.
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
 
+/// Resource limits for shader compilation.
 pub const ResourceLimits = struct {
+    /// Maximum uniform components per stage.
     max_uniform_components: u32 = 4096,
+    /// Maximum combined texture units.
     max_texture_units: u32 = 32,
 };
 
+/// Options for `compileToSPIRV` and related functions.
 pub const CompileOptions = struct {
+    /// GLSL source version: 100 (ESSL), 110, 120, 130, 140, 150, 300 (ESSL), 330, 400, 410, 420, 430, 440, 450, 460.
     version: u32 = 430,
+    /// Shader stage to compile.
     stage: Stage = .fragment,
+    /// Target SPIR-V version for the output binary.
     spirv_version: SPIRVVersion = .@"1.5",
+    /// Resource limits for validation.
     limits: ResourceLimits = .{},
 };
 
@@ -437,6 +476,25 @@ pub fn compileGlslToMsl(
     const msl = try spirvToMSL(alloc, spirv_words, .{});
     defer alloc.free(msl);
     return try alloc.dupeZ(u8, msl);
+}
+
+/// One-shot GLSL → WGSL compilation.
+/// Takes GLSL source and returns a null-terminated WGSL string.
+/// Caller must free with `alloc.free()`.
+pub fn compileGlslToWgsl(
+    alloc: std.mem.Allocator,
+    glsl_source: [:0]const u8,
+    stage: Stage,
+) ![:0]const u8 {
+    const spirv_words = try compileToSPIRV(alloc, glsl_source, .{
+        .stage = stage,
+        .version = 430,
+    });
+    defer alloc.free(spirv_words);
+
+    const wgsl = try spirvToWGSL(alloc, spirv_words, .{});
+    defer alloc.free(wgsl);
+    return try alloc.dupeZ(u8, wgsl);
 }
 
 /// One-shot GLSL -> GLSL compilation (round-trip / decompiled).
@@ -1105,3 +1163,12 @@ test "compileGlslToGlslVersion outputs requested version" {
 }
 
 
+
+test "compileGlslToWgsl basic" {
+    const alloc = std.testing.allocator;
+    const source = "#version 430\nvoid main() { gl_FragColor = vec4(1.0); }";
+    const wgsl = try compileGlslToWgsl(alloc, source, .fragment);
+    defer alloc.free(wgsl);
+    try std.testing.expect(wgsl.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@fragment") != null);
+}

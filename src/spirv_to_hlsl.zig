@@ -211,8 +211,11 @@ fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
 // HLSL Emitter
 // ---------------------------------------------------------------------------
 
+/// Options for SPIR-V → HLSL cross-compilation.
 pub const HlslCompileOptions = struct {
+    /// Shift all descriptor bindings by this amount. -1 remaps binding=1 → register(b0).
     binding_shift: i32 = 0,
+    /// Target HLSL Shader Model version (50 = 5.0, 60 = 6.0).
     shader_model: u32 = 60,
 };
 
