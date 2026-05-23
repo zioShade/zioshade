@@ -524,6 +524,55 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
     }
 
+    // Emit non-entry functions first
+    var func_ids = std.ArrayList(u32).initCapacity(arena, 8) catch return error.OutOfMemory;
+    var func_idx_map = std.AutoHashMap(u32, usize).init(arena);
+    for (module.instructions, 0..) |inst, i| {
+        if (inst.op == .Function and inst.words.len > 2) {
+            func_ids.appendAssumeCapacity(inst.words[2]);
+            func_idx_map.put(inst.words[2], i) catch {};
+        }
+    }
+    for (func_ids.items) |fid| {
+        if (fid == module.entry_point_id) continue; // emit entry last
+        const fidx = func_idx_map.get(fid) orelse continue;
+        const fi = module.instructions[fidx];
+        if (fi.words.len < 5) continue;
+        // Get function type to resolve return type and params
+        const func_type_id = fi.words[4]; // OpFunction: result_type, result_id, func_control, func_type
+        const ft_inst = getDef(&module, func_type_id);
+        if (ft_inst == null or ft_inst.?.op != .TypeFunction or ft_inst.?.words.len < 3) continue;
+        // Return type (words[2] of TypeFunction)
+        const ret_type = try wgslType(&module, ft_inst.?.words[2], &names, arena);
+        const func_name = names.get(fid) orelse "func";
+        // Parameters (words[3..] of TypeFunction)
+        var param_count: usize = 0;
+        try w.print("fn {s}(", .{func_name});
+        for (ft_inst.?.words[3..], 0..) |param_type_id, pi| {
+            if (pi > 0) try w.writeAll(", ");
+            const pt = try wgslType(&module, param_type_id, &names, arena);
+            // Look up param names from the function body
+            var found_name: ?[]const u8 = null;
+            var pidx: usize = 0;
+            for (module.instructions[fidx + 1..]) |pinst| {
+                if (pinst.op == .FunctionParameter and pinst.words.len > 2) {
+                    if (pidx == pi) {
+                        found_name = names.get(pinst.words[2]);
+                        break;
+                    }
+                    pidx += 1;
+                }
+                if (pinst.op == .Label) break;
+            }
+            const p_name = found_name orelse try std.fmt.allocPrint(arena, "p{d}", .{pi});
+            try w.print("{s}: {s}", .{p_name, pt});
+            param_count += 1;
+        }
+        try w.print(") -> {s} {{\n", .{ret_type});
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, false, null);
+        try w.writeAll("}\n\n");
+    }
+
     // Emit entry function
     const entry_stage: []const u8 = if (is_fragment) "@fragment" else if (is_vertex) "@vertex" else if (is_compute) "@compute" else "@fragment";
 
@@ -608,19 +657,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     _ = decorations;
     // Skip function declaration instructions
     var i: usize = func_idx + 1;
-    // Skip FunctionParameter instructions
+    // Skip FunctionParameter instructions (parameters declared in function signature)
     while (i < module.instructions.len) : (i += 1) {
         const inst = module.instructions[i];
         if (inst.op == .Label) { i += 1; break; }
-        if (inst.op == .FunctionParameter) {
-            // Declare parameter as local variable
-            if (inst.words.len > 2) {
-                const param_type = try wgslType(module, inst.words[1], names, arena);
-                const param_name = names.get(inst.words[2]) orelse "p";
-                try w.print("    var {s}: {s};\n", .{ param_name, param_type });
-            }
-            continue;
-        }
+        if (inst.op == .FunctionParameter) continue;
         break;
     }
 
