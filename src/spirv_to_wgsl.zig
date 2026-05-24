@@ -1283,10 +1283,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             if (scan_inst.op == .FunctionEnd) break;
             if (scan_inst.op == .BranchConditional and scan_inst.words.len >= 4) {
                 const cond_id = scan_inst.words[1];
-                // If this condition can be inlined, mark it as dead
+                // If this condition can be inlined, mark it and sub-expressions as dead
                 const inlined = inlineConditionExpr(module, names, cond_id, arena, 0);
                 if (inlined != null) {
-                    dead_conditions.put(cond_id, {}) catch {};
+                    markDeadConditions(module, cond_id, &dead_conditions, 0);
                 }
             }
         }
@@ -2768,6 +2768,27 @@ fn resolveSourceName(module: *const ParsedModule, names: *const std.AutoHashMap(
 // Try to inline a condition expression for loop exit checks.
 // Traces through Load/CopyObject to find the comparison and inlines it.
 // Returns the inlined expression, or null if inlining isn't possible.
+// Recursively mark condition IDs as dead (for compound conditions like LogicalAnd/Or)
+fn markDeadConditions(module: *const ParsedModule, cond_id: u32, dead: *std.AutoHashMap(u32, void), depth: u32) void {
+    if (depth > 5) return;
+    dead.put(cond_id, {}) catch {};
+    const cond_def = getDef(module, cond_id) orelse return;
+    switch (cond_def.op) {
+        .LogicalAnd, .LogicalOr => {
+            if (cond_def.words.len >= 5) {
+                markDeadConditions(module, cond_def.words[3], dead, depth + 1);
+                markDeadConditions(module, cond_def.words[4], dead, depth + 1);
+            }
+        },
+        .LogicalNot => {
+            if (cond_def.words.len >= 4) {
+                markDeadConditions(module, cond_def.words[3], dead, depth + 1);
+            }
+        },
+        else => {},
+    }
+}
+
 fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), cond_id: u32, arena: std.mem.Allocator, depth: u32) ?[]const u8 {
     if (depth > 3) return null; // prevent infinite recursion
     const cond_def = getDef(module, cond_id) orelse return null;
@@ -2799,6 +2820,19 @@ fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMa
             buf.appendSlice(arena, "!(") catch return null;
             buf.appendSlice(arena, inner) catch return null;
             buf.append(arena, ')') catch return null;
+            return buf.items;
+        },
+        // LogicalAnd / LogicalOr — inline as "lhs and rhs" / "lhs or rhs"
+        .LogicalAnd, .LogicalOr => {
+            if (cond_def.words.len < 5) return null;
+            const lhs = inlineConditionExpr(module, names, cond_def.words[3], arena, depth + 1);
+            const rhs = inlineConditionExpr(module, names, cond_def.words[4], arena, depth + 1);
+            if (lhs == null or rhs == null) return null;
+            const join = if (cond_def.op == .LogicalAnd) " and " else " or ";
+            var buf = std.ArrayList(u8).initCapacity(arena, lhs.?.len + rhs.?.len + 6) catch return null;
+            buf.appendSlice(arena, lhs.?) catch return null;
+            buf.appendSlice(arena, join) catch return null;
+            buf.appendSlice(arena, rhs.?) catch return null;
             return buf.items;
         },
         // Load / CopyObject — trace through to the underlying value
