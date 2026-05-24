@@ -1970,30 +1970,34 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const v1 = names.get(inst.words[3]) orelse "v1";
                 const v2 = names.get(inst.words[4]) orelse "v2";
-                var swizzle = std.ArrayList(u8).initCapacity(alloc, 16) catch return;
-                defer swizzle.deinit(alloc);
+                // Check if all components come from the same source vector (single-source swizzle)
+                var single_source = true;
                 for (inst.words[5..]) |idx| {
-                    const src = if (idx < 4) v1 else v2;
-                    const comp = idx % 4;
-                    if (swizzle.items.len > 0 and std.mem.endsWith(u8, swizzle.items, src)) {
-                        try swizzle.append(alloc, switch (comp) { 0 => 'x', 1 => 'y', 2 => 'z', 3 => 'w', else => 'x' });
-                    } else {
-                        // Different source vector — can't use simple swizzle
-                        try swizzle.print(alloc, "{s}[{d}]", .{ src, comp });
+                    if (idx >= 4) { single_source = false; break; }
+                }
+                if (single_source) {
+                    // All from v1 — emit as v1.xyzw swizzle
+                    var sw = std.ArrayList(u8).initCapacity(arena, 5) catch return;
+                    defer sw.deinit(arena);
+                    const chars = "xyzw";
+                    for (inst.words[5..]) |idx| {
+                        if (idx < 4) try sw.append(arena, chars[idx]);
                     }
+                    try writeInd(w, indent); try w.print("let {s}: {s} = {s}.{s};\n", .{ result_name, rt, v1, sw.items });
+                } else {
+                    // Mixed sources — construct from components
+                    try writeInd(w, indent); try w.print("let {s}: {s} = {s}(", .{ result_name, rt, rt });
+                    var first = true;
+                    for (inst.words[5..]) |idx| {
+                        if (!first) try w.writeAll(", ");
+                        first = false;
+                        const src = if (idx < 4) v1 else v2;
+                        const comp = idx % 4;
+                        const sw = switch (comp) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" };
+                        try w.print("{s}{s}", .{ src, sw });
+                    }
+                    try w.writeAll(");\n");
                 }
-                // Simple approach: construct from components
-                try writeInd(w, indent); try w.print("let {s}: {s} = {s}(", .{ result_name, rt, rt });
-                var first = true;
-                for (inst.words[5..]) |idx| {
-                    if (!first) try w.writeAll(", ");
-                    first = false;
-                    const src = if (idx < 4) v1 else v2;
-                    const comp = idx % 4;
-                    const sw = switch (comp) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" };
-                    try w.print("{s}{s}", .{ src, sw });
-                }
-                try w.writeAll(");\n");
             },
 
             // Arithmetic
