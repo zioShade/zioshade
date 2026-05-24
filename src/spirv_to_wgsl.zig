@@ -1359,12 +1359,97 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             try writeInd(w, indent); try w.print("if (!({s})) {{ break; }}\n", .{condition});
                             pending_merge = null;
                         } else if (true_is_continue) {
-                            // if (cond) { continue; }
-                            try writeInd(w, indent); try w.print("if ({s}) {{ continue; }}\n", .{condition});
+                            // Emit phi computation + updates before continue, inside the if block
+                            // In SPIR-V, continue goes to continue block which computes phi values
+                            // In WGSL, we must compute phi values before the continue keyword
+                            try writeInd(w, indent); try w.print("if ({s}) {{\n", .{condition});
+                            if (loop_stack.items.len > 0) {
+                                const cur = loop_stack.items[loop_stack.items.len - 1];
+                                // Scan forward for the continue block and emit phi-relevant computations
+                                var ci: usize = i + 1;
+                                while (ci < module.instructions.len) : (ci += 1) {
+                                    const cinst = module.instructions[ci];
+                                    if (cinst.op == .Label and cinst.words.len > 1 and cinst.words[1] == loop_continue_label.?) {
+                                        // Found continue block — emit instructions until Branch back to header
+                                        ci += 1;
+                                        while (ci < module.instructions.len) : (ci += 1) {
+                                            const cbinst = module.instructions[ci];
+                                            if (cbinst.op == .Branch) break;
+                                            if (cbinst.op == .Label) break;
+                                            if (cbinst.words.len > 2) {
+                                                const result_id = cbinst.words[2];
+                                                var is_phi_val = false;
+                                                var idx2: usize = cur.phi_start;
+                                                while (idx2 < cur.phi_end) : (idx2 += 1) {
+                                                    if (phi_updates.items[idx2].value_id == result_id) {
+                                                        is_phi_val = true;
+                                                        break;
+                                                    }
+                                                }
+                                                if (is_phi_val) {
+                                                    try emitSimpleInstruction(module, names, cbinst, w, alloc, arena, indent + 1);
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    if (cinst.op == .LoopMerge or cinst.op == .FunctionEnd) break;
+                                }
+                                // Emit the phi assignments
+                                var idx: usize = cur.phi_start;
+                                while (idx < cur.phi_end) : (idx += 1) {
+                                    const pu = phi_updates.items[idx];
+                                    const res_name = names.get(pu.result_id) orelse continue;
+                                    const val_name = names.get(pu.value_id) orelse continue;
+                                    try writeInd(w, indent + 1); try w.print("{s} = {s};\n", .{ res_name, val_name });
+                                }
+                            }
+                            try writeInd(w, indent + 1); try w.writeAll("continue;\n");
+                            try writeInd(w, indent); try w.writeAll("}\n");
                             pending_merge = null;
                         } else if (false_is_continue) {
-                            // if (!(cond)) { continue; }
-                            try writeInd(w, indent); try w.print("if (!({s})) {{ continue; }}\n", .{condition});
+                            // Emit phi computation + updates before continue, inside the if block
+                            try writeInd(w, indent); try w.print("if (!({s})) {{\n", .{condition});
+                            if (loop_stack.items.len > 0) {
+                                const cur = loop_stack.items[loop_stack.items.len - 1];
+                                var ci: usize = i + 1;
+                                while (ci < module.instructions.len) : (ci += 1) {
+                                    const cinst = module.instructions[ci];
+                                    if (cinst.op == .Label and cinst.words.len > 1 and cinst.words[1] == loop_continue_label.?) {
+                                        ci += 1;
+                                        while (ci < module.instructions.len) : (ci += 1) {
+                                            const cbinst = module.instructions[ci];
+                                            if (cbinst.op == .Branch) break;
+                                            if (cbinst.op == .Label) break;
+                                            if (cbinst.words.len > 2) {
+                                                const result_id = cbinst.words[2];
+                                                var is_phi_val = false;
+                                                var idx2: usize = cur.phi_start;
+                                                while (idx2 < cur.phi_end) : (idx2 += 1) {
+                                                    if (phi_updates.items[idx2].value_id == result_id) {
+                                                        is_phi_val = true;
+                                                        break;
+                                                    }
+                                                }
+                                                if (is_phi_val) {
+                                                    try emitSimpleInstruction(module, names, cbinst, w, alloc, arena, indent + 1);
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    if (cinst.op == .LoopMerge or cinst.op == .FunctionEnd) break;
+                                }
+                                var idx: usize = cur.phi_start;
+                                while (idx < cur.phi_end) : (idx += 1) {
+                                    const pu = phi_updates.items[idx];
+                                    const res_name = names.get(pu.result_id) orelse continue;
+                                    const val_name = names.get(pu.value_id) orelse continue;
+                                    try writeInd(w, indent + 1); try w.print("{s} = {s};\n", .{ res_name, val_name });
+                                }
+                            }
+                            try writeInd(w, indent + 1); try w.writeAll("continue;\n");
+                            try writeInd(w, indent); try w.writeAll("}\n");
                             pending_merge = null;
                         } else {
                             // Regular if/else
