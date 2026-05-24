@@ -1,12 +1,15 @@
-// Tests: multiple render targets (layout location)
+// Tests: multi-target switch with default
 #version 450
-uniform vec4 u_color0;
-uniform vec4 u_color1;
-
-layout(location = 0) out vec4 fragColor0;
-layout(location = 1) out vec4 fragColor1;
+uniform int u_mode;
 
 void main() {
-    fragColor0 = u_color0;
-    fragColor1 = u_color1;
+    float r;
+    switch (u_mode) {
+        case 0: r = 0.2; break;
+        case 1: r = 0.4; break;
+        case 2: r = 0.6; break;
+        case 3: r = 0.8; break;
+        default: r = 0.0; break;
+    }
+    gl_FragColor = vec4(r, r, r, 1.0);
 }

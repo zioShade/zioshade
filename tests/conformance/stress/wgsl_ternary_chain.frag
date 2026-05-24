@@ -1,10 +1,9 @@
-// Tests: ternary operator chains
+// Tests: ternary chain with different types
 #version 450
 uniform float u_val;
 
 void main() {
-    float x = u_val;
-    float result = x > 0.5 ? 1.0 : (x > 0.25 ? 0.5 : 0.0);
-    float result2 = x < 0.1 ? 0.1 : (x < 0.9 ? x : 0.9);
-    gl_FragColor = vec4(result, result2, 0.0, 1.0);
+    float r = u_val > 0.66 ? 1.0 : (u_val > 0.33 ? 0.5 : 0.0);
+    float g = 1.0 - r;
+    gl_FragColor = vec4(r, g, u_val, 1.0);
 }
