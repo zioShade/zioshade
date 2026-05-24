@@ -1201,6 +1201,43 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
+    // Pre-scan: identify dead CompositeExtract results that will be absorbed by swizzle optimization
+    var dead_extracts = std.AutoHashMap(u32, void).init(arena);
+    {
+        var si: usize = func_idx + 1;
+        while (si < module.instructions.len) : (si += 1) {
+            const scan_inst = module.instructions[si];
+            if (scan_inst.op == .FunctionEnd) break;
+            if (scan_inst.op == .CompositeConstruct and scan_inst.words.len > 3) {
+                // Check for leading sequential extracts from the same source
+                var lead_source: ?u32 = null;
+                var lead_count: usize = 0;
+                for (scan_inst.words[3..], 0..) |comp_id, ci| {
+                    const comp_def = getDef(module, comp_id) orelse break;
+                    if (comp_def.op == .CompositeExtract and comp_def.words.len > 4) {
+                        if (ci == 0) {
+                            lead_source = comp_def.words[3];
+                            lead_count = 1;
+                        } else if (comp_def.words[3] == lead_source.? and comp_def.words[4] == ci) {
+                            lead_count += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                if (lead_count >= 2 and lead_source != null) {
+                    // Mark the leading CompositeExtract results as dead
+                    for (scan_inst.words[3..], 0..) |comp_id, ci| {
+                        if (ci >= lead_count) break;
+                        dead_extracts.put(comp_id, {}) catch {};
+                    }
+                }
+            }
+        }
+    }
+
     // Emit instructions
     while (i < module.instructions.len) : (i += 1) {
         const inst = module.instructions[i];
@@ -1797,6 +1834,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // CompositeExtract
             .CompositeExtract => {
+                // Skip dead extracts that will be absorbed by swizzle optimization
+                if (dead_extracts.contains(inst.words[2])) continue;
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const composite = names.get(inst.words[3]) orelse "c";
@@ -1879,7 +1918,6 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         try swizzle.print(alloc, "{s}[{d}]", .{ src, comp });
                     }
                 }
-                try writeInd(w, indent); try w.print("// shuffle: {s}\n", .{swizzle.items});
                 // Simple approach: construct from components
                 try writeInd(w, indent); try w.print("let {s}: {s} = {s}(", .{ result_name, rt, rt });
                 var first = true;
