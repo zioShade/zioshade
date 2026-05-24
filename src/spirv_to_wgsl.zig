@@ -390,30 +390,37 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         while (it.next()) |e| {
             const name = e.value_ptr.*;
             // Replace float2(...) → vec2f(...), float3(...) → vec3f(...), float4(...) → vec4f(...)
-            if (std.mem.startsWith(u8, name, "float2(")) {
-                const rest = name["float2".len..];
-                const new_name = std.fmt.allocPrint(alloc, "vec2f{s}", .{rest}) catch continue;
-                replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
-            } else if (std.mem.startsWith(u8, name, "float3(")) {
-                const rest = name["float3".len..];
-                const new_name = std.fmt.allocPrint(alloc, "vec3f{s}", .{rest}) catch continue;
-                replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
-            } else if (std.mem.startsWith(u8, name, "float4(")) {
-                const rest = name["float4".len..];
-                const new_name = std.fmt.allocPrint(alloc, "vec4f{s}", .{rest}) catch continue;
-                replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
-            } else if (std.mem.startsWith(u8, name, "int2(")) {
-                const rest = name["int2".len..];
-                const new_name = std.fmt.allocPrint(alloc, "vec2i{s}", .{rest}) catch continue;
-                replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
-            } else if (std.mem.startsWith(u8, name, "int3(")) {
-                const rest = name["int3".len..];
-                const new_name = std.fmt.allocPrint(alloc, "vec3i{s}", .{rest}) catch continue;
-                replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
-            } else if (std.mem.startsWith(u8, name, "int4(")) {
-                const rest = name["int4".len..];
-                const new_name = std.fmt.allocPrint(alloc, "vec4i{s}", .{rest}) catch continue;
-                replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
+            // Handle both leading and embedded cases (e.g., Light(float3(...), 0.5))
+            if (std.mem.indexOf(u8, name, "float2(") != null or
+                std.mem.indexOf(u8, name, "float3(") != null or
+                std.mem.indexOf(u8, name, "float4(") != null or
+                std.mem.indexOf(u8, name, "int2(") != null or
+                std.mem.indexOf(u8, name, "int3(") != null or
+                std.mem.indexOf(u8, name, "int4(") != null)
+            {
+                var new_name = name;
+                var allocated = false;
+                const subs = [_]struct { from: []const u8, to: []const u8 }{
+                    .{ .from = "float2(", .to = "vec2f(" },
+                    .{ .from = "float3(", .to = "vec3f(" },
+                    .{ .from = "float4(", .to = "vec4f(" },
+                    .{ .from = "int2(", .to = "vec2i(" },
+                    .{ .from = "int3(", .to = "vec3i(" },
+                    .{ .from = "int4(", .to = "vec4i(" },
+                };
+                for (subs) |sub| {
+                    if (std.mem.indexOf(u8, new_name, sub.from)) |pos| {
+                        const replacement = std.fmt.allocPrint(alloc, "{s}{s}{s}", .{
+                            new_name[0..pos], sub.to, new_name[pos + sub.from.len ..],
+                        }) catch continue;
+                        if (allocated) alloc.free(new_name);
+                        new_name = replacement;
+                        allocated = true;
+                    }
+                }
+                if (allocated) {
+                    replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
+                }
             }
         }
         for (replacements.items) |r| {
