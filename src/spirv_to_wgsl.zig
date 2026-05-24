@@ -1356,17 +1356,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (inst.words.len >= 7) {
                             phi_updates.appendAssumeCapacity(.{ .result_id = inst.words[2], .value_id = inst.words[5] });
                         }
-                        // Check if LoopMerge follows (within the next 20 instructions)
+                        // Check if LoopMerge follows (within the next 30 instructions)
+                        // Don't stop at Labels — loop header may have Labels between Phi and LoopMerge
                         var peek: usize = i + 1;
-                        const peek_end = @min(i + 20, module.instructions.len);
+                        const peek_end = @min(i + 30, module.instructions.len);
                         while (peek < peek_end) : (peek += 1) {
                             if (module.instructions[peek].op == .LoopMerge) {
                                 defer_active = true;
                                 defer_start = i + 1;
                                 break;
                             }
-                            if (module.instructions[peek].op == .FunctionEnd or
-                                module.instructions[peek].op == .Label) break;
+                            if (module.instructions[peek].op == .FunctionEnd) break;
                         }
                     }
                 }
