@@ -1805,10 +1805,22 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
             .Bitcast => {
                 // Bitcast in WGSL: bitcast<T>(value)
-                const rt = try wgslType(module, inst.words[1], names, arena);
+                // If source and dest types match, it's a no-op — just assign the value
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const val = names.get(inst.words[3]) orelse "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = bitcast<{s}>({s});\n", .{ result_name, rt, rt, val });
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                // Check if operand type matches result type (same-type bitcast is no-op)
+                const operand_type_id = getTypeOf(module, inst.words[3]);
+                const is_same_type = if (operand_type_id) |otid| blk: {
+                    const src_type = try wgslType(module, otid, names, arena);
+                    break :blk std.mem.eql(u8, src_type, rt);
+                } else false;
+                if (is_same_type) {
+                    // Same-type bitcast: just assign the value directly
+                    try writeInd(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, val });
+                } else {
+                    try writeInd(w, indent); try w.print("let {s}: {s} = bitcast<{s}>({s});\n", .{ result_name, rt, rt, val });
+                }
             },
 
             // Texture sampling
