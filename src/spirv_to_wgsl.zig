@@ -644,12 +644,59 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         // Return type (words[2] of TypeFunction)
         const ret_type = try wgslType(&module, ft_inst.?.words[2], &names, arena);
         const func_name = names.get(fid) orelse "func";
+
+        // Detect pointer params (inout/out parameters)
+        // In SPIR-V, inout params are Function-scope pointer types
+        const InoutParam = struct { param_idx: usize, param_id: u32, pointee_type_id: u32, local_name: []const u8 };
+        var inout_params = std.ArrayList(InoutParam).initCapacity(arena, 4) catch return error.OutOfMemory;
+        var has_pointer_params = false;
+
+        for (ft_inst.?.words[3..], 0..) |param_type_id, pi| {
+            const pt_inst = getDef(&module, param_type_id);
+            if (pt_inst) |pti| {
+                if (pti.op == .TypePointer and pti.words.len > 3) {
+                    // This is a pointer parameter — inout/out in GLSL
+                    const storage_class: spirv.StorageClass = @enumFromInt(pti.words[2]);
+                    if (storage_class == .Function) {
+                        has_pointer_params = true;
+                        const pointee_type_id = pti.words[3];
+                        // Find the FunctionParameter instruction for this param
+                        var param_id: u32 = 0;
+                        var pidx: usize = 0;
+                        for (module.instructions[fidx + 1..]) |pinst| {
+                            if (pinst.op == .FunctionParameter and pinst.words.len > 2) {
+                                if (pidx == pi) {
+                                    param_id = pinst.words[2];
+                                    break;
+                                }
+                                pidx += 1;
+                            }
+                            if (pinst.op == .Label) break;
+                        }
+                        const orig_name = names.get(param_id) orelse "";
+                        const local_name = try std.fmt.allocPrint(arena, "_inout_{s}", .{if (orig_name.len > 0) orig_name else try std.fmt.allocPrint(arena, "p{d}", .{pi})});
+                        try inout_params.append(arena, .{ .param_idx = pi, .param_id = param_id, .pointee_type_id = pointee_type_id, .local_name = local_name });
+                    }
+                }
+            }
+        }
+
         // Parameters (words[3..] of TypeFunction)
         var param_count: usize = 0;
         try w.print("fn {s}(", .{func_name});
         for (ft_inst.?.words[3..], 0..) |param_type_id, pi| {
             if (pi > 0) try w.writeAll(", ");
-            const pt = try wgslType(&module, param_type_id, &names, arena);
+            // Check if this param is a pointer (inout/out)
+            var actual_type_id = param_type_id;
+            var is_inout = false;
+            for (inout_params.items) |ip| {
+                if (ip.param_idx == pi) {
+                    actual_type_id = ip.pointee_type_id;
+                    is_inout = true;
+                    break;
+                }
+            }
+            const pt = try wgslType(&module, actual_type_id, &names, arena);
             // Look up param names from the function body
             var found_name: ?[]const u8 = null;
             var pidx: usize = 0;
@@ -664,15 +711,69 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 if (pinst.op == .Label) break;
             }
             const p_name = found_name orelse try std.fmt.allocPrint(arena, "p{d}", .{pi});
-            try w.print("{s}: {s}", .{p_name, pt});
+            try w.print("{s}: {s}", .{ p_name, pt });
             param_count += 1;
         }
-        if (std.mem.eql(u8, ret_type, "void")) {
+
+        // Determine return type
+        if (has_pointer_params and inout_params.items.len > 0) {
+            // Need to return modified inout param values
+            if (std.mem.eql(u8, ret_type, "void")) {
+                if (inout_params.items.len == 1) {
+                    // Single out param: return the pointee type directly
+                    const out_type = try wgslType(&module, inout_params.items[0].pointee_type_id, &names, arena);
+                    try w.print(") -> {s} {{\n", .{out_type});
+                } else {
+                    // Multiple out params: return a struct
+                    // TODO: implement struct return for multiple out params
+                    try w.writeAll(") {\n");
+                }
+            } else {
+                // Non-void return + out params: return a struct
+                // TODO: implement struct return for non-void + out params
+                try w.print(") -> {s} {{\n", .{ret_type});
+            }
+        } else if (std.mem.eql(u8, ret_type, "void")) {
             try w.writeAll(") {\n");
         } else {
             try w.print(") -> {s} {{\n", .{ret_type});
         }
+
+        // Emit local var declarations for inout params
+        for (inout_params.items) |ip| {
+            const pt = try wgslType(&module, ip.pointee_type_id, &names, arena);
+            const orig_name = names.get(ip.param_id) orelse "";
+            try writeIndentStatic(w, 1);
+            try w.print("var {s}: {s} = {s};\n", .{ ip.local_name, pt, if (orig_name.len > 0) orig_name else "0" });
+        }
+
+        // Remap pointer param IDs to local var names in the names map
+        // Save old names to restore later (in case of shared IDs)
+        var saved_names = std.ArrayList(struct { id: u32, name: []const u8 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+        for (inout_params.items) |ip| {
+            const old_name = names.get(ip.param_id);
+            if (old_name) |n| {
+                try saved_names.append(arena, .{ .id = ip.param_id, .name = n });
+            }
+            const local_copy = try alloc.dupe(u8, ip.local_name);
+            if (try names.fetchPut(ip.param_id, local_copy)) |old| alloc.free(old.value);
+        }
+        defer {
+            // Restore original names
+            for (saved_names.items) |sn| {
+                const restored = alloc.dupe(u8, sn.name) catch continue;
+                if (names.fetchPut(sn.id, restored) catch null) |old| alloc.free(old.value);
+            }
+        }
+
         try emitBody(&module, &names, &decorations, fidx, w, alloc, arena);
+
+        // Emit return for inout params (void function with single out param)
+        if (has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) {
+            try writeIndentStatic(w, 1);
+            try w.print("return {s};\n", .{inout_params.items[0].local_name});
+        }
+
         try w.writeAll("}\n\n");
     }
 
@@ -1761,13 +1862,52 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const func_id = inst.words[3];
                 const func_name = names.get(func_id) orelse "func";
+
+                // Check if the callee has inout params by examining its function type
+                var callee_inout_arg_indices = std.ArrayList(usize).initCapacity(arena, 4) catch return;
+                const func_def = getDef(module, func_id);
+                if (func_def) |fd| {
+                    if (fd.op == .Function and fd.words.len > 4) {
+                        const ftype_id = fd.words[4];
+                        const ft = getDef(module, ftype_id);
+                        if (ft) |fti| {
+                            if (fti.op == .TypeFunction) {
+                                for (fti.words[3..], 0..) |ptype_id, pidx| {
+                                    const pt = getDef(module, ptype_id);
+                                    if (pt) |pti| {
+                                        if (pti.op == .TypePointer and pti.words.len > 3) {
+                                            const sc: spirv.StorageClass = @enumFromInt(pti.words[2]);
+                                            if (sc == .Function) {
+                                                try callee_inout_arg_indices.append(arena, pidx);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 var args = std.ArrayList(u8).initCapacity(arena, 64) catch return;
                 defer args.deinit(arena);
                 for (inst.words[4..], 0..) |arg_id, ai| {
                     if (ai > 0) try args.appendSlice(arena, ", ");
                     try args.appendSlice(arena, names.get(arg_id) orelse "0");
                 }
-                if (std.mem.eql(u8, rt, "void")) {
+
+                if (callee_inout_arg_indices.items.len == 1 and std.mem.eql(u8, rt, "void")) {
+                    // Void function with single inout param: caller reassigns
+                    // e.g., v16 = out_test_0(40, v16);
+                    const inout_idx = callee_inout_arg_indices.items[0];
+                    if (inst.words.len > 4 + inout_idx) {
+                        const inout_arg_id = inst.words[4 + inout_idx];
+                        const inout_arg_name = names.get(inout_arg_id) orelse "_out";
+                        try writeInd(w, indent);
+                        try w.print("{s} = {s}({s});\n", .{ inout_arg_name, func_name, args.items });
+                    } else {
+                        try writeInd(w, indent); try w.print("{s}({s});\n", .{ func_name, args.items });
+                    }
+                } else if (std.mem.eql(u8, rt, "void")) {
                     try writeInd(w, indent); try w.print("{s}({s});\n", .{ func_name, args.items });
                 } else {
                     try writeInd(w, indent); try w.print("var {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
