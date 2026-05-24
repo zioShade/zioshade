@@ -1080,11 +1080,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     var loop_header_label: ?u32 = null;
     var in_loop: bool = false;
     var in_continue_block: bool = false;
-    const PhiUpdate = struct { result_name: []const u8, value_name: []const u8 };
-    var phi_updates = std.ArrayList(PhiUpdate).initCapacity(arena, 4) catch return;
+    const PhiUpdate = struct { result_id: u32, value_id: u32 };
+    var phi_updates = std.ArrayList(PhiUpdate).initCapacity(arena, 8) catch return;
     defer phi_updates.deinit(arena);
-    var loop_stack = std.ArrayList(struct { merge: u32, cont: u32, header: u32 }).initCapacity(arena, 4) catch return;
+    var loop_stack = std.ArrayList(struct { merge: u32, cont: u32, header: u32, phi_start: usize, phi_end: usize }).initCapacity(arena, 4) catch return;
     defer loop_stack.deinit(arena);
+    // Track phi range for pending loop (Phi processed before LoopMerge)
+    var pending_phi_start: usize = 0;
 
     // Deferred instruction range for loop header instructions
     // Instructions between Phi and LoopMerge must be emitted INSIDE the loop
@@ -1265,7 +1267,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     loop_header_label = header;
                     in_loop = true;
                     in_continue_block = false;
-                    try loop_stack.append(arena, .{ .merge = merge, .cont = cont, .header = header });
+                    const phi_start = pending_phi_start;
+                    const phi_end = phi_updates.items.len;
+                    try loop_stack.append(arena, .{ .merge = merge, .cont = cont, .header = header, .phi_start = phi_start, .phi_end = phi_end });
                     try writeInd(w, indent); try w.writeAll("loop {\n");
                     indent += 1;
                     // Replay deferred loop header instructions inside the loop
@@ -1298,11 +1302,20 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const init_val = names.get(inst.words[3]) orelse "0";
                         try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val });
                         // Record phi update: result = value from second pair (words[5])
-                        if (inst.words.len >= 7) {
-                            const update_val = names.get(inst.words[5]) orelse null;
-                            if (update_val != null) {
-                                phi_updates.appendAssumeCapacity(.{ .result_name = phi_result.?, .value_name = update_val.? });
+                        // If LoopMerge follows, this phi belongs to a new loop
+                        var lm_follows = false;
+                        {
+                            var pk = i + 1;
+                            while (pk < @min(i + 20, module.instructions.len)) : (pk += 1) {
+                                if (module.instructions[pk].op == .LoopMerge) { lm_follows = true; break; }
+                                if (module.instructions[pk].op == .FunctionEnd or module.instructions[pk].op == .Label) break;
                             }
+                        }
+                        if (lm_follows) {
+                            pending_phi_start = phi_updates.items.len; // mark start BEFORE adding
+                        }
+                        if (inst.words.len >= 7) {
+                            phi_updates.appendAssumeCapacity(.{ .result_id = inst.words[2], .value_id = inst.words[5] });
                         }
                         // Check if LoopMerge follows (within the next 20 instructions)
                         var peek: usize = i + 1;
@@ -1373,11 +1386,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // Check for loop-related branches
                     if (in_loop) {
                         if (target == loop_header_label) {
-                            // Back edge — emit phi updates
-                            for (phi_updates.items) |pu| {
-                                try writeInd(w, indent); try w.print("{s} = {s};\n", .{ pu.result_name, pu.value_name });
+                            // Back edge — emit phi updates for THIS loop only
+                            if (loop_stack.items.len > 0) {
+                                const cur = loop_stack.items[loop_stack.items.len - 1];
+                                var idx: usize = cur.phi_start;
+                                while (idx < cur.phi_end) : (idx += 1) {
+                                    const pu = phi_updates.items[idx];
+                                    const res_name = names.get(pu.result_id) orelse continue;
+                                    const val_name = names.get(pu.value_id) orelse continue;
+                                    try writeInd(w, indent); try w.print("{s} = {s};\n", .{ res_name, val_name });
+                                }
                             }
-                            phi_updates.clearRetainingCapacity();
                             continue;
                         }
                         if (loop_continue_label != null and target == loop_continue_label.?) {
