@@ -1233,9 +1233,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const merge_label = pending_merge;
                     if (merge_label != null) {
                         try writeInd(w, indent); try w.print("switch {s} {{\n", .{selector});
+                        const case_ind = indent + 1;
+                        const body_ind = indent + 2;
                         // Emit default case
                         if (default_label != merge_label.?) {
-                            try writeInd(w, indent); try w.writeAll("default: {\n");
+                            try writeInd(w, case_ind); try w.writeAll("default: {\n");
                             // Skip to default label block, emit until merge
                             var si: usize = i + 1;
                             while (si < module.instructions.len) : (si += 1) {
@@ -1248,12 +1250,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         if (dinst.op == .Label and dinst.words.len > 1 and dinst.words[1] == merge_label.?) break;
                                         if (dinst.op == .Branch or dinst.op == .BranchConditional) break;
                                         if (dinst.op == .Switch) break;
-                                        try emitSimpleInstruction(module, names, dinst, w, alloc, arena, indent);
+                                        try emitSimpleInstruction(module, names, dinst, w, alloc, arena, body_ind);
                                     }
                                     break;
                                 }
                             }
-                            try writeInd(w, indent); try w.writeAll("}\n");
+                            try writeInd(w, case_ind); try w.writeAll("}\n");
                         }
                         // Emit case targets
                         var wi: usize = 3;
@@ -1261,7 +1263,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             const case_val = inst.words[wi];
                             const target_label = inst.words[wi + 1];
                             if (target_label == merge_label.?) continue;
-                            try writeInd(w, indent); try w.print("case {d}: {{\n", .{case_val});
+                            try writeInd(w, case_ind); try w.print("case {d}: {{\n", .{case_val});
                             // Find and emit target block
                             var si: usize = i + 1;
                             while (si < module.instructions.len) : (si += 1) {
@@ -1273,12 +1275,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         if (dinst.op == .Label) break;
                                         if (dinst.op == .Branch or dinst.op == .BranchConditional) break;
                                         if (dinst.op == .Switch) break;
-                                        try emitSimpleInstruction(module, names, dinst, w, alloc, arena, indent);
+                                        try emitSimpleInstruction(module, names, dinst, w, alloc, arena, body_ind);
                                     }
                                     break;
                                 }
                             }
-                            try writeInd(w, indent); try w.writeAll("}\n");
+                            try writeInd(w, case_ind); try w.writeAll("}\n");
                         }
                         try writeInd(w, indent); try w.writeAll("}\n");
                         // Skip all instructions until merge label
