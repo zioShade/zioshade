@@ -1392,6 +1392,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     // Pre-scan: build inline expressions for single-use arithmetic operations
     // This eliminates chains like: let v13 = v12 * 6.0; let v17 = v13 + v16; → inline v13 into v17
     var inline_exprs = std.AutoHashMap(u32, []const u8).init(arena);
+    var dead_arith = std.AutoHashMap(u32, void).init(arena);
     {
         // Build set of IDs used as Store operands (these feed mutable vars, don't inline)
         var store_operands = std.AutoHashMap(u32, void).init(arena);
@@ -1420,6 +1421,39 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             const expr = buildInlineExpr(module, names, &inline_exprs, result_id, arena, 0) orelse continue;
             try inline_exprs.put(result_id, expr);
         }
+        // Second pass: find dead bindings (where the single user is also inlined)
+        var ie_it = inline_exprs.iterator();
+        while (ie_it.next()) |entry| {
+            const result_id = entry.key_ptr.*;
+            const uses = use_count.get(result_id) orelse 0;
+            if (uses != 2) continue; // only single-use
+            // Find the single user instruction
+            var user_inlined = false;
+            var fi: usize = func_idx + 1;
+            while (fi < module.instructions.len) : (fi += 1) {
+                const finst = module.instructions[fi];
+                if (finst.op == .FunctionEnd) break;
+                if (finst.words.len > 2 and finst.words[2] == result_id) continue; // skip the def
+                // Check if this instruction uses result_id as an operand
+                var found = false;
+                for (finst.words[@min(3, finst.words.len)..]) |fw| {
+                    if (fw == result_id) { found = true; break; }
+                }
+                if (found) {
+                    // Check if the user is also inlined
+                    if (finst.words.len > 2) {
+                        const user_result = finst.words[2];
+                        if (inline_exprs.contains(user_result)) {
+                            user_inlined = true;
+                        }
+                    }
+                    break;
+                }
+            }
+            if (user_inlined) {
+                dead_arith.put(result_id, {}) catch {};
+            }
+        }
     }
 
     // Emit instructions
@@ -1435,6 +1469,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         // Skip dead condition bindings that were inlined into BranchConditional
         if (inst.words.len > 2 and dead_conditions.contains(inst.words[2])) {
             continue;
+        }
+
+        // Skip dead arithmetic bindings (user also inlined)
+        if (inst.words.len > 2 and dead_arith.contains(inst.words[2])) {
+            if (def_op.get(inst.words[2])) |def_op_val| {
+                if (def_op_val == inst.op) continue;
+            }
         }
 
         switch (inst.op) {
