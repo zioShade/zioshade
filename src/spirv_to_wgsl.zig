@@ -1252,25 +1252,55 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (uses <= 3 and uses >= 2) { // 1 def + 1-2 uses
                     const ext_inst = getDef(module, result_id) orelse continue;
                     if (ext_inst.words.len > 4) {
-                        const composite_name = resolveSourceName(module, names, ext_inst.words[3], 0) orelse continue;
-                        const idx = ext_inst.words[4];
-                        if (idx <= 3) {
-                            const sw: []const u8 = switch (idx) {
-                                0 => ".x",
-                                1 => ".y",
-                                2 => ".z",
-                                3 => ".w",
-                                else => "",
-                            };
-                            const current_name = names.get(result_id) orelse "";
-                            // Only rename if it won't create self-reference
-                            const new_name_str = try std.fmt.allocPrint(alloc, "{s}{s}", .{ composite_name, sw });
-                            if (!std.mem.eql(u8, current_name, new_name_str)) {
-                                if (try names.fetchPut(result_id, new_name_str)) |old| {
-                                    alloc.free(old.value);
+                        // Check if source is a Load from an AccessChain — skip inlining
+                        // because the AccessChain name isn't set until emit time
+                        const source_id = ext_inst.words[3];
+                        const source_def = getDef(module, source_id);
+                        if (source_def) |sd| {
+                            if (sd.op == .Load or sd.op == .CopyObject) {
+                                if (sd.words.len > 3) {
+                                    const ptr_def = getDef(module, sd.words[3]);
+                                    if (ptr_def) |pd| {
+                                        if (pd.op == .AccessChain) continue; // skip
+                                    }
                                 }
-                                try inline_loads.put(result_id, {});
                             }
+                        }
+                        const composite_name = resolveSourceName(module, names, source_id, 0) orelse continue;
+                        const idx = ext_inst.words[4];
+                        // Check if source is a struct — use field name instead of .x/.y/.z/.w
+                        const source_type = resolveTypeOf(module, ext_inst.words[3]);
+                        var is_struct_field = false;
+                        var field_name_buf: [32]u8 = undefined;
+                        const field_name: []const u8 = if (source_type) |st| blk: {
+                            const st_def = getDef(module, st);
+                            if (st_def) |sd| {
+                                if (sd.op == .TypeStruct) {
+                                    is_struct_field = true;
+                                    break :blk getMemberName(module, st, idx, &field_name_buf);
+                                }
+                            }
+                            break :blk "";
+                        } else "";
+                        var new_name_buf: []const u8 = undefined;
+                        const suffix: []const u8 = if (is_struct_field) field_name else switch (idx) {
+                            0 => ".x",
+                            1 => ".y",
+                            2 => ".z",
+                            3 => ".w",
+                            else => "",
+                        };
+                        if (is_struct_field) {
+                            new_name_buf = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ composite_name, suffix });
+                        } else if (idx <= 3) {
+                            new_name_buf = try std.fmt.allocPrint(alloc, "{s}{s}", .{ composite_name, suffix });
+                        } else continue;
+                        const current_name = names.get(result_id) orelse "";
+                        if (!std.mem.eql(u8, current_name, new_name_buf)) {
+                            if (try names.fetchPut(result_id, new_name_buf)) |old| {
+                                alloc.free(old.value);
+                            }
+                            try inline_loads.put(result_id, {});
                         }
                     }
                 }
