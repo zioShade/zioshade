@@ -3200,6 +3200,7 @@ fn getBinOpSymbol(op: spirv.Op) ?[]const u8 {
         .FOrdNotEqual => "!=",
         .IEqual => "==",
         .INotEqual => "!=",
+        .VectorTimesScalar, .MatrixTimesScalar => "*",
         else => null,
     };
 }
