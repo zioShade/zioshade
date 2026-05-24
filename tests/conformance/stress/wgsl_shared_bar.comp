@@ -1,0 +1,14 @@
+// Tests: shared memory and barrier in compute
+#version 450
+layout(local_size_x = 64) in;
+shared float s_data[64];
+
+void main() {
+    uint idx = gl_LocalInvocationID.x;
+    s_data[idx] = float(idx);
+    barrier();
+    float sum = 0.0;
+    for (uint i = 0u; i < 64u; i++) {
+        sum += s_data[i];
+    }
+}

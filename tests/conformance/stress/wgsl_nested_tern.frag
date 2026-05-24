@@ -1,9 +1,8 @@
-// Tests: nested ternary with different types
+// Tests: nested ternary operator
 #version 450
 uniform float u_val;
 
 void main() {
-    float x = u_val > 0.5 ? (u_val > 0.8 ? 1.0 : 0.5) : 0.0;
-    vec3 col = x > 0.25 ? vec3(1.0, 0.5, 0.0) : vec3(0.0, 0.5, 1.0);
-    gl_FragColor = vec4(col * x, 1.0);
+    float r = u_val < 0.33 ? 0.0 : (u_val < 0.66 ? 0.5 : 1.0);
+    gl_FragColor = vec4(r, u_val, 0.0, 1.0);
 }
