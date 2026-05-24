@@ -1245,7 +1245,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (uses <= 3 and uses >= 2) { // 1 def + 1-2 uses
                     const ext_inst = getDef(module, result_id) orelse continue;
                     if (ext_inst.words.len > 4) {
-                        const composite_name = names.get(ext_inst.words[3]) orelse continue;
+                        const composite_name = resolveSourceName(module, names, ext_inst.words[3], 0) orelse continue;
                         const idx = ext_inst.words[4];
                         if (idx <= 3) {
                             const sw: []const u8 = switch (idx) {
