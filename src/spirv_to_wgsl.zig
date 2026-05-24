@@ -1676,6 +1676,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try expr.appendSlice(alloc, composite);
                 // Resolve composite type for member name resolution
                 var current_type: ?u32 = resolveTypeOf(module, inst.words[3]);
+                if (current_type == null) {
+                    // Fallback: look at the defining instruction's result type
+                    const comp_def = getDef(module, inst.words[3]);
+                    if (comp_def) |cd| {
+                        if (cd.words.len > 1) {
+                            // Check if result type is a pointer — resolve pointee
+                            const rt_inst = getDef(module, cd.words[1]);
+                            if (rt_inst) |rti| {
+                                if (rti.op == .TypePointer and rti.words.len > 3) {
+                                    current_type = rti.words[3];
+                                } else {
+                                    current_type = cd.words[1];
+                                }
+                            }
+                        }
+                    }
+                }
                 for (inst.words[4..]) |idx| {
                     if (current_type) |ct| {
                         const ct_inst = getDef(module, ct);
