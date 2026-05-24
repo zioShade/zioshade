@@ -1389,7 +1389,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // Check if this is a loop exit condition (BranchConditional in loop header)
                     if (in_loop and loop_merge_label != null and false_label == loop_merge_label.? and pending_merge == null) {
                         // Loop condition: if (!cond) { break; }
-                        try writeInd(w, indent); try w.print("if (!({s})) {{ break; }}\n", .{condition});
+                        // Try to inline the condition expression for correctness
+                        // (cached let values may be stale if they reference phi vars)
+                        const inlined = inlineConditionExpr(module, names, inst.words[1], arena, 0);
+                        const cond_expr = inlined orelse condition;
+                        try writeInd(w, indent); try w.print("if (!({s})) {{ break; }}\n", .{cond_expr});
                     } else if (pending_merge != null) {
                         const merge_label = pending_merge.?;
                         // Check if this is a break/continue inside a loop
@@ -1399,11 +1403,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const false_is_continue = in_loop and loop_continue_label != null and false_label == loop_continue_label.?;
                         if (true_is_break) {
                             // if (cond) { break; }
-                            try writeInd(w, indent); try w.print("if ({s}) {{ break; }}\n", .{condition});
+                            const inlined2 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
+                            try writeInd(w, indent); try w.print("if ({s}) {{ break; }}\n", .{inlined2 orelse condition});
                             pending_merge = null;
                         } else if (false_is_break) {
-                            // if (!(cond)) { break; } — or equivalently if (cond) {} else { break; }
-                            try writeInd(w, indent); try w.print("if (!({s})) {{ break; }}\n", .{condition});
+                            // if (!(cond)) { break; }
+                            const inlined3 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
+                            try writeInd(w, indent); try w.print("if (!({s})) {{ break; }}\n", .{inlined3 orelse condition});
                             pending_merge = null;
                         } else if (true_is_continue) {
                             // Emit phi computation + updates before continue, inside the if block
@@ -2620,6 +2626,72 @@ fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
     const lhs = names.get(inst.words[3]) orelse "a";
     const rhs = names.get(inst.words[4]) orelse "b";
     try writeIndentStatic(w, indent); try w.print("var {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
+}
+
+// Resolve an ID's name through CopyObject/Load chains to find the underlying variable.
+// This helps inline stale `let` bindings that captured a `var` value once.
+fn resolveSourceName(module: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), id: u32, depth: u32) ?[]const u8 {
+    if (depth > 5) return names.get(id);
+    const def = getDef(module, id) orelse return names.get(id);
+    switch (def.op) {
+        .Load, .CopyObject => {
+            if (def.words.len < 4) return names.get(id);
+            // Try to resolve further through the chain
+            const deeper = resolveSourceName(module, names, def.words[3], depth + 1);
+            // Only use the deeper name if it's different from the current name
+            const current = names.get(id) orelse return deeper;
+            if (deeper) |dn| {
+                if (!std.mem.eql(u8, current, dn)) return dn;
+            }
+            return current;
+        },
+        else => return names.get(id),
+    }
+}
+
+// Try to inline a condition expression for loop exit checks.
+// Traces through Load/CopyObject to find the comparison and inlines it.
+// Returns the inlined expression, or null if inlining isn't possible.
+fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), cond_id: u32, arena: std.mem.Allocator, depth: u32) ?[]const u8 {
+    if (depth > 3) return null; // prevent infinite recursion
+    const cond_def = getDef(module, cond_id) orelse return null;
+    switch (cond_def.op) {
+        // Comparison ops — inline as "lhs op rhs"
+        .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
+        .FOrdEqual, .FOrdNotEqual, .SLessThan, .SGreaterThan, .SLessThanEqual,
+        .SGreaterThanEqual, .ULessThan, .UGreaterThan, .ULessThanEqual,
+        .UGreaterThanEqual, .IEqual, .INotEqual
+        => {
+            if (cond_def.words.len < 5) return null;
+            // Resolve operands through CopyObject/Load chains to use live variable names
+            const lhs = resolveSourceName(module, names, cond_def.words[3], 0) orelse return null;
+            const rhs = resolveSourceName(module, names, cond_def.words[4], 0) orelse return null;
+            const op_sym = getBinOpSymbol(cond_def.op) orelse return null;
+            var buf = std.ArrayList(u8).initCapacity(arena, lhs.len + rhs.len + op_sym.len + 8) catch return null;
+            buf.appendSlice(arena, lhs) catch return null;
+            buf.appendSlice(arena, " ") catch return null;
+            buf.appendSlice(arena, op_sym) catch return null;
+            buf.appendSlice(arena, " ") catch return null;
+            buf.appendSlice(arena, rhs) catch return null;
+            return buf.items;
+        },
+        // LogicalNot — inline as "!(expr)"
+        .LogicalNot => {
+            if (cond_def.words.len < 4) return null;
+            const inner = inlineConditionExpr(module, names, cond_def.words[3], arena, depth + 1) orelse return null;
+            var buf = std.ArrayList(u8).initCapacity(arena, inner.len + 4) catch return null;
+            buf.appendSlice(arena, "!(") catch return null;
+            buf.appendSlice(arena, inner) catch return null;
+            buf.append(arena, ')') catch return null;
+            return buf.items;
+        },
+        // Load / CopyObject — trace through to the underlying value
+        .Load, .CopyObject => {
+            if (cond_def.words.len < 4) return null;
+            return inlineConditionExpr(module, names, cond_def.words[3], arena, depth + 1);
+        },
+        else => return null,
+    }
 }
 
 // Emit a single instruction — used for replaying deferred loop header instructions
