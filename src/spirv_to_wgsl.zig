@@ -1184,6 +1184,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                 alloc.free(old.value);
                             }
                             try inline_loads.put(result_id, {});
+                        } else if (std.mem.eql(u8, ptr_name, current_name) and ptr_name.len > 0) {
+                            // Name conflict: load result has same name as pointer
+                            // Rename to avoid self-assignment (let u_val = u_val)
+                            var buf = std.ArrayList(u8).initCapacity(alloc, ptr_name.len + 8) catch continue;
+                            try buf.appendSlice(alloc, ptr_name);
+                            try buf.appendSlice(alloc, "_ld");
+                            const new_name = try buf.toOwnedSlice(alloc);
+                            if (try names.fetchPut(result_id, new_name)) |old| {
+                                alloc.free(old.value);
+                            }
                         }
                     }
                 }
@@ -2568,10 +2578,13 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             }
         },
         .Load => {
-            const rt = try wgslType(module, inst.words[1], names, arena);
             const result_name = names.get(inst.words[2]) orelse "v";
             const ptr = names.get(inst.words[3]) orelse "var";
-            try writeIndentStatic(w, indent); try w.print("var {s}: {s} = {s};\n", .{ result_name, rt, ptr });
+            // Skip inlined loads (result name == pointer name means load was inlined)
+            if (!std.mem.eql(u8, result_name, ptr)) {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, ptr });
+            }
         },
         .Store => {
             const ptr = names.get(inst.words[1]) orelse "var";
@@ -2583,6 +2596,35 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             const result_name = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[3]) orelse "0";
             try writeIndentStatic(w, indent); try w.print("let {s}: {s} = bitcast<{s}>({s});\n", .{ result_name, rt, rt, val });
+        },
+        .ExtInst => {
+            // Handle GLSL.std.450 extended instructions in switch replay
+            if (inst.words.len > 4) {
+                const instruction = inst.words[4];
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const func_name = switch (instruction) {
+                    1 => "round", 2 => "round", 3 => "trunc", 4 => "abs", 5 => "abs",
+                    6 => "sign", 7 => "sign", 8 => "floor", 9 => "ceil", 10 => "fract",
+                    11 => "radians", 12 => "degrees", 13 => "sin", 14 => "cos", 15 => "tan",
+                    16 => "asin", 17 => "acos", 18 => "atan", 19 => "sinh", 20 => "cosh",
+                    21 => "tanh", 22 => "asinh", 23 => "acosh", 24 => "atanh",
+                    25 => "atan2", 26 => "pow", 27 => "exp", 28 => "log", 29 => "exp2",
+                    30 => "log2", 31 => "sqrt", 32 => "inverseSqrt", 33 => "determinant",
+                    34 => "matrixInverse", 37 => "min", 40 => "max", 43 => "clamp",
+                    46 => "mix", 48 => "step", 49 => "smoothstep", 50 => "fma",
+                    66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
+                    70 => "faceForward", 71 => "reflect", 72 => "refract",
+                    else => "unknown",
+                };
+                var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
+                defer args.deinit(arena);
+                for (inst.words[5..], 0..) |arg_id, ai| {
+                    if (ai > 0) try args.appendSlice(arena, ", ");
+                    try args.appendSlice(arena, names.get(arg_id) orelse "0");
+                }
+                try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+            }
         },
         else => {
             // For all other instructions, try emitCall/emitBinOp patterns
