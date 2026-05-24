@@ -1,12 +1,9 @@
-// Tests: conditional discard in fragment shader
+// Tests: discard with complex condition
 #version 450
-uniform float u_threshold;
-uniform vec2 u_resolution;
+uniform float u_val;
 
 void main() {
-    vec2 uv = gl_FragCoord.xy / u_resolution;
-    float d = distance(uv, vec2(0.5));
-    if (d > u_threshold) discard;
-    float intensity = 1.0 - d * 2.0;
-    gl_FragColor = vec4(vec3(intensity), 1.0);
+    if (u_val < 0.0 || u_val > 1.0) discard;
+    float r = u_val * u_val;
+    gl_FragColor = vec4(r, u_val, 1.0 - r, 1.0);
 }
