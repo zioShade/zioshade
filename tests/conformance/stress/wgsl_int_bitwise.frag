@@ -1,14 +1,18 @@
+// Tests: integer arithmetic and bitwise ops
 #version 450
-uniform vec2 u_resolution;
-out vec4 fragColor;
+uniform int u_a;
+uniform int u_b;
 
 void main() {
-    vec2 uv = gl_FragCoord.xy / u_resolution;
-    // Integer bitwise ops
-    int a = int(uv.x * 255.0);
-    int b = int(uv.y * 255.0);
-    int c = a & b;
-    int d = a | b;
-    int e = a ^ b;
-    fragColor = vec4(float(c) / 255.0, float(d) / 255.0, float(e) / 255.0, 1.0);
+    int sum = u_a + u_b;
+    int diff = u_a - u_b;
+    int prod = u_a * u_b;
+    int band = u_a & u_b;
+    int bor = u_a | u_b;
+    int bxor = u_a ^ u_b;
+    int shifted = u_a << 2;
+    float r = float(sum % 256) / 255.0;
+    float g = float(band & 0xFF) / 255.0;
+    float b = float(bor & 0xFF) / 255.0;
+    gl_FragColor = vec4(r, g, b, 1.0);
 }
