@@ -1307,9 +1307,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
                 if (lead_count >= 2 and lead_source != null) {
                     // Mark the leading CompositeExtract results as dead
+                    // ONLY if they're not used elsewhere (single use absorbed by swizzle)
                     for (scan_inst.words[3..], 0..) |comp_id, ci| {
                         if (ci >= lead_count) break;
-                        dead_extracts.put(comp_id, {}) catch {};
+                        const ext_uses = use_count.get(comp_id) orelse 0;
+                        // use_count includes definition (1) + uses. For single-use, total = 2.
+                        // Only mark dead if this CompositeConstruct is the sole consumer.
+                        if (ext_uses <= 2) {
+                            dead_extracts.put(comp_id, {}) catch {};
+                        }
                     }
                 }
             }
