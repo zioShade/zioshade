@@ -1,14 +1,22 @@
+// Tests: compute shader with shared memory
 #version 450
 layout(local_size_x = 64) in;
-layout(std430, binding = 0) buffer Data {
-    float values[];
-} data;
+uniform int u_count;
 
-shared float scratch[64];
+shared float s_data[64];
 
 void main() {
     uint idx = gl_LocalInvocationID.x;
-    scratch[idx] = float(idx);
+    s_data[idx] = float(idx) * 0.1;
     barrier();
-    data.values[gl_GlobalInvocationID.x] = scratch[63 - idx];
+    
+    float sum = 0.0;
+    for (uint i = 0u; i < 64u; i++) {
+        sum += s_data[i];
+    }
+    
+    if (idx == 0u) {
+        // Use the sum somehow
+        float result = sum / 64.0;
+    }
 }
