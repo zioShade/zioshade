@@ -1163,10 +1163,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     {
         var it = def_op.iterator();
         while (it.next()) |entry| {
-            if (entry.value_ptr.* == .Load) {
+            if (entry.value_ptr.* == .Load or entry.value_ptr.* == .CopyObject) {
                 const result_id = entry.key_ptr.*;
                 const uses = use_count.get(result_id) orelse 0;
-                if (uses == 2) { // 1 from definition + 1 actual use
+                if (uses <= 6) { // Allow up to 5 actual uses for name propagation
                     // Find the source pointer for this load
                     const load_inst = getDef(module, result_id) orelse continue;
                     if (load_inst.words.len > 3) {
