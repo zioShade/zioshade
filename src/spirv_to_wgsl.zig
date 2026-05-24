@@ -1366,7 +1366,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // (where one target is the loop merge label)
                 // We detect this by checking if there's a LoopMerge with matching merge label
                 var is_loop_exit = false;
-                // Look backward for the nearest LoopMerge
+                // Look backward for the nearest enclosing LoopMerge
+                // We look past SelectionMerge (if-blocks inside loops are still inside the loop)
                 var li: usize = ci;
                 while (li > func_idx) : (li -= 1) {
                     const prev = module.instructions[li];
@@ -1377,7 +1378,6 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         }
                         break;
                     }
-                    if (prev.op == .SelectionMerge) break; // different scope
                 }
                 if (is_loop_exit) {
                     const inlined = inlineConditionExpr(module, names, cond_id, arena, 0);
