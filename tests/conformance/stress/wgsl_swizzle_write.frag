@@ -1,12 +1,11 @@
-// Tests: vec4 swizzle write patterns
+// Tests: swizzle write patterns
 #version 450
-uniform float u_val;
+uniform vec4 u_color;
 
 void main() {
-    vec4 c = vec4(0.0);
-    c.x = u_val;
-    c.y = u_val * 0.5;
-    c.z = u_val * 0.25;
-    c.w = 1.0;
+    vec4 c = u_color;
+    c.x = c.y;
+    c.z = c.w;
+    c.y = c.x + 0.1;
     gl_FragColor = c;
 }

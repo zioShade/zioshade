@@ -1,4 +1,4 @@
-// Tests: while loop (non-for)
+// Tests: while loop with early exit
 #version 450
 uniform float u_val;
 
@@ -10,5 +10,6 @@ void main() {
         count++;
         if (count > 50) break;
     }
-    gl_FragColor = vec4(x, float(count) / 50.0, 0.0, 1.0);
+    float result = x + float(count) * 0.01;
+    gl_FragColor = vec4(result, 0.0, 0.0, 1.0);
 }
