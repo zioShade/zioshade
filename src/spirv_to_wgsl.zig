@@ -330,6 +330,14 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
         .MatrixTimesMatrix, .OuterProduct, .ImageSampleImplicitLod,
         .ImageSampleExplicitLod, .ImageFetch, .ImageRead,
         .FNegate, .SNegate, .Not, .LogicalNot,
+        .ExtInst,
+        .FAdd, .FSub, .FMul, .FDiv, .FRem, .FMod,
+        .IAdd, .ISub, .IMul, .SDiv, .UDiv, .SMod, .UMod,
+        .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical,
+        .BitwiseAnd, .BitwiseOr, .BitwiseXor,
+        .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
+        .FOrdEqual, .FOrdNotEqual,
+        .LogicalAnd, .LogicalOr,
         => {
             // words[1] is result type (may be pointer)
             if (inst.words.len > 1) {
@@ -1909,7 +1917,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (src_type) |st| {
                             const st_def = getDef(module, st);
                             if (st_def) |sd| {
-                                if (sd.op == .TypeVector and sd.words.len > 4) src_num_comp = sd.words[4];
+                                if (sd.op == .TypeVector and sd.words.len > 3) src_num_comp = sd.words[3];
                             }
                         }
                         if (lead_count == src_num_comp) {
