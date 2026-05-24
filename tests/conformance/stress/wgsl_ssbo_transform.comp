@@ -1,0 +1,15 @@
+// Tests: compute shader with SSBO read/write and barrier
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer InputBuffer { vec4 data[]; } input_buf;
+layout(std430, binding = 1) buffer OutputBuffer { vec4 data[]; } output_buf;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    vec4 val = input_buf.data[idx];
+    val.x = val.x * 2.0;
+    val.y = val.y + 1.0;
+    val.z = sqrt(val.z);
+    val.w = clamp(val.w, 0.0, 1.0);
+    output_buf.data[idx] = val;
+}
