@@ -1,14 +1,14 @@
-// Tests: conditional returns in WGSL
+// Tests: conditional return from function
 #version 450
-uniform int u_mode;
+uniform float u_val;
 
-float getColor(int mode) {
-    if (mode == 0) return 1.0;
-    if (mode == 1) return 0.5;
-    return 0.0;
+float saturate(float x) {
+    if (x < 0.0) return 0.0;
+    if (x > 1.0) return 1.0;
+    return x;
 }
 
 void main() {
-    float c = getColor(u_mode);
-    gl_FragColor = vec4(c, c, c, 1.0);
+    float s = saturate(u_val);
+    gl_FragColor = vec4(s, s, s, 1.0);
 }
