@@ -97,6 +97,12 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn detectStage(path: []const u8) ?glslpp.Stage {
+    // .v.glsl, .f.glsl, .c.glsl, .g.glsl conventions
+    if (std.mem.endsWith(u8, path, ".v.glsl")) return .vertex;
+    if (std.mem.endsWith(u8, path, ".f.glsl")) return .fragment;
+    if (std.mem.endsWith(u8, path, ".c.glsl")) return .compute;
+    if (std.mem.endsWith(u8, path, ".g.glsl")) return .geometry;
+    // Standard extensions
     if (std.mem.endsWith(u8, path, ".vert")) return .vertex;
     if (std.mem.endsWith(u8, path, ".frag")) return .fragment;
     if (std.mem.endsWith(u8, path, ".comp")) return .compute;

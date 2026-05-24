@@ -848,8 +848,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 .front_facing => "front_facing",
                 .frag_depth => "frag_depth",
                 .position => "position",
-                .vertex_id => "vertex_id",
-                .instance_id => "instance_id",
+                .vertex_id => "vertex_index",
+                .instance_id => "instance_index",
+                .vertex_index => "vertex_index",
+                .instance_index => "instance_index",
                 .global_invocation_id => "global_invocation_id",
                 .local_invocation_id => "local_invocation_id",
                 .workgroup_id => "workgroup_id",
@@ -1534,7 +1536,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             expr_allocated = true;
                         }
                     }
-                    try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ result_name, rt, expr });
+                    try writeInd(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, expr });
                     if (expr_allocated) alloc.free(expr);
                 }
             },
@@ -1575,7 +1577,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const comp_name = names.get(comp_id) orelse "0";
                     try parts.appendSlice(alloc, comp_name);
                 }
-                try writeInd(w, indent); try w.print("var {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, parts.items });
+                try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, parts.items });
             },
 
             // CompositeExtract
@@ -1614,7 +1616,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // Fallback: array index
                     try expr.print(alloc, "[{d}]", .{idx});
                 }
-                try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ result_name, rt, expr.items });
+                try writeInd(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, expr.items });
             },
 
             // CopyObject
@@ -1647,7 +1649,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
                 try writeInd(w, indent); try w.print("// shuffle: {s}\n", .{swizzle.items});
                 // Simple approach: construct from components
-                try writeInd(w, indent); try w.print("var {s}: {s} = {s}(", .{ result_name, rt, rt });
+                try writeInd(w, indent); try w.print("let {s}: {s} = {s}(", .{ result_name, rt, rt });
                 var first = true;
                 for (inst.words[5..]) |idx| {
                     if (!first) try w.writeAll(", ");
@@ -1671,7 +1673,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .ShiftRightLogical => try emitBinOp(module, names, inst, ">>", w, arena, indent),
             .FNegate, .SNegate => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
-                try writeInd(w, indent); try w.print("var {s}: {s} = -{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+                try writeInd(w, indent); try w.print("let {s}: {s} = -{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
             .VectorTimesScalar, .MatrixTimesScalar => try emitBinOp(module, names, inst, "*", w, arena, indent),
             .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => {
@@ -1695,7 +1697,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .LogicalAnd => try emitBinOp(module, names, inst, "and", w, arena, indent),
             .LogicalNot => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
-                try writeInd(w, indent); try w.print("var {s}: {s} = !{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "true" });
+                try writeInd(w, indent); try w.print("let {s}: {s} = !{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "true" });
             },
 
             // Select (ternary)
@@ -1705,16 +1707,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const cond = names.get(inst.words[3]) orelse "c";
                 const true_val = names.get(inst.words[4]) orelse "t";
                 const false_val = names.get(inst.words[5]) orelse "f";
-                try writeInd(w, indent); try w.print("var {s}: {s} = select({s}, {s}, {s});\n", .{ result_name, rt, false_val, true_val, cond });
+                try writeInd(w, indent); try w.print("let {s}: {s} = select({s}, {s}, {s});\n", .{ result_name, rt, false_val, true_val, cond });
             },
 
             // Conversions
             .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
-            .UConvert, .SConvert, .FConvert, .Bitcast => {
+            .UConvert, .SConvert, .FConvert => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const val = names.get(inst.words[3]) orelse "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, val });
+                try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, val });
+            },
+            .Bitcast => {
+                // Bitcast in WGSL: bitcast<T>(value)
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const val = names.get(inst.words[3]) orelse "0";
+                try writeInd(w, indent); try w.print("let {s}: {s} = bitcast<{s}>({s});\n", .{ result_name, rt, rt, val });
             },
 
             // Texture sampling
@@ -1724,7 +1733,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const coord = names.get(inst.words[4]) orelse "uv";
                 // Get texture name directly from combined sampler ID
                 const tex_name = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureSample({s}, {s}_sampler, {s});\n", .{ result_name, rt, tex_name, tex_name, coord });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s});\n", .{ result_name, rt, tex_name, tex_name, coord });
             },
 
             .ImageSampleExplicitLod => {
@@ -1733,7 +1742,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lod });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lod });
             },
 
             .ImageSampleDrefImplicitLod => {
@@ -1742,7 +1751,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
             },
 
             .ImageSampleDrefExplicitLod => {
@@ -1752,7 +1761,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
                 const lod = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureSampleCompareLevel({s}, {s}_sampler, {s}, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref, lod });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompareLevel({s}, {s}_sampler, {s}, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref, lod });
             },
 
             .ImageFetch => {
@@ -1760,7 +1769,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const si = names.get(inst.words[3]) orelse "tex";
                 const coord = names.get(inst.words[4]) orelse "uv";
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureLoad({s}, {s});\n", .{ result_name, rt, si, coord });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureLoad({s}, {s});\n", .{ result_name, rt, si, coord });
             },
 
             // Return
@@ -1868,7 +1877,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             "frexp" // WGSL frexp returns struct
                         else
                             func_name;
-                        try writeInd(w, indent); try w.print("var {s}: {s} = {s}({s});\n", .{ result_name, rt, wgsl_name, args.items });
+                        try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, wgsl_name, args.items });
                     }
                 }
             },
@@ -1927,7 +1936,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 } else if (std.mem.eql(u8, rt, "void")) {
                     try writeInd(w, indent); try w.print("{s}({s});\n", .{ func_name, args.items });
                 } else {
-                    try writeInd(w, indent); try w.print("var {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                    try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
                 }
             },
 
@@ -1937,15 +1946,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .BitwiseAnd => try emitBinOp(module, names, inst, "&", w, arena, indent),
             .Not => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
-                try writeInd(w, indent); try w.print("var {s}: {s} = ~{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+                try writeInd(w, indent); try w.print("let {s}: {s} = ~{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
             .BitReverse => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
-                try writeInd(w, indent); try w.print("var {s}: {s} = reverseBits({s});\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+                try writeInd(w, indent); try w.print("let {s}: {s} = reverseBits({s});\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
             .BitCount => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
-                try writeInd(w, indent); try w.print("var {s}: {s} = countOneBits({s});\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+                try writeInd(w, indent); try w.print("let {s}: {s} = countOneBits({s});\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
 
             // Derivatives
@@ -1961,65 +1970,65 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "true" else "true";
-                try writeInd(w, indent); try w.print("var {s}: {s} = subgroupAll({s});\n", .{ rn, rt, val });
+                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupAll({s});\n", .{ rn, rt, val });
             },
             .SubgroupAnyKHR, .GroupNonUniformAny => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "false" else "false";
-                try writeInd(w, indent); try w.print("var {s}: {s} = subgroupAny({s});\n", .{ rn, rt, val });
+                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupAny({s});\n", .{ rn, rt, val });
             },
             .GroupNonUniformElect => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
-                try writeInd(w, indent); try w.print("var {s}: {s} = subgroupElect();\n", .{ rn, rt });
+                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupElect();\n", .{ rn, rt });
             },
             .GroupNonUniformBroadcast => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
                 const id = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = subgroupBroadcast({s}, {s});\n", .{ rn, rt, val, id });
+                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupBroadcast({s}, {s});\n", .{ rn, rt, val, id });
             },
             .GroupNonUniformBroadcastFirst => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = subgroupBroadcastFirst({s});\n", .{ rn, rt, val });
+                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupBroadcastFirst({s});\n", .{ rn, rt, val });
             },
             .GroupNonUniformBallot => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "false" else "false";
-                try writeInd(w, indent); try w.print("var {s}: {s} = subgroupBallot({s});\n", .{ rn, rt, val });
+                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupBallot({s});\n", .{ rn, rt, val });
             },
             .GroupNonUniformShuffle => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
                 const id = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = subgroupShuffle({s}, {s});\n", .{ rn, rt, val, id });
+                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupShuffle({s}, {s});\n", .{ rn, rt, val, id });
             },
             .GroupNonUniformShuffleXor => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
                 const mask = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = subgroupShuffleXor({s}, {s});\n", .{ rn, rt, val, mask });
+                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupShuffleXor({s}, {s});\n", .{ rn, rt, val, mask });
             },
             .GroupNonUniformShuffleUp => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
                 const delta = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = subgroupShuffleUp({s}, {s});\n", .{ rn, rt, val, delta });
+                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupShuffleUp({s}, {s});\n", .{ rn, rt, val, delta });
             },
             .GroupNonUniformShuffleDown => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
                 const delta = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = subgroupShuffleDown({s}, {s});\n", .{ rn, rt, val, delta });
+                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupShuffleDown({s}, {s});\n", .{ rn, rt, val, delta });
             },
             // GroupNonUniform arithmetic: IAdd, FAdd, IMul, FMul
             .GroupNonUniformIAdd, .GroupNonUniformFAdd => {
@@ -2127,7 +2136,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     try access.appendSlice(arena, sw);
                 }
                 // First copy composite, then set the field
-                try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ result_name, rt, composite });
+                try writeInd(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, composite });
                 try writeInd(w, indent); try w.print("{s}{s} = {s};\n", .{ result_name, access.items, object });
             },
 
@@ -2137,7 +2146,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const vector = names.get(inst.words[3]) orelse "vec";
                 const index = names.get(inst.words[4]) orelse "i";
-                try writeInd(w, indent); try w.print("var {s}: {s} = {s}[{s}];\n", .{ result_name, rt, vector, index });
+                try writeInd(w, indent); try w.print("let {s}: {s} = {s}[{s}];\n", .{ result_name, rt, vector, index });
             },
 
             // Transpose
@@ -2172,7 +2181,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureDimensions({s});\n", .{ result_name, rt, image });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureDimensions({s});\n", .{ result_name, rt, image });
             },
 
             // ImageQuerySizeLod
@@ -2181,7 +2190,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
                 const lod = names.get(inst.words[4]) orelse "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureDimensions({s}, {s});\n", .{ result_name, rt, image, lod });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureDimensions({s}, {s});\n", .{ result_name, rt, image, lod });
             },
 
             // ImageQueryLevels
@@ -2189,7 +2198,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureNumLevels({s});\n", .{ result_name, rt, image });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureNumLevels({s});\n", .{ result_name, rt, image });
             },
 
             // ImageQuerySamples
@@ -2197,7 +2206,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureNumSamples({s});\n", .{ result_name, rt, image });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureNumSamples({s});\n", .{ result_name, rt, image });
             },
 
             // ImageQueryLod
@@ -2214,7 +2223,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     }
                 }
                 const coord = if (inst.words.len > 4) names.get(inst.words[4]) orelse "uv" else "uv";
-                try writeInd(w, indent); try w.print("var {s}: {s} = vec2f(f32(textureQueryLod({s}, {s})), 0.0);\n", .{ result_name, rt, tex_name, coord });
+                try writeInd(w, indent); try w.print("let {s}: {s} = vec2f(f32(textureQueryLod({s}, {s})), 0.0);\n", .{ result_name, rt, tex_name, coord });
             },
 
             // ImageGather
@@ -2232,7 +2241,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const component = names.get(inst.words[5]) orelse "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureGather({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, component });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureGather({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, component });
             },
 
             // ImageDrefGather — depth comparison gather
@@ -2250,7 +2259,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
             },
 
             // ImageSampleProjImplicitLod — projective texture sampling
@@ -2260,14 +2269,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
                 // Projective: divide xy by w (component 3)
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureSample({s}, {s}_sampler, {s}.xy / {s}.w);\n", .{ result_name, rt, tex_name, tex_name, coord, coord });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}.xy / {s}.w);\n", .{ result_name, rt, tex_name, tex_name, coord, coord });
             },
 
             // ReadClockKHR — shader clock
             .ReadClockKHR => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
-                try writeInd(w, indent); try w.print("var {s}: {s} = 0u; // ReadClockKHR stub\n", .{ result_name, rt });
+                try writeInd(w, indent); try w.print("let {s}: {s} = 0u; // ReadClockKHR stub\n", .{ result_name, rt });
             },
 
             // ImageRead (storage image load)
@@ -2276,7 +2285,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "img";
                 const coord = names.get(inst.words[4]) orelse "uv";
-                try writeInd(w, indent); try w.print("var {s}: {s} = textureLoad({s}, {s});\n", .{ result_name, rt, image, coord });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureLoad({s}, {s});\n", .{ result_name, rt, image, coord });
             },
 
             // ImageWrite (storage image store)
@@ -2303,7 +2312,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const val = names.get(inst.words[3]) orelse "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ result_name, rt, val });
+                try writeInd(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, val });
             },
 
             // CopyMemory
@@ -2340,7 +2349,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rn = names.get(inst.words[2]) orelse "v";
                 const ptr = names.get(inst.words[3]) orelse "ptr";
                 const val = names.get(inst.words[4]) orelse "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = atomicExchange(&{s}, {s});\n", .{ rn, rt, ptr, val });
+                try writeInd(w, indent); try w.print("let {s}: {s} = atomicExchange(&{s}, {s});\n", .{ rn, rt, ptr, val });
             },
             .AtomicCompareExchange => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
@@ -2349,7 +2358,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // words[4] = scope, words[5] = memory semantics
                 const cmp = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
                 const val = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("var {s}: {s} = atomicCompareExchangeWeak(&{s}, {s}, {s}).old_value;\n", .{ rn, rt, ptr, cmp, val });
+                try writeInd(w, indent); try w.print("let {s}: {s} = atomicCompareExchangeWeak(&{s}, {s}, {s}).old_value;\n", .{ rn, rt, ptr, cmp, val });
             },
 
             else => {
@@ -2401,6 +2410,12 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             const ptr = names.get(inst.words[1]) orelse "var";
             const val = names.get(inst.words[2]) orelse "0";
             try writeIndentStatic(w, indent); try w.print("{s} = {s};\n", .{ ptr, val });
+        },
+        .Bitcast => {
+            const rt = try wgslType(module, inst.words[1], names, arena);
+            const result_name = names.get(inst.words[2]) orelse "v";
+            const val = names.get(inst.words[3]) orelse "0";
+            try writeIndentStatic(w, indent); try w.print("let {s}: {s} = bitcast<{s}>({s});\n", .{ result_name, rt, rt, val });
         },
         else => {
             // For all other instructions, try emitCall/emitBinOp patterns
@@ -2476,6 +2491,7 @@ fn getConvFunc(op: spirv.Op) ?[]const u8 {
         .SNegate => "-",
         .FNegate => "-",
         .Not => "!",
+        .Bitcast => "bitcast", // will be handled specially
         else => null,
     };
 }
