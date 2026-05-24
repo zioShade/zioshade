@@ -1389,6 +1389,39 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
+    // Pre-scan: build inline expressions for single-use arithmetic operations
+    // This eliminates chains like: let v13 = v12 * 6.0; let v17 = v13 + v16; → inline v13 into v17
+    var inline_exprs = std.AutoHashMap(u32, []const u8).init(arena);
+    {
+        // Build set of IDs used as Store operands (these feed mutable vars, don't inline)
+        var store_operands = std.AutoHashMap(u32, void).init(arena);
+        var si: usize = func_idx + 1;
+        while (si < module.instructions.len) : (si += 1) {
+            const sinst = module.instructions[si];
+            if (sinst.op == .FunctionEnd) break;
+            if (sinst.op == .Store and sinst.words.len > 2) {
+                store_operands.put(sinst.words[2], {}) catch {};
+            }
+        }
+        // Build inline expressions for single-use arithmetic operations
+        // These expressions are used as operands when building OTHER expressions,
+        // but the original let bindings are NOT removed (to avoid dead references)
+        var ii: usize = func_idx + 1;
+        while (ii < module.instructions.len) : (ii += 1) {
+            const scan_inst = module.instructions[ii];
+            if (scan_inst.op == .FunctionEnd) break;
+            if (scan_inst.words.len < 3) continue;
+            const result_id = scan_inst.words[2];
+            if (!isInlineableArithOp(scan_inst.op)) continue;
+            const uses = use_count.get(result_id) orelse 0;
+            if (uses != 2) continue;
+            if (dead_extracts.contains(result_id) or dead_conditions.contains(result_id)) continue;
+            if (store_operands.contains(result_id)) continue;
+            const expr = buildInlineExpr(module, names, &inline_exprs, result_id, arena, 0) orelse continue;
+            try inline_exprs.put(result_id, expr);
+        }
+    }
+
     // Emit instructions
     while (i < module.instructions.len) : (i += 1) {
         const inst = module.instructions[i];
@@ -1443,7 +1476,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         if (dinst.op == .Label and dinst.words.len > 1 and dinst.words[1] == merge_label.?) break;
                                         if (dinst.op == .Branch or dinst.op == .BranchConditional) break;
                                         if (dinst.op == .Switch) break;
-                                        try emitSimpleInstruction(module, names, dinst, w, alloc, arena, body_ind);
+                                        try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind);
                                     }
                                     break;
                                 }
@@ -1468,7 +1501,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         if (dinst.op == .Label) break;
                                         if (dinst.op == .Branch or dinst.op == .BranchConditional) break;
                                         if (dinst.op == .Switch) break;
-                                        try emitSimpleInstruction(module, names, dinst, w, alloc, arena, body_ind);
+                                        try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind);
                                     }
                                     break;
                                 }
@@ -1529,7 +1562,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             switch (dinst.op) {
                                 .BranchConditional, .Branch, .SelectionMerge, .LoopMerge, .Phi, .FunctionEnd => {},
                                 else => {
-                                    try emitSimpleInstruction(module, names, dinst, w, alloc, arena, indent);
+                                    try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, indent);
                                 },
                             }
                         }
@@ -1640,7 +1673,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     }
                                                 }
                                                 if (is_phi_val) {
-                                                    try emitSimpleInstruction(module, names, cbinst, w, alloc, arena, indent + 1);
+                                                    try emitSimpleInstruction(module, names, &inline_exprs, cbinst, w, alloc, arena, indent + 1);
                                                 }
                                             }
                                         }
@@ -1685,7 +1718,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     }
                                                 }
                                                 if (is_phi_val) {
-                                                    try emitSimpleInstruction(module, names, cbinst, w, alloc, arena, indent + 1);
+                                                    try emitSimpleInstruction(module, names, &inline_exprs, cbinst, w, alloc, arena, indent + 1);
                                                 }
                                             }
                                         }
@@ -2100,38 +2133,38 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             // Arithmetic
-            .FAdd, .IAdd => try emitBinOp(module, names, inst, "+", w, arena, indent),
-            .FSub, .ISub => try emitBinOp(module, names, inst, "-", w, arena, indent),
-            .FMul, .IMul => try emitBinOp(module, names, inst, "*", w, arena, indent),
-            .FDiv, .SDiv, .UDiv => try emitBinOp(module, names, inst, "/", w, arena, indent),
-            .FMod => try emitBinOp(module, names, inst, "%", w, arena, indent),
-            .UMod, .SRem, .SMod, .FRem => try emitBinOp(module, names, inst, "%", w, arena, indent),
-            .ShiftLeftLogical => try emitBinOp(module, names, inst, "<<", w, arena, indent),
-            .ShiftRightLogical => try emitBinOp(module, names, inst, ">>", w, arena, indent),
+            .FAdd, .IAdd => try emitBinOp(module, names, &inline_exprs, inst, "+", w, arena, indent),
+            .FSub, .ISub => try emitBinOp(module, names, &inline_exprs, inst, "-", w, arena, indent),
+            .FMul, .IMul => try emitBinOp(module, names, &inline_exprs, inst, "*", w, arena, indent),
+            .FDiv, .SDiv, .UDiv => try emitBinOp(module, names, &inline_exprs, inst, "/", w, arena, indent),
+            .FMod => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
+            .UMod, .SRem, .SMod, .FRem => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
+            .ShiftLeftLogical => try emitBinOp(module, names, &inline_exprs, inst, "<<", w, arena, indent),
+            .ShiftRightLogical => try emitBinOp(module, names, &inline_exprs, inst, ">>", w, arena, indent),
             .FNegate, .SNegate => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 try writeInd(w, indent); try w.print("let {s}: {s} = -{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
-            .VectorTimesScalar, .MatrixTimesScalar => try emitBinOp(module, names, inst, "*", w, arena, indent),
+            .VectorTimesScalar, .MatrixTimesScalar => try emitBinOp(module, names, &inline_exprs, inst, "*", w, arena, indent),
             .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => {
                 // WGSL uses mul() — wait, WGSL doesn't have mul(). Use matrix multiplication operator *
-                try emitBinOp(module, names, inst, "*", w, arena, indent);
+                try emitBinOp(module, names, &inline_exprs, inst, "*", w, arena, indent);
             },
 
             // Dot product
             .Dot => try emitCall(module, names, inst, "dot", w, arena, indent),
 
             // Comparisons
-            .FOrdEqual, .IEqual => try emitBinOp(module, names, inst, "==", w, arena, indent),
-            .FOrdNotEqual, .INotEqual => try emitBinOp(module, names, inst, "!=", w, arena, indent),
-            .FOrdLessThan, .SLessThan, .ULessThan => try emitBinOp(module, names, inst, "<", w, arena, indent),
-            .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, inst, ">", w, arena, indent),
-            .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, inst, "<=", w, arena, indent),
-            .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(module, names, inst, ">=", w, arena, indent),
+            .FOrdEqual, .IEqual => try emitBinOp(module, names, &inline_exprs, inst, "==", w, arena, indent),
+            .FOrdNotEqual, .INotEqual => try emitBinOp(module, names, &inline_exprs, inst, "!=", w, arena, indent),
+            .FOrdLessThan, .SLessThan, .ULessThan => try emitBinOp(module, names, &inline_exprs, inst, "<", w, arena, indent),
+            .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, &inline_exprs, inst, ">", w, arena, indent),
+            .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, &inline_exprs, inst, "<=", w, arena, indent),
+            .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(module, names, &inline_exprs, inst, ">=", w, arena, indent),
 
             // Logical
-            .LogicalOr => try emitBinOp(module, names, inst, "or", w, arena, indent),
-            .LogicalAnd => try emitBinOp(module, names, inst, "and", w, arena, indent),
+            .LogicalOr => try emitBinOp(module, names, &inline_exprs, inst, "or", w, arena, indent),
+            .LogicalAnd => try emitBinOp(module, names, &inline_exprs, inst, "and", w, arena, indent),
             .LogicalNot => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 try writeInd(w, indent); try w.print("let {s}: {s} = !{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "true" });
@@ -2398,9 +2431,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             // Bitwise
-            .BitwiseOr => try emitBinOp(module, names, inst, "|", w, arena, indent),
-            .BitwiseXor => try emitBinOp(module, names, inst, "^", w, arena, indent),
-            .BitwiseAnd => try emitBinOp(module, names, inst, "&", w, arena, indent),
+            .BitwiseOr => try emitBinOp(module, names, &inline_exprs, inst, "|", w, arena, indent),
+            .BitwiseXor => try emitBinOp(module, names, &inline_exprs, inst, "^", w, arena, indent),
+            .BitwiseAnd => try emitBinOp(module, names, &inline_exprs, inst, "&", w, arena, indent),
             .Not => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 try writeInd(w, indent); try w.print("let {s}: {s} = ~{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
@@ -2782,7 +2815,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             // ShiftRightArithmetic
-            .ShiftRightArithmetic => try emitBinOp(module, names, inst, ">>", w, arena, indent),
+            .ShiftRightArithmetic => try emitBinOp(module, names, &inline_exprs, inst, ">>", w, arena, indent),
 
             // ControlBarrier / MemoryBarrier
             .ControlBarrier => {
@@ -2835,12 +2868,64 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 // Emit helpers
 // ---------------------------------------------------------------------------
 
-fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
     const rt = try wgslType(module, inst.words[1], names, arena);
     const result_name = names.get(inst.words[2]) orelse "v";
-    const lhs = names.get(inst.words[3]) orelse "a";
-    const rhs = names.get(inst.words[4]) orelse "b";
-    try writeIndentStatic(w, indent); try w.print("var {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
+    const lhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, 0);
+    const rhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[4], arena, 0);
+    // Wrap compound expressions in parens for correct precedence
+    const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
+    const rhs = if (isCompoundExpr(rhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{rhs_raw}) else rhs_raw;
+    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
+}
+
+// Check if a string is a compound expression (contains operators at depth 0)
+fn isCompoundExpr(s: []const u8) bool {
+    var depth: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (c == '(') {
+            depth += 1;
+        } else if (c == ')') {
+            if (depth > 0) depth -= 1;
+        }
+        if (depth == 0 and i > 0) {
+            // Check for " op " pattern (operator surrounded by spaces)
+            if (c == ' ') {
+                // Look ahead for operator and space: " + ", " - ", etc.
+                if (i + 2 < s.len and s[i + 2] == ' ') {
+                    const op_char = s[i + 1];
+                    if (op_char == '+' or op_char == '-' or op_char == '*' or op_char == '/' or op_char == '%' or
+                        op_char == '<' or op_char == '>' or op_char == '=' or op_char == '!' or
+                        op_char == '&' or op_char == '|' or op_char == '^')
+                    {
+                        return true;
+                    }
+                    // Two-char ops: <=, >=, ==, !=, <<, >>
+                    if (i + 3 < s.len and s[i + 3] == ' ') {
+                        const op_pair = s[i + 1..i + 3];
+                        if (std.mem.eql(u8, op_pair, "<=") or std.mem.eql(u8, op_pair, ">=") or
+                            std.mem.eql(u8, op_pair, "==") or std.mem.eql(u8, op_pair, "!=") or
+                            std.mem.eql(u8, op_pair, "<<") or std.mem.eql(u8, op_pair, ">>"))
+                        {
+                            return true;
+                        }
+                    }
+                    // "or" and "and" keywords
+                    if (i + 3 < s.len and s[i + 3] == ' ') {
+                        const kw = s[i + 1..i + 3];
+                        if (std.mem.eql(u8, kw, "or")) return true;
+                    }
+                    if (i + 4 < s.len and s[i + 4] == ' ') {
+                        const kw = s[i + 1..i + 4];
+                        if (std.mem.eql(u8, kw, "and")) return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
 }
 
 // Resolve an ID's name through CopyObject/Load chains to find the underlying variable.
@@ -2944,7 +3029,7 @@ fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMa
 }
 
 // Emit a single instruction — used for replaying deferred loop header instructions
-fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32) !void {
+fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32) !void {
     _ = alloc;
     switch (inst.op) {
         .Variable => {
@@ -3011,7 +3096,7 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             // Comparison ops
             const maybe_op = getBinOpSymbol(inst.op);
             if (maybe_op != null) {
-                try emitBinOp(module, names, inst, maybe_op.?, w, arena, indent);
+                try emitBinOp(module, names, inline_exprs, inst, maybe_op.?, w, arena, indent);
                 return;
             }
             // Unary conversion ops
@@ -3123,3 +3208,153 @@ fn emitAtomicBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
     try writeIndentStatic(w, indent); try w.print("var {s}: {s} = atomic{s}(&{s}, {s});\n", .{ result_name, rt, op, ptr, val });
 }
+
+// Check if an opcode is an inlineable arithmetic op
+fn isInlineableArithOp(op: spirv.Op) bool {
+    return switch (op) {
+        .FMul, .FAdd, .FSub, .FDiv, .FMod, .FNegate,
+        .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod,
+        .VectorTimesScalar, .MatrixTimesScalar,
+        .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
+        .FOrdEqual, .FOrdNotEqual
+        => true,
+        else => false,
+    };
+}
+
+// Get the binary operator symbol for an opcode (for inline expression building)
+fn getInlineBinOp(op: spirv.Op) ?[]const u8 {
+    return switch (op) {
+        .FMul, .IMul, .VectorTimesScalar, .MatrixTimesScalar => "*",
+        .FAdd, .IAdd => "+",
+        .FSub, .ISub => "-",
+        .FDiv, .SDiv, .UDiv => "/",
+        .FMod, .SMod => "%",
+        .FOrdLessThan => "<",
+        .FOrdGreaterThan => ">",
+        .FOrdLessThanEqual => "<=",
+        .FOrdGreaterThanEqual => ">=",
+        .FOrdEqual => "==",
+        .FOrdNotEqual => "!=",
+        else => null,
+    };
+}
+
+// Build an inline expression for an instruction result.
+// Returns null if the instruction can't be inlined.
+// Recursively inlines single-use operands.
+fn buildInlineExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), result_id: u32, arena: std.mem.Allocator, depth: u32) ?[]const u8 {
+    if (depth > 4) return null; // limit nesting depth
+    const inst = getDef(module, result_id) orelse return null;
+    if (inst.words.len < 3) return null;
+
+    switch (inst.op) {
+        // Unary ops: -expr
+        .FNegate, .SNegate => {
+            if (inst.words.len < 4) return null;
+            const inner = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, depth + 1);
+            var buf = std.ArrayList(u8).initCapacity(arena, inner.len + 4) catch return null;
+            buf.appendSlice(arena, "-") catch return null;
+            // Wrap in parens if the inner expression contains an operator
+            if (needsParens(inner)) {
+                buf.appendSlice(arena, "(") catch return null;
+                buf.appendSlice(arena, inner) catch return null;
+                buf.appendSlice(arena, ")") catch return null;
+            } else {
+                buf.appendSlice(arena, inner) catch return null;
+            }
+            return buf.items;
+        },
+        // Binary arithmetic ops: lhs op rhs
+        .FMul, .FAdd, .FSub, .FDiv, .FMod,
+        .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod,
+        .VectorTimesScalar, .MatrixTimesScalar,
+        .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
+        .FOrdEqual, .FOrdNotEqual
+        => {
+            if (inst.words.len < 5) return null;
+            const op_sym = getInlineBinOp(inst.op) orelse return null;
+            const lhs = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, depth + 1);
+            const rhs = resolveOperandExpr(module, names, inline_exprs, inst.words[4], arena, depth + 1);
+            var buf = std.ArrayList(u8).initCapacity(arena, lhs.len + rhs.len + op_sym.len + 8) catch return null;
+            // Wrap lhs in parens if it contains a lower-precedence operator
+            if (needsParensForOp(lhs, inst.op, true)) {
+                buf.appendSlice(arena, "(") catch return null;
+                buf.appendSlice(arena, lhs) catch return null;
+                buf.appendSlice(arena, ")") catch return null;
+            } else {
+                buf.appendSlice(arena, lhs) catch return null;
+            }
+            buf.appendSlice(arena, " ") catch return null;
+            buf.appendSlice(arena, op_sym) catch return null;
+            buf.appendSlice(arena, " ") catch return null;
+            // Wrap rhs in parens if needed
+            if (needsParensForOp(rhs, inst.op, false)) {
+                buf.appendSlice(arena, "(") catch return null;
+                buf.appendSlice(arena, rhs) catch return null;
+                buf.appendSlice(arena, ")") catch return null;
+            } else {
+                buf.appendSlice(arena, rhs) catch return null;
+            }
+            return buf.items;
+        },
+        else => return null,
+    }
+}
+
+// Resolve an operand's expression: check inline_exprs first, then try to build inline,
+// finally fall back to the name.
+fn resolveOperandExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), id: u32, _arena: std.mem.Allocator, _depth: u32) []const u8 {
+    _ = module;
+    _ = _arena;
+    _ = _depth;
+    // Only use pre-built inline expressions (from the pre-scan)
+    if (inline_exprs.get(id)) |expr| return expr;
+    return names.get(id) orelse "v";
+}
+
+// Check if an expression contains operators and needs parentheses
+fn needsParens(expr: []const u8) bool {
+    // Contains any binary operator (but not inside function calls or swizzles)
+    var depth: usize = 0;
+    for (expr) |c| {
+        if (c == '(') {
+            depth += 1;
+        } else if (c == ')') {
+            if (depth > 0) depth -= 1;
+        }
+        if (depth == 0) {
+            if (c == '+' or c == '-' or c == '*' or c == '/' or c == '%') return true;
+        }
+    }
+    return false;
+}
+
+// Check if a sub-expression needs parens when used as operand of `op`
+fn needsParensForOp(sub_expr: []const u8, parent_op: spirv.Op, is_lhs: bool) bool {
+    _ = parent_op;
+    _ = is_lhs;
+    // Quick check: no spaces means it's a simple name/number, no parens needed
+    var has_op = false;
+    var depth: usize = 0;
+    for (sub_expr) |c| {
+        if (c == '(') {
+            depth += 1;
+        } else if (c == ')') {
+            if (depth > 0) depth -= 1;
+        }
+        if (depth == 0) {
+            if (c == ' ' and !has_op) {
+                // A space could be part of "lhs + rhs"
+                // But not part of "sin(x)" or "vec3f(1.0)"
+                has_op = true;
+            }
+        }
+    }
+    if (!has_op) return false;
+
+    // The sub-expression has spaces (likely an operator).
+    // Conservative: wrap all compound expressions in parens when inside another op
+    return true;
+}
+
