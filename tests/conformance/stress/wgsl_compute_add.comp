@@ -1,0 +1,11 @@
+// Tests: compute with multiple SSBOs
+#version 450
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer InputA { float a[]; } inA;
+layout(std430, binding = 1) readonly buffer InputB { float b[]; } inB;
+layout(std430, binding = 2) writeonly buffer Output { float o[]; } outBuf;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    outBuf.o[idx] = inA.a[idx] + inB.b[idx];
+}
