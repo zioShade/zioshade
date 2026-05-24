@@ -1201,6 +1201,42 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
+    // Pre-scan: inline single-use CompositeExtract results (v15 = v14.x → rename v15 to v14.x)
+    {
+        var it2 = def_op.iterator();
+        while (it2.next()) |entry| {
+            if (entry.value_ptr.* == .CompositeExtract) {
+                const result_id = entry.key_ptr.*;
+                const uses = use_count.get(result_id) orelse 0;
+                if (uses <= 3 and uses >= 2) { // 1 def + 1-2 uses
+                    const ext_inst = getDef(module, result_id) orelse continue;
+                    if (ext_inst.words.len > 4) {
+                        const composite_name = names.get(ext_inst.words[3]) orelse continue;
+                        const idx = ext_inst.words[4];
+                        if (idx <= 3) {
+                            const sw: []const u8 = switch (idx) {
+                                0 => ".x",
+                                1 => ".y",
+                                2 => ".z",
+                                3 => ".w",
+                                else => "",
+                            };
+                            const current_name = names.get(result_id) orelse "";
+                            // Only rename if it won't create self-reference
+                            const new_name_str = try std.fmt.allocPrint(alloc, "{s}{s}", .{ composite_name, sw });
+                            if (!std.mem.eql(u8, current_name, new_name_str)) {
+                                if (try names.fetchPut(result_id, new_name_str)) |old| {
+                                    alloc.free(old.value);
+                                }
+                                try inline_loads.put(result_id, {});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Pre-scan: identify dead CompositeExtract results that will be absorbed by swizzle optimization
     var dead_extracts = std.AutoHashMap(u32, void).init(arena);
     {
@@ -1834,8 +1870,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // CompositeExtract
             .CompositeExtract => {
-                // Skip dead extracts that will be absorbed by swizzle optimization
-                if (dead_extracts.contains(inst.words[2])) continue;
+                // Skip dead extracts or inlined extracts (name was propagated to use site)
+                if (dead_extracts.contains(inst.words[2]) or inline_loads.contains(inst.words[2])) continue;
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const composite = names.get(inst.words[3]) orelse "c";
