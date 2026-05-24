@@ -2173,6 +2173,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             32 => "inverseSqrt",
                             33 => "determinant",
                             34 => "matrixInverse",
+                            35 => "modf", // ModfStruct
                             36 => "modf",
                             37 => "min",
                             38 => "min", // SMin
@@ -2187,6 +2188,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             48 => "step",
                             49 => "smoothstep",
                             50 => "fma",
+                            51 => "frexp", // FrexpStruct
                             52 => "frexp",
                             53 => "ldexp",
                             54 => "packSnorm4x8",
@@ -2852,8 +2854,8 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                     21 => "tanh", 22 => "asinh", 23 => "acosh", 24 => "atanh",
                     25 => "atan2", 26 => "pow", 27 => "exp", 28 => "log", 29 => "exp2",
                     30 => "log2", 31 => "sqrt", 32 => "inverseSqrt", 33 => "determinant",
-                    34 => "matrixInverse", 37 => "min", 38 => "min", 39 => "min", 40 => "max", 41 => "max", 42 => "max", 43 => "clamp", 44 => "clamp", 45 => "clamp",
-                    46 => "mix", 48 => "step", 49 => "smoothstep", 50 => "fma",
+                    34 => "matrixInverse", 35 => "modf", 37 => "min", 38 => "min", 39 => "min", 40 => "max", 41 => "max", 42 => "max", 43 => "clamp", 44 => "clamp", 45 => "clamp",
+                    46 => "mix", 48 => "step", 49 => "smoothstep", 50 => "fma", 51 => "frexp",
                     66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
                     70 => "faceForward", 71 => "reflect", 72 => "refract",
                     else => "unknown",
