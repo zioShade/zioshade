@@ -278,6 +278,43 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
                     const lit = buf.toOwnedSlice(alloc) catch continue;
                     if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
                     continue;
+                } else if (ti.op == .TypeStruct) {
+                    // Struct constant: emit as StructName(field1, field2, ...)
+                    const struct_name = names.get(type_id) orelse "Struct";
+                    var buf = std.ArrayList(u8).initCapacity(alloc, 128) catch continue;
+                    defer buf.deinit(alloc);
+                    buf.writer(alloc).print("{s}(", .{struct_name}) catch continue;
+                    for (inst.words[3..], 0..) |comp_id, i| {
+                        if (i > 0) buf.writer(alloc).writeAll(", ") catch continue;
+                        const comp_name = names.get(comp_id) orelse "0.0";
+                        buf.writer(alloc).writeAll(comp_name) catch continue;
+                    }
+                    buf.writer(alloc).writeAll(")") catch continue;
+                    const lit = buf.toOwnedSlice(alloc) catch continue;
+                    if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
+                    continue;
+                } else if (ti.op == .TypeArray) {
+                    // Array constant: emit as array<T, N>(v1, v2, ...)
+                    var buf2 = std.ArrayList(u8).initCapacity(alloc, 128) catch continue;
+                    defer buf2.deinit(alloc);
+                    const elem_type_id = ti.words[2];
+                    const count_id = ti.words[3];
+                    const count_inst = getDef(module, count_id);
+                    var count_val: u32 = 0;
+                    if (count_inst) |ci2| {
+                        if (ci2.op == .Constant and ci2.words.len > 3) count_val = ci2.words[3];
+                    }
+                    const elem_name = tryResolveTypeName(module, elem_type_id);
+                    buf2.writer(alloc).print("array<{s}, {d}>(", .{elem_name, count_val}) catch continue;
+                    for (inst.words[3..], 0..) |comp_id, i| {
+                        if (i > 0) buf2.writer(alloc).writeAll(", ") catch continue;
+                        const comp_name2 = names.get(comp_id) orelse "0.0";
+                        buf2.writer(alloc).writeAll(comp_name2) catch continue;
+                    }
+                    buf2.writer(alloc).writeAll(")") catch continue;
+                    const lit2 = buf2.toOwnedSlice(alloc) catch continue;
+                    if (names.fetchPut(rid, lit2) catch null) |old| alloc.free(old.value);
+                    continue;
                 }
             }
         }
