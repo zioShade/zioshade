@@ -1508,7 +1508,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         try writeInd(w, indent); try w.print("switch {s} {{\n", .{selector});
                         const case_ind = indent + 1;
                         const body_ind = indent + 2;
-                        // Emit default case
+                        // Emit default case (WGSL requires exactly one default)
                         if (default_label != merge_label.?) {
                             try writeInd(w, case_ind); try w.writeAll("default: {\n");
                             // Skip to default label block, emit until merge
@@ -1528,6 +1528,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     break;
                                 }
                             }
+                            try writeInd(w, case_ind); try w.writeAll("}\n");
+                        } else {
+                            // Default targets merge — emit empty default (WGSL requires it)
+                            try writeInd(w, case_ind); try w.writeAll("default: {\n");
                             try writeInd(w, case_ind); try w.writeAll("}\n");
                         }
                         // Emit case targets
