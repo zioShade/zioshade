@@ -1702,6 +1702,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .CompositeConstruct => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
+                const num_comps = inst.words.len - 3;
                 // Check if all components are the same (for scalar broadcast simplification)
                 var all_same = true;
                 var first_comp: ?[]const u8 = null;
@@ -1714,17 +1715,75 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         break;
                     }
                 }
-                if (all_same and inst.words.len > 3 and first_comp != null) {
+                if (all_same and num_comps > 1 and first_comp != null) {
                     try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, first_comp.? });
                 } else {
-                    var parts = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
-                    defer parts.deinit(alloc);
+                    // Check for leading sequential extracts from the same source
+                    // e.g., vec4f(v.x, v.y, v.z, 1.0) → vec4f(v, 1.0) or vec4f(v.xyz, 1.0)
+                    var lead_source: ?u32 = null;
+                    var lead_count: usize = 0;
                     for (inst.words[3..], 0..) |comp_id, ci| {
-                        if (ci > 0) try parts.appendSlice(alloc, ", ");
-                        const comp_name = names.get(comp_id) orelse "0";
-                        try parts.appendSlice(alloc, comp_name);
+                        const comp_def = getDef(module, comp_id);
+                        if (comp_def) |cd| {
+                            if (cd.op == .CompositeExtract and cd.words.len > 4) {
+                                if (ci == 0) {
+                                    lead_source = cd.words[3];
+                                    lead_count = 1;
+                                } else if (cd.words[3] == lead_source.? and cd.words[4] == ci) {
+                                    lead_count += 1;
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
                     }
-                    try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, parts.items });
+                    if (lead_count >= 2 and lead_source != null) {
+                        // Emit with leading source aggregated
+                        var parts = std.ArrayList(u8).initCapacity(arena, 128) catch return;
+                        defer parts.deinit(arena);
+                        const src_name = names.get(lead_source.?) orelse "v";
+                        // Check if lead_count matches the full source vector size → use source directly
+                        const src_type = resolveTypeOf(module, lead_source.?);
+                        var src_num_comp: usize = 0;
+                        if (src_type) |st| {
+                            const st_def = getDef(module, st);
+                            if (st_def) |sd| {
+                                if (sd.op == .TypeVector and sd.words.len > 4) src_num_comp = sd.words[4];
+                            }
+                        }
+                        if (lead_count == src_num_comp) {
+                            try parts.appendSlice(arena, src_name);
+                        } else {
+                            try parts.appendSlice(arena, src_name);
+                            try parts.append(arena, '.');
+                            const xyzw: []const u8 = "xyzw";
+                            for (0..lead_count) |si| {
+                                if (si < 4) try parts.append(arena, xyzw[si]);
+                            }
+                        }
+                        // Append remaining non-extract components
+                        for (inst.words[3 + lead_count ..], 0..) |comp_id, ci| {
+                            _ = ci;
+                            try parts.appendSlice(arena, ", ");
+                            const comp_name = names.get(comp_id) orelse "0";
+                            try parts.appendSlice(arena, comp_name);
+                        }
+                        try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, parts.items });
+                    } else {
+                        // General case: emit all components
+                        var parts = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
+                        defer parts.deinit(alloc);
+                        for (inst.words[3..], 0..) |comp_id, ci| {
+                            if (ci > 0) try parts.appendSlice(alloc, ", ");
+                            const comp_name = names.get(comp_id) orelse "0";
+                            try parts.appendSlice(alloc, comp_name);
+                        }
+                        try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, parts.items });
+                    }
                 }
             },
 
