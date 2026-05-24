@@ -197,6 +197,43 @@ fn collectDecorations(alloc: std.mem.Allocator, module: *const ParsedModule, dec
 
 fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8)) void {
     common.collectNames(alloc, module, names);
+    // Post-process: simplify uniform vector constructors like vec3f(0.0, 0.0, 0.0) → vec3f(0.0)
+    var it = names.iterator();
+    var replacements = std.ArrayList(struct { key: u32, val: []const u8 }).initCapacity(alloc, 16) catch return;
+    defer replacements.deinit(alloc);
+    while (it.next()) |e| {
+        const name = e.value_ptr.*;
+        // Match vecNf(val, val, ..., val) where all values are identical
+        if (std.mem.startsWith(u8, name, "float") or std.mem.startsWith(u8, name, "vec")) {
+            // Find the opening paren
+            if (std.mem.indexOfScalar(u8, name, '(')) |paren_pos| {
+                const args = name[paren_pos + 1 .. name.len - 1]; // strip parens
+                // Split by ", " and check if all parts are equal
+                var parts = std.mem.splitSequence(u8, args, ", ");
+                var first: ?[]const u8 = null;
+                var all_same = true;
+                var count: u32 = 0;
+                while (parts.next()) |part| {
+                    if (first == null) {
+                        first = part;
+                    } else if (!std.mem.eql(u8, part, first.?)) {
+                        all_same = false;
+                        break;
+                    }
+                    count += 1;
+                }
+                if (all_same and count >= 2 and first != null) {
+                    // Replace with shorter form: vec3f(val) instead of vec3f(val, val, val)
+                    const prefix = name[0 .. paren_pos + 1];
+                    const new_name = std.fmt.allocPrint(alloc, "{s}{s})", .{ prefix, first.? }) catch continue;
+                    replacements.append(alloc, .{ .key = e.key_ptr.*, .val = new_name }) catch continue;
+                }
+            }
+        }
+    }
+    for (replacements.items) |r| {
+        if (names.fetchPut(r.key, r.val) catch null) |old| alloc.free(old.value);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1655,14 +1692,30 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .CompositeConstruct => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
-                var parts = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
-                defer parts.deinit(alloc);
+                // Check if all components are the same (for scalar broadcast simplification)
+                var all_same = true;
+                var first_comp: ?[]const u8 = null;
                 for (inst.words[3..], 0..) |comp_id, ci| {
-                    if (ci > 0) try parts.appendSlice(alloc, ", ");
                     const comp_name = names.get(comp_id) orelse "0";
-                    try parts.appendSlice(alloc, comp_name);
+                    if (ci == 0) {
+                        first_comp = comp_name;
+                    } else if (!std.mem.eql(u8, comp_name, first_comp.?)) {
+                        all_same = false;
+                        break;
+                    }
                 }
-                try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, parts.items });
+                if (all_same and inst.words.len > 3 and first_comp != null) {
+                    try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, first_comp.? });
+                } else {
+                    var parts = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
+                    defer parts.deinit(alloc);
+                    for (inst.words[3..], 0..) |comp_id, ci| {
+                        if (ci > 0) try parts.appendSlice(alloc, ", ");
+                        const comp_name = names.get(comp_id) orelse "0";
+                        try parts.appendSlice(alloc, comp_name);
+                    }
+                    try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, parts.items });
+                }
             },
 
             // CompositeExtract
