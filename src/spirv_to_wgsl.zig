@@ -766,13 +766,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             }
         }
 
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena);
-
-        // Emit return for inout params (void function with single out param)
-        if (has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) {
-            try writeIndentStatic(w, 1);
-            try w.print("return {s};\n", .{inout_params.items[0].local_name});
-        }
+        const inout_ret_name: ?[]const u8 = if (has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name);
 
         try w.writeAll("}\n\n");
     }
@@ -941,7 +936,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null);
 
     // Return output var
     if (use_vertex_struct) {
@@ -1051,7 +1046,7 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8) !void {
     _ = decorations;
     var indent: u32 = 1; // base function body indentation (4 spaces)
 
@@ -1751,7 +1746,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // Return
             .Return => {
-                // Return is handled by the wrapper code that returns the output var
+                if (inout_return) |ret_name| {
+                    try writeInd(w, indent); try w.print("return {s};\n", .{ret_name});
+                }
+                // Otherwise: void return in entry function — handled by wrapper
             },
 
             // ExtInst (GLSL.std.450)
