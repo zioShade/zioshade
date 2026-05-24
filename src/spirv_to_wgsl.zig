@@ -804,7 +804,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
 
         const inout_ret_name: ?[]const u8 = if (has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null);
 
         try w.writeAll("}\n\n");
     }
@@ -951,35 +951,61 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         try w.writeAll(") {\n");
     }
 
-    // Declare output variable(s) as local
-    if (use_vertex_struct) {
-        // Vertex shader with multiple outputs — declare struct variable
-        try w.writeAll("    var vertex_out: VertexOutput;\n");
-        // Map each output var to vertex_out.field_name
-        for (output_vars.items) |ovid| {
-            const var_name = names.get(ovid) orelse continue;
-            const alias = try std.fmt.allocPrint(alloc, "vertex_out.{s}", .{var_name});
-            if (names.fetchPut(ovid, alias) catch null) |old| alloc.free(old.value);
-        }
-    } else if ((is_fragment or is_vertex) and output_var_id != null) {
+    // Pre-scan: detect simple output variable pattern (single store before return)
+    // If output var is stored to exactly once, we can return the value directly
+    var direct_return_value: ?[]const u8 = null;
+    var skip_output_var_decl = false;
+    if (!use_vertex_struct and output_var_id != null) {
         const ov = output_var_id.?;
-        const var_inst = getDef(&module, ov).?;
-        const ptr_inst = getDef(&module, var_inst.words[1]);
-        var actual_type: u32 = undefined;
-        if (ptr_inst) |pi| {
-            if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = var_inst.words[1];
-        } else actual_type = var_inst.words[1];
-        const type_name = try wgslType(&module, actual_type, &names, arena);
-        const var_name = names.get(ov) orelse "out";
-        try w.print("    var {s}: {s};\n", .{ var_name, type_name });
+        var store_count: usize = 0;
+        var last_stored_value: ?[]const u8 = null;
+        // Scan function body for stores to the output variable
+        var sci: usize = entry_func_idx.? + 1;
+        while (sci < module.instructions.len) : (sci += 1) {
+            const si = module.instructions[sci];
+            if (si.op == .FunctionEnd) break;
+            if (si.op == .Store and si.words.len >= 3 and si.words[1] == ov) {
+                store_count += 1;
+                last_stored_value = names.get(si.words[2]);
+            }
+        }
+        if (store_count == 1 and last_stored_value != null) {
+            direct_return_value = last_stored_value.?;
+            skip_output_var_decl = true;
+        }
+    }
+
+    // Declare output variable(s) as local (skip if direct return)
+    if (!skip_output_var_decl) {
+        if (use_vertex_struct) {
+            try w.writeAll("    var vertex_out: VertexOutput;\n");
+            for (output_vars.items) |ovid| {
+                const var_name = names.get(ovid) orelse continue;
+                const alias = try std.fmt.allocPrint(alloc, "vertex_out.{s}", .{var_name});
+                if (names.fetchPut(ovid, alias) catch null) |old| alloc.free(old.value);
+            }
+        } else if ((is_fragment or is_vertex) and output_var_id != null) {
+            const ov = output_var_id.?;
+            const var_inst = getDef(&module, ov).?;
+            const ptr_inst = getDef(&module, var_inst.words[1]);
+            var actual_type: u32 = undefined;
+            if (ptr_inst) |pi| {
+                if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = var_inst.words[1];
+            } else actual_type = var_inst.words[1];
+            const type_name = try wgslType(&module, actual_type, &names, arena);
+            const var_name = names.get(ov) orelse "out";
+            try w.print("    var {s}: {s};\n", .{ var_name, type_name });
+        }
     }
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null);
 
     // Return output var
     if (use_vertex_struct) {
         try w.writeAll("    return vertex_out;\n");
+    } else if (direct_return_value != null) {
+        try w.print("    return {s};\n", .{direct_return_value.?});
     } else if ((is_fragment or is_vertex) and output_var_id != null) {
         const var_name = names.get(output_var_id.?) orelse "out";
         try w.print("    return {s};\n", .{var_name});
@@ -1085,7 +1111,7 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32) !void {
     _ = decorations;
     var indent: u32 = 1; // base function body indentation (4 spaces)
 
@@ -1804,6 +1830,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // Store
             .Store => {
+                // Skip store to output variable when doing direct return
+                if (skip_store_target != null and inst.words[1] == skip_store_target.?) continue;
                 const ptr = names.get(inst.words[1]) orelse "var";
                 const val = names.get(inst.words[2]) orelse "0";
                 const ptr_inst = getDef(module, inst.words[1]);
