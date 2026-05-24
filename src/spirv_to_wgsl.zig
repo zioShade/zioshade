@@ -1283,10 +1283,30 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             if (scan_inst.op == .FunctionEnd) break;
             if (scan_inst.op == .BranchConditional and scan_inst.words.len >= 4) {
                 const cond_id = scan_inst.words[1];
-                // If this condition can be inlined, mark it and sub-expressions as dead
-                const inlined = inlineConditionExpr(module, names, cond_id, arena, 0);
-                if (inlined != null) {
-                    markDeadConditions(module, cond_id, &dead_conditions, 0);
+                const true_label = scan_inst.words[2];
+                const false_label = scan_inst.words[3];
+                // Only mark as dead for loop exit conditions
+                // (where one target is the loop merge label)
+                // We detect this by checking if there's a LoopMerge with matching merge label
+                var is_loop_exit = false;
+                // Look backward for the nearest LoopMerge
+                var li: usize = ci;
+                while (li > func_idx) : (li -= 1) {
+                    const prev = module.instructions[li];
+                    if (prev.op == .LoopMerge and prev.words.len >= 3) {
+                        const merge_label = prev.words[1];
+                        if (true_label == merge_label or false_label == merge_label) {
+                            is_loop_exit = true;
+                        }
+                        break;
+                    }
+                    if (prev.op == .SelectionMerge) break; // different scope
+                }
+                if (is_loop_exit) {
+                    const inlined = inlineConditionExpr(module, names, cond_id, arena, 0);
+                    if (inlined != null) {
+                        markDeadConditions(module, cond_id, &dead_conditions, 0);
+                    }
                 }
             }
         }
