@@ -1421,37 +1421,43 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             const expr = buildInlineExpr(module, names, &inline_exprs, result_id, arena, 0) orelse continue;
             try inline_exprs.put(result_id, expr);
         }
-        // Second pass: find dead bindings (where the single user is also inlined)
-        var ie_it = inline_exprs.iterator();
-        while (ie_it.next()) |entry| {
-            const result_id = entry.key_ptr.*;
-            const uses = use_count.get(result_id) orelse 0;
-            if (uses != 2) continue; // only single-use
-            // Find the single user instruction
-            var user_inlined = false;
-            var fi: usize = func_idx + 1;
-            while (fi < module.instructions.len) : (fi += 1) {
-                const finst = module.instructions[fi];
-                if (finst.op == .FunctionEnd) break;
-                if (finst.words.len > 2 and finst.words[2] == result_id) continue; // skip the def
-                // Check if this instruction uses result_id as an operand
-                var found = false;
-                for (finst.words[@min(3, finst.words.len)..]) |fw| {
-                    if (fw == result_id) { found = true; break; }
-                }
-                if (found) {
-                    // Check if the user is also inlined
-                    if (finst.words.len > 2) {
-                        const user_result = finst.words[2];
-                        if (inline_exprs.contains(user_result)) {
-                            user_inlined = true;
-                        }
+        // Second pass: find dead bindings (where the single user is also dead)
+        // Fixpoint: keep iterating until no new dead IDs are found
+        var changed = true;
+        while (changed) {
+            changed = false;
+            var fp_it = inline_exprs.iterator();
+            while (fp_it.next()) |entry| {
+                const result_id = entry.key_ptr.*;
+                if (dead_arith.contains(result_id)) continue; // already dead
+                const uses = use_count.get(result_id) orelse 0;
+                if (uses != 2) continue;
+                // Find the single user instruction
+                var user_is_dead = false;
+                var fi: usize = func_idx + 1;
+                while (fi < module.instructions.len) : (fi += 1) {
+                    const finst = module.instructions[fi];
+                    if (finst.op == .FunctionEnd) break;
+                    if (finst.words.len > 2 and finst.words[2] == result_id) continue;
+                    var found = false;
+                    for (finst.words[@min(3, finst.words.len)..]) |fw| {
+                        if (fw == result_id) { found = true; break; }
                     }
-                    break;
+                    if (found) {
+                        if (finst.words.len > 2) {
+                            const user_result = finst.words[2];
+                            // User is dead if it's already in dead_arith
+                            if (dead_arith.contains(user_result)) {
+                                user_is_dead = true;
+                            }
+                        }
+                        break;
+                    }
                 }
-            }
-            if (user_inlined) {
-                dead_arith.put(result_id, {}) catch {};
+                if (user_is_dead) {
+                    dead_arith.put(result_id, {}) catch {};
+                    changed = true;
+                }
             }
         }
     }
@@ -3250,6 +3256,56 @@ fn emitAtomicBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     try writeIndentStatic(w, indent); try w.print("var {s}: {s} = atomic{s}(&{s}, {s});\n", .{ result_name, rt, op, ptr, val });
 }
 
+// Get the WGSL function name for a GLSL.std.450 instruction opcode
+fn getExtInstName(instruction: u32) ?[]const u8 {
+    return switch (instruction) {
+        1 => "round",
+        3 => "trunc",
+        4, 5 => "abs",
+        6, 7 => "sign",
+        8 => "floor",
+        9 => "ceil",
+        10 => "fract",
+        11 => "radians",
+        12 => "degrees",
+        13 => "sin",
+        14 => "cos",
+        15 => "tan",
+        16 => "asin",
+        17 => "acos",
+        18 => "atan",
+        19 => "sinh",
+        20 => "cosh",
+        21 => "tanh",
+        22 => "asinh",
+        23 => "acosh",
+        24 => "atanh",
+        25 => "atan2",
+        26 => "pow",
+        27 => "exp",
+        28 => "log",
+        29 => "exp2",
+        30 => "log2",
+        31 => "sqrt",
+        32 => "inverseSqrt",
+        37, 38, 39 => "min",
+        40, 41, 42 => "max",
+        43, 44, 45 => "clamp",
+        46 => "mix",
+        48 => "step",
+        49 => "smoothstep",
+        50 => "fma",
+        66 => "length",
+        67 => "distance",
+        68 => "cross",
+        69 => "normalize",
+        70 => "faceForward",
+        71 => "reflect",
+        72 => "refract",
+        else => null,
+    };
+}
+
 // Check if an opcode is an inlineable arithmetic op
 fn isInlineableArithOp(op: spirv.Op) bool {
     return switch (op) {
@@ -3257,7 +3313,8 @@ fn isInlineableArithOp(op: spirv.Op) bool {
         .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod,
         .VectorTimesScalar, .MatrixTimesScalar,
         .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
-        .FOrdEqual, .FOrdNotEqual
+        .FOrdEqual, .FOrdNotEqual,
+        .ExtInst
         => true,
         else => false,
     };
@@ -3337,6 +3394,28 @@ fn buildInlineExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u3
             } else {
                 buf.appendSlice(arena, rhs) catch return null;
             }
+            return buf.items;
+        },
+        // ExtInst (GLSL.std.450 function calls): func(arg1, arg2, ...)
+        .ExtInst => {
+            if (inst.words.len < 5) return null;
+            const instruction = inst.words[4];
+            const func_name = getExtInstName(instruction) orelse return null;
+            // Don't inline functions with side effects or complex returns
+            // Skip ModfStruct(35), FrexpStruct(51), determinant(33), matrixInverse(34)
+            if (instruction == 33 or instruction == 34 or instruction == 35 or instruction == 51) return null;
+            // Build function call with resolved operand expressions
+            var buf = std.ArrayList(u8).initCapacity(arena, 64) catch return null;
+            buf.appendSlice(arena, func_name) catch return null;
+            buf.appendSlice(arena, "(") catch return null;
+            if (inst.words.len > 5) {
+                for (inst.words[5..], 0..) |arg_id, ai| {
+                    if (ai > 0) buf.appendSlice(arena, ", ") catch return null;
+                    const arg_expr = resolveOperandExpr(module, names, inline_exprs, arg_id, arena, depth + 1);
+                    buf.appendSlice(arena, arg_expr) catch return null;
+                }
+            }
+            buf.appendSlice(arena, ")") catch return null;
             return buf.items;
         },
         else => return null,
