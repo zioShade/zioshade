@@ -1239,6 +1239,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
     // Pre-scan: identify dead CompositeExtract results that will be absorbed by swizzle optimization
     var dead_extracts = std.AutoHashMap(u32, void).init(arena);
+    var dead_conditions = std.AutoHashMap(u32, void).init(arena);
     {
         var si: usize = func_idx + 1;
         while (si < module.instructions.len) : (si += 1) {
@@ -1274,6 +1275,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
+    // Pre-scan: identify dead conditions that will be inlined into BranchConditional
+    {
+        var ci: usize = func_idx + 1;
+        while (ci < module.instructions.len) : (ci += 1) {
+            const scan_inst = module.instructions[ci];
+            if (scan_inst.op == .FunctionEnd) break;
+            if (scan_inst.op == .BranchConditional and scan_inst.words.len >= 4) {
+                const cond_id = scan_inst.words[1];
+                // If this condition can be inlined, mark it as dead
+                const inlined = inlineConditionExpr(module, names, cond_id, arena, 0);
+                if (inlined != null) {
+                    dead_conditions.put(cond_id, {}) catch {};
+                }
+            }
+        }
+    }
+
     // Emit instructions
     while (i < module.instructions.len) : (i += 1) {
         const inst = module.instructions[i];
@@ -1281,6 +1299,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         // If deferring loop header instructions, skip them for now
         // They will be emitted inside the loop body when LoopMerge is encountered
         if (defer_active and inst.op != .LoopMerge and inst.op != .Phi) {
+            continue;
+        }
+
+        // Skip dead condition bindings that were inlined into BranchConditional
+        if (inst.words.len > 2 and dead_conditions.contains(inst.words[2])) {
             continue;
         }
 
@@ -1403,12 +1426,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         while (di < i) : (di += 1) {
                             const dinst = module.instructions[di];
                             if (dinst.op == .Nop or dinst.op == .Label) continue;
+                            // Skip dead conditions that were inlined
+                            if (dinst.words.len > 2 and dead_conditions.contains(dinst.words[2])) continue;
                             // Emit common instruction types inline
                             switch (dinst.op) {
                                 .BranchConditional, .Branch, .SelectionMerge, .LoopMerge, .Phi, .FunctionEnd => {},
                                 else => {
-                                    // Re-emit by temporarily resetting index and falling through
-                                    // This is safe because deferred instructions are simple (comparisons, conversions)
                                     try emitSimpleInstruction(module, names, dinst, w, alloc, arena, indent);
                                 },
                             }
@@ -1468,6 +1491,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // (cached let values may be stale if they reference phi vars)
                         const inlined = inlineConditionExpr(module, names, inst.words[1], arena, 0);
                         const cond_expr = inlined orelse condition;
+                        if (inlined != null) {
+                            dead_conditions.put(inst.words[1], {}) catch {};
+                        }
                         try writeInd(w, indent); try w.print("if (!({s})) {{ break; }}\n", .{cond_expr});
                     } else if (pending_merge != null) {
                         const merge_label = pending_merge.?;
@@ -1479,11 +1505,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (true_is_break) {
                             // if (cond) { break; }
                             const inlined2 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
+                            if (inlined2 != null) dead_conditions.put(inst.words[1], {}) catch {};
                             try writeInd(w, indent); try w.print("if ({s}) {{ break; }}\n", .{inlined2 orelse condition});
                             pending_merge = null;
                         } else if (false_is_break) {
                             // if (!(cond)) { break; }
                             const inlined3 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
+                            if (inlined3 != null) dead_conditions.put(inst.words[1], {}) catch {};
                             try writeInd(w, indent); try w.print("if (!({s})) {{ break; }}\n", .{inlined3 orelse condition});
                             pending_merge = null;
                         } else if (true_is_continue) {
