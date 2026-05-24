@@ -1,13 +1,16 @@
+// Tests: complex boolean logic
 #version 450
-out vec4 fragColor;
+uniform float u_a;
+uniform float u_b;
+uniform float u_c;
 
 void main() {
-    vec2 uv = gl_FragCoord.xy / vec2(800.0, 600.0);
-    // Boolean logic
-    bool b1 = uv.x > 0.5;
-    bool b2 = uv.y > 0.5;
-    float r = b1 ? 1.0 : 0.0;
-    float g = b2 ? 1.0 : 0.0;
-    float bl = (b1 && b2) ? 1.0 : 0.0;
-    fragColor = vec4(r, g, bl, 1.0);
+    bool cond1 = u_a > 0.5;
+    bool cond2 = u_b < 0.3;
+    bool cond3 = u_c > 0.7;
+    bool any_true = cond1 || cond2 || cond3;
+    bool all_true = cond1 && cond2 && cond3;
+    float r = any_true ? 1.0 : 0.0;
+    float g = all_true ? 1.0 : 0.0;
+    gl_FragColor = vec4(r, g, u_c, 1.0);
 }
