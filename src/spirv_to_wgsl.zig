@@ -439,10 +439,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                     .{ .from = "int4(", .to = "vec4i(" },
                 };
                 for (subs) |sub| {
-                    if (std.mem.indexOf(u8, new_name, sub.from)) |pos| {
+                    while (std.mem.indexOf(u8, new_name, sub.from)) |pos| {
                         const replacement = std.fmt.allocPrint(alloc, "{s}{s}{s}", .{
                             new_name[0..pos], sub.to, new_name[pos + sub.from.len ..],
-                        }) catch continue;
+                        }) catch break;
                         if (allocated) alloc.free(new_name);
                         new_name = replacement;
                         allocated = true;
