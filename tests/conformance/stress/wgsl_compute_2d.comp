@@ -1,0 +1,13 @@
+// Tests: compute shader with workgroup builtins
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) buffer Output {
+    float data[];
+};
+
+void main() {
+    uvec3 gid = gl_GlobalInvocationID;
+    uvec3 lid = gl_LocalInvocationID;
+    uint idx = gid.x + gid.y * 8u;
+    data[idx] = float(lid.x + lid.y * 8u);
+}
