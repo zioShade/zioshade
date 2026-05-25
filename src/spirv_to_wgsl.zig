@@ -1206,6 +1206,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             const scan_inst = module.instructions[si];
             if (scan_inst.op == .FunctionEnd) break;
             if (scan_inst.op == .Phi and scan_inst.words.len >= 7) {
+                // Check if this phi belongs to a loop header (skip — loop phis are handled separately)
+                var is_loop_phi = false;
+                var pk: usize = si + 1;
+                while (pk < @min(si + 30, module.instructions.len)) : (pk += 1) {
+                    if (module.instructions[pk].op == .LoopMerge) { is_loop_phi = true; break; }
+                    if (module.instructions[pk].op == .SelectionMerge or module.instructions[pk].op == .Label or module.instructions[pk].op == .FunctionEnd) break;
+                }
+                if (is_loop_phi) continue;
+
                 // Find the merge label this phi belongs to (the label of the current block)
                 var merge_label: ?u32 = null;
                 var li: usize = si;
