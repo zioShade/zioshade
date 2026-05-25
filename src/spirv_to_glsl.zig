@@ -291,12 +291,21 @@ pub const GlslCompileOptions = struct {
     version: u32 = 430,
     /// Output OpenGL ES Shading Language (ESSL) instead of desktop GLSL.
     es: bool = false,
+    /// Entry point name to compile (default: "main").
+    entry_point_name: []const u8 = "main",
 };
 
 // Use shared parse cache from root (avoids circular import — cache is passed via allocator context)
 pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: GlslCompileOptions) ![]const u8 {
     var module = try parseModule(alloc, spirv_words);
     defer module.deinit(alloc);
+
+    // Override entry point if requested
+    if (!std.mem.eql(u8, options.entry_point_name, "main")) {
+        if (findEntryPoint(&module, options.entry_point_name)) |ep_id| {
+            module.entry_point_id = ep_id;
+        } else return error.EntryPointNotFound;
+    }
 
     // Mesh/task shaders cannot be cross-compiled to GLSL (no standard dialect exists)
     if (module.execution_model == .MeshEXT or module.execution_model == .TaskEXT or
@@ -552,6 +561,21 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     }
     return module;
 }
+
+fn findEntryPoint(module: *const ParsedModule, name: []const u8) ?u32 {
+    for (module.instructions) |inst| {
+        if (inst.op == .EntryPoint and inst.words.len > 3) {
+            const bytes = std.mem.sliceAsBytes(inst.words[3..]);
+            var len: usize = 0;
+            while (len < bytes.len) : (len += 1) {
+                if (bytes[len] == 0) break;
+            }
+            if (std.mem.eql(u8, bytes[0..len], name)) return inst.words[2];
+        }
+    }
+    return null;
+}
+
 fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
     return switch(op) {
         .TypeVoid,.TypeBool,.TypeInt,.TypeFloat,.TypeVector,.TypeMatrix,.TypeImage,.TypeSampler,.TypeSampledImage,.TypeArray,.TypeRuntimeArray,.TypeStruct,.TypePointer,.TypeFunction,.TypeForwardPointer,.TypeAccelerationStructureKHR,.TypeRayQueryKHR,.TypeTensorARM => if(words.len>1) words[1] else null,

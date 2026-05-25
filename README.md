@@ -60,6 +60,18 @@ zig-out/bin/glslpp glsl shader.frag -o shader.glsl
 zig-out/bin/glslpp msl shader.frag -o shader.msl
 zig-out/bin/glslpp wgsl shader.frag -o shader.wgsl
 
+# With preprocessor defines and include paths
+zig-out/bin/glslpp wgsl shader.frag -DDEBUG=1 -DQUALITY=3 -I src/shaders/
+
+# Select entry point for multi-kernel SPIR-V
+zig-out/bin/glslpp wgsl module.spv --entry-point compute_blur
+
+# Read from stdin
+cat shader.frag | zig-out/bin/glslpp wgsl --stdin
+
+# HLSL with specific shader model
+zig-out/bin/glslpp hlsl shader.frag --shader-model 50
+
 # Reflect on a SPIR-V binary
 zig-out/bin/glslpp reflect shader.spv
 
