@@ -1,0 +1,11 @@
+// Tests: compute shader with indirect indexing
+#version 450
+layout(local_size_x = 256) in;
+layout(binding = 0) buffer InputBuffer { float input_data[]; };
+layout(binding = 1) buffer OutputBuffer { float output_data[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    float val = input_data[idx];
+    output_data[idx] = val * val + sin(val) * 0.5;
+}
