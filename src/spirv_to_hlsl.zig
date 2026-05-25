@@ -1760,7 +1760,7 @@ fn builtInToSemantic(b: u32) []const u8 {
         .sample_mask => "SV_Coverage",
         .sample_position => "SV_Position",
         .bary_coord_khr => "SV_Barycentrics",
-        .bary_coord_no_persp_khr => "SV_Barycentrics",
+        .bary_coord_no_persp_khr => "SV_Barycentrics1",
         else => "TEXCOORD0",
     };
 }
