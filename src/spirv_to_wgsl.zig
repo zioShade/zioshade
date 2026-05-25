@@ -650,11 +650,6 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     for (cbuffers.items) |cb| {
         const group = @divFloor(cb.binding, 2);
         const binding = cb.binding;
-        if (cb.is_ssbo) {
-            try w.print("@group({d}) @binding({d})\nvar<storage, read_write> {s}: ", .{ group, binding, cb.name });
-        } else {
-            try w.print("@group({d}) @binding({d})\nvar<uniform> {s}: ", .{ group, binding, cb.name });
-        }
         const type_name = blk: {
             // Resolve pointer type to pointee type
             const ptr_inst = getDef(&module, cb.type_id);
@@ -663,6 +658,27 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             else cb.type_id;
             break :blk try wgslType(&module, actual_type, &names, arena);
         };
+        // Avoid name collision: if variable name same as type name, rename the variable
+        var var_name: []const u8 = cb.name;
+        if (std.mem.eql(u8, cb.name, type_name)) {
+            // Find the variable's result ID and rename it in the names map
+            for (module.instructions) |vinst| {
+                if (vinst.op == .Variable and vinst.words.len >= 4) {
+                    const vname = names.get(vinst.words[2]) orelse continue;
+                    if (std.mem.eql(u8, vname, cb.name)) {
+                        const new_name = try std.fmt.allocPrint(alloc, "{s}_data", .{cb.name});
+                        try names.put(vinst.words[2], new_name);
+                        var_name = new_name;
+                        break;
+                    }
+                }
+            }
+        }
+        if (cb.is_ssbo) {
+            try w.print("@group({d}) @binding({d})\nvar<storage, read_write> {s}: ", .{ group, binding, var_name });
+        } else {
+            try w.print("@group({d}) @binding({d})\nvar<uniform> {s}: ", .{ group, binding, var_name });
+        }
         try w.print("{s};\n\n", .{type_name});
     }
 
@@ -1362,6 +1378,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // Check if source is a struct — use field name instead of .x/.y/.z/.w
                         const source_type = resolveTypeOf(module, ext_inst.words[3]);
                         var is_struct_field = false;
+                        var is_matrix_col = false;
                         var field_name_buf: [32]u8 = undefined;
                         const field_name: []const u8 = if (source_type) |st| blk: {
                             const st_def = getDef(module, st);
@@ -1370,11 +1387,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     is_struct_field = true;
                                     break :blk getMemberName(module, st, idx, &field_name_buf);
                                 }
+                                if (sd.op == .TypeMatrix) {
+                                    is_matrix_col = true;
+                                    break :blk "";
+                                }
                             }
                             break :blk "";
                         } else "";
                         var new_name_buf: []const u8 = undefined;
-                        const suffix: []const u8 = if (is_struct_field) field_name else switch (idx) {
+                        const suffix: []const u8 = if (is_struct_field) field_name else if (is_matrix_col) "" else switch (idx) {
                             0 => ".x",
                             1 => ".y",
                             2 => ".z",
@@ -1383,6 +1404,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         };
                         if (is_struct_field) {
                             new_name_buf = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ composite_name, suffix });
+                        } else if (is_matrix_col) {
+                            new_name_buf = try std.fmt.allocPrint(alloc, "{s}[{d}]", .{ composite_name, idx });
                         } else if (idx <= 3) {
                             new_name_buf = try std.fmt.allocPrint(alloc, "{s}{s}", .{ composite_name, suffix });
                         } else continue;
