@@ -339,6 +339,31 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
                     const lit2 = buf2.toOwnedSlice(alloc) catch continue;
                     if (names.fetchPut(rid, lit2) catch null) |old| alloc.free(old.value);
                     continue;
+                } else if (ti.op == .TypeMatrix) {
+                    // Matrix constant: emit as matNxMf(col1, col2, ...)
+                    const col_type_id = ti.words[2];
+                    const col_count = if (ti.words.len > 3) ti.words[3] else 2;
+                    const col_type_inst = getDef(module, col_type_id);
+                    var col_size: u32 = 2;
+                    if (col_type_inst) |ct| {
+                        if (ct.op == .TypeVector and ct.words.len > 3) col_size = ct.words[3];
+                    }
+                    const scalar_type_id: u32 = if (col_type_inst) |ct| ct.words[2] else 0;
+                    const scalar_type_raw = tryResolveTypeName(module, scalar_type_id);
+                    // Convert to WGSL-style short names: float->f, int->i, uint->u
+                    const scalar_type: []const u8 = if (std.mem.eql(u8, scalar_type_raw, "float")) "f" else if (std.mem.eql(u8, scalar_type_raw, "int")) "i" else if (std.mem.eql(u8, scalar_type_raw, "uint")) "u" else scalar_type_raw;
+                    var buf3 = std.ArrayList(u8).initCapacity(alloc, 128) catch continue;
+                    defer buf3.deinit(alloc);
+                    buf3.writer(alloc).print("mat{d}x{d}{s}(", .{col_count, col_size, scalar_type}) catch continue;
+                    for (inst.words[3..], 0..) |comp_id, i| {
+                        if (i > 0) buf3.writer(alloc).writeAll(", ") catch continue;
+                        const comp_name3 = names.get(comp_id) orelse "0.0";
+                        buf3.writer(alloc).writeAll(comp_name3) catch continue;
+                    }
+                    buf3.writer(alloc).writeAll(")") catch continue;
+                    const lit3 = buf3.toOwnedSlice(alloc) catch continue;
+                    if (names.fetchPut(rid, lit3) catch null) |old| alloc.free(old.value);
+                    continue;
                 }
             }
         }
