@@ -646,6 +646,24 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
     }
 
+    // Deduplicate bindings: auto-assign sequential bindings when multiple uniforms collide
+    {
+        var seen_bindings = std.AutoHashMap(u32, void).init(arena);
+        var next_binding: u32 = 0;
+        for (cbuffers.items, 0..) |*cb, ci| {
+            if (ci > 0) {
+                // Check if this binding was already used
+                if (seen_bindings.contains(cb.binding)) {
+                    // Find next available binding
+                    while (seen_bindings.contains(next_binding)) : (next_binding += 1) {}
+                    cb.binding = next_binding;
+                    next_binding += 1;
+                }
+            }
+            try seen_bindings.put(cb.binding, {});
+        }
+    }
+
     // Emit uniform buffers
     for (cbuffers.items) |cb| {
         const group = @divFloor(cb.binding, 2);
