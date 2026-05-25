@@ -485,6 +485,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     // Find entry point and function
     var entry_func_idx: ?usize = null;
     var output_var_id: ?u32 = null;
+    var depth_output_var_id: ?u32 = null;
     var output_vars = std.ArrayList(u32).initCapacity(arena, 4) catch return error.OutOfMemory;
     var input_vars = std.ArrayList(struct { id: u32, type_id: u32, builtin: ?spirv.BuiltIn }).initCapacity(arena, 8) catch return error.OutOfMemory;
 
@@ -498,7 +499,17 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 if (location != null or is_fragment or is_vertex) {
                     try output_vars.append(arena, inst.words[2]);
                     if (is_fragment) {
-                        if (output_var_id == null) output_var_id = inst.words[2];
+                        // Detect depth output
+                        if (builtin != null) {
+                            const bi: spirv.BuiltIn = @enumFromInt(builtin.?);
+                            if (bi == .frag_depth) {
+                                depth_output_var_id = inst.words[2];
+                            } else if (output_var_id == null) {
+                                output_var_id = inst.words[2];
+                            }
+                        } else if (output_var_id == null) {
+                            output_var_id = inst.words[2];
+                        }
                     } else if (is_vertex) {
                         // For vertex shaders, prefer BuiltIn.position (gl_Position) as the return value
                         if (builtin != null) {
@@ -890,6 +901,15 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
 
     // Emit VertexOutput struct if vertex shader has multiple outputs
     var vertex_output_fields = std.ArrayList(struct { name: []const u8, type_name: []const u8, builtin: ?[]const u8, location: ?u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    // Detect depth output for fragment shaders
+    var use_frag_depth_struct = false;
+    if (is_fragment and depth_output_var_id != null) {
+        try w.writeAll("struct FragmentOutput {\n");
+        try w.writeAll("    @location(0) color: vec4f,\n");
+        try w.writeAll("    @builtin(frag_depth) depth: f32,\n");
+        try w.writeAll("}\n\n");
+        use_frag_depth_struct = true;
+    }
     if (is_vertex and output_vars.items.len > 1) {
         for (output_vars.items) |ovid| {
             const builtin_val = getDecVal(&decorations, ovid, .built_in);
@@ -995,14 +1015,18 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
 
     // Return type
     if (is_fragment and output_vars.items.len > 0 and output_var_id != null) {
-        const ov = output_var_id.?;
-        const ptr_inst = getDef(&module, getDef(&module, ov).?.words[1]);
-        var actual_type: u32 = undefined;
-        if (ptr_inst) |pi| {
-            if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = ov;
-        } else actual_type = ov;
-        const type_name = try wgslType(&module, actual_type, &names, arena);
-        try w.print(") -> @location(0) {s} {{\n", .{type_name});
+        if (use_frag_depth_struct) {
+            try w.writeAll(") -> FragmentOutput {\n");
+        } else {
+            const ov = output_var_id.?;
+            const ptr_inst = getDef(&module, getDef(&module, ov).?.words[1]);
+            var actual_type: u32 = undefined;
+            if (ptr_inst) |pi| {
+                if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = ov;
+            } else actual_type = ov;
+            const type_name = try wgslType(&module, actual_type, &names, arena);
+            try w.print(") -> @location(0) {s} {{\n", .{type_name});
+        }
     } else if (is_vertex and output_vars.items.len > 0 and output_var_id != null) {
         if (output_vars.items.len == 1) {
             // Single output — emit simple return type
@@ -1037,6 +1061,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     // Pre-scan: detect simple output variable pattern (single store before return)
     // If output var is stored to exactly once, we can return the value directly
     var direct_return_value: ?[]const u8 = null;
+    var depth_return_value: ?[]const u8 = null;
     var skip_output_var_decl = false;
     if (!use_vertex_struct and output_var_id != null) {
         const ov = output_var_id.?;
@@ -1050,6 +1075,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             if (si.op == .Store and si.words.len >= 3 and si.words[1] == ov) {
                 store_count += 1;
                 last_stored_value = names.get(si.words[2]);
+            }
+            // Track depth output stores
+            if (depth_output_var_id != null and si.op == .Store and si.words.len >= 3 and si.words[1] == depth_output_var_id.?) {
+                depth_return_value = names.get(si.words[2]);
             }
         }
         if (store_count == 1 and last_stored_value != null) {
@@ -1085,7 +1114,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null);
 
     // Return output var
-    if (use_vertex_struct) {
+    if (use_frag_depth_struct) {
+        const color_val = direct_return_value orelse (if (output_var_id != null) names.get(output_var_id.?) orelse "vec4f()" else "vec4f()");
+        const depth_val = depth_return_value orelse "0.0";
+        try w.print("    return FragmentOutput({s}, {s});\n", .{ color_val, depth_val });
+    } else if (use_vertex_struct) {
         try w.writeAll("    return vertex_out;\n");
     } else if (direct_return_value != null) {
         try w.print("    return {s};\n", .{direct_return_value.?});
@@ -2207,6 +2240,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .Store => {
                 // Skip store to output variable when doing direct return
                 if (skip_store_target != null and inst.words[1] == skip_store_target.?) continue;
+                // Skip store to depth output (handled by FragmentOutput struct return)
+                const ptr_name = names.get(inst.words[1]);
+                if (ptr_name != null and std.mem.eql(u8, ptr_name.?, "gl_FragDepth")) continue;
                 const ptr = names.get(inst.words[1]) orelse "var";
                 const val = names.get(inst.words[2]) orelse "0";
                 const ptr_inst = getDef(module, inst.words[1]);
