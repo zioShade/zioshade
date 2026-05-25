@@ -1610,8 +1610,39 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         phi_result = name_copy;
                                     }
                                     const phi_type = try wgslType(module, getDef(module, sp.result_id).?.words[1], names, arena);
-                                    const init_val = names.get(sp.value_id) orelse "0";
-                                    try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val });
+                                    // Check if the init value is defined BEFORE the SelectionMerge
+                                    // If defined inside the if-else block, use a type-appropriate zero instead
+                                    const init_val_name = names.get(sp.value_id);
+                                    var use_init = false;
+                                    if (init_val_name != null) {
+                                        // Check if value_id is a constant (always safe to reference)
+                                        const val_def = getDef(module, sp.value_id);
+                                        if (val_def != null) {
+                                            const val_op = val_def.?.op;
+                                            if (val_op == .Constant or val_op == .ConstantComposite or val_op == .ConstantTrue or val_op == .ConstantFalse or val_op == .Undef) {
+                                                use_init = true;
+                                            } else if (val_op == .Load or val_op == .Variable) {
+                                                // Loads from variables declared before the if-else are safe
+                                                use_init = true;
+                                            } else {
+                                                // Check if the value's definition index is before this SelectionMerge
+                                                var found_before = false;
+                                                for (module.instructions[0..i], 0..) |minst, mi| {
+                                                    if (minst.words.len > 2 and minst.words[2] == sp.value_id) {
+                                                        found_before = true;
+                                                        _ = mi;
+                                                        break;
+                                                    }
+                                                }
+                                                if (found_before) use_init = true;
+                                            }
+                                        }
+                                    }
+                                    if (use_init and init_val_name != null) {
+                                        try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val_name.? });
+                                    } else {
+                                        try writeInd(w, indent); try w.print("var {s}: {s};\n", .{ phi_result.?, phi_type });
+                                    }
                                 }
                             }
                         }
@@ -1986,15 +2017,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                 }
                             }
                             if (cur_pred) |cp| {
-                                // Get the init predecessor label from the Phi
-                                // The Phi's first pair (words[3], words[4]) gives the init value and pred
                                 for (phi_list.items) |sp| {
                                     if (sp.pred_label == cp) {
-                                        // Find the init predecessor (first pair in the Phi)
-                                        const phi_inst = getDef(module, sp.result_id);
-                                        const init_pred = if (phi_inst != null and phi_inst.?.words.len >= 5) phi_inst.?.words[4] else null;
-                                        // Skip update if this IS the init predecessor (already set by var init)
-                                        if (cp == init_pred) continue;
                                         const res_name = names.get(sp.result_id) orelse continue;
                                         const val_name = names.get(sp.value_id) orelse continue;
                                         try writeInd(w, indent); try w.print("{s} = {s};\n", .{ res_name, val_name });
