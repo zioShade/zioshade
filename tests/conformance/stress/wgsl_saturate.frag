@@ -1,16 +1,12 @@
+// Tests: clamp, saturate, and range operations
 #version 450
-
-layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 fragColor;
-
-// Test saturate pattern (clamp to 0..1)
-float saturate(float x) {
-    return clamp(x, 0.0, 1.0);
-}
+uniform float u_val;
 
 void main() {
-    float s = saturate(uv.x * 2.0 - 0.5);
-    float t = saturate(uv.y * 3.0 - 1.0);
-    vec3 color = vec3(s, t, s * t);
-    fragColor = vec4(color, 1.0);
+    float a = clamp(u_val, 0.0, 1.0);
+    float b = saturate(u_val * 2.0 - 0.5);
+    float c = min(max(u_val, -1.0), 1.0);
+    float d = clamp(abs(u_val - 0.5) * 3.0, 0.0, 1.0);
+    fragColor = vec4(a, b, c, d);
 }
