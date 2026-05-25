@@ -3354,7 +3354,6 @@ fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMa
 
 // Emit a single instruction — used for replaying deferred loop header instructions
 fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32) !void {
-    _ = alloc;
     switch (inst.op) {
         .Variable => {
             if (inst.words.len >= 4) {
@@ -3378,7 +3377,19 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
         .Store => {
             const ptr = names.get(inst.words[1]) orelse "var";
             const val = names.get(inst.words[2]) orelse "0";
+            // Skip store to depth output (handled by FragmentOutput struct return)
+            const ptr_name = names.get(inst.words[1]);
+            if (ptr_name != null and std.mem.eql(u8, ptr_name.?, "gl_FragDepth")) return;
             try writeIndentStatic(w, indent); try w.print("{s} = {s};\n", .{ ptr, val });
+        },
+        .AccessChain => {
+            // Rename result to composite.field expression
+            if (inst.words.len > 3) {
+                const result_id = inst.words[2];
+                const base_id = inst.words[3];
+                const expr = buildAccessExpr(module, names, base_id, inst.words[4..], alloc) catch return;
+                if (try names.fetchPut(result_id, expr)) |old| alloc.free(old.value);
+            }
         },
         .Bitcast => {
             const rt = try wgslType(module, inst.words[1], names, arena);
