@@ -1241,7 +1241,20 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
     // For single-use OpLoad results, inline the source pointer name
     // This eliminates unnecessary 'let vN = ptr;' declarations
+    // BUT: don't inline if the pointer is also a Store target (to preserve load-before-store semantics)
     var inline_loads = std.AutoHashMap(u32, void).init(arena);
+    // Build set of pointer IDs that are Store targets in this function
+    var store_targets = std.AutoHashMap(u32, void).init(arena);
+    {
+        var si: usize = func_idx + 1;
+        while (si < module.instructions.len) : (si += 1) {
+            const scan_inst = module.instructions[si];
+            if (scan_inst.op == .FunctionEnd) break;
+            if (scan_inst.op == .Store and scan_inst.words.len > 1) {
+                store_targets.put(scan_inst.words[1], {}) catch {};
+            }
+        }
+    }
     {
         var it = def_op.iterator();
         while (it.next()) |entry| {
@@ -1254,6 +1267,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (load_inst.words.len > 3) {
                         const ptr_id = load_inst.words[3];
                         const ptr_name = names.get(ptr_id) orelse continue;
+                        // Don't inline loads from pointers that are Store targets
+                        // — they might be overwritten, so we need to capture the current value
+                        if (store_targets.contains(ptr_id)) continue;
                         // Only inline if the pointer has a meaningful name and inlining
                         // doesn't create a self-assignment (e.g., let u_time = u_time)
                         const current_name = names.get(result_id) orelse "";
