@@ -31,7 +31,7 @@ pub fn main() !void {
     while (try walker.next()) |entry| {
         if (entry.kind != .file) continue;
         const path = entry.path;
-        if (!std.mem.endsWith(u8, path, ".frag") and !std.mem.endsWith(u8, path, ".vert") and !std.mem.endsWith(u8, path, ".comp")) continue;
+        if (!std.mem.endsWith(u8, path, ".frag") and !std.mem.endsWith(u8, path, ".vert") and !std.mem.endsWith(u8, path, ".comp") and !std.mem.endsWith(u8, path, ".geom")) continue;
 
         total += 1;
 
