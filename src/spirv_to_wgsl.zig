@@ -28,8 +28,29 @@ fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
     return common.getTypeOf(module, id);
 }
 
+fn isWgslKeyword(name: []const u8) bool {
+    const reserved = [_][]const u8{ "fn", "let", "var", "const", "if", "else", "for", "while", "loop", "switch", "case", "default", "break", "continue", "return", "struct", "type", "true", "false", "discard", "enable", "override", "private", "storage", "uniform", "workgroup", "function", "array", "atomic", "bool", "f16", "f32", "i32", "u32", "mat2x2", "mat2x3", "mat2x4", "mat3x2", "mat3x3", "mat3x4", "mat4x2", "mat4x3", "mat4x4", "ptr", "vec2", "vec3", "vec4" };
+    for (&reserved) |kw| {
+        if (std.mem.eql(u8, name, kw)) return true;
+    }
+    return false;
+}
+
+fn wgslSafeName(name: []const u8, buf: *[64]u8) []const u8 {
+    if (!isWgslKeyword(name)) return name;
+    const result = std.fmt.bufPrint(buf, "{s}_", .{name}) catch return name;
+    return buf[0..result.len];
+}
+
 fn getMemberName(module: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
-    return common.commonGetMemberName(module.instructions, struct_id, member_idx, buf, "_");
+    const raw = common.commonGetMemberName(module.instructions, struct_id, member_idx, buf, "_");
+    if (!isWgslKeyword(raw)) return raw;
+    // Keyword conflict: append _ to the existing buffer
+    if (raw.len + 1 <= buf.len) {
+        buf[raw.len] = '_';
+        return buf[0 .. raw.len + 1];
+    }
+    return raw;
 }
 
 fn getArraySuffix(module: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
@@ -890,8 +911,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     // Emit entry function
     const entry_stage: []const u8 = if (is_fragment) "@fragment" else if (is_vertex) "@vertex" else if (is_compute) "@compute" else "@fragment";
 
-    // Build function signature
-    try w.print("{s}\nfn main(", .{entry_stage});
+    if (is_compute) {
+        const ls = module.local_size;
+        try w.print("@compute @workgroup_size({d}, {d}, {d})\nfn main(", .{ls[0], ls[1], ls[2]});
+    } else {
+        try w.print("{s}\nfn main(", .{entry_stage});
+    }
 
     // Input parameters
     for (input_vars.items, 0..) |iv, i| {
@@ -2355,8 +2380,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(module, names, &inline_exprs, inst, ">=", w, arena, indent),
 
             // Logical
-            .LogicalOr => try emitBinOp(module, names, &inline_exprs, inst, "or", w, arena, indent),
-            .LogicalAnd => try emitBinOp(module, names, &inline_exprs, inst, "and", w, arena, indent),
+            .LogicalOr => try emitBinOp(module, names, &inline_exprs, inst, "||", w, arena, indent),
+            .LogicalAnd => try emitBinOp(module, names, &inline_exprs, inst, "&&", w, arena, indent),
             .LogicalNot => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 try writeInd(w, indent); try w.print("let {s}: {s} = !{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "true" });
@@ -3198,13 +3223,13 @@ fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMa
             buf.append(arena, ')') catch return null;
             return buf.items;
         },
-        // LogicalAnd / LogicalOr — inline as "lhs and rhs" / "lhs or rhs"
+        // LogicalAnd / LogicalOr — inline as "lhs && rhs" / "lhs || rhs"
         .LogicalAnd, .LogicalOr => {
             if (cond_def.words.len < 5) return null;
             const lhs = inlineConditionExpr(module, names, cond_def.words[3], arena, depth + 1);
             const rhs = inlineConditionExpr(module, names, cond_def.words[4], arena, depth + 1);
             if (lhs == null or rhs == null) return null;
-            const join = if (cond_def.op == .LogicalAnd) " and " else " or ";
+            const join = if (cond_def.op == .LogicalAnd) " && " else " || ";
             var buf = std.ArrayList(u8).initCapacity(arena, lhs.?.len + rhs.?.len + 6) catch return null;
             buf.appendSlice(arena, lhs.?) catch return null;
             buf.appendSlice(arena, join) catch return null;
@@ -3328,8 +3353,8 @@ fn getBinOpSymbol(op: spirv.Op) ?[]const u8 {
         .BitwiseAnd => "&",
         .BitwiseOr => "|",
         .BitwiseXor => "^",
-        .LogicalAnd => "and",
-        .LogicalOr => "or",
+        .LogicalAnd => "&&",
+        .LogicalOr => "||",
         .SLessThan => "<",
         .SGreaterThan => ">",
         .ULessThan => "<",
