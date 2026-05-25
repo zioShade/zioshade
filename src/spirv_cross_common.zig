@@ -94,6 +94,30 @@ pub fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     return module;
 }
 
+/// Find the function ID for a named entry point. Returns null if not found.
+pub fn findEntryPoint(module: *const ParsedModule, name: []const u8) ?u32 {
+    for (module.instructions) |inst| {
+        if (inst.op == .EntryPoint and inst.words.len > 3) {
+            // words: header, execution_model, func_id, name_string...
+            const ep_name = extractString(inst.words[3..]);
+            if (std.mem.eql(u8, ep_name, name)) {
+                return inst.words[2];
+            }
+        }
+    }
+    return null;
+}
+
+/// Extract a null-terminated string from SPIR-V literal words.
+fn extractString(words: []const u32) []const u8 {
+    const bytes = std.mem.sliceAsBytes(words);
+    var len: usize = 0;
+    while (len < bytes.len) : (len += 1) {
+        if (bytes[len] == 0) break;
+    }
+    return bytes[0..len];
+}
+
 pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
     return switch (op) {
         .TypeVoid, .TypeBool, .TypeInt, .TypeFloat, .TypeVector, .TypeMatrix,

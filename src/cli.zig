@@ -25,10 +25,16 @@ pub fn main() !void {
             \\  validate  Validate SPIR-V binary with spirv-val
             \\
             \\Options:
-            \\  -o <path>        Output file (default: stdout)
-            \\  --stage <stage>  Shader stage: vertex, fragment, compute, geometry (default: auto-detect)
-            \\  --glsl-version   GLSL output version: 330, 410, 430, 450, 460 (default: 430)
-            \\  --help           Show this help
+            \\  -o <path>             Output file (default: stdout)
+            \\  --stage <stage>       Shader stage: vertex, fragment, compute, geometry, ...
+            \\  --entry-point <name>  Entry point name (default: main)
+            \\  -I <path>             Add include search path (repeatable)
+            \\  -D<name>[=<value>]    Define preprocessor macro
+            \\  --glsl-version <ver>  GLSL output version: 330–460 (default: 430)
+            \\  --shader-model <ver>  HLSL shader model: 50, 60 (default: 60)
+            \\  --metal-version <ver> MSL version: 21, 24, 30 (default: 21)
+            \\  --stdin               Read input from stdin
+            \\  --help                Show this help
             \\
         , .{});
         std.process.exit(2);
@@ -40,7 +46,17 @@ pub fn main() !void {
     var input_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
     var stage_override: ?glslpp.Stage = null;
+    var entry_point: ?[]const u8 = null;
     var glsl_version: u32 = 430;
+    var shader_model: u32 = 60;
+    var metal_version: u32 = 21;
+    var use_stdin = false;
+
+    var include_paths = std.ArrayList([]const u8).initCapacity(alloc, 4) catch return;
+    defer include_paths.deinit(alloc);
+
+    var defines = std.ArrayList(glslpp.DefineOverride).initCapacity(alloc, 8) catch return;
+    defer defines.deinit(alloc);
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -59,29 +75,81 @@ pub fn main() !void {
             else if (std.mem.eql(u8, s, "tessellation_control")) stage_override = .tessellation_control
             else if (std.mem.eql(u8, s, "tessellation_evaluation")) stage_override = .tessellation_evaluation
             else fatal("unknown stage: {s}", .{s});
+        } else if (std.mem.eql(u8, args[i], "--entry-point")) {
+            i += 1;
+            if (i >= args.len) fatal("missing argument after --entry-point", .{});
+            entry_point = args[i];
+        } else if (std.mem.eql(u8, args[i], "-I")) {
+            i += 1;
+            if (i >= args.len) fatal("missing argument after -I", .{});
+            try include_paths.append(alloc, args[i]);
+        } else if (std.mem.startsWith(u8, args[i], "-D")) {
+            const def = args[i][2..];
+            if (def.len == 0) fatal("empty define name after -D", .{});
+            if (std.mem.indexOfScalar(u8, def, '=')) |eq_pos| {
+                try defines.append(alloc, .{ .name = def[0..eq_pos], .value = def[eq_pos + 1 ..] });
+            } else {
+                try defines.append(alloc, .{ .name = def, .value = "1" });
+            }
         } else if (std.mem.eql(u8, args[i], "--glsl-version")) {
             i += 1;
             if (i >= args.len) fatal("missing argument after --glsl-version", .{});
             glsl_version = std.fmt.parseInt(u32, args[i], 10) catch fatal("invalid version: {s}", .{args[i]});
+        } else if (std.mem.eql(u8, args[i], "--shader-model")) {
+            i += 1;
+            if (i >= args.len) fatal("missing argument after --shader-model", .{});
+            shader_model = std.fmt.parseInt(u32, args[i], 10) catch fatal("invalid shader model: {s}", .{args[i]});
+        } else if (std.mem.eql(u8, args[i], "--metal-version")) {
+            i += 1;
+            if (i >= args.len) fatal("missing argument after --metal-version", .{});
+            metal_version = std.fmt.parseInt(u32, args[i], 10) catch fatal("invalid metal version: {s}", .{args[i]});
+        } else if (std.mem.eql(u8, args[i], "--stdin")) {
+            use_stdin = true;
         } else {
             input_path = args[i];
         }
     }
 
-    const input = input_path orelse fatal("missing input file", .{});
+    const input = input_path orelse if (!use_stdin) fatal("missing input file (use --stdin to read from stdin)", .{}) else "stdin";
     const stage = stage_override orelse detectStage(input) orelse .fragment;
     const is_spv = std.mem.endsWith(u8, input, ".spv");
 
     if (std.mem.eql(u8, command, "compile")) {
-        try doCompile(alloc, input, output_path, stage);
+        const source = try readInput(alloc, input_path, use_stdin);
+        defer alloc.free(source);
+        try doCompile(alloc, source, output_path, stage, include_paths.items, defines.items);
     } else if (std.mem.eql(u8, command, "hlsl")) {
-        if (is_spv) try doSpvTo(alloc, input, output_path, .hlsl) else try doGlslTo(alloc, input, output_path, stage, .hlsl);
+        if (is_spv and !use_stdin) {
+            try doSpvToHlsl(alloc, input, output_path, entry_point, shader_model);
+        } else {
+            const source = try readInput(alloc, input_path, use_stdin);
+            defer alloc.free(source);
+            try doGlslToHlsl(alloc, source, output_path, stage, include_paths.items, defines.items, entry_point, shader_model);
+        }
     } else if (std.mem.eql(u8, command, "glsl")) {
-        if (is_spv) try doSpvToGlsl(alloc, input, output_path, glsl_version) else try doGlslToGlsl(alloc, input, output_path, stage, glsl_version);
+        if (is_spv and !use_stdin) {
+            try doSpvToGlsl(alloc, input, output_path, glsl_version, entry_point);
+        } else {
+            const source = try readInput(alloc, input_path, use_stdin);
+            defer alloc.free(source);
+            try doGlslToGlsl(alloc, source, output_path, stage, glsl_version, include_paths.items, defines.items, entry_point);
+        }
     } else if (std.mem.eql(u8, command, "msl")) {
-        if (is_spv) try doSpvTo(alloc, input, output_path, .msl) else try doGlslTo(alloc, input, output_path, stage, .msl);
+        if (is_spv and !use_stdin) {
+            try doSpvToMsl(alloc, input, output_path, entry_point, metal_version);
+        } else {
+            const source = try readInput(alloc, input_path, use_stdin);
+            defer alloc.free(source);
+            try doGlslToMsl(alloc, source, output_path, stage, include_paths.items, defines.items, entry_point, metal_version);
+        }
     } else if (std.mem.eql(u8, command, "wgsl")) {
-        if (is_spv) try doSpvTo(alloc, input, output_path, .wgsl) else try doGlslTo(alloc, input, output_path, stage, .wgsl);
+        if (is_spv and !use_stdin) {
+            try doSpvToWgsl(alloc, input, output_path, entry_point);
+        } else {
+            const source = try readInput(alloc, input_path, use_stdin);
+            defer alloc.free(source);
+            try doGlslToWgsl(alloc, source, output_path, stage, include_paths.items, defines.items, entry_point);
+        }
     } else if (std.mem.eql(u8, command, "reflect")) {
         try doReflect(alloc, input);
     } else if (std.mem.eql(u8, command, "validate")) {
@@ -97,6 +165,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn detectStage(path: []const u8) ?glslpp.Stage {
+    if (std.mem.eql(u8, path, "stdin")) return null;
     // .v.glsl, .f.glsl, .c.glsl, .g.glsl conventions
     if (std.mem.endsWith(u8, path, ".v.glsl")) return .vertex;
     if (std.mem.endsWith(u8, path, ".f.glsl")) return .fragment;
@@ -110,6 +179,21 @@ fn detectStage(path: []const u8) ?glslpp.Stage {
     if (std.mem.endsWith(u8, path, ".tesc")) return .tessellation_control;
     if (std.mem.endsWith(u8, path, ".tese")) return .tessellation_evaluation;
     return null;
+}
+
+fn readInput(alloc: std.mem.Allocator, path: ?[]const u8, use_stdin: bool) ![:0]const u8 {
+    if (use_stdin or path == null) {
+        const stdin_file = std.fs.File.stdin();
+        const raw = try stdin_file.readToEndAlloc(alloc, 10 * 1024 * 1024);
+        var buf = try std.ArrayListUnmanaged(u8).initCapacity(alloc, raw.len + 1);
+        defer buf.deinit(alloc);
+        try buf.appendSlice(alloc, raw);
+        try buf.append(alloc, 0);
+        alloc.free(raw);
+        const result = try buf.toOwnedSlice(alloc);
+        return result[0 .. result.len - 1 :0];
+    }
+    return readSource(alloc, path.?);
 }
 
 fn readSource(alloc: std.mem.Allocator, path: []const u8) ![:0]const u8 {
@@ -141,52 +225,14 @@ fn writeOutput(output_path: ?[]const u8, data: []const u8) !void {
     }
 }
 
-const Backend = enum { hlsl, msl, wgsl };
+// ── Compile GLSL → SPIR-V ──────────────────────────────────────────
 
-fn doGlslTo(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, stage: glslpp.Stage, backend: Backend) !void {
-    const source = try readSource(alloc, input);
-    defer alloc.free(source);
-    const result = switch (backend) {
-        .hlsl => glslpp.compileGlslToHlsl(alloc, source, stage) catch |e| compileErr(e),
-        .msl => glslpp.compileGlslToMsl(alloc, source, stage) catch |e| compileErr(e),
-        .wgsl => glslpp.compileGlslToWgsl(alloc, source, stage) catch |e| compileErr(e),
-    };
-    defer alloc.free(result);
-    try writeOutput(output, result);
-}
-
-fn doSpvTo(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, backend: Backend) !void {
-    const spv = try readSpv(alloc, input);
-    defer alloc.free(spv);
-    const result = switch (backend) {
-        .hlsl => glslpp.spirvToHLSL(alloc, spv, .{}) catch |e| crossErr(e),
-        .msl => glslpp.spirvToMSL(alloc, spv, .{}) catch |e| crossErr(e),
-        .wgsl => glslpp.spirvToWGSL(alloc, spv, .{}) catch |e| crossErr(e),
-    };
-    defer alloc.free(result);
-    try writeOutput(output, result);
-}
-
-fn doGlslToGlsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, stage: glslpp.Stage, version: u32) !void {
-    const source = try readSource(alloc, input);
-    defer alloc.free(source);
-    const glsl = glslpp.compileGlslToGlslVersion(alloc, source, stage, version) catch |e| compileErr(e);
-    defer alloc.free(glsl);
-    try writeOutput(output, glsl);
-}
-
-fn doSpvToGlsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, version: u32) !void {
-    const spv = try readSpv(alloc, input);
-    defer alloc.free(spv);
-    const glsl = glslpp.spirvToGLSL(alloc, spv, .{ .version = version }) catch |e| crossErr(e);
-    defer alloc.free(glsl);
-    try writeOutput(output, glsl);
-}
-
-fn doCompile(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, stage: glslpp.Stage) !void {
-    const source = try readSource(alloc, input);
-    defer alloc.free(source);
-    const spv = glslpp.compileToSPIRV(alloc, source, .{ .stage = stage }) catch |e| compileErr(e);
+fn doCompile(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride) !void {
+    const spv = glslpp.compileToSPIRV(alloc, source, .{
+        .stage = stage,
+        .include_paths = include_paths,
+        .defines = defines,
+    }) catch |e| compileErr(e);
     defer alloc.free(spv);
     const bytes = std.mem.sliceAsBytes(spv);
     if (output) |path| {
@@ -197,6 +243,118 @@ fn doCompile(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, s
         std.process.exit(2);
     }
 }
+
+// ── SPIR-V → HLSL ──────────────────────────────────────────────────
+
+fn doSpvToHlsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, entry_point: ?[]const u8, shader_model: u32) !void {
+    const spv = try readSpv(alloc, input);
+    defer alloc.free(spv);
+    const result = glslpp.spirvToHLSL(alloc, spv, .{
+        .shader_model = shader_model,
+        .entry_point_name = entry_point orelse "main",
+    }) catch |e| crossErr(e);
+    defer alloc.free(result);
+    try writeOutput(output, result);
+}
+
+fn doGlslToHlsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8, shader_model: u32) !void {
+    const spv = glslpp.compileToSPIRV(alloc, source, .{
+        .stage = stage,
+        .include_paths = include_paths,
+        .defines = defines,
+    }) catch |e| compileErr(e);
+    defer alloc.free(spv);
+    const result = glslpp.spirvToHLSL(alloc, spv, .{
+        .shader_model = shader_model,
+        .entry_point_name = entry_point orelse "main",
+    }) catch |e| crossErr(e);
+    defer alloc.free(result);
+    try writeOutput(output, result);
+}
+
+// ── SPIR-V → GLSL ──────────────────────────────────────────────────
+
+fn doSpvToGlsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, version: u32, entry_point: ?[]const u8) !void {
+    const spv = try readSpv(alloc, input);
+    defer alloc.free(spv);
+    const glsl = glslpp.spirvToGLSL(alloc, spv, .{
+        .version = version,
+        .entry_point_name = entry_point orelse "main",
+    }) catch |e| crossErr(e);
+    defer alloc.free(glsl);
+    try writeOutput(output, glsl);
+}
+
+fn doGlslToGlsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, version: u32, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8) !void {
+    const spv = glslpp.compileToSPIRV(alloc, source, .{
+        .stage = stage,
+        .include_paths = include_paths,
+        .defines = defines,
+    }) catch |e| compileErr(e);
+    defer alloc.free(spv);
+    const glsl = glslpp.spirvToGLSL(alloc, spv, .{
+        .version = version,
+        .entry_point_name = entry_point orelse "main",
+    }) catch |e| crossErr(e);
+    defer alloc.free(glsl);
+    try writeOutput(output, glsl);
+}
+
+// ── SPIR-V → MSL ───────────────────────────────────────────────────
+
+fn doSpvToMsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, entry_point: ?[]const u8, metal_version: u32) !void {
+    const spv = try readSpv(alloc, input);
+    defer alloc.free(spv);
+    const result = glslpp.spirvToMSL(alloc, spv, .{
+        .metal_version = metal_version,
+        .entry_point_name = entry_point orelse "main",
+    }) catch |e| crossErr(e);
+    defer alloc.free(result);
+    try writeOutput(output, result);
+}
+
+fn doGlslToMsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8, metal_version: u32) !void {
+    const spv = glslpp.compileToSPIRV(alloc, source, .{
+        .stage = stage,
+        .include_paths = include_paths,
+        .defines = defines,
+    }) catch |e| compileErr(e);
+    defer alloc.free(spv);
+    const result = glslpp.spirvToMSL(alloc, spv, .{
+        .metal_version = metal_version,
+        .entry_point_name = entry_point orelse "main",
+    }) catch |e| crossErr(e);
+    defer alloc.free(result);
+    try writeOutput(output, result);
+}
+
+// ── SPIR-V → WGSL ──────────────────────────────────────────────────
+
+fn doSpvToWgsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, entry_point: ?[]const u8) !void {
+    const spv = try readSpv(alloc, input);
+    defer alloc.free(spv);
+    const result = glslpp.spirvToWGSL(alloc, spv, .{
+        .entry_point_name = entry_point orelse "main",
+    }) catch |e| crossErr(e);
+    defer alloc.free(result);
+    try writeOutput(output, result);
+}
+
+fn doGlslToWgsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8) !void {
+    const spv = glslpp.compileToSPIRV(alloc, source, .{
+        .stage = stage,
+        .include_paths = include_paths,
+        .defines = defines,
+    }) catch |e| compileErr(e);
+    defer alloc.free(spv);
+    const result = glslpp.spirvToWGSL(alloc, spv, .{
+        .entry_point_name = entry_point orelse "main",
+    }) catch |e| crossErr(e);
+    defer alloc.free(result);
+    try writeOutput(output, result);
+}
+
+// ── Reflect / Validate ─────────────────────────────────────────────
 
 fn doReflect(alloc: std.mem.Allocator, input: []const u8) !void {
     const spv = try readSpv(alloc, input);
@@ -238,6 +396,8 @@ fn compileErr(err: anyerror) noreturn {
     const detail = glslpp.last_compile_detail;
     std.debug.print("error: {s}", .{@errorName(err)});
     if (detail) |d| std.debug.print(" ({s})", .{@tagName(d)});
+    const ctx = glslpp.lastErrorCtx();
+    if (ctx) |c| std.debug.print(": {s}", .{c});
     std.debug.print("\n", .{});
     std.process.exit(1);
 }

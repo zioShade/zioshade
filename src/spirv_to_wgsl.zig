@@ -11,7 +11,10 @@ const DecorationEntry = common.DecorationEntry;
 
 /// Options for SPIR-V → WGSL cross-compilation.
 /// Currently empty — reserved for future options.
-pub const WgslCompileOptions = struct {};
+pub const WgslCompileOptions = struct {
+    /// Entry point name to compile (default: "main").
+    entry_point_name: []const u8 = "main",
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -370,9 +373,15 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
 // ---------------------------------------------------------------------------
 
 pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: WgslCompileOptions) ![]const u8 {
-    _ = options;
     var module = try common.parseModule(alloc, spirv_words);
     defer module.deinit(alloc);
+
+    // Override entry point if requested
+    if (!std.mem.eql(u8, options.entry_point_name, "main")) {
+        if (common.findEntryPoint(&module, options.entry_point_name)) |ep_id| {
+            module.entry_point_id = ep_id;
+        } else return error.EntryPointNotFound;
+    }
 
     var names = std.AutoHashMap(u32, []const u8).init(alloc);
     defer {
