@@ -3298,6 +3298,7 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                 return;
             }
             // Generic: emit as function call using opcode name
+            if (inst.words.len < 3) return; // safety: need at least type + result
             const rt = try wgslType(module, inst.words[1], names, arena);
             const result_name = names.get(inst.words[2]) orelse "v";
             var args = std.ArrayList(u8).initCapacity(arena, 64) catch return;
