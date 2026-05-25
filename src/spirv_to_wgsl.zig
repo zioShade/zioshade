@@ -325,7 +325,7 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
             return null;
         },
         .Load, .CopyObject, .CompositeConstruct, .CompositeInsert,
-        .FunctionCall, .Phi, .Select, .CopyLogical,
+        .FunctionCall, .Phi, .Select, .CopyLogical, .FunctionParameter,
         .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
         .UConvert, .SConvert, .FConvert, .Bitcast,
         .VectorShuffle, .CompositeExtract, .VectorTimesScalar,
@@ -1172,6 +1172,38 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     const PhiUpdate = struct { result_id: u32, value_id: u32 };
     var phi_updates = std.ArrayList(PhiUpdate).initCapacity(arena, 8) catch return;
     defer phi_updates.deinit(arena);
+    // Selection phi: [merge_label] → list of (result_id, value_id, predecessor_label)
+    const SelPhi = struct { result_id: u32, value_id: u32, pred_label: u32 };
+    var sel_phis = std.AutoArrayHashMap(u32, std.ArrayList(SelPhi)).init(arena);
+    {
+        var si: usize = func_idx + 1;
+        while (si < module.instructions.len) : (si += 1) {
+            const scan_inst = module.instructions[si];
+            if (scan_inst.op == .FunctionEnd) break;
+            if (scan_inst.op == .Phi and scan_inst.words.len >= 7) {
+                // Find the merge label this phi belongs to (the label of the current block)
+                var merge_label: ?u32 = null;
+                var li: usize = si;
+                while (li > func_idx) : (li -= 1) {
+                    if (module.instructions[li].op == .Label and module.instructions[li].words.len > 1) {
+                        merge_label = module.instructions[li].words[1];
+                        break;
+                    }
+                }
+                if (merge_label) |ml| {
+                    // Parse all (value, predecessor) pairs
+                    var pi: usize = 3;
+                    while (pi + 1 < scan_inst.words.len) : (pi += 2) {
+                        const val_id = scan_inst.words[pi];
+                        const pred_id = scan_inst.words[pi + 1];
+                        const gop = sel_phis.getOrPut(ml) catch continue;
+                        if (!gop.found_existing) gop.value_ptr.* = std.ArrayList(SelPhi).initCapacity(arena, 2) catch continue;
+                        gop.value_ptr.appendAssumeCapacity(.{ .result_id = scan_inst.words[2], .value_id = val_id, .pred_label = pred_id });
+                    }
+                }
+            }
+        }
+    }
     var loop_stack = std.ArrayList(struct { merge: u32, cont: u32, header: u32, phi_start: usize, phi_end: usize }).initCapacity(arena, 4) catch return;
     defer loop_stack.deinit(arena);
     // Track phi range for pending loop (Phi processed before LoopMerge)
@@ -1505,6 +1537,35 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .SelectionMerge => {
                 if (inst.words.len > 1) {
                     pending_merge = inst.words[1];
+                    // Pre-declare selection phi variables before the if/else block
+                    if (sel_phis.count() > 0) {
+                        if (sel_phis.get(pending_merge.?)) |phi_list| {
+                            // Find the first (init) predecessor — get it from the Phi instruction
+                            const first_phi_result = phi_list.items[0].result_id;
+                            const phi_inst = getDef(module, first_phi_result);
+                            const init_pred = if (phi_inst != null and phi_inst.?.words.len >= 5) phi_inst.?.words[4] else null;
+                            // Emit var declarations for all phi results using init values
+                            var seen = std.AutoHashMap(u32, void).init(arena);
+                            for (phi_list.items) |sp| {
+                                if (sp.pred_label == init_pred) {
+                                    if (seen.contains(sp.result_id)) continue;
+                                    try seen.put(sp.result_id, {});
+                                    // Ensure the phi result has a name
+                                    var phi_result = names.get(sp.result_id);
+                                    if (phi_result == null) {
+                                        var buf: [64]u8 = undefined;
+                                        const default_name = std.fmt.bufPrint(&buf, "v{d}", .{sp.result_id}) catch "phi";
+                                        const name_copy = try alloc.dupe(u8, default_name);
+                                        try names.put(sp.result_id, name_copy);
+                                        phi_result = name_copy;
+                                    }
+                                    const phi_type = try wgslType(module, getDef(module, sp.result_id).?.words[1], names, arena);
+                                    const init_val = names.get(sp.value_id) orelse "0";
+                                    try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val });
+                                }
+                            }
+                        }
+                    }
                 }
             },
             .Switch => {
@@ -1633,39 +1694,64 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .Phi => {
                 // Emit phi as variable declaration with initial value
                 if (inst.words.len >= 7) {
-                    const phi_result = names.get(inst.words[2]) orelse null;
-                    if (phi_result != null) {
+                    const phi_result_id = inst.words[2];
+
+                    // Check if this phi was already pre-declared by SelectionMerge
+                    var already_declared = false;
+                    {
+                        var spi = sel_phis.iterator();
+                        while (spi.next()) |entry| {
+                            for (entry.value_ptr.*.items) |sp| {
+                                if (sp.result_id == phi_result_id) {
+                                    already_declared = true;
+                                    break;
+                                }
+                            }
+                            if (already_declared) break;
+                        }
+                    }
+
+                    var phi_result = names.get(phi_result_id);
+                    // If phi result has no name, assign a default one
+                    if (phi_result == null) {
+                        var buf: [64]u8 = undefined;
+                        const default_name = std.fmt.bufPrint(&buf, "v{d}", .{phi_result_id}) catch "phi";
+                        const name_copy = try alloc.dupe(u8, default_name);
+                        try names.put(phi_result_id, name_copy);
+                        phi_result = name_copy;
+                    }
+                    if (!already_declared) {
                         const phi_type = try wgslType(module, inst.words[1], names, arena);
                         const init_val = names.get(inst.words[3]) orelse "0";
                         try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val });
-                        // Record phi update: result = value from second pair (words[5])
-                        // If LoopMerge follows, this phi belongs to a new loop
-                        var lm_follows = false;
-                        {
-                            var pk = i + 1;
-                            while (pk < @min(i + 20, module.instructions.len)) : (pk += 1) {
-                                if (module.instructions[pk].op == .LoopMerge) { lm_follows = true; break; }
-                                if (module.instructions[pk].op == .FunctionEnd or module.instructions[pk].op == .Label) break;
-                            }
+                    }
+                    // Record phi update: result = value from second pair (words[5])
+                    // If LoopMerge follows, this phi belongs to a new loop
+                    var lm_follows = false;
+                    {
+                        var pk = i + 1;
+                        while (pk < @min(i + 20, module.instructions.len)) : (pk += 1) {
+                            if (module.instructions[pk].op == .LoopMerge) { lm_follows = true; break; }
+                            if (module.instructions[pk].op == .FunctionEnd or module.instructions[pk].op == .Label) break;
                         }
-                        if (lm_follows) {
-                            pending_phi_start = phi_updates.items.len; // mark start BEFORE adding
+                    }
+                    if (lm_follows) {
+                        pending_phi_start = phi_updates.items.len; // mark start BEFORE adding
+                    }
+                    if (inst.words.len >= 7) {
+                        phi_updates.appendAssumeCapacity(.{ .result_id = inst.words[2], .value_id = inst.words[5] });
+                    }
+                    // Check if LoopMerge follows (within the next 30 instructions)
+                    // Don't stop at Labels — loop header may have Labels between Phi and LoopMerge
+                    var peek: usize = i + 1;
+                    const peek_end = @min(i + 30, module.instructions.len);
+                    while (peek < peek_end) : (peek += 1) {
+                        if (module.instructions[peek].op == .LoopMerge) {
+                            defer_active = true;
+                            defer_start = i + 1;
+                            break;
                         }
-                        if (inst.words.len >= 7) {
-                            phi_updates.appendAssumeCapacity(.{ .result_id = inst.words[2], .value_id = inst.words[5] });
-                        }
-                        // Check if LoopMerge follows (within the next 30 instructions)
-                        // Don't stop at Labels — loop header may have Labels between Phi and LoopMerge
-                        var peek: usize = i + 1;
-                        const peek_end = @min(i + 30, module.instructions.len);
-                        while (peek < peek_end) : (peek += 1) {
-                            if (module.instructions[peek].op == .LoopMerge) {
-                                defer_active = true;
-                                defer_start = i + 1;
-                                break;
-                            }
-                            if (module.instructions[peek].op == .FunctionEnd) break;
-                        }
+                        if (module.instructions[peek].op == .FunctionEnd) break;
                     }
                 }
             },
@@ -1835,6 +1921,36 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (loop_continue_label != null and target == loop_continue_label.?) {
                             // Branch to continue block — skip
                             continue;
+                        }
+                    }
+                    // Emit selection phi updates when branching to merge block
+                    if (sel_phis.count() > 0) {
+                        if (sel_phis.get(target)) |phi_list| {
+                            // Find current predecessor label (previous Label instruction)
+                            var cur_pred: ?u32 = null;
+                            var li: usize = if (i > 0) i - 1 else 0;
+                            while (li > func_idx) : (li -= 1) {
+                                if (module.instructions[li].op == .Label and module.instructions[li].words.len > 1) {
+                                    cur_pred = module.instructions[li].words[1];
+                                    break;
+                                }
+                            }
+                            if (cur_pred) |cp| {
+                                // Get the init predecessor label from the Phi
+                                // The Phi's first pair (words[3], words[4]) gives the init value and pred
+                                for (phi_list.items) |sp| {
+                                    if (sp.pred_label == cp) {
+                                        // Find the init predecessor (first pair in the Phi)
+                                        const phi_inst = getDef(module, sp.result_id);
+                                        const init_pred = if (phi_inst != null and phi_inst.?.words.len >= 5) phi_inst.?.words[4] else null;
+                                        // Skip update if this IS the init predecessor (already set by var init)
+                                        if (cp == init_pred) continue;
+                                        const res_name = names.get(sp.result_id) orelse continue;
+                                        const val_name = names.get(sp.value_id) orelse continue;
+                                        try writeInd(w, indent); try w.print("{s} = {s};\n", .{ res_name, val_name });
+                                    }
+                                }
+                            }
                         }
                     }
                     // When true branch ends and there's a false branch, emit } else {
