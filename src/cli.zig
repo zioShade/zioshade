@@ -221,7 +221,9 @@ fn writeOutput(output_path: ?[]const u8, data: []const u8) !void {
     if (output_path) |path| {
         try std.fs.cwd().writeFile(.{ .sub_path = path, .data = data });
     } else {
-        std.debug.print("{s}\n", .{data});
+        const stdout_file = std.fs.File.stdout();
+        try stdout_file.writeAll(data);
+        try stdout_file.writeAll("\n");
     }
 }
 
