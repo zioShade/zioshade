@@ -323,7 +323,7 @@ pub fn spirvToHLSL(
         var binding: i32 = @intCast(cb.binding);
         binding += options.binding_shift;
         if (binding < 0) binding = 0;
-        // TODO: SSBO (cb.is_ssbo) needs RWStructuredBuffer for writable access
+        // SSBO: emit as RWStructuredBuffer (or RasterizerOrdered for interlock)
         if (cb.is_ssbo) {
             // SSBO: emit as RWStructuredBuffer<StructType> or ByteAddressBuffer
             // For shaders with interlock, use RasterizerOrderedByteAddressBuffer
