@@ -2358,7 +2358,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             break;
                         }
                     }
-                    if (lead_count >= 2 and lead_source != null) {
+                    // Check if source is a struct — struct extracts shouldn't use swizzle notation
+                    var src_is_struct = false;
+                    if (lead_source) |ls| {
+                        const src_type_for_swizzle = resolveTypeOf(module, ls);
+                        if (src_type_for_swizzle) |st| {
+                            const st_def2 = getDef(module, st);
+                            if (st_def2) |sd3| {
+                                if (sd3.op == .TypeStruct) src_is_struct = true;
+                            }
+                        }
+                    }
+                    if (lead_count >= 2 and lead_source != null and !src_is_struct) {
                         // Emit with leading source aggregated
                         var parts = std.ArrayList(u8).initCapacity(arena, 128) catch return;
                         defer parts.deinit(arena);
@@ -2478,10 +2489,38 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const v1 = names.get(inst.words[3]) orelse "v1";
                 const v2 = names.get(inst.words[4]) orelse "v2";
+                // Get component count of first vector to determine single-source swizzle
+                const v1_type = getDef(module, inst.words[3]);
+                var v1_count: u32 = 4; // default to vec4
+                if (v1_type) |vt| blk: {
+                    if (vt.op == .Load or vt.op == .AccessChain) {
+                        // Resolve through load/accesschain to get the actual type
+                        if (vt.words.len > 1) {
+                            const inner_type = getDef(module, vt.words[1]);
+                            if (inner_type) |it| {
+                                if (it.op == .TypeVector and it.words.len > 3) {
+                                    v1_count = it.words[3];
+                                    break :blk;
+                                }
+                            }
+                        }
+                    }
+                    // Check if v1 instruction has a type we can use
+                    if (vt.op == .TypeVector and vt.words.len > 3) {
+                        v1_count = vt.words[3];
+                    } else if (vt.words.len > 1) {
+                        const t = getDef(module, vt.words[1]);
+                        if (t) |ti| {
+                            if (ti.op == .TypeVector and ti.words.len > 3) {
+                                v1_count = ti.words[3];
+                            }
+                        }
+                    }
+                }
                 // Check if all components come from the same source vector (single-source swizzle)
                 var single_source = true;
                 for (inst.words[5..]) |idx| {
-                    if (idx >= 4) { single_source = false; break; }
+                    if (idx >= v1_count) { single_source = false; break; }
                 }
                 if (single_source) {
                     // All from v1 — emit as v1.xyzw swizzle
@@ -2499,8 +2538,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     for (inst.words[5..]) |idx| {
                         if (!first) try w.writeAll(", ");
                         first = false;
-                        const src = if (idx < 4) v1 else v2;
-                        const comp = idx % 4;
+                        const src = if (idx < v1_count) v1 else v2;
+                        const comp = idx % v1_count;
                         const sw = switch (comp) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" };
                         try w.print("{s}{s}", .{ src, sw });
                     }
