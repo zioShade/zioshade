@@ -1340,6 +1340,24 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
+    // Pre-scan: process AccessChain instructions to set names before expression inlining
+    // Without this, inline expressions reference raw names like v27 instead of v15.colors[v25]
+    {
+        var aci: usize = func_idx + 1;
+        while (aci < module.instructions.len) : (aci += 1) {
+            const ac_inst = module.instructions[aci];
+            if (ac_inst.op == .FunctionEnd) break;
+            if (ac_inst.op == .AccessChain and ac_inst.words.len > 3) {
+                const result_id = ac_inst.words[2];
+                const base_id = ac_inst.words[3];
+                const expr = buildAccessExpr(module, names, base_id, ac_inst.words[4..], alloc) catch continue;
+                if (expr.len > 0) {
+                    if (try names.fetchPut(result_id, expr)) |old| alloc.free(old.value);
+                }
+            }
+        }
+    }
+
     // For single-use OpLoad results, inline the source pointer name
     // This eliminates unnecessary 'let vN = ptr;' declarations
     // BUT: don't inline if the pointer is also a Store target (to preserve load-before-store semantics)
@@ -1620,6 +1638,40 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     dead_arith.put(result_id, {}) catch {};
                     changed = true;
                 }
+            }
+        }
+        // Revive dead IDs whose names are referenced in surviving inline expressions
+        // If a dead ID's name appears in an inline_exprs value, the reference would be
+        // undeclared, so we must keep the binding
+        {
+            var revive_blk = std.ArrayList(u32).initCapacity(arena, 16) catch unreachable;
+            var revive = &revive_blk;
+            var re_it = dead_arith.iterator();
+            while (re_it.next()) |entry| {
+                const dead_id = entry.key_ptr.*;
+                const dead_name = names.get(dead_id) orelse continue;
+                if (dead_name.len < 2) continue; // skip short names like "v"
+                // Check if any inline_exprs value references this name
+                var ie_it = inline_exprs.iterator();
+                while (ie_it.next()) |ie_entry| {
+                    if (dead_arith.contains(ie_entry.key_ptr.*)) continue; // skip dead exprs
+                    const expr = ie_entry.value_ptr.*;
+                    if (std.mem.indexOf(u8, expr, dead_name) != null) {
+                        // Check it's actually a variable reference (word boundary)
+                        // Simple heuristic: name is preceded by space, (, or start; followed by ), +, -, *, /, ,, space, or end
+                        const pos = std.mem.indexOf(u8, expr, dead_name).?;
+                        const before_ok = pos == 0 or switch (expr[pos - 1]) { ' ', '(', ',', '=', '\t' => true, else => false };
+                        const after_idx = pos + dead_name.len;
+                        const after_ok = after_idx >= expr.len or switch (expr[after_idx]) { ' ', ')', ',', '+', '-', '*', '/', '\t', '\n' => true, else => false };
+                        if (before_ok and after_ok) {
+                            revive.append(arena, dead_id) catch {};
+                            break;
+                        }
+                    }
+                }
+            }
+            for (revive.items) |rid| {
+                _ = dead_arith.remove(rid);
             }
         }
     }
