@@ -35,6 +35,8 @@ pub const Error = error{
     SemanticFailed,
     /// SPIR-V code generation failed.
     CodegenFailed,
+    /// Requested entry point was not found in the SPIR-V module.
+    EntryPointNotFound,
 };
 
 /// Detailed information about which compilation stage failed.
@@ -92,6 +94,11 @@ pub const ResourceLimits = struct {
 };
 
 /// Options for `compileToSPIRV` and related functions.
+pub const DefineOverride = struct {
+    name: []const u8,
+    value: []const u8 = "1",
+};
+
 pub const CompileOptions = struct {
     /// GLSL source version: 100 (ESSL), 110, 120, 130, 140, 150, 300 (ESSL), 330, 400, 410, 420, 430, 440, 450, 460.
     version: u32 = 430,
@@ -101,6 +108,10 @@ pub const CompileOptions = struct {
     spirv_version: SPIRVVersion = .@"1.5",
     /// Resource limits for validation.
     limits: ResourceLimits = .{},
+    /// Include search paths for #include directives.
+    include_paths: []const []const u8 = &.{},
+    /// Preprocessor defines to inject before compilation.
+    defines: []const DefineOverride = &.{},
 };
 
 pub const CrossCompileOptions = struct {
@@ -270,7 +281,25 @@ pub fn compileToSPIRV(
     options: CompileOptions,
 ) Error![]const u32 {
     last_compile_detail = null;
-    const tokens = lexer.tokenize(alloc, source) catch {
+
+    // Prepend -D defines as #define directives to source
+    const actual_source: [:0]const u8 = if (options.defines.len > 0) blk: {
+        var buf = std.ArrayListUnmanaged(u8).initCapacity(alloc, source.len + options.defines.len * 64) catch return error.OutOfMemory;
+        for (options.defines) |def| {
+            buf.appendSlice(alloc, "#define ") catch return error.OutOfMemory;
+            buf.appendSlice(alloc, def.name) catch return error.OutOfMemory;
+            buf.appendSlice(alloc, " ") catch return error.OutOfMemory;
+            buf.appendSlice(alloc, def.value) catch return error.OutOfMemory;
+            buf.append(alloc, '\n') catch return error.OutOfMemory;
+        }
+        buf.appendSlice(alloc, source) catch return error.OutOfMemory;
+        buf.append(alloc, 0) catch return error.OutOfMemory;
+        const result = buf.toOwnedSlice(alloc) catch return error.OutOfMemory;
+        break :blk result[0 .. result.len - 1 :0];
+    } else source;
+    defer if (actual_source.ptr != source.ptr) alloc.free(@constCast(actual_source.ptr[0..actual_source.len + 1]));
+
+    const tokens = lexer.tokenize(alloc, actual_source) catch {
         last_compile_detail = .lex_failed;
         semantic.last_error_line = lexer.last_error_line;
         semantic.last_error_column = lexer.last_error_column;
@@ -281,10 +310,12 @@ pub fn compileToSPIRV(
     // Run preprocessor to handle #define, #if, #ifdef, etc.
     var pp = preprocessor.Preprocessor.init(alloc);
     defer pp.deinit();
-    const pp_tokens = pp.process(source, tokens) catch tokens;
+    pp.include_paths = options.include_paths;
+
+    const pp_tokens = pp.process(actual_source, tokens) catch tokens;
     defer if (pp_tokens.ptr != tokens.ptr) alloc.free(pp_tokens);
 
-    var root_node = parser.parse(alloc, source, pp_tokens) catch {
+    var root_node = parser.parse(alloc, actual_source, pp_tokens) catch {
         last_compile_detail = .parse_failed;
         return error.ParseFailed;
     };

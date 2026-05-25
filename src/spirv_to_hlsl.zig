@@ -112,6 +112,20 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     return module;
 }
 
+fn findEntryPoint(module: *const ParsedModule, name: []const u8) ?u32 {
+    for (module.instructions) |inst| {
+        if (inst.op == .EntryPoint and inst.words.len > 3) {
+            const bytes = std.mem.sliceAsBytes(inst.words[3..]);
+            var len: usize = 0;
+            while (len < bytes.len) : (len += 1) {
+                if (bytes[len] == 0) break;
+            }
+            if (std.mem.eql(u8, bytes[0..len], name)) return inst.words[2];
+        }
+    }
+    return null;
+}
+
 fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
     return switch (op) {
         // Types: result at word[1]
@@ -217,6 +231,8 @@ pub const HlslCompileOptions = struct {
     binding_shift: i32 = 0,
     /// Target HLSL Shader Model version (50 = 5.0, 60 = 6.0).
     shader_model: u32 = 60,
+    /// Entry point name to compile (default: "main").
+    entry_point_name: []const u8 = "main",
 };
 
 pub fn spirvToHLSL(
@@ -226,6 +242,13 @@ pub fn spirvToHLSL(
 ) ![]const u8 {
     var module = try parseModule(alloc, spirv_words);
     defer module.deinit(alloc);
+
+    // Override entry point if requested
+    if (!std.mem.eql(u8, options.entry_point_name, "main")) {
+        if (findEntryPoint(&module, options.entry_point_name)) |ep_id| {
+            module.entry_point_id = ep_id;
+        } else return error.EntryPointNotFound;
+    }
 
     const entry_id = module.entry_point_id orelse return error.NoEntryPoint;
 

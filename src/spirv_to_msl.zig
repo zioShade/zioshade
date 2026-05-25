@@ -353,12 +353,20 @@ fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id:
 pub const MslCompileOptions = struct {
     /// Target Metal version (21 = Metal 2.1, 30 = Metal 3.0).
     metal_version: u32 = 21,
+    /// Entry point name to compile (default: "main").
+    entry_point_name: []const u8 = "main",
 };
 
 pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: MslCompileOptions) ![]const u8 {
-    _ = options;
     var module = try parseModule(alloc, spirv_words);
     defer module.deinit(alloc);
+
+    // Override entry point if requested
+    if (!std.mem.eql(u8, options.entry_point_name, "main")) {
+        if (findEntryPoint(&module, options.entry_point_name)) |ep_id| {
+            module.entry_point_id = ep_id;
+        } else return error.EntryPointNotFound;
+    }
 
     // Metal ray tracing uses a fundamentally different model (compute + intersection queries)
     // Vulkan's ray tracing pipeline stages cannot be directly mapped
@@ -557,6 +565,21 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     }
     return module;
 }
+
+fn findEntryPoint(module: *const ParsedModule, name: []const u8) ?u32 {
+    for (module.instructions) |inst| {
+        if (inst.op == .EntryPoint and inst.words.len > 3) {
+            const bytes = std.mem.sliceAsBytes(inst.words[3..]);
+            var len: usize = 0;
+            while (len < bytes.len) : (len += 1) {
+                if (bytes[len] == 0) break;
+            }
+            if (std.mem.eql(u8, bytes[0..len], name)) return inst.words[2];
+        }
+    }
+    return null;
+}
+
 fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
     return switch(op) {
         .TypeVoid,.TypeBool,.TypeInt,.TypeFloat,.TypeVector,.TypeMatrix,.TypeImage,.TypeSampler,.TypeSampledImage,.TypeArray,.TypeRuntimeArray,.TypeStruct,.TypePointer,.TypeFunction,.TypeForwardPointer,.TypeAccelerationStructureKHR,.TypeRayQueryKHR,.TypeTensorARM => if(words.len>1) words[1] else null,
