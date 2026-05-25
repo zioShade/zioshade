@@ -1162,7 +1162,41 @@ fn emitBody(
                 }
                 if (label_map.get(mval)) |mi| { idx = mi; }
             } else {
-                try w.print("    if ({s}) {{ /* TODO */ }}\n", .{cn});
+                // No SelectionMerge — reconstruct if/else from branch targets
+                // Find convergence: both branches eventually branch to same label
+                var converge_lbl: ?u32 = null;
+                if (fl != null) {
+                    // Scan true branch for its terminal Branch
+                    const tl_idx = label_map.get(tl) orelse tl;
+                    var si: usize = tl_idx;
+                    while (si < m.instructions.len) : (si += 1) {
+                        const sinst = m.instructions[si];
+                        if (sinst.op == .Branch and sinst.words.len > 1) {
+                            converge_lbl = sinst.words[1];
+                            break;
+                        }
+                        if (sinst.op == .ReturnValue or sinst.op == .Return or sinst.op == .Kill) break;
+                        if (sinst.op == .BranchConditional) break;
+                    }
+                }
+                try w.print("    if ({s})\n    {{\n", .{cn});
+                if (converge_lbl) |cv| {
+                    idx = try emitBlock(m, names, decs, tl, cv, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
+                    if (fl != null and fl.? != cv) {
+                        try w.writeAll("    } else {\n");
+                        idx = try emitBlock(m, names, decs, fl.?, cv, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
+                    }
+                    try w.writeAll("    }\n");
+                    if (label_map.get(cv)) |mi| { idx = mi; }
+                } else if (fl != null) {
+                    idx = try emitBlock(m, names, decs, tl, fl.?, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
+                    try w.writeAll("    }\n");
+                    if (label_map.get(fl.?)) |mi| { idx = mi; }
+                } else {
+                    // Only true branch, no false — emit true branch and continue
+                    idx = try emitBlock(m, names, decs, tl, tl, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", true);
+                    try w.writeAll("    }\n");
+                }
             }
             continue;
         }
@@ -1189,7 +1223,41 @@ fn emitBody(
                 try w.writeAll("    }\n");
                 if (label_map.get(mval)) |mi| { idx = mi; }
             } else {
-                try w.writeAll("    // switch TODO\n");
+                // No SelectionMerge for switch — try to find convergence point
+                var switch_merge: ?u32 = null;
+                if (inst.words.len >= 5) {
+                    const first_case_target = inst.words[4];
+                    const fc_idx = label_map.get(first_case_target) orelse first_case_target;
+                    var si: usize = fc_idx;
+                    while (si < m.instructions.len) : (si += 1) {
+                        const sinst = m.instructions[si];
+                        if (sinst.op == .Branch and sinst.words.len > 1) {
+                            switch_merge = sinst.words[1];
+                            break;
+                        }
+                        if (sinst.op == .ReturnValue or sinst.op == .Return or sinst.op == .Kill) break;
+                        if (sinst.op == .BranchConditional) break;
+                    }
+                }
+                if (switch_merge) |sm| {
+                    try w.print("    switch ({s}) {{\n", .{sn});
+                    if (dl != sm) {
+                        try w.writeAll("    default:\n");
+                        _ = try emitBlock(m, names, decs, dl, sm, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", true);
+                    }
+                    var wi: usize = 3;
+                    while (wi + 1 < inst.words.len) : (wi += 2) {
+                        const cv = inst.words[wi];
+                        const target = inst.words[wi + 1];
+                        if (target == sm) continue;
+                        try w.print("    case {d}:\n", .{cv});
+                        _ = try emitBlock(m, names, decs, target, sm, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", true);
+                    }
+                    try w.writeAll("    }\n");
+                    if (label_map.get(sm)) |mi| { idx = mi; }
+                } else {
+                    try w.writeAll("    // switch: no merge info\n");
+                }
             }
             continue;
         }
@@ -1510,7 +1578,41 @@ fn emitBlock(
                 try w.print("{s}    }}\n", .{indent});
                 if (lm.get(smv)) |smi| { i = smi; }
             } else {
-                try w.writeAll("    // switch TODO\n");
+                // No merge info for switch — try to find convergence
+                var switch_merge2: ?u32 = null;
+                if (inst.words.len >= 5) {
+                    const fct = inst.words[4];
+                    const fci = lm.get(fct) orelse fct;
+                    var sci: usize = fci;
+                    while (sci < m.instructions.len) : (sci += 1) {
+                        const sinst = m.instructions[sci];
+                        if (sinst.op == .Branch and sinst.words.len > 1) {
+                            switch_merge2 = sinst.words[1];
+                            break;
+                        }
+                        if (sinst.op == .ReturnValue or sinst.op == .Return or sinst.op == .Kill) break;
+                        if (sinst.op == .BranchConditional) break;
+                    }
+                }
+                if (switch_merge2) |sm2| {
+                    try w.print("{s}switch ({s}) {{\n", .{ indent, sn });
+                    if (dl != sm2) {
+                        try w.print("{s}default:\n", .{indent});
+                        i = try emitBlock(m, names, decs, dl, sm2, lm, bm, w, alloc, is_frag, ovid, indent, true);
+                    }
+                    var wi: usize = 3;
+                    while (wi + 1 < inst.words.len) : (wi += 2) {
+                        const cv = inst.words[wi];
+                        const target = inst.words[wi + 1];
+                        if (target == sm2) continue;
+                        try w.print("{s}case {d}:\n", .{ indent, cv });
+                        i = try emitBlock(m, names, decs, target, sm2, lm, bm, w, alloc, is_frag, ovid, indent, true);
+                    }
+                    try w.print("{s}}}\n", .{indent});
+                    if (lm.get(sm2)) |smi| { i = smi; }
+                } else {
+                    try w.writeAll("    // switch: no merge info\n");
+                }
             }
             continue;
         }
