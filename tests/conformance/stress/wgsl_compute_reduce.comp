@@ -1,0 +1,22 @@
+// Tests: compute shader with reduction pattern
+#version 450
+layout(local_size_x = 256) in;
+layout(binding = 0) buffer Input { float data[]; };
+layout(binding = 1) buffer Output { float result; };
+
+shared float s_partial[256];
+
+void main() {
+    uint idx = gl_LocalInvocationID.x;
+    s_partial[idx] = data[gl_GlobalInvocationID.x];
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (idx < stride) {
+            s_partial[idx] += s_partial[idx + stride];
+        }
+        barrier();
+    }
+    if (idx == 0u) {
+        result = s_partial[0];
+    }
+}
