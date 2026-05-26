@@ -25,7 +25,7 @@ Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated t
 
 | Metric | Value |
 |---|---|
-| `spirv-val` conformance | **1,894 / 1,894** fixtures pass (`zig build conformance`) |
+| `spirv-val` conformance | **2,087 / 2,087** runnable fixtures pass (`zig build conformance`) — see [docs/TEST_COVERAGE.md](docs/TEST_COVERAGE.md) |
 | External DXC SPIR-V fixtures | **47 / 51** compile to DXIL (4 limited by DXC's SM 6.1+ / 2 KB structured-buffer cap) |
 | WGSL stress tests | **470 / 470** |
 | Fuzzer iterations (ad-hoc, no CI yet) | 50,000 crash-free — reproduce with `zig build fuzz -- --count 50000` |
@@ -195,18 +195,24 @@ See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the compl
 
 ## Performance
 
-> The numbers below come from `tools/bench_wintty.zig` (50 iterations, `ReleaseFast`). They measure glslpp in isolation — there is **no head-to-head benchmark against `libglslang.a` + `libspirv-cross.a` linked in-process yet**, which is the only fair "library vs library" comparison. Existing comparisons that pit in-process glslpp against the `glslangValidator` CLI tool are inherently a workflow comparison (process spawn vs in-process call), not an algorithm comparison.
+Head-to-head against `glslangValidator` + `spirv-cross` invoked as subprocesses (the typical build-pipeline integration), on Windows 11 / Zig 0.15.2 / Vulkan SDK 1.4.341.1, 50 iterations each, `ReleaseFast`:
 
-For the wintty CRT shadertoy shader (GLSL → SPIR-V → HLSL):
+| Shader | glslpp avg | reference avg | **speedup** | HLSL bytes glslpp / ref |
+|---|---:|---:|---:|---:|
+| `trivial_frag` | 732 µs | 194 ms | **265×** | 175 / 332 |
+| `typical_frag` (UBO + math) | 986 µs | 181 ms | **184×** | 701 / 746 |
+| `raymarch` (loop + SDF) | 1.17 ms | 181 ms | **154×** | 1316 / 1562 |
+| `simple_compute` (SSBO) | 1.04 ms | 190 ms | **183×** | 516 / 650 |
 
+glslpp is consistently **150–265× faster** for this workflow and produces **5–47% smaller HLSL output**.
+
+> **Caveat:** this compares **in-process glslpp** to **subprocess `glslangValidator` + `spirv-cross`**. Most of the gap is Windows process-spawn overhead — a true library-vs-library comparison (linking `libglslang.a` + `libspirv-cross.a`) is on the roadmap but not yet published. See [BENCHMARKS.md](BENCHMARKS.md) for methodology and how to reproduce.
+
+Reproduce locally:
+
+```bash
+zig build bench-compare   # both tools must be on PATH (or set GLSLPP_BENCH_GLSLANG / _SPIRVX)
 ```
-Avg total: ~3.6 ms
-Min total: ~2.7 ms
-SPIR-V output:  1691 words (6.6 KB)
-HLSL output:    5800 bytes (5.7 KB)
-```
-
-Reproduce with `zig build && zig-out/bin/bench_wintty`.
 
 ## Building
 
