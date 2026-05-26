@@ -1,0 +1,35 @@
+// Test: compute shader with shared memory and barrier
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputData {
+    float data[];
+} input_buf;
+
+layout(binding = 1) buffer OutputData {
+    float data[];
+} output_buf;
+
+shared float s_data[256];
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    
+    // Load into shared memory
+    s_data[idx] = input_buf.data[idx];
+    barrier();
+    
+    // Prefix sum in shared memory
+    float val = s_data[idx];
+    for (uint offset = 1; offset < 256; offset *= 2) {
+        barrier();
+        if (idx >= offset) {
+            val = s_data[idx - offset] + val;
+        }
+        barrier();
+        s_data[idx] = val;
+    }
+    
+    output_buf.data[idx] = s_data[idx];
+}
