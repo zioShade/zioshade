@@ -1502,6 +1502,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // Don't inline loads from pointers that are Store targets
                         // — they might be overwritten, so we need to capture the current value
                         if (store_targets.contains(ptr_id)) continue;
+                        // Don't inline loads from AccessChain results — the expression
+                        // may have unresolved indices that get updated later
+                        const ptr_def = getDef(module, ptr_id);
+                        if (ptr_def) |pd| {
+                            if (pd.op == .AccessChain) continue;
+                        }
                         // Only inline if the pointer has a meaningful name and inlining
                         // doesn't create a self-assignment (e.g., let u_time = u_time)
                         const current_name = names.get(result_id) orelse "";
@@ -1600,6 +1606,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             }
         }
     }
+
+    // (Second AccessChain pass removed — caused regressions)
 
     // Pre-scan: identify dead CompositeExtract results that will be absorbed by swizzle optimization
     var dead_extracts = std.AutoHashMap(u32, void).init(arena);
@@ -2382,8 +2390,21 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
                 } else if (inline_loads.contains(inst.words[2])) {
                     // Single-use load: propagate name, skip declaration
-                    const a = try alloc.dupe(u8, ptr);
+                    // Re-resolve the pointer name in case AccessChain indices were updated
+                    var resolved_ptr = ptr;
+                    var resolved_allocated = false;
+                    if (ptr_inst) |pi| {
+                        if (pi.op == .AccessChain) {
+                            const fresh_expr = buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc) catch ptr;
+                            if (!std.mem.eql(u8, fresh_expr, ptr)) {
+                                resolved_ptr = fresh_expr;
+                                resolved_allocated = true;
+                            }
+                        }
+                    }
+                    const a = try alloc.dupe(u8, resolved_ptr);
                     if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
+                    if (resolved_allocated) alloc.free(resolved_ptr);
                 } else {
                     var expr: []const u8 = ptr;
                     var expr_allocated = false;
