@@ -1,7 +1,7 @@
 const std = @import("std");
 const glslpp = @import("glslpp");
-const diagnostic = @import("glslpp").diagnostic;
-const semantic = @import("glslpp").semantic;
+const diagnostic = glslpp.diagnostic;
+const semantic = glslpp.test_internals.semantic;
 const diag_helpers = @import("helpers/diagnostics.zig");
 
 // =============================================================================
