@@ -356,6 +356,7 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
         },
         .Load, .CopyObject, .CompositeConstruct, .CompositeInsert,
         .FunctionCall, .Phi, .Select, .CopyLogical, .FunctionParameter,
+        .Undef,
         .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
         .UConvert, .SConvert, .FConvert, .Bitcast,
         .VectorShuffle, .CompositeExtract, .VectorTimesScalar,
@@ -768,6 +769,41 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             func_idx_map.put(inst.words[2], i) catch {};
         }
     }
+    // Pre-scan: forward-declare structs used as local variable types in any function
+    for (func_ids.items) |fid| {
+        const fidx = func_idx_map.get(fid) orelse continue;
+        const fi = module.instructions[fidx];
+        // Get function type for return type
+        if (fi.words.len >= 5) {
+            const func_type_id = fi.words[4];
+            const ft = getDef(&module, func_type_id);
+            if (ft) |fti| {
+                if (fti.op == .TypeFunction and fti.words.len > 2) {
+                    try emitOneStructForwardDecl(&module, &names, fti.words[2], w, arena, &emitted_structs, &emitted_names);
+                    // Also emit for param types
+                    for (fti.words[3..]) |param_tid| {
+                        try emitOneStructForwardDecl(&module, &names, param_tid, w, arena, &emitted_structs, &emitted_names);
+                    }
+                }
+            }
+        }
+        // Scan function body for OpVariable/OpUndef with struct types
+        var si: usize = fidx + 1;
+        while (si < module.instructions.len) : (si += 1) {
+            const scan = module.instructions[si];
+            if (scan.op == .FunctionEnd) break;
+            if (scan.op == .Variable or scan.op == .Undef or
+                scan.op == .CompositeConstruct or scan.op == .Load or
+                scan.op == .CompositeExtract)
+            {
+                if (scan.words.len > 1) {
+                    const type_id = scan.words[1];
+                    try emitOneStructForwardDecl(&module, &names, type_id, w, arena, &emitted_structs, &emitted_names);
+                }
+            }
+        }
+    }
+
     for (func_ids.items) |fid| {
         if (fid == module.entry_point_id) continue; // emit entry last
         const fidx = func_idx_map.get(fid) orelse continue;
