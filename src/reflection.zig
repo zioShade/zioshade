@@ -10,6 +10,24 @@ pub const TypeKind = enum {
     uniform_buffer, storage_buffer, acceleration_structure,
 };
 
+/// SPIR-V image format qualifier (from `OpTypeImage` Format operand).
+/// Mirrors the SPIR-V spec's `Image Format` enum; only meaningful for
+/// `storage_images` and storage-image-like resources.
+pub const ImageFormat = enum(u8) {
+    unknown = 0, rgba32f, rgba16f, r32f, rgba8, rgba8_snorm,
+    rg32f, rg16f, r11f_g11f_b10f, r16f, rgba16, rgb10_a2, rg16, rg8,
+    r16, r8, rgba16_snorm, rg16_snorm, rg8_snorm, r16_snorm, r8_snorm,
+    rgba32i, rgba16i, rgba8i, r32i, rg32i, rg16i, rg8i, r16i, r8i,
+    rgba32ui, rgba16ui, rgba8ui, r32ui, rgb10_a2ui, rg32ui, rg16ui,
+    rg8ui, r16ui, r8ui,
+
+    fn fromSpv(format_op: u32) ImageFormat {
+        // SPIR-V Image Format enum runs 0..39 contiguously. Cast if in range.
+        if (format_op > 39) return .unknown;
+        return @enumFromInt(@as(u8, @intCast(format_op)));
+    }
+};
+
 pub const Member = struct {
     name: []const u8 = "",
     offset: u32 = 0,
@@ -27,6 +45,17 @@ pub const Resource = struct {
     type_id: u32 = 0,
     size: u32 = 0,
     members: []const Member = &.{},
+
+    // ── Image-specific (populated only for storage_images / subpass_inputs / separate_images / sampled_images) ──
+    /// Image format qualifier (e.g. `.rgba8`) for storage images. `null` otherwise.
+    image_format: ?ImageFormat = null,
+
+    // ── Specialization-constant-specific (populated only for `specialization_constants`) ──
+    /// `SpecId` decoration value. `0xFFFF_FFFF` if not a spec constant.
+    spec_id: u32 = 0xFFFF_FFFF,
+    /// Raw 32-bit operand from `OpSpecConstant`. Consumer reinterprets per type
+    /// (int / uint / float bitcast / bool 0-or-1).
+    default_value_u32: u32 = 0,
 };
 
 pub const EntryPoint = struct {
@@ -94,6 +123,14 @@ const TInfo = struct {
     pointee_type_id: u32 = 0,
     member_type_ids: []const u32 = &.{},
     byte_size: u32 = 0,
+
+    // Image-specific (only set when kind == .image, from OpTypeImage operands).
+    /// Image dimensionality per SPIR-V `Dim` enum: 1=1D, 2=2D, 3=3D, 4=Cube, 5=Rect, 6=SubpassData, 7=Buffer.
+    image_dim: u32 = 0,
+    /// `Sampled` operand: 0=unknown, 1=sampled image, 2=storage image.
+    image_sampled: u32 = 0,
+    /// Image format qualifier from the `Format` operand.
+    image_format: ImageFormat = .unknown,
 };
 
 // Pack (struct_id, member_index) into a single u64 key
@@ -122,7 +159,7 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
     const VarInfo = struct { id: u32, type_id: u32, sc: u32 };
     var variables = std.ArrayList(VarInfo).initCapacity(alloc, 64) catch return ShaderResources{};
     defer variables.deinit(alloc);
-    var spec_consts = std.ArrayList(struct { id: u32, type_id: u32 }).initCapacity(alloc, 8) catch return ShaderResources{};
+    var spec_consts = std.ArrayList(struct { id: u32, type_id: u32, default_value_u32: u32 }).initCapacity(alloc, 8) catch return ShaderResources{};
     defer spec_consts.deinit(alloc);
 
     // Walk instructions
@@ -168,7 +205,7 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                         34 => { if (wc >= 4) gop.value_ptr.set = spirv_words[pos + 3]; }, // DescriptorSet
                         33 => { if (wc >= 4) gop.value_ptr.binding = spirv_words[pos + 3]; }, // Binding
                         30 => { if (wc >= 4) gop.value_ptr.location = spirv_words[pos + 3]; }, // Location
-                        41 => { if (wc >= 4) gop.value_ptr.spec_id = spirv_words[pos + 3]; }, // SpecId
+                        1 => { if (wc >= 4) gop.value_ptr.spec_id = spirv_words[pos + 3]; }, // SpecId
                         2 => { gop.value_ptr.is_block = true; }, // Block
                         3 => { gop.value_ptr.is_buffer_block = true; }, // BufferBlock
                         else => {},
@@ -222,6 +259,18 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                     try types.put(spirv_words[pos + 1], info);
                 }
             },
+            25 => { // OpTypeImage = result_id sampledType dim depth arrayed ms sampled format access?
+                // Words: [25|wc] result_id sampledType dim depth arrayed ms sampled format [access]
+                if (wc >= 9) {
+                    try types.put(spirv_words[pos + 1], .{
+                        .kind = .image,
+                        .element_type_id = spirv_words[pos + 2], // sampledType
+                        .image_dim = spirv_words[pos + 3],
+                        .image_sampled = spirv_words[pos + 7],
+                        .image_format = ImageFormat.fromSpv(spirv_words[pos + 8]),
+                    });
+                }
+            },
             26 => { // OpTypeSampler
                 if (wc >= 2) try types.put(spirv_words[pos + 1], .{ .kind = .sampler });
             },
@@ -253,10 +302,33 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                     try types.put(spirv_words[pos + 1], .{ .pointee_type_id = spirv_words[pos + 3] });
                 }
             },
-            49 => { // OpSpecConstant
+            48, 49 => { // OpSpecConstantTrue (48), OpSpecConstantFalse (49)
+                // No literal payload; default value is implied (1 or 0).
                 if (wc >= 3) {
-                    try spec_consts.append(alloc, .{ .type_id = spirv_words[pos + 1], .id = spirv_words[pos + 2] });
+                    try spec_consts.append(alloc, .{
+                        .type_id = spirv_words[pos + 1],
+                        .id = spirv_words[pos + 2],
+                        .default_value_u32 = if (op == 48) 1 else 0,
+                    });
                 }
+            },
+            50 => { // OpSpecConstant — typed scalar with explicit default literal
+                if (wc >= 4) {
+                    try spec_consts.append(alloc, .{
+                        .type_id = spirv_words[pos + 1],
+                        .id = spirv_words[pos + 2],
+                        .default_value_u32 = spirv_words[pos + 3],
+                    });
+                } else if (wc >= 3) {
+                    try spec_consts.append(alloc, .{
+                        .type_id = spirv_words[pos + 1],
+                        .id = spirv_words[pos + 2],
+                        .default_value_u32 = 0,
+                    });
+                }
+            },
+            5341 => { // OpTypeAccelerationStructureKHR (extension instruction)
+                if (wc >= 2) try types.put(spirv_words[pos + 1], .{ .kind = .acceleration_structure });
             },
             else => {},
         }
@@ -276,6 +348,8 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
     defer sep_samp.deinit(alloc);
     var stor_img = std.ArrayList(Resource).initCapacity(alloc, 16) catch return ShaderResources{};
     defer stor_img.deinit(alloc);
+    var subpass = std.ArrayList(Resource).initCapacity(alloc, 4) catch return ShaderResources{};
+    defer subpass.deinit(alloc);
     var ins = std.ArrayList(Resource).initCapacity(alloc, 16) catch return ShaderResources{};
     defer ins.deinit(alloc);
     var outs = std.ArrayList(Resource).initCapacity(alloc, 16) catch return ShaderResources{};
@@ -292,6 +366,13 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
         const nm = names.get(v.id) orelse "";
         const pointee = resolvePointee(&types, v.type_id);
         const tk = resolveKind(&types, pointee);
+        const pointee_info: ?TInfo = types.get(pointee);
+
+        // For image resources, surface the SPIR-V `Format` operand to the caller.
+        const img_format: ?ImageFormat = if (pointee_info) |ti|
+            (if (ti.kind == .image and ti.image_format != .unknown) ti.image_format else null)
+        else
+            null;
 
         const res = Resource{
             .name = if (nm.len > 0) alloc.dupe(u8, nm) catch "" else "",
@@ -300,7 +381,8 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             .binding = d.binding,
             .location = d.location,
             .type_id = pointee,
-            .size = if (types.get(pointee)) |t| t.byte_size else 0,
+            .size = if (pointee_info) |t| t.byte_size else 0,
+            .image_format = img_format,
         };
 
         switch (v.sc) {
@@ -312,7 +394,18 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             0 => { // UniformConstant
                 switch (tk) {
                     .sampled_image => try sampled.append(alloc, res),
-                    .image => try sep_img.append(alloc, res),
+                    .image => {
+                        // Distinguish storage image / subpass input / separate image
+                        // based on the underlying OpTypeImage Dim and Sampled operands.
+                        const ti = pointee_info orelse TInfo{};
+                        if (ti.image_dim == 6) { // SubpassData
+                            try subpass.append(alloc, res);
+                        } else if (ti.image_sampled == 2) { // storage image
+                            try stor_img.append(alloc, res);
+                        } else {
+                            try sep_img.append(alloc, res);
+                        }
+                    },
                     .sampler => try sep_samp.append(alloc, res),
                     .acceleration_structure => try accels.append(alloc, res),
                     else => try sampled.append(alloc, res),
@@ -356,7 +449,9 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             .name = if (nm.len > 0) alloc.dupe(u8, nm) catch "" else "",
             .id = sc.id,
             .type_id = sc.type_id,
-            .location = d.spec_id,
+            .location = d.spec_id, // legacy: kept for compatibility, mirrors spec_id
+            .spec_id = d.spec_id,
+            .default_value_u32 = sc.default_value_u32,
         });
     }
 
@@ -367,6 +462,7 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
         .separate_images = sep_img.toOwnedSlice(alloc) catch &.{},
         .separate_samplers = sep_samp.toOwnedSlice(alloc) catch &.{},
         .storage_images = stor_img.toOwnedSlice(alloc) catch &.{},
+        .subpass_inputs = subpass.toOwnedSlice(alloc) catch &.{},
         .inputs = ins.toOwnedSlice(alloc) catch &.{},
         .outputs = outs.toOwnedSlice(alloc) catch &.{},
         .push_constants = pcs.toOwnedSlice(alloc) catch &.{},
