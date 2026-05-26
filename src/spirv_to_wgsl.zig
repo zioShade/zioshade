@@ -1692,6 +1692,21 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
+    // Save old names for extract results before renaming (for stale name fixup)
+    var extract_old_names = std.AutoHashMap(u32, []const u8).init(arena);
+    {
+        var sni: usize = func_idx + 1;
+        while (sni < module.instructions.len) : (sni += 1) {
+            const sn = module.instructions[sni];
+            if (sn.op == .FunctionEnd) break;
+            if (sn.op == .CompositeExtract and sn.words.len > 2) {
+                if (names.get(sn.words[2])) |old| {
+                    extract_old_names.put(sn.words[2], try alloc.dupe(u8, old)) catch {};
+                }
+            }
+        }
+    }
+
     // Pre-scan: inline single-use CompositeExtract results (v15 = v14.x → rename v15 to v14.x)
     // Process in instruction order so parent extracts are renamed before children
     {
@@ -1762,9 +1777,44 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
-    // (Second AccessChain pass removed — caused regressions)
-
-    // (Second AccessChain pass removed — caused regressions)
+    // Fix stale names: replace old extract names with new ones in all name values
+    // This fixes AccessChain/load names that captured the pre-rename extract name (e.g., v11 → gl_GlobalInvocationID.x)
+    {
+        var fixup_names = std.ArrayList(struct { id: u32, new_val: []const u8 }).initCapacity(arena, 32) catch unreachable;
+        var rn_it = names.iterator();
+        while (rn_it.next()) |entry| {
+            const id = entry.key_ptr.*;
+            const val = entry.value_ptr.*;
+            var updated = val;
+            var changed_any = false;
+            // Apply all extract renames
+            var eon_it = extract_old_names.iterator();
+            while (eon_it.next()) |eon| {
+                const old_name = eon.value_ptr.*;
+                if (old_name.len < 2) continue;
+                const new_name = names.get(eon.key_ptr.*) orelse continue;
+                if (std.mem.eql(u8, old_name, new_name)) continue; // no change
+                // Replace all occurrences of old_name in val
+                while (std.mem.indexOf(u8, updated, old_name)) |pos| {
+                    // Check word boundaries to avoid partial matches
+                    const before_ok = pos == 0 or switch (updated[pos - 1]) { ' ', '(', ',', '[', '+', '-', '*', '/', '=' => true, else => false };
+                    const after_idx = pos + old_name.len;
+                    const after_ok = after_idx >= updated.len or switch (updated[after_idx]) { ' ', ')', ',', ']', '+', '-', '*', '/', '=', '.', '\t' => true, else => false };
+                    if (before_ok and after_ok) {
+                        const replacement = try std.mem.concat(alloc, u8, &[_][]const u8{ updated[0..pos], new_name, updated[after_idx..] });
+                        updated = replacement;
+                        changed_any = true;
+                    } else break; // avoid infinite loop on non-match
+                }
+            }
+            if (changed_any) {
+                fixup_names.append(arena, .{ .id = id, .new_val = updated }) catch {};
+            }
+        }
+        for (fixup_names.items) |fn_item| {
+            if (try names.fetchPut(fn_item.id, fn_item.new_val)) |old| alloc.free(old.value);
+        }
+    }
 
     // Pre-scan: identify dead CompositeExtract results that will be absorbed by swizzle optimization
     var dead_extracts = std.AutoHashMap(u32, void).init(arena);
