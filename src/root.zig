@@ -19,6 +19,15 @@ const codegen = @import("codegen.zig");
 /// may change or disappear without notice — do not depend on it from
 /// production code. Exposed so the diagnostic test suite can inspect
 /// threadlocal error state set by the compiler pipeline.
+///
+/// All exposed error-state fields (`last_error_line`, `last_error_column`,
+/// `last_error_ctx`, `last_error_inner`) are `threadlocal` — read them on
+/// the same OS thread that invoked the compile function or they will be
+/// zero/empty. Safe today because Zig deduplicates `@import` by path within
+/// a single package, so this `semantic` and the file-scope `semantic` above
+/// resolve to the same module instance and share threadlocal slots. Do not
+/// re-export this struct from a different package, which would break that
+/// invariant.
 pub const test_internals = struct {
     pub const semantic = @import("semantic.zig");
 };
