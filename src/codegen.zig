@@ -4613,7 +4613,10 @@ const Codegen = struct {
                     const lod_id: u32 = switch (resolved.operands[2]) {
                         .literal_int => |v| try self.emitIntConstant(v),
                         .id => |id| self.constant_alias.get(id) orelse id,
-                        else => @panic("unexpected lod operand type"),
+                        else => |o| blk: {
+                            std.log.err("codegen.image_fetch: unexpected lod operand kind {s}", .{@tagName(o)});
+                            break :blk 0;
+                        },
                     };
                     const offset_id = self.operandId(resolved, 3);
                     try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageFetch)));
@@ -5349,7 +5352,16 @@ const Codegen = struct {
     fn operandId(self: *Codegen, inst: ir.Instruction, index: usize) u32 {
         const raw_id = switch (inst.operands[index]) {
             .id => |id| id,
-            else => @panic("operandId: expected id operand"),
+            // Caller pre-validates operand kinds; reaching this means semantic
+            // analysis emitted the wrong kind. Return 0 (invalid SPIR-V id)
+            // so spirv-val catches the malformed module instead of crashing
+            // the host process.
+            else => |o| blk: {
+                std.log.err("codegen.operandId: expected .id at operand[{d}] of {s}; got {s}", .{
+                    index, @tagName(inst.tag), @tagName(o),
+                });
+                break :blk 0;
+            },
         };
         return self.constant_alias.get(raw_id) orelse raw_id;
     }
@@ -5358,7 +5370,12 @@ const Codegen = struct {
         _ = self;
         return switch (inst.operands[index]) {
             .literal_int => |v| v,
-            else => @panic("operandInt: expected literal_int operand"),
+            else => |o| blk: {
+                std.log.err("codegen.operandInt: expected .literal_int at operand[{d}] of {s}; got {s}", .{
+                    index, @tagName(inst.tag), @tagName(o),
+                });
+                break :blk 0;
+            },
         };
     }
 
