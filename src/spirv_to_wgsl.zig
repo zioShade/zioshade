@@ -1502,12 +1502,6 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // Don't inline loads from pointers that are Store targets
                         // — they might be overwritten, so we need to capture the current value
                         if (store_targets.contains(ptr_id)) continue;
-                        // Don't inline loads from AccessChain results — the expression
-                        // may have unresolved indices that get updated later
-                        const ptr_def = getDef(module, ptr_id);
-                        if (ptr_def) |pd| {
-                            if (pd.op == .AccessChain) continue;
-                        }
                         // Only inline if the pointer has a meaningful name and inlining
                         // doesn't create a self-assignment (e.g., let u_time = u_time)
                         const current_name = names.get(result_id) orelse "";
