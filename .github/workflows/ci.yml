@@ -34,9 +34,7 @@ jobs:
           zig build cli
 
       - name: Build examples
-        run: |
-          zig build-exe examples/glsl_to_hlsl.zig --mod glslpp::src/root.zig --deps glslpp
-          zig build-exe examples/reflect_uniforms.zig --mod glslpp::src/root.zig --deps glslpp
+        run: zig build examples
 
       - name: Unit tests
         run: zig build test --summary all

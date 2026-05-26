@@ -10,7 +10,7 @@ glslpp is a **pure-Zig GLSL→SPIR-V compiler and SPIR-V cross-compiler** (HLSL 
 
 **What works today:**
 - **wintty production use** — every shader wintty ships through GLSL → SPIR-V → HLSL / MSL / WGSL.
-- **Correctness** — 1894 / 1894 fixtures pass `spirv-val`; HLSL outputs validate via DXC; pixel-level rendering matches glslang+SPIRV-Cross for the validated set.
+- **Correctness** — 2,087 / 2,087 runnable fixtures pass `spirv-val`; HLSL outputs validate via DXC; pixel-level rendering matches glslang+SPIRV-Cross for the validated set.
 - **In-process API** — no process spawn, no DLL init, no global state outside `threadlocal` per-thread caches.
 
 **What's missing relative to a true glslang / SPIRV-Cross drop-in:**
@@ -35,7 +35,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Cross-compilers (HLSL, GLSL, MSL, WGSL) | ~12,000 |
 | Optimizer (compact_ids_passes) | ~10,200 |
 | Preprocessor | ~1,800 |
-| `spirv-val` conformance passing | 1,894 / 1,894 (`zig build conformance`) |
+| `spirv-val` conformance passing | 2,087 / 2,087 runnable (`zig build conformance`) |
 | External DXC SPIR-V fixtures | 47 / 51 compile (4 limited by DXC SM 6.1+ / 2 KB structured-buffer cap) |
 | WGSL stress tests | 470 / 470 |
 | Fuzzer iterations (clean, ad-hoc) | 50,000 (run `zig build fuzz -- --count 50000` to reproduce) |

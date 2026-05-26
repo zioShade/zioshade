@@ -523,4 +523,43 @@ pub fn build(b: *std.Build) void {
         for (a) |arg| run_realworld.addArg(arg);
     }
     realworld_step.dependOn(&run_realworld.step);
+
+    // Head-to-head benchmark — runs glslpp vs glslang+spirv-cross subprocess.
+    // Build/run with: zig build bench-compare
+    const bench_compare_step = b.step("bench-compare", "Run glslpp vs glslang+spirv-cross head-to-head benchmark");
+    const bench_compare_mod = b.createModule(.{
+        .root_source_file = b.path("tools/bench_compare.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_compare_mod.addImport("glslpp", glslpp_mod);
+    const bench_compare_exe = b.addExecutable(.{
+        .name = "bench-compare",
+        .root_module = bench_compare_mod,
+    });
+    const run_bench_compare = b.addRunArtifact(bench_compare_exe);
+    if (b.args) |a| {
+        for (a) |arg| run_bench_compare.addArg(arg);
+    }
+    bench_compare_step.dependOn(&run_bench_compare.step);
+
+    // Examples — build with: zig build examples
+    // Each example is a real installable executable that imports the glslpp
+    // module so it cannot drift out of sync with the library API.
+    const examples_step = b.step("examples", "Build the example programs in examples/");
+    const example_names = .{ "glsl_to_hlsl", "reflect_uniforms" };
+    inline for (example_names) |name| {
+        const ex_mod = b.createModule(.{
+            .root_source_file = b.path(b.fmt("examples/{s}.zig", .{name})),
+            .target = target,
+            .optimize = optimize,
+        });
+        ex_mod.addImport("glslpp", glslpp_mod);
+        const ex_exe = b.addExecutable(.{
+            .name = b.fmt("example-{s}", .{name}),
+            .root_module = ex_mod,
+        });
+        const ex_install = b.addInstallArtifact(ex_exe, .{});
+        examples_step.dependOn(&ex_install.step);
+    }
 }

@@ -1701,7 +1701,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             if (sn.op == .FunctionEnd) break;
             if (sn.op == .CompositeExtract and sn.words.len > 2) {
                 if (names.get(sn.words[2])) |old| {
-                    extract_old_names.put(sn.words[2], try alloc.dupe(u8, old)) catch {};
+                    // Use arena: extract_old_names is arena-allocated and only
+                    // read within this function, so the value strings should
+                    // live in arena too (otherwise they leak when arena is freed).
+                    extract_old_names.put(sn.words[2], arena.dupe(u8, old) catch continue) catch {};
                 }
             }
         }
@@ -1772,6 +1775,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         alloc.free(old.value);
                     }
                     try inline_loads.put(result_id, {});
+                } else {
+                    // No rename needed — release the buffer we just allocated.
+                    alloc.free(new_name_buf);
                 }
             }
         }
@@ -2604,16 +2610,22 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     var resolved_allocated = false;
                     if (ptr_inst) |pi| {
                         if (pi.op == .AccessChain) {
-                            var fresh_expr = buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc) catch ptr;
-                            // If wrapped uniform array, append .x
-                            if (std.mem.indexOf(u8, fresh_expr, "._wrapped_[") != null) {
-                                const with_x = try std.fmt.allocPrint(alloc, "{s}.x", .{fresh_expr});
-                                alloc.free(fresh_expr);
-                                fresh_expr = with_x;
-                            }
-                            if (!std.mem.eql(u8, fresh_expr, ptr)) {
-                                resolved_ptr = fresh_expr;
-                                resolved_allocated = true;
+                            const fresh_expr_opt: ?[]const u8 = buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc) catch null;
+                            if (fresh_expr_opt) |fe0| {
+                                var fresh_expr = fe0;
+                                // If wrapped uniform array, append .x
+                                if (std.mem.indexOf(u8, fresh_expr, "._wrapped_[") != null) {
+                                    const with_x = try std.fmt.allocPrint(alloc, "{s}.x", .{fresh_expr});
+                                    alloc.free(fresh_expr);
+                                    fresh_expr = with_x;
+                                }
+                                if (!std.mem.eql(u8, fresh_expr, ptr)) {
+                                    resolved_ptr = fresh_expr;
+                                    resolved_allocated = true;
+                                } else {
+                                    // Same content as the existing ptr name — drop the fresh allocation.
+                                    alloc.free(fresh_expr);
+                                }
                             }
                         }
                     }
