@@ -125,6 +125,7 @@ pub fn build(b: *std.Build) void {
         .root_module = refl_test_mod,
     }));
     refl_test_step.dependOn(&run_refl_tests.step);
+    test_step.dependOn(&run_refl_tests.step);
 
     // Correctness tests (G1/G4/G10) — run with: zig build test-correctness
     const corr_test_step = b.step("test-correctness", "Run correctness tests for reflection, GLSL versions, HLSL SM5");
@@ -138,6 +139,7 @@ pub fn build(b: *std.Build) void {
         .root_module = corr_test_mod,
     }));
     corr_test_step.dependOn(&run_corr_tests.step);
+    test_step.dependOn(&run_corr_tests.step);
 
     // Diagnostic tests (G3) — run with: zig build test-diagnostic
     const diag_test_step = b.step("test-diagnostic", "Run diagnostic quality tests");
@@ -151,6 +153,7 @@ pub fn build(b: *std.Build) void {
         .root_module = diag_test_mod,
     }));
     diag_test_step.dependOn(&run_diag_tests.step);
+    test_step.dependOn(&run_diag_tests.step);
 
     const run_hlsl_tests = b.addRunArtifact(b.addTest(.{
         .name = "hlsl-tests",
