@@ -1,13 +1,24 @@
-// Tests: integer modulo and division patterns
+// Test: integer division and modulo edge cases
 #version 450
+
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-    int a = 17;
-    int b = 5;
-    int q = a / b;
-    int r = a % b;
-    int neg = -a;
-    float result = float(q) + float(r) * 0.1 + float(neg) * 0.01;
-    fragColor = vec4(vec3(fract(result)), 1.0);
+    int a = int(gl_FragCoord.x);
+    int b = int(gl_FragCoord.y);
+    
+    // Avoid division by zero
+    b = max(b, 1);
+    
+    int quotient = a / b;
+    int remainder = a % b;
+    int neg_quotient = (-a) / b;
+    int neg_remainder = (-a) % b;
+    
+    uint ua = uint(a);
+    uint ub = uint(max(b, 1));
+    uint udiv = ua / ub;
+    uint umod = ua % ub;
+    
+    fragColor = vec4(float(quotient) / 255.0, float(remainder) / 255.0, float(neg_quotient) / 255.0, float(udiv) / 255.0);
 }

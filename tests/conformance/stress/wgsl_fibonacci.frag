@@ -1,15 +1,20 @@
-// Tests: recursive fibonacci-like pattern (non-recursive, iterative)
+// Test: recursive-looking fibonacci (actually iterative with loop)
 #version 450
-uniform int u_n;
+
+layout(location = 0) out vec4 fragColor;
 
 void main() {
-    int a = 0;
-    int b = 1;
-    for (int i = 0; i < u_n; i++) {
-        int temp = a + b;
-        a = b;
-        b = temp;
+    int n = int(gl_FragCoord.x) % 20;
+    
+    int fib_prev = 0;
+    int fib_curr = 1;
+    
+    for (int i = 0; i < n; i++) {
+        int temp = fib_curr;
+        fib_curr = fib_prev + fib_curr;
+        fib_prev = temp;
     }
-    float result = float(a) / 1000.0;
-    gl_FragColor = vec4(result, float(u_n) / 20.0, 0.0, 1.0);
+    
+    float result = float(fib_prev) / 1000.0;
+    fragColor = vec4(result, float(n) / 20.0, 0.0, 1.0);
 }
