@@ -191,15 +191,21 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
                 6 => "texture_2d",
                 else => "texture_2d",
             };
-            // Check if multisampled (words[6]) or storage (words[7] == 2)
+            // Check if multisampled (words[6]) or storage image (words[7] != 0)
             const is_ms = if (inst.words.len > 6) inst.words[6] == 1 else false;
-            const is_storage = if (inst.words.len > 7) inst.words[7] == 2 else false;
+            const access_qualifier: u32 = if (inst.words.len > 7) inst.words[7] else 0;
+            const is_storage = access_qualifier == 2; // Only ReadWrite is storage with both load+store
+            // WriteOnly (1) images are also storage but we handle them with regular textures
             if (is_storage) {
-                // Storage image: texture_storage_2d<rgba8unorm, write>
+                const access_mode: []const u8 = switch (access_qualifier) {
+                    1 => "write",
+                    2 => "read_write",
+                    else => "write",
+                };
                 const format: []const u8 = switch (dim) {
-                    1 => "texture_storage_2d<rgba8unorm, write>",
-                    2 => "texture_storage_3d<rgba8unorm, write>",
-                    else => "texture_storage_2d<rgba8unorm, write>",
+                    1 => try std.fmt.allocPrint(alloc, "texture_storage_2d<rgba8unorm, {s}>", .{access_mode}),
+                    2 => try std.fmt.allocPrint(alloc, "texture_storage_3d<rgba8unorm, {s}>", .{access_mode}),
+                    else => try std.fmt.allocPrint(alloc, "texture_storage_2d<rgba8unorm, {s}>", .{access_mode}),
                 };
                 break :blk format;
             } else if (is_ms) {
@@ -877,11 +883,27 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
 
     // Emit textures and samplers
     // Group sampler + texture pairs
+    // Deduplicate bindings against cbuffers
     var sampler_names = std.ArrayList(struct { name: []const u8, binding: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    // Collect used bindings from cbuffers
+    var used_tex_bindings = std.AutoHashMap(u32, void).init(arena);
+    for (cbuffers.items) |cb| {
+        used_tex_bindings.put(cb.binding, {}) catch {};
+    }
+    var next_tex_binding: u32 = 0;
 
     for (textures.items) |tex| {
-        const group = @divFloor(tex.binding, 2);
-        const binding = tex.binding;
+        var tex_binding = tex.binding;
+        // Avoid collision with cbuffers
+        if (used_tex_bindings.contains(tex_binding)) {
+            while (used_tex_bindings.contains(next_tex_binding)) : (next_tex_binding += 1) {}
+            tex_binding = next_tex_binding;
+            next_tex_binding += 1;
+        }
+        used_tex_bindings.put(tex_binding, {}) catch {};
+        used_tex_bindings.put(tex_binding + 1, {}) catch {}; // sampler slot
+        const group = @divFloor(tex_binding, 2);
+        const binding = tex_binding;
         const tex_type = try wgslType(&module, tex.image_type_id, &names, arena);
         if (tex.is_storage) {
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, binding, tex.name, tex_type });
