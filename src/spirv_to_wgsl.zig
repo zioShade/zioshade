@@ -2670,8 +2670,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .FDiv, .SDiv, .UDiv => try emitBinOp(module, names, &inline_exprs, inst, "/", w, arena, indent),
             .FMod => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
             .UMod, .SRem, .SMod, .FRem => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
-            .ShiftLeftLogical => try emitBinOp(module, names, &inline_exprs, inst, "<<", w, arena, indent),
-            .ShiftRightLogical => try emitBinOp(module, names, &inline_exprs, inst, ">>", w, arena, indent),
+            .ShiftLeftLogical, .ShiftRightLogical => {
+                // WGSL requires shift amount to be u32
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const lhs_raw = resolveOperandExpr(module, names, &inline_exprs, inst.words[3], arena, 0);
+                const rhs_raw = resolveOperandExpr(module, names, &inline_exprs, inst.words[4], arena, 0);
+                const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
+                const op_str: []const u8 = if (inst.op == .ShiftLeftLogical) "<<" else ">>";
+                try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s} {s} u32({s});\n", .{ result_name, rt, lhs, op_str, rhs_raw });
+            },
+            .ShiftRightArithmetic => try emitBinOp(module, names, &inline_exprs, inst, ">>", w, arena, indent),
             .FNegate, .SNegate => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 try writeInd(w, indent); try w.print("let {s}: {s} = -{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
@@ -3356,9 +3365,6 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     try writeInd(w, indent); try w.print("{s} = {s};\n", .{ dst, src });
                 }
             },
-
-            // ShiftRightArithmetic
-            .ShiftRightArithmetic => try emitBinOp(module, names, &inline_exprs, inst, ">>", w, arena, indent),
 
             // ControlBarrier / MemoryBarrier
             .ControlBarrier => {
