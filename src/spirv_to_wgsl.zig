@@ -1764,6 +1764,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
     // (Second AccessChain pass removed — caused regressions)
 
+    // (Second AccessChain pass removed — caused regressions)
+
     // Pre-scan: identify dead CompositeExtract results that will be absorbed by swizzle optimization
     var dead_extracts = std.AutoHashMap(u32, void).init(arena);
     var dead_conditions = std.AutoHashMap(u32, void).init(arena);
