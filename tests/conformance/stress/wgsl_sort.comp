@@ -1,0 +1,37 @@
+// Test: GPU sort with shared memory - bitonic merge
+#version 450
+
+layout(local_size_x = 512) in;
+
+shared float s_data[512];
+
+layout(binding = 0) buffer SortData {
+    float values[];
+} data;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    s_data[idx] = data.values[idx];
+    barrier();
+    
+    // Bitonic sort stages
+    for (uint k = 2u; k <= 512u; k *= 2u) {
+        for (uint j = k / 2u; j > 0u; j /= 2u) {
+            barrier();
+            uint l = idx ^ j;
+            if (l > idx) {
+                bool ascending = ((idx & k) == 0u);
+                float a = s_data[idx];
+                float b = s_data[l];
+                bool shouldSwap = ascending ? (a > b) : (a < b);
+                if (shouldSwap) {
+                    s_data[idx] = b;
+                    s_data[l] = a;
+                }
+            }
+        }
+    }
+    
+    barrier();
+    data.values[idx] = s_data[idx];
+}
