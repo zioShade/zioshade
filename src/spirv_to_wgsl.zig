@@ -1173,7 +1173,7 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
             continue;
         }
 
-        // Look for reassignment pattern: '<name> = ...' (not '==')
+        // Look for reassignment pattern: '<name> = ...' (not '==') or '<name>[...] = ...'
         const trimmed = std.mem.trimLeft(u8, line, " ");
         if (trimmed.len > 0) {
             if (std.mem.indexOfScalar(u8, trimmed, ' ')) |space_idx| {
@@ -1181,6 +1181,17 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
                 if (space_idx + 2 < trimmed.len and trimmed[space_idx + 1] == '=' and trimmed[space_idx + 2] != '=') {
                     const name_copy = try arena.dupe(u8, potential_name);
                     try mutable_names.put(name_copy, {});
+                }
+            }
+            // Also check for indexed assignment: name[...] = value
+            if (std.mem.indexOfScalar(u8, trimmed, '[')) |bracket_idx| {
+                const potential_name = trimmed[0..bracket_idx];
+                // Find the closing bracket and check for ' ='
+                if (std.mem.indexOfScalarPos(u8, trimmed, bracket_idx, ']')) |close_idx| {
+                    if (close_idx + 2 < trimmed.len and trimmed[close_idx + 1] == ' ' and trimmed[close_idx + 2] == '=') {
+                        const name_copy = try arena.dupe(u8, potential_name);
+                        try mutable_names.put(name_copy, {});
+                    }
                 }
             }
         }
@@ -2289,7 +2300,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             expr_allocated = true;
                         }
                     }
-                    try writeInd(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, expr });
+                    const let_or_var: []const u8 = if (std.mem.startsWith(u8, result_name, "_inout_")) "var" else "let";
+                    try writeInd(w, indent); try w.print("{s} {s}: {s} = {s};\n", .{ let_or_var, result_name, rt, expr });
                     if (expr_allocated) alloc.free(expr);
                 }
             },
