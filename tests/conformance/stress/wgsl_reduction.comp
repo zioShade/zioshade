@@ -1,0 +1,31 @@
+// Test: compute with subgroup-like barrier patterns
+#version 450
+
+layout(local_size_x = 64) in;
+
+shared float s_buf[64];
+
+layout(binding = 0) buffer Data {
+    float values[];
+} data;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    
+    // Load phase
+    s_buf[idx] = data.values[idx];
+    barrier();
+    
+    // Reduction phase: tree reduction
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        barrier();
+        if (idx < stride) {
+            s_buf[idx] += s_buf[idx + stride];
+        }
+    }
+    
+    // Store result
+    if (idx == 0u) {
+        data.values[0] = s_buf[0];
+    }
+}
