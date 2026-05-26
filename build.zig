@@ -151,6 +151,7 @@ pub fn build(b: *std.Build) void {
         .root_module = diag_test_mod,
     }));
     diag_test_step.dependOn(&run_diag_tests.step);
+    test_step.dependOn(&run_diag_tests.step);
 
     const run_hlsl_tests = b.addRunArtifact(b.addTest(.{
         .name = "hlsl-tests",

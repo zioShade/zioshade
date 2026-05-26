@@ -14,6 +14,14 @@ const ir = @import("ir.zig");
 const parser = @import("parser.zig");
 const semantic = @import("semantic.zig");
 const codegen = @import("codegen.zig");
+
+/// Test-only access to internal modules. Not part of the public API and
+/// may change or disappear without notice — do not depend on it from
+/// production code. Exposed so the diagnostic test suite can inspect
+/// threadlocal error state set by the compiler pipeline.
+pub const test_internals = struct {
+    pub const semantic = @import("semantic.zig");
+};
 const spirv_to_hlsl = @import("spirv_to_hlsl.zig");
 const spirv_to_glsl = @import("spirv_to_glsl.zig");
 const spirv_to_msl = @import("spirv_to_msl.zig");
