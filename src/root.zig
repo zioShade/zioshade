@@ -12,7 +12,11 @@ const preprocessor = @import("preprocessor.zig");
 const ast = @import("ast.zig");
 const ir = @import("ir.zig");
 const parser = @import("parser.zig");
-const semantic = @import("semantic.zig");
+/// Exposed publicly for use by `tests/diagnostic_tests.zig` which needs to read
+/// post-error state (`semantic.last_error_line`, `last_error_column`, etc.).
+/// External callers should prefer `Error`, `Diagnostic`, `lastErrorCtx()`, and
+/// `lastErrorInner()` from the curated public API.
+pub const semantic = @import("semantic.zig");
 const codegen = @import("codegen.zig");
 const spirv_to_hlsl = @import("spirv_to_hlsl.zig");
 const spirv_to_glsl = @import("spirv_to_glsl.zig");
