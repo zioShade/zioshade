@@ -939,7 +939,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
 
         const inout_ret_name: ?[]const u8 = if (has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null);
 
         try w.writeAll("}\n\n");
     }
@@ -948,12 +948,23 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     var vertex_output_fields = std.ArrayList(struct { name: []const u8, type_name: []const u8, builtin: ?[]const u8, location: ?u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
     // Detect depth output for fragment shaders
     var use_frag_depth_struct = false;
+    var use_frag_mrt_struct = false;
     if (is_fragment and depth_output_var_id != null) {
         try w.writeAll("struct FragmentOutput {\n");
         try w.writeAll("    @location(0) color: vec4f,\n");
         try w.writeAll("    @builtin(frag_depth) depth: f32,\n");
         try w.writeAll("}\n\n");
         use_frag_depth_struct = true;
+    } else if (is_fragment and output_vars.items.len > 1) {
+        // Multiple render targets — emit FragmentOutput struct
+        try w.writeAll("struct FragmentOutput {\n");
+        for (output_vars.items, 0..) |ovid, i| {
+            const loc = getDecVal(&decorations, ovid, .location) orelse i;
+            const var_name = names.get(ovid) orelse continue;
+            try w.print("    @location({d}) {s}: vec4f,\n", .{loc, var_name});
+        }
+        try w.writeAll("}\n\n");
+        use_frag_mrt_struct = true;
     }
     if (is_vertex and output_vars.items.len > 1) {
         for (output_vars.items) |ovid| {
@@ -1060,7 +1071,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
 
     // Return type
     if (is_fragment and output_vars.items.len > 0 and output_var_id != null) {
-        if (use_frag_depth_struct) {
+        if (use_frag_depth_struct or use_frag_mrt_struct) {
             try w.writeAll(") -> FragmentOutput {\n");
         } else {
             const ov = output_var_id.?;
@@ -1107,6 +1118,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     // If output var is stored to exactly once, we can return the value directly
     var direct_return_value: ?[]const u8 = null;
     var depth_return_value: ?[]const u8 = null;
+    var mrt_return_values = std.ArrayList(struct { var_name: []const u8, value: []const u8 }).initCapacity(arena, 4) catch return error.OutOfMemory;
     var skip_output_var_decl = false;
     if (!use_vertex_struct and output_var_id != null) {
         const ov = output_var_id.?;
@@ -1125,9 +1137,23 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             if (depth_output_var_id != null and si.op == .Store and si.words.len >= 3 and si.words[1] == depth_output_var_id.?) {
                 depth_return_value = names.get(si.words[2]);
             }
+            // Track MRT output stores
+            if (use_frag_mrt_struct and si.op == .Store and si.words.len >= 3) {
+                for (output_vars.items) |ovid| {
+                    if (si.words[1] == ovid) {
+                        const vn = names.get(ovid) orelse continue;
+                        const val = names.get(si.words[2]) orelse continue;
+                        try mrt_return_values.append(arena, .{ .var_name = vn, .value = val });
+                    }
+                }
+            }
         }
         if (store_count == 1 and last_stored_value != null) {
             direct_return_value = last_stored_value.?;
+            skip_output_var_decl = true;
+        }
+        // MRT: check all output vars have exactly 1 store
+        if (use_frag_mrt_struct) {
             skip_output_var_decl = true;
         }
     }
@@ -1155,14 +1181,36 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
     }
 
+    // Build MRT skip set for stores
+    var mrt_skip_set = std.AutoHashMap(u32, void).init(arena);
+    if (use_frag_mrt_struct) {
+        for (output_vars.items) |ovid| {
+            try mrt_skip_set.put(ovid, {});
+        }
+    }
+
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null);
 
     // Return output var
     if (use_frag_depth_struct) {
         const color_val = direct_return_value orelse (if (output_var_id != null) names.get(output_var_id.?) orelse "vec4f()" else "vec4f()");
         const depth_val = depth_return_value orelse "0.0";
         try w.print("    return FragmentOutput({s}, {s});\n", .{ color_val, depth_val });
+    } else if (use_frag_mrt_struct) {
+        // Build FragmentOutput with stored values for each output
+        var mrt_parts = std.ArrayList(u8).initCapacity(arena, 256) catch return error.OutOfMemory;
+        for (output_vars.items) |ovid| {
+            const vn = names.get(ovid) orelse continue;
+            // Find the last stored value for this output var
+            var stored_val: ?[]const u8 = null;
+            for (mrt_return_values.items) |rv| {
+                if (std.mem.eql(u8, rv.var_name, vn)) stored_val = rv.value;
+            }
+            if (mrt_parts.items.len > 0) try mrt_parts.appendSlice(arena, ", ");
+            try mrt_parts.appendSlice(arena, stored_val orelse "vec4f()");
+        }
+        try w.print("    return FragmentOutput({s});\n", .{mrt_parts.items});
     } else if (use_vertex_struct) {
         try w.writeAll("    return vertex_out;\n");
     } else if (direct_return_value != null) {
@@ -1283,7 +1331,7 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void)) !void {
     _ = decorations;
     var indent: u32 = 1; // base function body indentation (4 spaces)
 
@@ -2346,6 +2394,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .Store => {
                 // Skip store to output variable when doing direct return
                 if (skip_store_target != null and inst.words[1] == skip_store_target.?) continue;
+                // Skip stores to MRT output variables
+                if (skip_store_targets != null and skip_store_targets.?.contains(inst.words[1])) continue;
                 // Skip store to depth output (handled by FragmentOutput struct return)
                 const ptr_name = names.get(inst.words[1]);
                 if (ptr_name != null and std.mem.eql(u8, ptr_name.?, "gl_FragDepth")) continue;
