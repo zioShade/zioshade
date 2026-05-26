@@ -230,11 +230,11 @@ fn writeOutput(output_path: ?[]const u8, data: []const u8) !void {
 // ── Compile GLSL → SPIR-V ──────────────────────────────────────────
 
 fn doCompile(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride) !void {
-    const spv = glslpp.compileToSPIRV(alloc, source, .{
+    const spv = compileWithDiagsOrExit(alloc, source, .{
         .stage = stage,
         .include_paths = include_paths,
         .defines = defines,
-    }) catch |e| compileErr(e);
+    });
     defer alloc.free(spv);
     const bytes = std.mem.sliceAsBytes(spv);
     if (output) |path| {
@@ -260,11 +260,11 @@ fn doSpvToHlsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8,
 }
 
 fn doGlslToHlsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8, shader_model: u32) !void {
-    const spv = glslpp.compileToSPIRV(alloc, source, .{
+    const spv = compileWithDiagsOrExit(alloc, source, .{
         .stage = stage,
         .include_paths = include_paths,
         .defines = defines,
-    }) catch |e| compileErr(e);
+    });
     defer alloc.free(spv);
     const result = glslpp.spirvToHLSL(alloc, spv, .{
         .shader_model = shader_model,
@@ -288,11 +288,11 @@ fn doSpvToGlsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8,
 }
 
 fn doGlslToGlsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, version: u32, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8) !void {
-    const spv = glslpp.compileToSPIRV(alloc, source, .{
+    const spv = compileWithDiagsOrExit(alloc, source, .{
         .stage = stage,
         .include_paths = include_paths,
         .defines = defines,
-    }) catch |e| compileErr(e);
+    });
     defer alloc.free(spv);
     const glsl = glslpp.spirvToGLSL(alloc, spv, .{
         .version = version,
@@ -316,11 +316,11 @@ fn doSpvToMsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, 
 }
 
 fn doGlslToMsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8, metal_version: u32) !void {
-    const spv = glslpp.compileToSPIRV(alloc, source, .{
+    const spv = compileWithDiagsOrExit(alloc, source, .{
         .stage = stage,
         .include_paths = include_paths,
         .defines = defines,
-    }) catch |e| compileErr(e);
+    });
     defer alloc.free(spv);
     const result = glslpp.spirvToMSL(alloc, spv, .{
         .metal_version = metal_version,
@@ -343,11 +343,11 @@ fn doSpvToWgsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8,
 }
 
 fn doGlslToWgsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8) !void {
-    const spv = glslpp.compileToSPIRV(alloc, source, .{
+    const spv = compileWithDiagsOrExit(alloc, source, .{
         .stage = stage,
         .include_paths = include_paths,
         .defines = defines,
-    }) catch |e| compileErr(e);
+    });
     defer alloc.free(spv);
     const result = glslpp.spirvToWGSL(alloc, spv, .{
         .entry_point_name = entry_point orelse "main",
@@ -402,6 +402,39 @@ fn compileErr(err: anyerror) noreturn {
     if (ctx) |c| std.debug.print(": {s}", .{c});
     std.debug.print("\n", .{});
     std.process.exit(1);
+}
+
+/// Print one diagnostic in glslang-style `path:line:col: kind: message` format.
+fn printDiagnostic(d: glslpp.diagnostic.Diagnostic) void {
+    const kind_str: []const u8 = switch (d.kind) {
+        .@"error" => "error",
+        .warning => "warning",
+        .note => "note",
+    };
+    if (d.path.len > 0) {
+        std.debug.print("{s}:{d}:{d}: {s}: {s}\n", .{ d.path, d.line, d.column, kind_str, d.message });
+    } else {
+        std.debug.print("{d}:{d}: {s}: {s}\n", .{ d.line, d.column, kind_str, d.message });
+    }
+}
+
+/// Compile GLSL to SPIR-V, surfacing every collected Diagnostic to stderr
+/// in glslang-style format before exiting on failure. Used by all CLI
+/// commands that take GLSL source as input.
+fn compileWithDiagsOrExit(
+    alloc: std.mem.Allocator,
+    source: [:0]const u8,
+    opts: glslpp.CompileOptions,
+) []const u32 {
+    var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    return glslpp.compileToSPIRVWithDiagnostics(alloc, source, opts, &diags) catch |e| {
+        for (diags.items) |d| printDiagnostic(d);
+        compileErr(e);
+    };
 }
 
 fn crossErr(err: anyerror) noreturn {
