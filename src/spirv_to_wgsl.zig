@@ -344,6 +344,47 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     return buf.toOwnedSlice(alloc);
 }
 
+/// Try to resolve a constant expression to a WGSL literal string
+fn resolveConstantExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), id: u32, arena: std.mem.Allocator) ?[]const u8 {
+    _ = names;
+    const inst = common.getDef(module, id) orelse return null;
+    switch (inst.op) {
+        .Constant => {
+            if (inst.words.len < 4) return null;
+            const val = inst.words[3];
+            const type_id = inst.words[1];
+            const type_inst = common.getDef(module, type_id) orelse return null;
+            if (type_inst.op == .TypeFloat) {
+                const bits: u32 = if (type_inst.words.len > 2) type_inst.words[2] else 32;
+                if (bits == 32) {
+                    const f: f32 = @bitCast(val);
+                    var buf = std.ArrayList(u8).initCapacity(arena, 32) catch return null;
+                    if (f == @floor(f) and @abs(f) < 1e6) {
+                        buf.print(arena, "{d}.0", .{f}) catch return null;
+                    } else {
+                        buf.print(arena, "{d}", .{f}) catch return null;
+                    }
+                    return buf.toOwnedSlice(arena) catch return null;
+                }
+            } else if (type_inst.op == .TypeInt) {
+                const is_signed = type_inst.words.len > 3 and type_inst.words[3] == 1;
+                if (is_signed) {
+                    const sv: i32 = @bitCast(val);
+                    var buf = std.ArrayList(u8).initCapacity(arena, 16) catch return null;
+                    buf.print(arena, "{d}", .{sv}) catch return null;
+                    return buf.toOwnedSlice(arena) catch return null;
+                } else {
+                    var buf = std.ArrayList(u8).initCapacity(arena, 16) catch return null;
+                    buf.print(arena, "{d}u", .{val}) catch return null;
+                    return buf.toOwnedSlice(arena) catch return null;
+                }
+            }
+        },
+        else => {},
+    }
+    return null;
+}
+
 fn resolvePointee(module: *const ParsedModule, id: u32) ?u32 {
     // First try direct TypePointer
     if (common.resolvePointeeType(module, id)) |pt| return pt;
@@ -580,7 +621,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     if (entry_func_idx == null) return error.NoEntryPoint;
 
     // Collect cbuffers and textures
-    var cbuffers = std.ArrayList(struct { name: []const u8, type_id: u32, binding: u32, is_ssbo: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var cbuffers = std.ArrayList(struct { name: []const u8, type_id: u32, binding: u32, is_ssbo: bool, result_id: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
     var textures = std.ArrayList(struct { name: []const u8, binding: u32, image_type_id: u32, is_storage: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
 
     for (module.instructions) |inst| {
@@ -599,13 +640,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 const set = getDecVal(&decorations, result_id, .descriptor_set) orelse 0;
                 const name = names.get(result_id) orelse "Globals";
                 const is_ssbo = hasDec(&decorations, pointee_type, .buffer_block);
-                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = is_ssbo });
+                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = is_ssbo, .result_id = result_id });
             },
             .StorageBuffer => {
                 const binding = getDecVal(&decorations, result_id, .binding) orelse 0;
                 const set = getDecVal(&decorations, result_id, .descriptor_set) orelse 0;
                 const name = names.get(result_id) orelse "buffer";
-                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = true });
+                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = true, .result_id = result_id });
             },
             .UniformConstant => {
                 const pointee_inst = getDef(&module, pointee_type) orelse continue;
@@ -627,6 +668,37 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             },
             else => {},
         }
+    }
+
+    // Emit Private storage class variables as module-scope declarations
+    // Note: SPIR-V Private vars may be uninitialized (compiler doesn't emit init values for const globals)
+    // WGSL var<private> is zero-initialized — semantically wrong but valid
+    for (module.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc != .Private) continue;
+        const result_id = inst.words[2];
+        const name = names.get(result_id) orelse continue;
+        const rt = wgslType(&module, inst.words[1], &names, arena) catch continue;
+        // Check if this Private var is actually used (has loads from it)
+        var has_load = false;
+        for (module.instructions) |check| {
+            if (check.op == .Load and check.words.len > 3 and check.words[3] == result_id) {
+                has_load = true;
+                break;
+            }
+        }
+        if (!has_load) continue;
+        // Check for initializer (optional 5th word in OpVariable)
+        if (inst.words.len > 4) {
+            const init_id = inst.words[4];
+            const init_val = resolveConstantExpr(&module, &names, init_id, arena);
+            if (init_val) |val| {
+                try w.print("const {s}: {s} = {s};\n", .{ name, rt, val });
+                continue;
+            }
+        }
+        try w.print("var<private> {s}: {s};\n", .{ name, rt });
     }
 
     // Emit struct forward declarations for types used in cbuffers
@@ -694,6 +766,9 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
     }
 
+    // Track uniform arrays wrapped in vec4 structs (for alignment)
+    var wrapped_uniform_arrays = std.AutoHashMap(u32, void).init(arena);
+
     // Emit uniform buffers
     for (cbuffers.items) |cb| {
         const group = @divFloor(cb.binding, 2);
@@ -722,12 +797,62 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 }
             }
         }
-        if (cb.is_ssbo) {
-            try w.print("@group({d}) @binding({d})\nvar<storage, read_write> {s}: ", .{ group, binding, var_name });
+        // WGSL requires uniform arrays to have 16-byte aligned stride.
+        // Wrap bare arrays in a struct to satisfy alignment.
+        const ptr_inst2 = getDef(&module, cb.type_id);
+        const actual_type2 = if (ptr_inst2) |pi|
+            if (pi.op == .TypePointer and pi.words.len > 3) pi.words[3] else cb.type_id
+        else cb.type_id;
+        const is_bare_array = blk: {
+            const ti = getDef(&module, actual_type2);
+            break :blk ti != null and ti.?.op == .TypeArray;
+        };
+        if (is_bare_array and !cb.is_ssbo) {
+            // WGSL uniform arrays require 16-byte aligned stride.
+            // Wrap bare float/int arrays: array<f32, N> → struct { values: array<vec4f, N> }
+            // Access pattern changes: u_vals[i] → u_vals.values[i].x
+            const arr_type_inst = getDef(&module, actual_type2).?;
+            const elem_type_id = if (arr_type_inst.words.len > 2) arr_type_inst.words[2] else 0;
+            const arr_count_id = if (arr_type_inst.words.len > 3) arr_type_inst.words[3] else 0;
+            const elem_inst = getDef(&module, elem_type_id);
+            const is_float = elem_inst != null and elem_inst.?.op == .TypeFloat;
+            const is_int = elem_inst != null and elem_inst.?.op == .TypeInt;
+            if ((is_float or is_int) and arr_count_id != 0) {
+                const vec_type = if (is_float) "vec4f" else "vec4i";
+                // Get the constant count
+                const count_inst = getDef(&module, arr_count_id);
+                const count = if (count_inst) |ci| blk: {
+                    if (ci.op == .Constant and ci.words.len > 3) break :blk ci.words[3];
+                    break :blk 0;
+                } else 0;
+                if (count > 0) {
+                    try w.print("struct {s}_wrapper {{ _wrapped_: array<{s}, {d}> }};\n\n", .{ var_name, vec_type, count });
+                    try w.print("@group({d}) @binding({d})\nvar<uniform> {s}: {s}_wrapper;\n\n", .{ group, binding, var_name, var_name });
+                    // Update names: access chains that use this variable as base need .values prefix + .x suffix
+                    for (module.instructions) |vinst| {
+                        if (vinst.op == .Variable and vinst.words.len >= 4) {
+                            const vname = names.get(vinst.words[2]) orelse continue;
+                            if (std.mem.eql(u8, vname, var_name)) {
+                                const wrapper_name = try std.fmt.allocPrint(alloc, "{s}._wrapped_", .{var_name});
+                                if (try names.fetchPut(vinst.words[2], wrapper_name)) |old| alloc.free(old.value);
+                                break;
+                            }
+                        }
+                    }
+                    // Track that loads from this array need .x suffix
+                    // AccessChain results from this base need .x appended
+                    _ = try wrapped_uniform_arrays.put(cb.result_id, {});
+                    continue;
+                }
+            }
+            // Fallback: emit as-is (may fail naga validation)
+            try w.print("struct {s}_wrapper {{ values: {s} }};\n\n", .{ var_name, type_name });
+            try w.print("@group({d}) @binding({d})\nvar<uniform> {s}: {s}_wrapper;\n\n", .{ group, binding, var_name, var_name });
+        } else if (cb.is_ssbo) {
+            try w.print("@group({d}) @binding({d})\nvar<storage, read_write> {s}: {s};\n\n", .{ group, binding, var_name, type_name });
         } else {
-            try w.print("@group({d}) @binding({d})\nvar<uniform> {s}: ", .{ group, binding, var_name });
+            try w.print("@group({d}) @binding({d})\nvar<uniform> {s}: {s};\n\n", .{ group, binding, var_name, type_name });
         }
-        try w.print("{s};\n\n", .{type_name});
     }
 
     // Emit workgroup variables (shared memory for compute shaders)
@@ -948,7 +1073,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
 
         const inout_ret_name: ?[]const u8 = if (has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays);
 
         try w.writeAll("}\n\n");
     }
@@ -1199,7 +1324,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays);
 
     // Return output var
     if (use_frag_depth_struct) {
@@ -1340,8 +1465,9 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void)) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void)) !void {
     _ = decorations;
+    _ = wrapped_uniform_arrays;
     var indent: u32 = 1; // base function body indentation (4 spaces)
 
     // Helper to write current indentation
@@ -1463,8 +1589,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             if (ac_inst.op == .AccessChain and ac_inst.words.len > 3) {
                 const result_id = ac_inst.words[2];
                 const base_id = ac_inst.words[3];
-                const expr = buildAccessExpr(module, names, base_id, ac_inst.words[4..], alloc) catch continue;
+                var expr = buildAccessExpr(module, names, base_id, ac_inst.words[4..], alloc) catch continue;
                 if (expr.len > 0) {
+                    // Append .x for wrapped uniform arrays (array<f32,N> → array<vec4f,N>)
+                    // Check if base variable was renamed to include .values
+                    const base_name = names.get(base_id) orelse "";
+                    _ = base_name; // used in debug below
+                    // Check by examining the expr itself — if it contains ._wrapped_[
+                    if (std.mem.indexOf(u8, expr, "._wrapped_[") != null) {
+                        const with_x = try std.fmt.allocPrint(alloc, "{s}.x", .{expr});
+                        alloc.free(expr);
+                        expr = with_x;
+                    }
                     if (try names.fetchPut(result_id, expr)) |old| alloc.free(old.value);
                 }
             }
@@ -2389,7 +2525,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     var resolved_allocated = false;
                     if (ptr_inst) |pi| {
                         if (pi.op == .AccessChain) {
-                            const fresh_expr = buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc) catch ptr;
+                            var fresh_expr = buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc) catch ptr;
+                            // If wrapped uniform array, append .x
+                            if (std.mem.indexOf(u8, fresh_expr, "._wrapped_[") != null) {
+                                const with_x = try std.fmt.allocPrint(alloc, "{s}.x", .{fresh_expr});
+                                alloc.free(fresh_expr);
+                                fresh_expr = with_x;
+                            }
                             if (!std.mem.eql(u8, fresh_expr, ptr)) {
                                 resolved_ptr = fresh_expr;
                                 resolved_allocated = true;
@@ -2406,6 +2548,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (pi.op == .AccessChain) {
                             expr = try buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc);
                             expr_allocated = true;
+                            // If the base was renamed to include .values (wrapped uniform array), append .x
+                            if (std.mem.indexOf(u8, expr, "._wrapped_[") != null) {
+                                const with_x = try std.fmt.allocPrint(alloc, "{s}.x", .{expr});
+                                alloc.free(expr);
+                                expr = with_x;
+                            }
                         }
                     }
                     const let_or_var: []const u8 = if (std.mem.startsWith(u8, result_name, "_inout_")) "var" else "let";
