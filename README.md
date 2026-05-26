@@ -2,62 +2,50 @@
 
 [![Sponsor](https://img.shields.io/github/sponsors/deblasis)](https://github.com/sponsors/deblasis)
 
-A pure-Zig GLSL-to-SPIR-V compiler and cross-compiler. Drop-in replacement for [glslang](https://github.com/KhronosGroup/glslang) + [SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross).
+A pure-Zig GLSL → SPIR-V compiler and SPIR-V cross-compiler (HLSL / MSL / GLSL / WGSL).
 
-**No C++ runtime. No system dependencies. No DLL isolation hacks.**
+Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated terminal emulator, to replace ~60 MB of glslang + SPIRV-Cross C++ dependencies in a single Zig module. No C++ runtime. No system dependencies. No DLL isolation hacks.
+
+> **Scope:** glslpp is **not** a full Khronos drop-in. It is a focused replacement for the shader-compilation surface wintty needs (GLSL 430-class shaders → SPIR-V → backend), validated on the full [`spirv-cross`](https://github.com/KhronosGroup/SPIRV-Cross) and `glslang` reference suites. If you need full GLSL ES, descriptor-set reflection, specialization constants, or SPIRV-Cross-grade WGSL output, **use upstream**. See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the full gap analysis.
 
 ## Features
 
-- **GLSL → SPIR-V**: Compile GLSL 330–460 / ESSL shaders to SPIR-V 1.0–1.6
-- **SPIR-V → HLSL**: Cross-compile to HLSL Shader Model 5.0+ (for DX12)
-- **SPIR-V → GLSL**: Round-trip / decompile back to GLSL 330–460
-- **SPIR-V → MSL**: Cross-compile to Metal Shading Language 2.1+ (for macOS/iOS)
-- **SPIR-V → WGSL**: Cross-compile to WebGPU Shading Language
-- **Reflection**: Extract uniform buffers, inputs/outputs, samplers from SPIR-V
-- **Kernel Fusion**: Merge multiple compute shaders to reduce bandwidth
-- **SPIR-V Linking**: Merge multiple SPIR-V modules into one
-- **Shadertoy support**: One-shot API for Shadertoy-style shaders
-- **Zero C++ dependency**: Pure Zig, compiles with `zig build`
-- **Thread-safe**: No global state, no process-wide init/finalize
+- **GLSL → SPIR-V**: Compile GLSL 330–460 shaders to SPIR-V 1.0–1.6
+- **SPIR-V → HLSL**: Cross-compile to HLSL Shader Model 6.0 (DX12)
+- **SPIR-V → GLSL**: Round-trip / decompile back to GLSL 430
+- **SPIR-V → MSL**: Cross-compile to Metal Shading Language 2.0+
+- **SPIR-V → WGSL**: Cross-compile to WebGPU Shading Language (shallow coverage — see status doc)
+- **Reflection**: Enumerate uniform buffers, inputs/outputs, samplers from SPIR-V (partial — no full descriptor metadata)
+- **Kernel fusion / SPIR-V linking**: Merge multiple compute shaders or SPIR-V modules
+- **Shadertoy support**: One-shot API for Shadertoy-style fragment shaders
+- **Zero C++ dependency**: Pure Zig, builds with `zig build`
+- **In-process, threadlocal state only**: Safe to call from multiple threads; no process-wide init/finalize
+
+## Status
+
+| Metric | Value |
+|---|---|
+| `spirv-val` conformance | **1,894 / 1,894** fixtures pass (`zig build conformance`) |
+| External DXC SPIR-V fixtures | **47 / 51** compile to DXIL (4 limited by DXC's SM 6.1+ / 2 KB structured-buffer cap) |
+| WGSL stress tests | **470 / 470** |
+| Fuzzer iterations (ad-hoc, no CI yet) | 50,000 crash-free — reproduce with `zig build fuzz -- --count 50000` |
+| CI | Not yet wired up; cross-platform builds unverified by automation |
+| Production use | Backs all shader compilation in [wintty](https://github.com/deblasis/wintty) |
 
 ## Quick Start
-
-### As a Zig dependency
-
-Add to your `build.zig.zon`:
-
-```zig
-.dependencies = .{
-    .glslpp = .{
-        .url = "https://github.com/deblasis/glslpp/archive/<commit>.tar.gz",
-        .hash = "<run zig fetch to get hash>",
-    },
-},
-```
-
-Then in your `build.zig`:
-
-```zig
-const glslpp_dep = b.dependency("glslpp", .{
-    .target = target,
-    .optimize = optimize,
-});
-step.root_module.addImport("glslpp", glslpp_dep.module("glslpp"));
-```
 
 ### CLI
 
 ```bash
-# Build the CLI
 zig build cli
 
-# Compile GLSL to SPIR-V
+# GLSL → SPIR-V
 zig-out/bin/glslpp compile shader.frag -o shader.spv
 
-# Cross-compile to all targets
+# Cross-compile to a backend
 zig-out/bin/glslpp hlsl shader.frag -o shader.hlsl
 zig-out/bin/glslpp glsl shader.frag -o shader.glsl
-zig-out/bin/glslpp msl shader.frag -o shader.msl
+zig-out/bin/glslpp msl  shader.frag -o shader.msl
 zig-out/bin/glslpp wgsl shader.frag -o shader.wgsl
 
 # With preprocessor defines and include paths
@@ -69,17 +57,36 @@ zig-out/bin/glslpp wgsl module.spv --entry-point compute_blur
 # Read from stdin
 cat shader.frag | zig-out/bin/glslpp wgsl --stdin
 
-# HLSL with specific shader model
+# HLSL with a specific shader model
 zig-out/bin/glslpp hlsl shader.frag --shader-model 50
 
-# Reflect on a SPIR-V binary
+# Reflect a SPIR-V binary
 zig-out/bin/glslpp reflect shader.spv
 
-# Validate with spirv-val
+# Validate via spirv-val (if installed on PATH)
 zig-out/bin/glslpp validate shader.spv
 ```
 
-### Library Usage
+### As a Zig dependency
+
+```zig
+// build.zig.zon
+.dependencies = .{
+    .glslpp = .{
+        .url = "https://github.com/deblasis/glslpp/archive/<commit>.tar.gz",
+        .hash = "<run zig fetch to get the hash>",
+    },
+},
+```
+
+```zig
+// build.zig
+const glslpp_dep = b.dependency("glslpp", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("glslpp", glslpp_dep.module("glslpp"));
+```
 
 ```zig
 const glslpp = @import("glslpp");
@@ -89,22 +96,22 @@ const spirv = try glslpp.compileToSPIRV(alloc, source, .{
     .stage = .fragment,
     .version = 430,
 });
+defer alloc.free(spirv);
 
 // SPIR-V → any backend
 const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
 const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
 
-// One-shot: GLSL → any backend
-const hlsl = try glslpp.compileGlslToHlsl(alloc, source, .fragment);
-const msl = try glslpp.compileGlslToMsl(alloc, source, .fragment);
-const wgsl = try glslpp.compileGlslToWgsl(alloc, source, .fragment);
-const glsl = try glslpp.compileGlslToGlsl(alloc, source, .fragment);
+// One-shot: GLSL → backend
+const hlsl_one = try glslpp.compileGlslToHlsl(alloc, source, .fragment);
+const msl_one  = try glslpp.compileGlslToMsl(alloc, source, .fragment);
+const wgsl_one = try glslpp.compileGlslToWgsl(alloc, source, .fragment);
 
 // Reflection
 const resources = try glslpp.reflectSPIRV(alloc, spirv);
 defer resources.deinit(alloc);
 for (resources.uniform_buffers) |ubo| {
-    std.debug.print("UBO: {s} (set={d}, binding={d})\n", .{ubo.name, ubo.set, ubo.binding});
+    std.debug.print("UBO: {s} (set={d}, binding={d})\n", .{ ubo.name, ubo.set, ubo.binding });
 }
 
 // Error handling with diagnostics
@@ -113,15 +120,17 @@ defer {
     for (diags.items) |d| alloc.free(d.message);
     diags.deinit(alloc);
 }
-const result = glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{.stage = .fragment}, &diags) catch |err| {
+_ = glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags) catch |err| {
     for (diags.items) |d| {
-        std.debug.print("{d}:{d}: {s}: {s}\n", .{d.line, d.column, @tagName(d.kind), d.message});
+        std.debug.print("{d}:{d}: {s}: {s}\n", .{ d.line, d.column, @tagName(d.kind), d.message });
     }
     return err;
 };
 ```
 
-## API Reference
+See [`examples/`](examples/) for runnable end-to-end programs.
+
+## API Surface
 
 ### Compilation
 
@@ -129,10 +138,10 @@ const result = glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{.stage = .f
 |---|---|
 | `compileToSPIRV(alloc, source, options)` | GLSL → SPIR-V binary words |
 | `compileToSPIRVNoOpt(alloc, source, options)` | GLSL → SPIR-V without optimization |
-| `compileToSPIRVWithDiagnostics(alloc, source, options, diags)` | GLSL → SPIR-V with error collection |
+| `compileToSPIRVWithDiagnostics(alloc, source, options, diags)` | GLSL → SPIR-V with collected diagnostics |
 | `compileToSPIRVWithFusion(alloc, sources, options, fusion)` | Multiple sources → fused SPIR-V |
 
-### Cross-Compilation
+### Cross-compilation
 
 | Function | Description |
 |---|---|
@@ -141,27 +150,27 @@ const result = glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{.stage = .f
 | `spirvToMSL(alloc, spirv_words, options)` | SPIR-V → MSL source |
 | `spirvToWGSL(alloc, spirv_words, options)` | SPIR-V → WGSL source |
 
-### One-Shot (GLSL → Target)
+### One-shot (GLSL → backend)
 
 | Function | Description |
 |---|---|
 | `compileGlslToHlsl(alloc, source, stage)` | GLSL → HLSL (null-terminated) |
-| `compileGlslToMsl(alloc, source, stage)` | GLSL → MSL (null-terminated) |
+| `compileGlslToMsl(alloc, source, stage)`  | GLSL → MSL  (null-terminated) |
 | `compileGlslToGlsl(alloc, source, stage)` | GLSL → GLSL round-trip |
 | `compileGlslToWgsl(alloc, source, stage)` | GLSL → WGSL (null-terminated) |
-| `compileShadertoyToHlsl(alloc, source, options)` | Shadertoy GLSL → HLSL |
+| `compileShadertoyToHlsl(alloc, source, options)` | Shadertoy-style GLSL → HLSL |
 
 ### Utilities
 
 | Function | Description |
 |---|---|
-| `reflectSPIRV(alloc, spirv_words)` | Extract shader resources from SPIR-V |
+| `reflectSPIRV(alloc, spirv_words)` | Enumerate uniforms / samplers / I/O |
 | `reflectGLSL(alloc, source, options)` | Compile + reflect convenience |
-| `validateSPIRV(alloc, spirv_words)` | Validate via spirv-val (returns bool) |
+| `validateSPIRV(alloc, spirv_words)` | Run `spirv-val` if available on `PATH` |
 | `linkSPIRVModules(alloc, modules)` | Merge multiple SPIR-V binaries |
-| `compileMultiKernel(alloc, sources, options)` | Multiple GLSL → single SPIR-V |
+| `compileMultiKernel(alloc, sources, options)` | Multiple GLSL → single fused SPIR-V |
 
-## Supported Shader Stages
+## Supported shader stages
 
 | Stage | SPIR-V | HLSL | GLSL | MSL | WGSL |
 |---|---|---|---|---|---|
@@ -169,46 +178,63 @@ const result = glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{.stage = .f
 | Fragment | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Compute | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Geometry | ✅ | ✅ | ✅ | ✅ | — |
-| Tessellation | ✅ | ✅ | ✅ | ✅ | — |
-| Mesh / Task | ✅ | — | — | — | — |
-| Ray Tracing | ✅ | — | — | — | — |
+| Tessellation (TCS / TES) | ✅ | ✅ | ✅ | ✅ | — |
+| Mesh / Task | ✅ (basic) | — | — | — | — |
+| Ray tracing | ✅ (basic) | — | — | — | — |
 
-## Conformance
+## Known limitations
 
-- **1811/1811** shaders pass `spirv-val` validation
-- **51/51** external DXC SPIR-V binaries cross-validated across all backends
-- **180/180** WGSL outputs validated through naga
-- **50,000** fuzz iterations crash-free across all backends
+- **No specialization constants** (`OpSpecConstant*`).
+- **GLSL output is 430 only** — other versions are not generated.
+- **WGSL backend is shallow** vs SPIRV-Cross — common opcodes only.
+- **Cross-compiler control flow requires `OpSelectionMerge`.** SPIR-V produced by glslpp itself always satisfies this; externally-produced or post-optimized SPIR-V without merge info will get an empty branch body and a stderr warning.
+- **No formal C ABI.** Consumers outside the Zig ecosystem must write their own FFI layer.
+- **Single contributor.** Treat as alpha if you are not the wintty project.
+
+See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the complete feature-by-feature comparison against glslang / SPIRV-Cross.
+
+## Performance
+
+> The numbers below come from `tools/bench_wintty.zig` (50 iterations, `ReleaseFast`). They measure glslpp in isolation — there is **no head-to-head benchmark against `libglslang.a` + `libspirv-cross.a` linked in-process yet**, which is the only fair "library vs library" comparison. Existing comparisons that pit in-process glslpp against the `glslangValidator` CLI tool are inherently a workflow comparison (process spawn vs in-process call), not an algorithm comparison.
+
+For the wintty CRT shadertoy shader (GLSL → SPIR-V → HLSL):
+
+```
+Avg total: ~3.6 ms
+Min total: ~2.7 ms
+SPIR-V output:  1691 words (6.6 KB)
+HLSL output:    5800 bytes (5.7 KB)
+```
+
+Reproduce with `zig build && zig-out/bin/bench_wintty`.
 
 ## Building
 
 ```bash
-zig build              # Build the library
-zig build cli          # Build the CLI tool
-zig build test         # Run all tests
-zig build conformance  # Run shader conformance tests (requires spirv-val)
+zig build                  # Library
+zig build cli              # CLI tool
+zig build test             # Unit tests
+zig build conformance      # spirv-val conformance suite (needs spirv-val on PATH)
+zig build fuzz -- --count 50000  # Fuzzer
 ```
 
-## Performance
+Requires **Zig 0.15.2** (managed via [mise](https://mise.jdx.dev) if `.mise.toml` is honored).
 
-Benchmarked with the wintty CRT shadertoy shader (50 iterations, ReleaseFast):
+## Contributing
 
-```
-Avg total: ~3.6ms
-Min total: ~2.7ms
-SPIR-V:   1691 words (6.6 KB)
-HLSL:     5800 bytes (5.7 KB)
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and PRs are welcome — please open an issue first for large changes so we can confirm scope.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report security issues privately.
 
 ## License
 
-Licensed under either of
+Dual-licensed under either of
 
-- MIT License ([LICENSE-MIT](LICENSE-MIT))
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- [MIT License](LICENSE-MIT)
+- [Apache License 2.0](LICENSE-APACHE)
 
 at your option.
 
-### Contribution
-
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you shall be dual licensed as above, without any additional terms or conditions.
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion shall be dual-licensed as above without additional terms.

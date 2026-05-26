@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build & test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.15.2
+
+      - name: zig version
+        run: zig version
+
+      - name: Build (library + CLI)
+        run: |
+          zig build
+          zig build cli
+
+      - name: Build examples
+        run: |
+          zig build-exe examples/glsl_to_hlsl.zig --mod glslpp::src/root.zig --deps glslpp
+          zig build-exe examples/reflect_uniforms.zig --mod glslpp::src/root.zig --deps glslpp
+
+      - name: Unit tests
+        run: zig build test --summary all
+
+      - name: HLSL backend tests
+        run: zig build test-hlsl --summary all
+
+  conformance:
+    name: spirv-val conformance (${{ matrix.os }})
+    needs: build-test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.15.2
+
+      - name: Install Vulkan SDK (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.341.1
+          cache: true
+
+      - name: Verify spirv-val on PATH
+        shell: bash
+        run: spirv-val --version
+
+      - name: Run conformance suite
+        run: zig build conformance --summary all
+
+  fuzz-smoke:
+    name: fuzz smoke (5k iterations)
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.15.2
+      - name: Quick fuzz pass
+        run: zig build fuzz -- --count 5000

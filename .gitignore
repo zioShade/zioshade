@@ -1,12 +1,53 @@
 # Build artifacts
 zig-out/
 .zig-cache/
+*.exe
+*.pdb
+*.obj
+*.o
+*.dll
+*.so
+*.dylib
 
-# Downloaded shader test cache
+# SPIR-V dump artifacts at repo root
+/dump_*.spv
+/tmp_*.spv
+/frag.spv
+
+# Common scratch filenames
+/err.txt
+/out.txt
+/*.disasm.txt
+
+# Throw-away test sources at repo root (use src/ or tests/ for real ones)
+/test_*.zig
+/debug_*.zig
+/verify_*.zig
+/debug_*.py
+/audit_*.py
+
+# Internal research / planning artifacts (use docs/ for shipping docs)
+/autoresearch*
+/HANDOFF.md
+/PLAN.md
+/purge-list.txt
+
+# Downloaded test caches
 .shader_fetch_cache/
+shadertoy_test_cache/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code worktrees / skills (local-only)
+.claude/
+.worktrees/
 
 # OS files
 .DS_Store
 Thumbs.db
-.worktrees/
 __pycache__/
+*.pyc
