@@ -75,7 +75,16 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
     if (inst.op != .TypeStruct) return;
     if (inst.words.len > 2) {
         for (inst.words[2..]) |mt_id| {
-            try emitOneStructForwardDecl(module, names, mt_id, w, alloc, emitted, emitted_names);
+            // Recurse into member type to forward-declare nested structs
+            const mt_inst = getDef(module, mt_id);
+            if (mt_inst) |mi2| {
+                if (mi2.op == .TypeArray and mi2.words.len > 2) {
+                    // Array member — recurse into element type
+                    try emitOneStructForwardDecl(module, names, mi2.words[2], w, alloc, emitted, emitted_names);
+                } else {
+                    try emitOneStructForwardDecl(module, names, mt_id, w, alloc, emitted, emitted_names);
+                }
+            }
         }
     }
     if (emitted.get(type_id) != null) return;
