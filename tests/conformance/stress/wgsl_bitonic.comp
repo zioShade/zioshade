@@ -1,0 +1,37 @@
+// Test: integer loop with power-of-two stride
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Data {
+    float values[];
+} data;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = 256u;
+    
+    // Bitonic sort-like pattern
+    for (uint k = 2u; k <= total; k *= 2u) {
+        for (uint j = k / 2u; j > 0u; j /= 2u) {
+            uint l = idx ^ j;
+            if (l > idx) {
+                if ((idx & k) == 0u) {
+                    float a = data.values[idx];
+                    float b = data.values[l];
+                    if (a > b) {
+                        data.values[idx] = b;
+                        data.values[l] = a;
+                    }
+                } else {
+                    float a = data.values[idx];
+                    float b = data.values[l];
+                    if (a < b) {
+                        data.values[idx] = b;
+                        data.values[l] = a;
+                    }
+                }
+            }
+        }
+    }
+}

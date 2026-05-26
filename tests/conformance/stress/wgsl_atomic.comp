@@ -1,0 +1,23 @@
+// Test: compute with atomic operations
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(binding = 0) buffer Counter {
+    uint value;
+} counter;
+
+layout(binding = 1) buffer Data {
+    uint counts[];
+} data;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    
+    uint old = atomicAdd(counter.value, 1u);
+    atomicMax(data.counts[idx], old);
+    atomicMin(data.counts[idx], 0u);
+    
+    uint cmp = atomicCompSwap(data.counts[idx], 0u, 1u);
+    data.counts[idx] = cmp;
+}
