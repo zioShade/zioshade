@@ -28,6 +28,15 @@ fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
     return common.getTypeOf(module, id);
 }
 
+fn isStructType(module: *const ParsedModule, type_id: u32) bool {
+    const ti = common.getDef(module, type_id);
+    if (ti) |inst| {
+        if (inst.op == .TypeStruct) return true;
+        if (inst.op == .TypePointer and inst.words.len > 3) return isStructType(module, inst.words[3]);
+    }
+    return false;
+}
+
 fn isWgslKeyword(name: []const u8) bool {
     const reserved = [_][]const u8{ "fn", "let", "var", "const", "if", "else", "for", "while", "loop", "switch", "case", "default", "break", "continue", "return", "struct", "type", "true", "false", "discard", "enable", "override", "private", "storage", "uniform", "workgroup", "function", "array", "atomic", "bool", "f16", "f32", "i32", "u32", "mat2x2", "mat2x3", "mat2x4", "mat3x2", "mat3x3", "mat3x4", "mat4x2", "mat4x3", "mat4x4", "ptr", "vec2", "vec3", "vec4" };
     for (&reserved) |kw| {
@@ -2699,7 +2708,19 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const cond = names.get(inst.words[3]) orelse "c";
                 const true_val = names.get(inst.words[4]) orelse "t";
                 const false_val = names.get(inst.words[5]) orelse "f";
-                try writeInd(w, indent); try w.print("let {s}: {s} = select({s}, {s}, {s});\n", .{ result_name, rt, false_val, true_val, cond });
+                // WGSL select() only works with scalars and vectors, not structs
+                if (std.mem.startsWith(u8, rt, "struct") or std.mem.containsAtLeast(u8, rt, 1, "Struct") or
+                    (inst.words.len > 1 and isStructType(module, inst.words[1])))
+                {
+                    try writeInd(w, indent); try w.print("var {s}: {s};\n", .{ result_name, rt });
+                    try writeInd(w, indent); try w.print("if ({s}) {{\n", .{cond});
+                    try writeInd(w, indent + 1); try w.print("{s} = {s};\n", .{ result_name, true_val });
+                    try writeInd(w, indent); try w.writeAll("} else {\n");
+                    try writeInd(w, indent + 1); try w.print("{s} = {s};\n", .{ result_name, false_val });
+                    try writeInd(w, indent); try w.writeAll("}\n");
+                } else {
+                    try writeInd(w, indent); try w.print("let {s}: {s} = select({s}, {s}, {s});\n", .{ result_name, rt, false_val, true_val, cond });
+                }
             },
 
             // Conversions
@@ -3398,10 +3419,19 @@ fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
     // Wrap compound expressions in parens for correct precedence
     const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
     const rhs = if (isCompoundExpr(rhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{rhs_raw}) else rhs_raw;
+    // Avoid division by literal zero (naga evaluates compile-time)
+    if (std.mem.eql(u8, op, "/") and isLiteralZero(rhs)) {
+        try writeIndentStatic(w, indent); try w.print("let {s}: {s} = 0.0;\n", .{ result_name, rt });
+        return;
+    }
     try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
 }
 
 // Check if a string is a compound expression (contains operators at depth 0)
+fn isLiteralZero(s: []const u8) bool {
+    return std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "0.0") or std.mem.eql(u8, s, "0.0.0");
+}
+
 fn isCompoundExpr(s: []const u8) bool {
     var depth: usize = 0;
     var i: usize = 0;
