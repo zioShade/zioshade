@@ -360,7 +360,7 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
         .UConvert, .SConvert, .FConvert, .Bitcast,
         .VectorShuffle, .CompositeExtract, .VectorTimesScalar,
         .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector,
-        .MatrixTimesMatrix, .OuterProduct, .ImageSampleImplicitLod,
+        .MatrixTimesMatrix, .OuterProduct, .Transpose, .ImageSampleImplicitLod,
         .ImageSampleExplicitLod, .ImageFetch, .ImageRead,
         .FNegate, .SNegate, .Not, .LogicalNot,
         .ExtInst,
