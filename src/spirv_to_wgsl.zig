@@ -2357,7 +2357,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         }
                                         break;
                                     }
-                                    if (cinst.op == .LoopMerge or cinst.op == .FunctionEnd) break;
+                                    if (cinst.op == .FunctionEnd) break;
+                                    // Don't stop at LoopMerge — nested loops may be between here and the continue block
                                 }
                                 // Emit the phi assignments
                                 var idx: usize = cur.phi_start;
@@ -2402,7 +2403,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         }
                                         break;
                                     }
-                                    if (cinst.op == .LoopMerge or cinst.op == .FunctionEnd) break;
+                                    if (cinst.op == .FunctionEnd) break;
+                                    // Don't stop at LoopMerge — nested loops may be between here and the continue block
                                 }
                                 var idx: usize = cur.phi_start;
                                 while (idx < cur.phi_end) : (idx += 1) {
