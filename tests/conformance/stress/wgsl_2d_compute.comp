@@ -1,0 +1,22 @@
+// Test: gl_NumWorkGroups and gl_WorkGroupSize in compute
+#version 450
+
+layout(local_size_x = 32, local_size_y = 32) in;
+
+layout(binding = 0) writeonly buffer Output {
+    float data[];
+} outputBuf;
+
+void main() {
+    uvec3 gid = gl_GlobalInvocationID;
+    uvec3 groupSize = gl_WorkGroupSize;
+    uvec3 numGroups = gl_NumWorkGroups;
+    
+    uint width = groupSize.x * numGroups.x;
+    uint idx = gid.y * width + gid.x;
+    
+    float fx = float(gid.x) / float(width);
+    float fy = float(gid.y) / float(groupSize.y * numGroups.y);
+    
+    outputBuf.data[idx] = fx + fy * 0.5;
+}
