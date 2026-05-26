@@ -1,0 +1,24 @@
+// Test: compute histogram
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) readonly buffer Image {
+    vec4 pixels[];
+} image;
+
+layout(binding = 1) buffer Histogram {
+    uint bins[256];
+} hist;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    
+    if (idx >= image.pixels.length()) return;
+    
+    vec4 pixel = image.pixels[idx];
+    float luminance = dot(pixel.rgb, vec3(0.299, 0.587, 0.114));
+    uint bin = uint(clamp(luminance * 255.0, 0.0, 255.0));
+    
+    atomicAdd(hist.bins[bin], 1u);
+}
