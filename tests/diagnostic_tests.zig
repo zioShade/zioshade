@@ -2,6 +2,7 @@ const std = @import("std");
 const glslpp = @import("glslpp");
 const diagnostic = @import("glslpp").diagnostic;
 const semantic = @import("glslpp").semantic;
+const diag_helpers = @import("helpers/diagnostics.zig");
 
 // =============================================================================
 // Diagnostic tests — verify line/column reporting across compilation stages
@@ -258,6 +259,28 @@ test "Diagnostic.format without path omits filename" {
     try std.testing.expectEqualStrings("", d.path);
     try std.testing.expectEqual(diagnostic.Diagnostic.Kind.warning, d.kind);
     try std.testing.expectEqual(@as(u32, 3), d.line);
+}
+
+test "expectDiagnostic helper matches glslang-style format" {
+    const alloc = std.testing.allocator;
+    var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    try diags.append(alloc, .{
+        .kind = .@"error",
+        .line = 4,
+        .column = 32,
+        .message = try alloc.dupe(u8, "'undef_var' : undeclared identifier"),
+        .path = "shader.frag",
+    });
+    try diag_helpers.expectDiagnostic(diags.items, .{
+        .line = 4,
+        .column = 32,
+        .kind = .@"error",
+        .message_contains = "undeclared identifier",
+    });
 }
 
 test "multiple errors accumulate line/column correctly" {
