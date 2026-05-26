@@ -1140,13 +1140,16 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             }
         }
         try w.writeAll("struct VertexOutput {\n");
+        var auto_loc: u32 = 0;
         for (vertex_output_fields.items) |field| {
             if (field.builtin) |bi| {
                 try w.print("    @builtin({s}) {s}: {s},\n", .{ bi, field.name, field.type_name });
             } else if (field.location) |loc| {
+                auto_loc = loc + 1;
                 try w.print("    @location({d}) {s}: {s},\n", .{ loc, field.name, field.type_name });
             } else {
-                try w.print("    {s}: {s},\n", .{ field.name, field.type_name });
+                try w.print("    @location({d}) {s}: {s},\n", .{ auto_loc, field.name, field.type_name });
+                auto_loc += 1;
             }
         }
         try w.writeAll("}\n\n");
