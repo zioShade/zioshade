@@ -16,6 +16,10 @@ const parser = @import("parser.zig");
 /// post-error state (`semantic.last_error_line`, `last_error_column`, etc.).
 /// External callers should prefer `Error`, `Diagnostic`, `lastErrorCtx()`, and
 /// `lastErrorInner()` from the curated public API.
+///
+/// Note: `last_error_line`, `last_error_column`, `last_error_ctx`, and
+/// `last_error_inner` are `threadlocal` — read them on the same OS thread
+/// that invoked the compile function or they will be zero/empty.
 pub const semantic = @import("semantic.zig");
 const codegen = @import("codegen.zig");
 const spirv_to_hlsl = @import("spirv_to_hlsl.zig");
