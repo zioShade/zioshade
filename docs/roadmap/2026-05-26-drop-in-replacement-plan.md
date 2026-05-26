@@ -1,707 +1,216 @@
-# glslpp Drop-In Replacement Roadmap (2026-05-26)
+# glslpp Drop-In Replacement Roadmap (2026-05-26, revised)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close the credibility gap between glslpp and the glslang + SPIRV-Cross C++ toolchain so glslpp can be picked up by general Vulkan/WebGPU/D3D projects, not just wintty.
+**Goal:** Close the genuinely-remaining gaps between glslpp and the glslang + SPIRV-Cross C++ toolchain so glslpp can be picked up by general Vulkan/WebGPU/D3D projects.
 
-**Architecture:** Eight focused milestones. Each milestone delivers a coherent capability and is independently shippable. Tasks within a milestone follow strict TDD (red → green → commit). Each task touches a small number of files and produces a single logical change.
+**Architecture:** Eight tightly-scoped milestones, each independently shippable. Tasks within a milestone follow strict TDD (red → green → commit).
 
 **Tech Stack:** Zig 0.15.2 (toolchain pinned via `.mise.toml`); test harness is `zig build test`; conformance oracle is `spirv-val`; cross-validation against `glslangValidator` + `spirv-cross` (Vulkan SDK 1.4.341.1 on Windows).
 
-**Ground-truth notes (verified before writing this plan):**
-- `src/diagnostic.zig` already defines a complete `Diagnostic` struct with `kind`, `line`, `column`, `message`, `path`, `format()` — work is *population*, not infrastructure.
-- `src/reflection.zig` already declares 11 resource categories and populates 9 of them.
-- Specialization constants are wired end-to-end for **scalar** values in GLSL/MSL/HLSL backends — gaps are WGSL emit, composite/op variants, override API.
-- `src/codegen.zig` already has `layoutAlignment`, `layoutSize`, `layoutArrayStride` for std140/std430; scalar layout and column-major audit are the gaps.
-- Mesh/Task/Ray-Tracing already cross-compile to HLSL — gaps are `[OutputTopology]` metadata and MSL/WGSL coverage.
-- HLSL SSBO writable access (`RWStructuredBuffer`) is implemented; the inline TODO at [src/spirv_to_hlsl.zig:303](../../src/spirv_to_hlsl.zig) is stale.
+**Why this revision exists:** The first version of this roadmap (committed `1befd2cc`) was written from audit agents that only inspected current file contents and missed years of shipped feature work tagged G1/G2/G3/G4/G5/G7. The revised plan below is grounded in **both git history and code state**, so it covers only genuinely-remaining work. Most milestones from the prior plan are deleted because the work was already done.
 
-## Milestone overview
+## What was already shipped (do NOT redo)
 
-| # | Milestone | Outcome | Verifiable by |
-|---|---|---|---|
-| 0 | Test harness foundations | Helpers that every later milestone uses | `zig build test` extends with new helpers |
-| 1 | Diagnostics quality | Glslang-grade `path:line:col: kind: message` for all error paths | `tests/diagnostic_tests.zig` adds 15+ cases |
-| 2 | Reflection completeness | `storage_images`, `subpass_inputs`, spec-const defaults, image format metadata, members for samplers/images | `tests/reflection_tests.zig` doubles in size |
-| 3 | Spec constants completeness | WGSL emit, `OpSpecConstantTrue/False/Composite/Op`, value override API | round-trip tests through every backend |
-| 4 | GLSL versions & extensions | `__VERSION__` macro, semantic branching, unknown-extension warning, ESSL 300/310 parsing | new `tests/version_tests.zig` |
-| 5 | WGSL opcode depth | Derivatives, bitfield, packing, ballot/shuffle, missing image ops | naga validation of every stress fixture |
-| 6 | HLSL/MSL polish | HLSL SM 5.0/6.5/6.7 variants, mesh `[OutputTopology]`, MSL argument buffers | DXC compilation matrix expansion |
-| 7 | C ABI surface | `glslpp.h` + `extern fn` exports + sanity C consumer | `zig build c-abi-test` runs a C smoke test |
-| 8 | Closing the loop | Scalar UBO layout, `binding_shift` for non-HLSL backends, library-vs-library bench | `zig build bench-lib` |
+Verified via git log + code reads + test runs:
 
----
+| Prior plan milestone | Actually shipped as | Evidence |
+|---|---|---|
+| M1: Diagnostics quality | **G3** in commit `7d1d6f25` | `last_error_line/column` set in lexer (12×), parser (2×), semantic (14×). `compileToSPIRVWithDiagnostics` populates rich `Diagnostic`s. `tests/diagnostic_tests.zig` has 10 tests covering it. |
+| M2: Reflection — most of it | **G1** in commit `62d3659d` | 9 of 13 `ShaderResources` categories populated. 25 G1 tests in `tests/correctness_tests.zig` pass. |
+| M3: Spec constants (scalar) | commits `fa652c04`, `9186248b`, `98da12fd`, `038ca1cc` | `OpSpecConstant` scalar emission, GLSL `layout(constant_id=N)` emit, MSL `[[function_constant(N)]]` emit, reflection. Small types (int8/16, uint8/16, float16). |
+| M4: GLSL versions | **G4** in commit `bc0ce4ee` | `compileGlslToGlslVersion(alloc, src, stage, version)`. ESSL profile parses. `__VERSION__` macro defined. |
+| M5: WGSL opcode coverage | **G2/G5** across 12+ commits (e.g., `a1e75de9` "30+ missing WGSL opcode handlers") | **92 distinct opcode handlers** in `src/spirv_to_wgsl.zig`. Derivatives, atomics, shuffles, ballots, barriers all work. |
+| M6: HLSL mesh/ray cross-compile | shipped | 7 opcodes mapped: `EmitMeshTasksEXT`, `TraceRayKHR`, `ReportIntersectionKHR`, etc. |
+| M6: HLSL SSBO `RWStructuredBuffer` | shipped | The inline `// TODO: SSBO` comment at the prior audit was stale. |
 
-## Milestone 0 — Test harness foundations
+## What's genuinely remaining
 
-These helpers are shared by later milestones. Land them first.
+The 8 revised milestones below. Total estimated effort: **~1 week of focused work**, much less than the prior plan's 2-3 weeks.
 
-### Task 0.1: Add `expectDiagnostic` helper
-
-**Files:**
-- Create: `tests/helpers/diagnostics.zig`
-- Modify: `tests/diagnostic_tests.zig` (add import)
-
-- [ ] **Step 1: Write the failing test**
-
-  Add this to `tests/diagnostic_tests.zig` at the end:
-
-  ```zig
-  const diag_helpers = @import("helpers/diagnostics.zig");
-
-  test "expectDiagnostic helper matches glslang-style format" {
-      const alloc = std.testing.allocator;
-      var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
-      defer {
-          for (diags.items) |d| alloc.free(d.message);
-          diags.deinit(alloc);
-      }
-      try diags.append(alloc, .{
-          .kind = .@"error",
-          .line = 4,
-          .column = 32,
-          .message = try alloc.dupe(u8, "'undef_var' : undeclared identifier"),
-          .path = "shader.frag",
-      });
-      try diag_helpers.expectDiagnostic(diags.items, .{
-          .line = 4,
-          .column = 32,
-          .kind = .@"error",
-          .message_contains = "undeclared identifier",
-      });
-  }
-  ```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-  ```bash
-  mise exec -- zig build test --summary all 2>&1 | grep -E "test\.expectDiagnostic|fail"
-  ```
-
-  Expected: compilation error — `tests/helpers/diagnostics.zig` not found.
-
-- [ ] **Step 3: Implement helper**
-
-  Create `tests/helpers/diagnostics.zig`:
-
-  ```zig
-  // SPDX-License-Identifier: MIT OR Apache-2.0
-  //! Shared diagnostic-assertion helpers for glslpp tests.
-
-  const std = @import("std");
-  const glslpp = @import("glslpp");
-
-  pub const ExpectedDiagnostic = struct {
-      line: ?u32 = null,
-      column: ?u32 = null,
-      kind: ?glslpp.diagnostic.Diagnostic.Kind = null,
-      message_contains: ?[]const u8 = null,
-      path_contains: ?[]const u8 = null,
-  };
-
-  /// Asserts that at least one Diagnostic in `diags` matches every non-null
-  /// field of `expect`. Prints the full diagnostic list on mismatch.
-  pub fn expectDiagnostic(
-      diags: []const glslpp.diagnostic.Diagnostic,
-      expect: ExpectedDiagnostic,
-  ) !void {
-      for (diags) |d| {
-          if (expect.line) |l| if (d.line != l) continue;
-          if (expect.column) |c| if (d.column != c) continue;
-          if (expect.kind) |k| if (d.kind != k) continue;
-          if (expect.message_contains) |m|
-              if (std.mem.indexOf(u8, d.message, m) == null) continue;
-          if (expect.path_contains) |p|
-              if (std.mem.indexOf(u8, d.path, p) == null) continue;
-          return; // match
-      }
-      std.debug.print("no diagnostic matched expectation:\n  expect: {any}\n", .{expect});
-      for (diags, 0..) |d, i| {
-          std.debug.print("  [{d}] {s}:{d}:{d} {s}: {s}\n", .{
-              i, d.path, d.line, d.column, @tagName(d.kind), d.message,
-          });
-      }
-      return error.NoMatchingDiagnostic;
-  }
-  ```
-
-- [ ] **Step 4: Wire helper module into build**
-
-  `build.zig` already wires `tests/` files through `addTest`. The `tests/helpers/diagnostics.zig` file is reachable via the relative `@import("helpers/diagnostics.zig")` in `diagnostic_tests.zig` so no build.zig change is needed if Zig's path resolution finds it. Confirm by running tests.
-
-  Run: `mise exec -- zig build test --summary all 2>&1 | grep -E "Build Summary|fail"`
-
-  Expected: `Build Summary: 43/43 steps succeeded; 1601/1601 tests passed`.
-
-- [ ] **Step 5: Commit**
-
-  ```bash
-  git add tests/helpers/diagnostics.zig tests/diagnostic_tests.zig
-  git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
-      commit -m "test: add expectDiagnostic helper for glslang-style assertions"
-  ```
-
-### Task 0.2: Add `crossCompileRoundTrip` helper
-
-**Files:**
-- Create: `tests/helpers/roundtrip.zig`
-
-- [ ] **Step 1: Write the failing test**
-
-  Add to a new file `tests/helpers/roundtrip_tests.zig`:
-
-  ```zig
-  const std = @import("std");
-  const rt = @import("roundtrip.zig");
-
-  test "roundtrip helper compiles trivial frag to all backends" {
-      const src =
-          \\#version 430
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() { fragColor = vec4(1.0); }
-          ;
-      try rt.crossCompileRoundTrip(std.testing.allocator, src, .fragment);
-  }
-  ```
-
-  Wire it into `build.zig` by adding to the `module_files` tuple at [build.zig:49-60](../../build.zig) (after `"kernel_fusion"`):
-
-  ```zig
-  // (no change to module_files — that's src/ modules. Add the helpers test
-  // as its own step instead.)
-  ```
-
-  Better: add to existing `tests/` step. Use the pattern already in `build.zig` for `tests/hlsl_tests.zig`. Insert after that block:
-
-  ```zig
-  const helpers_step = b.step("test-helpers", "Validate test-helper modules");
-  const helpers_mod = b.createModule(.{
-      .root_source_file = b.path("tests/helpers/roundtrip_tests.zig"),
-      .target = target,
-      .optimize = optimize,
-  });
-  helpers_mod.addImport("glslpp", glslpp_mod);
-  const run_helpers = b.addRunArtifact(b.addTest(.{
-      .name = "test-helpers",
-      .root_module = helpers_mod,
-  }));
-  helpers_step.dependOn(&run_helpers.step);
-  test_step.dependOn(&run_helpers.step);
-  ```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-  ```bash
-  mise exec -- zig build test 2>&1 | grep -E "fail|error:"
-  ```
-
-  Expected: compilation error — `roundtrip.zig` not found.
-
-- [ ] **Step 3: Implement helper**
-
-  Create `tests/helpers/roundtrip.zig`:
-
-  ```zig
-  // SPDX-License-Identifier: MIT OR Apache-2.0
-  const std = @import("std");
-  const glslpp = @import("glslpp");
-
-  /// Compile the given GLSL source to SPIR-V then through every cross-compiler.
-  /// Asserts each backend produces non-empty output. Used to lock in that a
-  /// new feature emits valid (non-empty, no error) output across all backends.
-  pub fn crossCompileRoundTrip(
-      alloc: std.mem.Allocator,
-      glsl_source: [:0]const u8,
-      stage: glslpp.Stage,
-  ) !void {
-      const spirv = try glslpp.compileToSPIRV(alloc, glsl_source, .{ .stage = stage });
-      defer alloc.free(spirv);
-
-      const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{
-          .binding_shift = -1, .shader_model = 60,
-      });
-      defer alloc.free(hlsl);
-      try std.testing.expect(hlsl.len > 0);
-
-      const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{});
-      defer alloc.free(glsl);
-      try std.testing.expect(glsl.len > 0);
-
-      const msl = try glslpp.spirvToMSL(alloc, spirv, .{});
-      defer alloc.free(msl);
-      try std.testing.expect(msl.len > 0);
-
-      const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
-      defer alloc.free(wgsl);
-      try std.testing.expect(wgsl.len > 0);
-  }
-  ```
-
-- [ ] **Step 4: Run tests**
-
-  ```bash
-  mise exec -- zig build test 2>&1 | grep -E "Build Summary"
-  ```
-
-  Expected: `1602/1602 tests passed`.
-
-- [ ] **Step 5: Commit**
-
-  ```bash
-  git add tests/helpers/roundtrip.zig tests/helpers/roundtrip_tests.zig build.zig
-  git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
-      commit -m "test: add crossCompileRoundTrip helper covering all four backends"
-  ```
+| # | Milestone | Outcome | Tasks |
+|---|---|---|---:|
+| 1 | **Repair test infrastructure** | All shipped G-work runs in default `zig build test`. CLI uses diagnostics API. | 4 |
+| 2 | **Reflection completion** | Populate `storage_images`, `subpass_inputs`, spec-const `default_value`, image format metadata. | 5 |
+| 3 | **Spec constants completion** | WGSL emit, HLSL real emit, bool / composite / op variants, value override API. | 6 |
+| 4 | **WGSL final opcode coverage** | Add the 9 still-missing handlers (packing + bitfield). | 2 |
+| 5 | **HLSL polish** | SM 5.0 differentiated output, mesh `[OutputTopology]`. | 3 |
+| 6 | **MSL argument buffers** | `argument_buffers: bool` option + implementation. | 2 |
+| 7 | **C ABI surface** | `glslpp.h` + `extern fn` exports + C consumer + CI smoke. | 3 |
+| 8 | **Closing the loop** | Scalar block layout, buffer-reference extension, descriptor remap for non-HLSL, library-vs-library bench, `tests/external/` corpus. | 5 |
 
 ---
 
-## Milestone 1 — Diagnostics quality
+## Milestone 1 — Repair test infrastructure (load-bearing)
 
-Make every error from glslpp look like `shader.frag:4:32: error: 'undef_var' : undeclared identifier`. Infrastructure is already present in [src/diagnostic.zig](../../src/diagnostic.zig); work is population.
+### Why first
 
-### Task 1.1: Capture line/column on undeclared identifier (semantic.zig path 1)
+A surprising amount of the audit's confusion came from the fact that **`tests/diagnostic_tests.zig`, `tests/reflection_tests.zig`, and `tests/correctness_tests.zig` are not in the default `test` step**. They're behind named steps (`test-diagnostic`, `test-reflection`, `test-correctness`) that nobody runs by default. CI silently misses regressions in shipped G-work. Fixing this is high-leverage.
+
+### Task 1.1: Make `glslpp.semantic` public so tests can compile
 
 **Files:**
-- Modify: `src/semantic.zig` around line 2423
-- Test: `tests/diagnostic_tests.zig`
+- Modify: `src/root.zig` line 15
 
-- [ ] **Step 1: Write the failing test**
-
-  Append to `tests/diagnostic_tests.zig`:
-
-  ```zig
-  const diag_helpers = @import("helpers/diagnostics.zig");
-
-  test "diagnostic: undeclared identifier captures line and column" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 430
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() {
-          \\    fragColor = vec4(undef_var, 0.0, 0.0, 1.0);
-          \\}
-          ;
-      var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
-      defer {
-          for (diags.items) |d| alloc.free(d.message);
-          diags.deinit(alloc);
-      }
-      const result = glslpp.compileToSPIRVWithDiagnostics(alloc, src, .{ .stage = .fragment }, &diags);
-      try std.testing.expectError(error.SemanticFailed, result);
-      try diag_helpers.expectDiagnostic(diags.items, .{
-          .line = 4,
-          .kind = .@"error",
-          .message_contains = "undef_var",
-      });
-  }
-  ```
-
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 1: Reproduce the failure**
 
   ```bash
-  mise exec -- zig build test 2>&1 | grep -aE "undeclared identifier captures|fail|leaked"
+  cd C:/Users/Alessandro/CODE/OSS/glslpp/.claude/worktrees/amazing-ride-e4d37a
+  mise exec -- zig build test-diagnostic 2>&1 | head -10
   ```
 
-  Expected: assertion failure — diagnostic has `line=0` instead of `line=4`.
+  Expected: `error: 'semantic' is not marked 'pub'`.
 
-- [ ] **Step 3: Patch the error path**
+- [ ] **Step 2: Patch root.zig**
 
-  In `src/semantic.zig`, locate the first `return error.UndeclaredIdentifier` (the audit pinned this around line 2423 in `analyzeIdentifier` or equivalent). Just **before** the return, add:
+  Change line 15 from `const semantic = @import("semantic.zig");` to `pub const semantic = @import("semantic.zig");`. Add a doc comment noting that `semantic` is exposed for test use only — callers should use the public `Error` / `Diagnostic` / `lastErrorCtx()` / `lastErrorInner()` API.
 
-  ```zig
-  last_error_line = node.loc.line;
-  last_error_column = node.loc.column;
-  last_error_ctx = name;  // already set in most cases — verify
-  ```
-
-  Re-verify by running the test.
-
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 3: Verify it builds**
 
   ```bash
-  mise exec -- zig build test 2>&1 | grep -aE "Build Summary"
+  mise exec -- zig build test-diagnostic --summary all 2>&1 | grep -aE "Build Summary"
   ```
 
-  Expected: `1603/1603 tests passed`.
+  Expected: all 10+ tests pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
   ```bash
-  git add src/semantic.zig tests/diagnostic_tests.zig
+  git add src/root.zig
   git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
-      commit -m "diagnostic: capture line/column on undeclared identifier in analyzeIdentifier"
+      commit -m "expose glslpp.semantic for test-internals use; unbreaks tests/diagnostic_tests.zig"
   ```
 
-### Task 1.2: Capture line/column on undeclared identifier (semantic.zig path 2 — analyzeExpression)
+### Task 1.2: Wire orphaned test files into default `test` step
 
 **Files:**
-- Modify: `src/semantic.zig` around line 2657 (the second site identified by the audit)
-- Test: `tests/diagnostic_tests.zig`
+- Modify: `build.zig`
 
-- [ ] **Step 1: Write the failing test**
-
-  Append:
-
-  ```zig
-  test "diagnostic: undeclared identifier inside function-call arg" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 430
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() {
-          \\    fragColor = sin(missing_arg);
-          \\}
-          ;
-      var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
-      defer {
-          for (diags.items) |d| alloc.free(d.message);
-          diags.deinit(alloc);
-      }
-      _ = glslpp.compileToSPIRVWithDiagnostics(alloc, src, .{ .stage = .fragment }, &diags) catch {};
-      try diag_helpers.expectDiagnostic(diags.items, .{
-          .line = 4,
-          .kind = .@"error",
-          .message_contains = "missing_arg",
-      });
-  }
-  ```
-
-- [ ] **Step 2: Run test (fails)**
-
-  Same command as above.
-
-- [ ] **Step 3: Patch site #2**
-
-  In `src/semantic.zig` around the second `return error.UndeclaredIdentifier` (the audit identified line ~2657 in `analyzeExpression`), repeat the line/column capture pattern.
-
-- [ ] **Step 4: Run tests, confirm pass**
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 1: Reproduce — confirm default test step has 1601 tests, but adding the orphans should bump it**
 
   ```bash
+  mise exec -- zig build test --summary all 2>&1 | grep -aE "Build Summary"
+  ```
+
+  Record current count.
+
+- [ ] **Step 2: Add the three test files' run-steps to `test_step.dependOn`**
+
+  In `build.zig`, find each block like:
+  ```zig
+  const diag_test_step = b.step("test-diagnostic", "Run diagnostic quality tests");
+  // ...
+  const run_diag_tests = b.addRunArtifact(b.addTest(...));
+  diag_test_step.dependOn(&run_diag_tests.step);
+  ```
+
+  After each one, add:
+  ```zig
+  test_step.dependOn(&run_diag_tests.step);
+  ```
+
+  Repeat for `run_refl_tests`, `run_corr_tests`.
+
+- [ ] **Step 3: Verify**
+
+  ```bash
+  mise exec -- zig build test --summary all 2>&1 | grep -aE "Build Summary"
+  ```
+
+  Expected: test count jumps by 40+ (10 diagnostic + 8 reflection + 25 correctness).
+
+- [ ] **Step 4: Commit**
+
+  ```bash
+  git add build.zig
   git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
-      commit -m "diagnostic: capture line/column for undeclared identifier in analyzeExpression"
+      commit -m "build: wire diagnostic/reflection/correctness tests into default test step"
   ```
 
-### Task 1.3: Capture line/column for undeclared function call
+### Task 1.3: Wire CLI to use `compileToSPIRVWithDiagnostics` so errors show line:col:msg
 
 **Files:**
-- Modify: `src/semantic.zig` around line 5171
-- Test: `tests/diagnostic_tests.zig`
+- Modify: `src/cli.zig` — at minimum the `doCompile` path (line ~237), ideally also the cross-compile paths
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Reproduce — CLI on a broken shader currently shows a bare error**
+
+  ```bash
+  cat > /tmp/bad.frag <<'EOF'
+  #version 430
+  layout(location=0) out vec4 fragColor;
+  void main() { fragColor = vec4(undef_var, 0.0, 0.0, 1.0); }
+  EOF
+  mise exec -- zig build cli
+  zig-out/bin/glslpp.exe compile /tmp/bad.frag -o /tmp/out.spv 2>&1
+  ```
+
+  Expected: a vague error string with no line/column.
+
+- [ ] **Step 2: Patch CLI compile path**
+
+  Replace the `try compileToSPIRV(...)` call (or wrap it) with:
 
   ```zig
-  test "diagnostic: undeclared function call reports line" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 430
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() {
-          \\    fragColor = bogus_func(1.0, 2.0);
-          \\}
-          ;
-      var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
-      defer {
-          for (diags.items) |d| alloc.free(d.message);
-          diags.deinit(alloc);
+  var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
+  defer {
+      for (diags.items) |d| alloc.free(d.message);
+      diags.deinit(alloc);
+  }
+  const spirv_words = glslpp.compileToSPIRVWithDiagnostics(alloc, source, opts, &diags) catch |err| {
+      for (diags.items) |d| {
+          var buf: [512]u8 = undefined;
+          var writer = std.Io.Writer.fixed(&buf);
+          d.format(&writer) catch {};
+          std.debug.print("{s}\n", .{buf[0..writer.end]});
       }
-      _ = glslpp.compileToSPIRVWithDiagnostics(alloc, src, .{ .stage = .fragment }, &diags) catch {};
-      try diag_helpers.expectDiagnostic(diags.items, .{
-          .line = 4,
-          .message_contains = "bogus_func",
-      });
-  }
-  ```
-
-- [ ] **Step 2: Run test (fails)**
-
-- [ ] **Step 3: Patch the call-resolution error path**
-
-  Around line 5171 in `src/semantic.zig`, before `return error.UndeclaredIdentifier`, set `last_error_line/column` from the call node's location.
-
-- [ ] **Step 4: Run tests, confirm pass**
-
-- [ ] **Step 5: Commit**
-
-### Task 1.4: Capture line/column on type-mismatch errors
-
-**Files:**
-- Modify: `src/semantic.zig` around lines 1720-1724, 2475-2479, 2485-2488, 6384-6387 (the four sites identified by the audit)
-- Test: `tests/diagnostic_tests.zig`
-
-- [ ] **Step 1: Write failing tests** — one for each type-mismatch pattern:
-
-  ```zig
-  test "diagnostic: type mismatch in assignment reports line" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 430
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() {
-          \\    float x = vec4(1.0);
-          \\    fragColor = vec4(x);
-          \\}
-          ;
-      var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
-      defer {
-          for (diags.items) |d| alloc.free(d.message);
-          diags.deinit(alloc);
-      }
-      _ = glslpp.compileToSPIRVWithDiagnostics(alloc, src, .{ .stage = .fragment }, &diags) catch {};
-      try diag_helpers.expectDiagnostic(diags.items, .{
-          .line = 4,
-          .message_contains = "type",
-      });
-  }
-  ```
-
-- [ ] **Step 2: Run tests (fail)**
-
-- [ ] **Step 3: Patch all four sites in semantic.zig**
-
-  For each site, add `last_error_line/column` capture from the relevant AST node's `loc`. Use the same pattern as Task 1.1.
-
-- [ ] **Step 4: Run tests, confirm pass**
-
-- [ ] **Step 5: Commit**
-
-  ```bash
-  git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
-      commit -m "diagnostic: capture line/column on type-mismatch errors (4 sites)"
-  ```
-
-### Task 1.5: Audit remaining semantic error returns
-
-**Files:**
-- Modify: `src/semantic.zig` (multiple sites)
-- Test: `tests/diagnostic_tests.zig`
-
-- [ ] **Step 1: Grep all error returns**
-
-  ```bash
-  grep -n "return error\." src/semantic.zig | wc -l
-  ```
-
-  Expect: 30+ sites. For each, identify whether `last_error_line/column` is set before the return.
-
-- [ ] **Step 2: Write 5 failing tests** covering: array index out of bounds, wrong argument count, void in expression context, duplicate variable declaration, redefinition.
-
-  ```zig
-  test "diagnostic: wrong arg count reports line" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 430
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() { fragColor = vec4(1.0, 2.0); }
-          ;
-      // sin(x) called with 0 args:
-      // fragColor = sin();   // line 3
-      var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
-      defer { for (diags.items) |d| alloc.free(d.message); diags.deinit(alloc); }
-      _ = glslpp.compileToSPIRVWithDiagnostics(alloc, src, .{ .stage = .fragment }, &diags) catch {};
-      // The shader above is valid; replace with a known-bad one per site.
-  }
-  ```
-
-  Replace the test bodies with shaders that actually trigger each error path. Use `glslangValidator` on the same input as a reference to confirm the case is indeed an error.
-
-- [ ] **Step 3: Run tests (fail)**
-
-- [ ] **Step 4: Patch each remaining error return**
-
-  For every uncaught error return, capture `last_error_line/column` from the AST node before returning.
-
-- [ ] **Step 5: Run tests, confirm pass**
-
-- [ ] **Step 6: Commit**
-
-  ```bash
-  git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
-      commit -m "diagnostic: capture line/column on remaining semantic error returns"
-  ```
-
-### Task 1.6: Add `path` to Token and propagate through preprocessor
-
-**Files:**
-- Modify: `src/lexer.zig` `Token.Loc` struct
-- Modify: `src/preprocessor.zig` include-expansion path
-- Modify: `src/ast.zig` `Node.Loc` struct
-- Modify: `src/parser.zig` `nodeLoc()` to copy `path`
-- Test: `tests/diagnostic_tests.zig`
-
-- [ ] **Step 1: Write failing test**
-
-  ```zig
-  test "diagnostic: include propagates path field" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 430
-          \\#include "missing.glsl"
-          \\void main() {}
-          ;
-      var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
-      defer { for (diags.items) |d| alloc.free(d.message); diags.deinit(alloc); }
-      _ = glslpp.compileToSPIRVWithDiagnostics(alloc, src, .{ .stage = .fragment }, &diags) catch {};
-      try diag_helpers.expectDiagnostic(diags.items, .{
-          .line = 2,
-          .message_contains = "missing.glsl",
-      });
-  }
-  ```
-
-- [ ] **Step 2: Run test (fails)**
-
-- [ ] **Step 3: Add `path` to Token.Loc**
-
-  In `src/lexer.zig` `Token.Loc`:
-
-  ```zig
-  pub const Loc = struct {
-      line: u32 = 1,
-      column: u32 = 1,
-      path: []const u8 = "",   // NEW — empty means "primary source"
+      return err;
   };
   ```
 
-- [ ] **Step 4: Mirror on ast.Node.Loc**
-
-  In `src/ast.zig`:
-
-  ```zig
-  pub const Loc = struct {
-      line: u32 = 1,
-      column: u32 = 1,
-      path: []const u8 = "",
-  };
-  ```
-
-- [ ] **Step 5: Propagate in parser**
-
-  In `src/parser.zig` `nodeLoc()` (around line 240), copy `path` from the token:
-
-  ```zig
-  fn nodeLoc(self: *Parser) ast.Node.Loc {
-      const t = self.tokens[self.pos];
-      return .{ .line = t.loc.line, .column = t.loc.column, .path = t.loc.path };
-  }
-  ```
-
-- [ ] **Step 6: Set path in preprocessor on include**
-
-  In `src/preprocessor.zig`, when expanding `#include`, mark every token from the included file with `path = include_path` (the resolved path).
-
-- [ ] **Step 7: Use path in Diagnostic**
-
-  In `src/root.zig` `compileToSPIRVWithDiagnostics`, set `diagnostic.path` from the captured token's `path` (or the active include's path) before appending.
-
-- [ ] **Step 8: Run tests, confirm pass**
-
-- [ ] **Step 9: Commit**
+- [ ] **Step 3: Verify**
 
   ```bash
-  git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
-      commit -m "diagnostic: thread source file path from #include through to Diagnostic"
+  mise exec -- zig build cli
+  zig-out/bin/glslpp.exe compile /tmp/bad.frag -o /tmp/out.spv 2>&1
   ```
 
-### Task 1.7: Collect ALL diagnostics, not just the final one
+  Expected: now prints `4:?: error: ... undef_var ... undeclared identifier` style output.
+
+- [ ] **Step 4: Add a test**
+
+  Add to `tests/diagnostic_tests.zig` a CLI-level integration test if practical, or note that CLI tests are out of scope for this milestone.
+
+- [ ] **Step 5: Commit**
+
+  ```bash
+  git add src/cli.zig
+  git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
+      commit -m "cli: use compileToSPIRVWithDiagnostics so errors show line:col:msg"
+  ```
+
+### Task 1.4: Add CI step that runs all tests, not just the default subset
 
 **Files:**
-- Modify: `src/root.zig` `compileToSPIRVWithDiagnostics`
-- Modify: `src/semantic.zig` to optionally accept a `&diags` collector
-- Test: `tests/diagnostic_tests.zig`
+- Modify: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Read current ci.yml. The `Unit tests` step runs `zig build test --summary all`.**
 
-  ```zig
-  test "diagnostic: multi-error compile reports all errors" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 430
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() {
-          \\    fragColor = vec4(undef_a, undef_b, undef_c, 1.0);
-          \\}
-          ;
-      var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
-      defer { for (diags.items) |d| alloc.free(d.message); diags.deinit(alloc); }
-      _ = glslpp.compileToSPIRVWithDiagnostics(alloc, src, .{ .stage = .fragment }, &diags) catch {};
-      try std.testing.expect(diags.items.len >= 3);  // one per undef
-  }
-  ```
+  After M1.2, this now runs the previously-orphaned tests automatically. **No extra CI work needed** beyond verifying the workflow doesn't need updating.
 
-- [ ] **Step 2: Run test (fails — currently only 1 diagnostic returned)**
+  If you find the workflow uses a hard-coded test count or filtering, update it. Otherwise this task is just a verification.
 
-- [ ] **Step 3: Thread diagnostic collector through semantic**
-
-  Add an optional `diags: ?*std.ArrayListUnmanaged(diagnostic.Diagnostic)` parameter to the semantic entry point. On each error, append a diagnostic instead of (or in addition to) setting `last_error_*`. Continue analysis where possible to surface more errors per compile.
-
-- [ ] **Step 4: Wire from root.zig**
-
-  In `compileToSPIRVWithDiagnostics`, pass the user's `&diagnostics` slice into the semantic analyzer.
-
-- [ ] **Step 5: Run tests, confirm pass**
-
-- [ ] **Step 6: Commit**
-
-  ```bash
-  git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
-      commit -m "diagnostic: collect multiple errors per compile via threaded collector"
-  ```
-
-### Task 1.8: Format-string match with glslangValidator output
-
-**Files:**
-- Modify: `src/diagnostic.zig` `format()` if needed
-- Test: `tests/diagnostic_tests.zig`
-
-- [ ] **Step 1: Write golden-format test**
-
-  ```zig
-  test "diagnostic: format matches glslang convention" {
-      const alloc = std.testing.allocator;
-      var diag = glslpp.diagnostic.Diagnostic{
-          .kind = .@"error",
-          .line = 4,
-          .column = 32,
-          .message = "'undef_var' : undeclared identifier",
-          .path = "shader.frag",
-      };
-      var buf: [256]u8 = undefined;
-      var writer = std.Io.Writer.fixed(&buf);
-      try diag.format(&writer);
-      const out = buf[0..writer.end];
-      // glslangValidator format: "ERROR: shader.frag:4: 'undef_var' : undeclared identifier"
-      // glslpp current format:   "shader.frag:4:32: error: 'undef_var' : undeclared identifier"
-      // Keep glslpp format (richer: includes column).
-      try std.testing.expectEqualStrings(
-          "shader.frag:4:32: error: 'undef_var' : undeclared identifier",
-          out,
-      );
-  }
-  ```
-
-- [ ] **Step 2: Run test**
-
-  Likely passes already (the format is correct per current `diagnostic.zig`). If not, adjust `format()` to produce the expected string.
-
-- [ ] **Step 3: Commit**
-
-  ```bash
-  git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
-      commit -m "test: lock in diagnostic format string"
-  ```
+- [ ] **Step 2: Commit (or skip if nothing changed)**
 
 ---
 
-## Milestone 2 — Reflection completeness
+## Milestone 2 — Reflection completion
 
-Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const defaults dropped; image format metadata absent; `members` only populated for UBO/SSBO/push_constants.
+Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default value not extracted, `OpTypeImage` (opcode 25) not handled, several untested categories.
 
 ### Task 2.1: Populate `storage_images`
 
 **Files:**
-- Modify: `src/reflection.zig` around line 369
+- Modify: `src/reflection.zig` classifier switch (around line 290-326)
 - Test: `tests/reflection_tests.zig`
 
 - [ ] **Step 1: Write failing test**
@@ -726,13 +235,13 @@ Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const 
   }
   ```
 
-- [ ] **Step 2: Run test (fails — storage_images.len == 0)**
+- [ ] **Step 2: Run test (fails — `storage_images.len == 0`)**
 
-- [ ] **Step 3: Patch the classification switch**
+- [ ] **Step 3: Add the classifier branch in `src/reflection.zig`**
 
-  In `src/reflection.zig`'s classification path (the place that branches on SPIR-V storage class for variable kinds), add a branch that recognises `OpTypeImage` non-sampled variables and appends to `stor_img`.
+  The audit identified that the classification switch (around line 290) routes types to `ubos` / `ssbos` / `sampled` / `sep_img` / `sep_samp` / `accels`, but NEVER appends to `stor_img`. Add: for an `OpVariable` whose pointee type is `OpTypeImage` with Sampled=2 (storage image, per SPIR-V spec), append to `stor_img`.
 
-- [ ] **Step 4: Run tests, confirm pass**
+- [ ] **Step 4: Verify test passes**
 
 - [ ] **Step 5: Commit**
 
@@ -768,22 +277,35 @@ Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const 
 
 - [ ] **Step 2: Run test (fails)**
 
-- [ ] **Step 3: Patch classification**
+- [ ] **Step 3: Patch classifier**
 
-  Recognise `OpTypeImage` with Dim=SubpassData and classify into `subpass_inputs`.
+  Recognise `OpTypeImage` with Dim=SubpassData (Dim value 6 in SPIR-V spec) and classify into `subpass_inputs`.
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 4: Verify**
 
 - [ ] **Step 5: Commit**
 
-### Task 2.3: Extract specialization constant default values
+### Task 2.3: Extract spec-constant default values
 
 **Files:**
-- Modify: `src/reflection.zig` around lines 256-259
-- Modify: `src/root.zig` to expose default value in public type
+- Modify: `src/reflection.zig` — add `default_value_u32` field to spec-const branch; populate from `OpSpecConstant` operand
 - Test: `tests/reflection_tests.zig`
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Add the field**
+
+  In `src/reflection.zig` `Resource` (or a sub-struct for spec-consts if the type is divergent), add:
+
+  ```zig
+  default_value_u32: u32 = 0,  // raw 32-bit operand; consumer reinterprets per type
+  ```
+
+  Note: the audit says `spec_id` is already stored in the `location` field. Keep that convention but **also** add an explicit `spec_id: u32 = 0xFFFF_FFFF` field with the same value for clarity.
+
+- [ ] **Step 2: Populate**
+
+  In the existing `OpSpecConstant` handling around line 256-259, capture `inst.words[3]` (the literal default operand) into `default_value_u32`.
+
+- [ ] **Step 3: Write test**
 
   ```zig
   test "reflection: spec constant default value is extracted" {
@@ -798,34 +320,18 @@ Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const 
       defer alloc.free(spirv);
       var res = try glslpp.reflectSPIRV(alloc, spirv);
       defer res.deinit(alloc);
-      try std.testing.expect(res.specialization_constants.len == 1);
-      const sc = res.specialization_constants[0];
-      try std.testing.expectEqual(@as(u32, 7), sc.spec_id);
-      try std.testing.expectEqual(@as(u32, 42), sc.default_value_u32);
+      try std.testing.expectEqual(@as(usize, 1), res.specialization_constants.len);
+      try std.testing.expectEqual(@as(u32, 7), res.specialization_constants[0].spec_id);
+      try std.testing.expectEqual(@as(u32, 42), res.specialization_constants[0].default_value_u32);
   }
   ```
 
-- [ ] **Step 2: Add `spec_id` and `default_value_u32` fields**
+- [ ] **Step 4: Verify, commit**
 
-  In `src/reflection.zig` `Resource`, add (or in a new sub-struct):
-
-  ```zig
-  spec_id: u32 = 0xFFFF_FFFF,
-  default_value_u32: u32 = 0,  // raw 32-bit operand; consumer reinterprets per type
-  ```
-
-- [ ] **Step 3: Read OpSpecConstant operand**
-
-  Around line 256, when classifying `OpSpecConstant`, capture `inst.words[3]` (the literal default operand) and store it in `default_value_u32`. Also capture the `SpecId` decoration into `spec_id`.
-
-- [ ] **Step 4: Run tests**
-
-- [ ] **Step 5: Commit**
-
-### Task 2.4: Handle `OpTypeImage` to expose image format metadata
+### Task 2.4: Handle `OpTypeImage` (opcode 25) for image format metadata
 
 **Files:**
-- Modify: `src/reflection.zig` — add `image_format` field, add OpTypeImage handler
+- Modify: `src/reflection.zig` — add `ImageFormat` enum + image_format field; add OpTypeImage handler in the type-parsing switch
 - Test: `tests/reflection_tests.zig`
 
 - [ ] **Step 1: Write failing test**
@@ -843,12 +349,14 @@ Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const 
       defer alloc.free(spirv);
       var res = try glslpp.reflectSPIRV(alloc, spirv);
       defer res.deinit(alloc);
+      try std.testing.expect(res.storage_images.len == 1);
       try std.testing.expectEqual(@as(?glslpp.reflection.ImageFormat, .rgba8), res.storage_images[0].image_format);
   }
   ```
 
-- [ ] **Step 2: Add `ImageFormat` enum to reflection.zig**
+- [ ] **Step 2: Add `ImageFormat` enum**
 
+  In `src/reflection.zig`:
   ```zig
   pub const ImageFormat = enum(u8) {
       unknown, rgba32f, rgba16f, r32f, rgba8, rgba8_snorm,
@@ -860,131 +368,79 @@ Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const 
   };
   ```
 
-- [ ] **Step 3: Map SPIR-V `OpTypeImage`'s image format operand to `ImageFormat`**
+  Add `image_format: ?ImageFormat = null` to `Resource` (only meaningful for storage_images and storage_image-like resources).
 
-  Implement the mapping in a helper `imageFormatFromSpv(spv_format: u32) ImageFormat`. SPIR-V spec table for ImageFormat: 0=Unknown, 1=Rgba32f, 2=Rgba16f, etc.
+- [ ] **Step 3: Map SPIR-V format operand to enum**
 
-- [ ] **Step 4: Add to Resource struct**
+  Implement `fn imageFormatFromSpv(spv_format: u32) ImageFormat` per the SPIR-V spec (Unknown=0, Rgba32f=1, Rgba16f=2, etc.).
 
-  ```zig
-  image_format: ?ImageFormat = null,  // only meaningful for storage_images
-  ```
+- [ ] **Step 4: In the OpTypeImage parse branch, store format on the type-info side, then look it up when populating `storage_images` in Task 2.1's branch.**
 
-  In the classification path, look up the `OpTypeImage` for the variable's type and set this.
+- [ ] **Step 5: Verify, commit**
 
-- [ ] **Step 5: Run tests**
-
-- [ ] **Step 6: Commit**
-
-### Task 2.5: Extract `members` for image / sampler resources
+### Task 2.5: Add tests for untested categories
 
 **Files:**
-- Modify: `src/reflection.zig` member extraction loop around line 329
 - Test: `tests/reflection_tests.zig`
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Add a test asserting `separate_images` is populated for `texture2D` (Vulkan style)**
 
   ```zig
-  test "reflection: sampled_images get type metadata via members" {
+  test "reflection: separate_images populated for texture2D" {
       const alloc = std.testing.allocator;
       const src =
           \\#version 450
-          \\layout(set=0, binding=0) uniform sampler2D tex;
+          \\layout(set=0, binding=0) uniform texture2D myTex;
+          \\layout(set=0, binding=1) uniform sampler mySamp;
           \\layout(location=0) in vec2 uv;
           \\layout(location=0) out vec4 fragColor;
-          \\void main() { fragColor = texture(tex, uv); }
+          \\void main() { fragColor = texture(sampler2D(myTex, mySamp), uv); }
           ;
       const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
       defer alloc.free(spirv);
       var res = try glslpp.reflectSPIRV(alloc, spirv);
       defer res.deinit(alloc);
-      try std.testing.expect(res.sampled_images.len == 1);
-      try std.testing.expectEqual(glslpp.reflection.TypeKind.sampled_image, res.sampled_images[0].type_kind);
+      try std.testing.expect(res.separate_images.len == 1);
+      try std.testing.expect(res.separate_samplers.len == 1);
   }
   ```
 
-- [ ] **Step 2: Run test**
-
-  Existing code already populates `type_kind` for some resources. Verify whether `sampled_images` already has `type_kind` set; if not, patch.
-
-- [ ] **Step 3: Patch as needed**
-
-  Ensure every non-buffer resource has at least `type_id` and `type_kind` resolved.
-
-- [ ] **Step 4: Run tests**
-
-- [ ] **Step 5: Commit**
-
-### Task 2.6: Reflection regression run against full corpus
-
-**Files:**
-- Create: `tests/reflection_corpus_tests.zig`
-
-- [ ] **Step 1: Write a test that runs reflectSPIRV against every shader in `tests/conformance/stress/` and asserts no crash, no leak, and that for every shader with a UBO declaration, `uniform_buffers.len > 0`.**
+- [ ] **Step 2: Add a test asserting `acceleration_structures` is populated**
 
   ```zig
-  const std = @import("std");
-  const glslpp = @import("glslpp");
-
-  test "reflection: full stress corpus runs without crash or leak" {
+  test "reflection: acceleration_structures populated for accelerationStructureEXT" {
       const alloc = std.testing.allocator;
-      var dir = try std.fs.cwd().openDir("tests/conformance/stress", .{ .iterate = true });
-      defer dir.close();
-      var it = dir.iterate();
-      var count: u32 = 0;
-      while (try it.next()) |entry| {
-          if (entry.kind != .file) continue;
-          const data = try dir.readFileAlloc(alloc, entry.name, 4 * 1024 * 1024);
-          defer alloc.free(data);
-          const src_z = try alloc.dupeZ(u8, data);
-          defer alloc.free(src_z);
-          const stage: glslpp.Stage = if (std.mem.endsWith(u8, entry.name, ".comp")) .compute
-              else if (std.mem.endsWith(u8, entry.name, ".vert")) .vertex
-              else if (std.mem.endsWith(u8, entry.name, ".geom")) .geometry
-              else .fragment;
-          const spirv = glslpp.compileToSPIRV(alloc, src_z, .{ .stage = stage }) catch continue;
-          defer alloc.free(spirv);
-          var res = glslpp.reflectSPIRV(alloc, spirv) catch continue;
-          defer res.deinit(alloc);
-          count += 1;
-      }
-      try std.testing.expect(count > 100);  // sanity floor
+      const src =
+          \\#version 460
+          \\#extension GL_EXT_ray_tracing : require
+          \\layout(set=0, binding=0) uniform accelerationStructureEXT topLevel;
+          \\layout(location=0) rayPayloadInEXT vec3 hitValue;
+          \\void main() { hitValue = vec3(1.0); }
+          ;
+      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .raygen });
+      defer alloc.free(spirv);
+      var res = try glslpp.reflectSPIRV(alloc, spirv);
+      defer res.deinit(alloc);
+      try std.testing.expect(res.acceleration_structures.len == 1);
   }
   ```
 
-- [ ] **Step 2: Wire into build.zig**
-
-  Add a new test step `test-reflection-corpus` similar to existing `test-reflection`.
-
-- [ ] **Step 3: Run it**
-
-  ```bash
-  mise exec -- zig build test-reflection-corpus 2>&1 | tail -5
-  ```
-
-- [ ] **Step 4: Fix any crashes/leaks surfaced**
-
-  Iterate until clean.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Verify both pass, commit**
 
 ---
 
-## Milestone 3 — Spec constants completeness
+## Milestone 3 — Spec constants completion
 
 ### Task 3.1: WGSL emits `override @id(N)` for spec constants
 
 **Files:**
-- Modify: `src/spirv_to_wgsl.zig` — add `OpSpecConstant` handler
-- Test: new file `tests/spec_const_tests.zig`
+- Modify: `src/spirv_to_wgsl.zig` — add `OpSpecConstant` handler in top-level declaration emission
+- Test: new file `tests/spec_const_tests.zig` (wire into build.zig as a new test target similar to `tests/diagnostic_tests.zig`)
 
 - [ ] **Step 1: Write failing test**
 
   ```zig
-  const std = @import("std");
-  const glslpp = @import("glslpp");
-
-  test "spec const: WGSL emits override @id" {
+  test "spec const: WGSL emits @id() override" {
       const alloc = std.testing.allocator;
       const src =
           \\#version 450
@@ -1001,40 +457,63 @@ Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const 
   }
   ```
 
-- [ ] **Step 2: Run test (fails)**
+- [ ] **Step 2: Mirror existing GLSL emission pattern**
 
-- [ ] **Step 3: Add WGSL emission**
+  In `src/spirv_to_wgsl.zig`, locate the top-of-module declaration emission. Add an OpSpecConstant pass like the GLSL backend does. WGSL syntax: `@id(3) override N: i32 = 8;`. Note that `@id` is the WGSL attribute syntax and goes **before** `override`.
 
-  In `src/spirv_to_wgsl.zig`, near the top-level declaration emission, mirror what GLSL/MSL do. For each `OpSpecConstant`:
+- [ ] **Step 3: Verify, commit**
 
-  ```zig
-  if (inst.op == .SpecConstant and inst.words.len > 3) {
-      const sid = lookupSpecId(decs, inst.words[2]) orelse continue;
-      const type_id = inst.words[1];
-      const result_id = inst.words[2];
-      const default_val = inst.words[3];
-      const type_str = wgslType(m, type_id, names, arena) catch "i32";
-      const name = names.get(result_id) orelse "sc";
-      try w.print("override {s}: {s} = {d}u;\n", .{ name, type_str, default_val });
-      // For WGSL, the @id attribute syntax is:
-      //   @id(3) override N: i32 = 8;
-      // Adjust ordering above to match.
-  }
-  ```
-
-  Refine the type printing and `@id` attribute placement per the WGSL spec.
-
-- [ ] **Step 4: Run tests, confirm pass**
-
-- [ ] **Step 5: Commit**
-
-### Task 3.2: Emit `OpSpecConstantTrue` / `OpSpecConstantFalse` for boolean spec consts
+### Task 3.2: HLSL emits real specialization syntax instead of comment
 
 **Files:**
-- Modify: `src/codegen.zig` around line 3306 (spec const emission)
+- Modify: `src/spirv_to_hlsl.zig` around line 440-464 (current comment-only emit)
 - Test: `tests/spec_const_tests.zig`
 
 - [ ] **Step 1: Write failing test**
+
+  ```zig
+  test "spec const: HLSL emits [[vk::constant_id(N)]] or equivalent" {
+      const alloc = std.testing.allocator;
+      const src =
+          \\#version 450
+          \\layout(constant_id=2) const int LEVEL = 5;
+          \\layout(location=0) out vec4 fragColor;
+          \\void main() { fragColor = vec4(float(LEVEL)); }
+          ;
+      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+      defer alloc.free(spirv);
+      const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
+      defer alloc.free(hlsl);
+      // DXC accepts [[vk::constant_id(N)]] attribute on a static const declaration:
+      try std.testing.expect(std.mem.indexOf(u8, hlsl, "[[vk::constant_id(2)]]") != null);
+  }
+  ```
+
+- [ ] **Step 2: Patch HLSL emit**
+
+  Replace the comment-only path with:
+  ```hlsl
+  [[vk::constant_id(2)]] const int LEVEL = 5;
+  ```
+
+- [ ] **Step 3: Verify, commit**
+
+### Task 3.3: Emit `OpSpecConstantTrue` / `OpSpecConstantFalse` for booleans
+
+**Files:**
+- Modify: `src/codegen.zig` around spec-const emission (line ~3286-3306)
+- Modify: `src/spirv.zig` to add `SpecConstantTrue = 48, SpecConstantFalse = 49` if not present
+- Test: `tests/spec_const_tests.zig`
+
+- [ ] **Step 1: Verify spirv.zig has the opcodes**
+
+  ```bash
+  grep -n "SpecConstantTrue\|SpecConstantFalse" src/spirv.zig
+  ```
+
+  If absent, add them with the right numeric values.
+
+- [ ] **Step 2: Write failing test**
 
   ```zig
   test "spec const: bool emits OpSpecConstantTrue/False" {
@@ -1047,7 +526,7 @@ Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const 
           ;
       const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
       defer alloc.free(spirv);
-      // Walk SPIR-V looking for OpSpecConstantTrue (opcode 48):
+      // Walk SPIR-V looking for OpSpecConstantTrue (48):
       var found = false;
       var i: usize = 5;
       while (i < spirv.len) {
@@ -1060,11 +539,9 @@ Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const 
   }
   ```
 
-- [ ] **Step 2: Run test (fails)**
+- [ ] **Step 3: Patch codegen.zig spec-const emission**
 
-- [ ] **Step 3: Patch codegen.zig spec const emission**
-
-  In the spec-const-emit loop (around line 3286), branch on the GLSL declared type:
+  In the loop that emits spec consts, branch on the GLSL declared type:
 
   ```zig
   switch (sc.type_tag) {
@@ -1074,17 +551,15 @@ Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const 
           try self.emitTypeWord(type_id);
           try self.emitTypeWord(result_id);
       },
-      else => {
-          // existing OpSpecConstant emission
-      },
+      else => { /* existing OpSpecConstant emit */ },
   }
   ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 4: Update GLSL/MSL/HLSL/WGSL emitters to handle bool spec const correctly (the value print uses "true"/"false", not "1"/"0").**
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Verify, commit**
 
-### Task 3.3: Emit `OpSpecConstantComposite` for vector/matrix spec consts
+### Task 3.4: Emit `OpSpecConstantComposite` for vector/matrix spec consts
 
 **Files:**
 - Modify: `src/parser.zig` (allow vector literal as spec-const default)
@@ -1117,25 +592,60 @@ Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const 
   }
   ```
 
-- [ ] **Step 2: Run test (fails)**
+- [ ] **Step 2: Parser change** — accept `vec3(a,b,c)` constructor as spec-const initializer
 
-- [ ] **Step 3: Parser: accept vector literal as spec-const initializer**
+- [ ] **Step 3: Codegen change** — emit `OpSpecConstant` per component (each with its own incremented SpecId), then `OpSpecConstantComposite` grouping them by type
 
-  In `src/parser.zig`, the spec-const initializer parser needs to accept a `vec3(...)` constructor expression and unpack it into three scalar spec constants + a composite.
+- [ ] **Step 4: Update each cross-compiler to emit a composite initializer in target syntax**
 
-- [ ] **Step 4: Codegen: emit `OpSpecConstant` per component, then `OpSpecConstantComposite`**
+- [ ] **Step 5: Verify, commit**
 
-  Each component gets its own ID (and SpecId decoration), then the composite groups them. Each component should inherit a unique spec_id (incremented from the declared base).
-
-- [ ] **Step 5: Run tests**
-
-- [ ] **Step 6: Commit**
-
-### Task 3.4: Add `set_specialization_constant` override API
+### Task 3.5: Emit `OpSpecConstantOp` for derived expressions
 
 **Files:**
-- Modify: `src/root.zig` — add public function and `SpecOverride` type
-- Modify: `src/cli.zig` — add `--spec-const NAME=VALUE` flag
+- Modify: `src/parser.zig`, `src/semantic.zig`, `src/codegen.zig`
+- Test: `tests/spec_const_tests.zig`
+
+- [ ] **Step 1: Write failing test**
+
+  ```zig
+  test "spec const: derived const emits OpSpecConstantOp" {
+      const alloc = std.testing.allocator;
+      const src =
+          \\#version 450
+          \\layout(constant_id=1) const int SIZE = 4;
+          \\const int DOUBLE = SIZE * 2;
+          \\layout(location=0) out vec4 fragColor;
+          \\void main() { fragColor = vec4(float(DOUBLE)); }
+          ;
+      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+      defer alloc.free(spirv);
+      // OpSpecConstantOp = 52
+      var found = false;
+      var i: usize = 5;
+      while (i < spirv.len) {
+          const wc = spirv[i] >> 16;
+          const op = spirv[i] & 0xFFFF;
+          if (op == 52) { found = true; break; }
+          i += wc;
+      }
+      try std.testing.expect(found);
+  }
+  ```
+
+- [ ] **Step 2: Implement**
+
+  Semantic needs to detect that `DOUBLE = SIZE * 2` where SIZE is a spec const → the expression is *itself* a spec const. Codegen emits `OpSpecConstantOp` with the IMul opcode and the SIZE and constant 2 as operands.
+
+  This is the largest sub-task in M3 — multi-day if done thoroughly. May be scoped down to just `*`, `+`, `-`, `/` to start.
+
+- [ ] **Step 3: Verify, commit**
+
+### Task 3.6: Add `set_specialization_constant` override API + CLI flag
+
+**Files:**
+- Modify: `src/root.zig` — add `SpecOverride` type and `compileToSPIRVWithSpecOverrides`
+- Modify: `src/cli.zig` — add `--spec-const ID=VALUE` flag
 - Test: `tests/spec_const_tests.zig`
 
 - [ ] **Step 1: Write failing test**
@@ -1156,26 +666,27 @@ Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const 
           alloc, src, .{ .stage = .fragment }, overrides[0..],
       );
       defer alloc.free(spirv);
-      // Walk SPIR-V looking for OpSpecConstant with literal 99
-      // (the override replaced the 4):
+      // Walk SPIR-V looking for OpSpecConstant (50) with literal 99:
       var i: usize = 5;
-      var found99 = false;
+      var found = false;
       while (i < spirv.len) {
           const wc = spirv[i] >> 16;
           const op = spirv[i] & 0xFFFF;
-          if (op == 50 and wc >= 4 and spirv[i + 3] == 99) { found99 = true; break; }
+          if (op == 50 and wc >= 4 and spirv[i + 3] == 99) { found = true; break; }
           i += wc;
       }
-      try std.testing.expect(found99);
+      try std.testing.expect(found);
   }
   ```
 
-- [ ] **Step 2: Define types in root.zig**
+- [ ] **Step 2: Implement as a post-codegen rewrite pass**
+
+  Easiest: keep the normal pipeline, then walk the SPIR-V words once and rewrite any `OpSpecConstant` whose `SpecId` decoration matches an override. Avoids re-plumbing IR.
 
   ```zig
   pub const SpecOverride = struct {
       spec_id: u32,
-      value_u32: u32,   // raw 32-bit; caller bitcasts as needed
+      value_u32: u32,
   };
 
   pub fn compileToSPIRVWithSpecOverrides(
@@ -1184,416 +695,72 @@ Per audit: `storage_images` and `subpass_inputs` declared but empty; spec-const 
       options: CompileOptions,
       overrides: []const SpecOverride,
   ) Error![]const u32 {
-      // 1. Run normal pipeline to IR
-      // 2. For each override, find the matching SpecConstant in IR and rewrite
-      //    its default_literal (and type-related fields) before SPIR-V emission
-      // 3. Continue to codegen
-      // (Pseudocode — fill in real implementation.)
+      const words = try compileToSPIRV(alloc, source, options);
+      // Mutate-in-place over a copy
+      const mut = try alloc.dupe(u32, words);
+      alloc.free(words);
+      applySpecOverrides(mut, overrides);
+      return mut;
   }
   ```
 
-- [ ] **Step 3: Implement override application**
+  Implement `applySpecOverrides` by:
+  1. Scanning for `OpDecorate target SpecId N` to build a map of result_id → spec_id
+  2. Scanning for `OpSpecConstant type_id result_id literal` instances and rewriting `literal` where `spec_id` map has a matching override
 
-  Easiest implementation: keep current pipeline, then after codegen, walk the SPIR-V words once and rewrite any `OpSpecConstant` whose `SpecId` decoration matches an override. This avoids re-plumbing IR.
+- [ ] **Step 3: Add CLI flag**
 
-- [ ] **Step 4: Add CLI flag**
+  In `src/cli.zig`, parse `--spec-const ID=VALUE` (repeatable), build a `[]SpecOverride`, pass to the new API.
 
-  In `src/cli.zig`, add parsing for `--spec-const ID=VALUE` (repeatable). Pass into `compileToSPIRVWithSpecOverrides`.
-
-- [ ] **Step 5: Run tests**
-
-- [ ] **Step 6: Commit**
-
-### Task 3.5: Cross-compile round-trip test of spec consts
-
-**Files:**
-- Test: `tests/spec_const_tests.zig`
-
-- [ ] **Step 1: Add round-trip test using helper from Milestone 0**
-
-  ```zig
-  const rt = @import("helpers/roundtrip.zig");
-
-  test "spec const: scalar + bool + vec all round-trip through every backend" {
-      const src =
-          \\#version 450
-          \\layout(constant_id=1) const bool USE_DETAIL = true;
-          \\layout(constant_id=2) const int  N         = 16;
-          \\layout(constant_id=3) const vec3 TINT      = vec3(0.5);
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() {
-          \\    vec3 c = TINT * float(N);
-          \\    if (USE_DETAIL) c *= 1.5;
-          \\    fragColor = vec4(c, 1.0);
-          \\}
-          ;
-      try rt.crossCompileRoundTrip(std.testing.allocator, src, .fragment);
-  }
-  ```
-
-- [ ] **Step 2: Run, fix any backend failures**
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Verify, commit**
 
 ---
 
-## Milestone 4 — GLSL versions & extensions
+## Milestone 4 — WGSL final opcode coverage (small, last 9 opcodes)
 
-### Task 4.1: Preprocessor defines `__VERSION__` macro
-
-**Files:**
-- Modify: `src/preprocessor.zig` — set `__VERSION__` to the active `version` value after `#version` is parsed
-- Test: `tests/preprocessor_tests.zig` (or wherever preprocessor tests live; check first)
-
-- [ ] **Step 1: Write failing test**
-
-  ```zig
-  test "preprocessor: __VERSION__ macro is set from #version directive" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 450
-          \\#if __VERSION__ >= 450
-          \\#define HAS_NEW_FEATURES 1
-          \\#endif
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() {
-          \\#ifdef HAS_NEW_FEATURES
-          \\    fragColor = vec4(1.0);
-          \\#else
-          \\    fragColor = vec4(0.0);
-          \\#endif
-          \\}
-          ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment, .version = 450 });
-      defer alloc.free(spirv);
-      // Just verify compilation succeeds; the 1.0-vs-0.0 branch confirms
-      // __VERSION__ was usable in #if.
-      try std.testing.expect(spirv.len > 0);
-  }
-  ```
-
-- [ ] **Step 2: Run test (fails — `__VERSION__` undefined)**
-
-- [ ] **Step 3: Define macro in preprocessor**
-
-  In `src/preprocessor.zig`, right after `#version` is parsed and `pp.version` is set, insert into the macro table:
-
-  ```zig
-  try pp.defines.put(alloc, "__VERSION__", .{
-      .body = try std.fmt.allocPrint(alloc, "{d}", .{pp.version}),
-      .params = &.{},
-      .is_function_like = false,
-  });
-  ```
-
-- [ ] **Step 4: Run tests, confirm pass**
-
-- [ ] **Step 5: Commit**
-
-### Task 4.2: Semantic version branching — `gl_in[]` requires ≥ 410
+### Task 4.1: WGSL packing — `PackSnorm2x16` / `PackUnorm2x16` / `PackHalf2x16` + 3 unpack variants
 
 **Files:**
-- Modify: `src/semantic.zig` — version-gate `gl_in`/`gl_out` builtin arrays
-- Test: `tests/version_tests.zig` (new)
+- Modify: `src/spirv_to_wgsl.zig` — add ExtInst mappings (these are GLSL.std.450 opcodes 36, 37, 39, 60, 61, 63)
+- Test: new `tests/conformance/stress/wgsl_pack_unpack.frag` + WGSL assertion test
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Author the fixture and write a test asserting WGSL output contains `pack2x16snorm`, `pack2x16unorm`, `pack2x16float`, `unpack2x16snorm`, `unpack2x16unorm`, `unpack2x16float`**
 
-  ```zig
-  const std = @import("std");
-  const glslpp = @import("glslpp");
-
-  test "version: gl_in errors before GLSL 410" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 330
-          \\layout(triangles) in;
-          \\void main() { gl_Position = gl_in[0].gl_Position; }
-          ;
-      const result = glslpp.compileToSPIRV(alloc, src, .{ .stage = .geometry });
-      try std.testing.expectError(error.SemanticFailed, result);
-  }
-
-  test "version: gl_in compiles at GLSL 410+" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 410
-          \\layout(triangles) in;
-          \\void main() { gl_Position = gl_in[0].gl_Position; }
-          ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .geometry });
-      defer alloc.free(spirv);
-      try std.testing.expect(spirv.len > 0);
+  ```glsl
+  // tests/conformance/stress/wgsl_pack_unpack.frag
+  #version 450
+  layout(location=0) in vec2 in_uv;
+  layout(location=0) out vec4 fragColor;
+  void main() {
+      uint p = packSnorm2x16(in_uv);
+      vec2 q = unpackSnorm2x16(p);
+      fragColor = vec4(q, 0.0, 1.0);
   }
   ```
 
-- [ ] **Step 2: Run tests (one or both fail)**
+- [ ] **Step 2: Map the GLSL.std.450 opcodes in spirv_to_wgsl's ExtInst dispatch**
 
-- [ ] **Step 3: Patch semantic.zig**
+  WGSL names: `pack2x16snorm`, `unpack2x16snorm`, `pack2x16unorm`, `unpack2x16unorm`, `pack2x16float`, `unpack2x16float`.
 
-  In the builtin-lookup path for `gl_in` / `gl_out`, branch on `pp.version`:
+- [ ] **Step 3: Verify via conformance + a focused WGSL output test, commit**
 
-  ```zig
-  if (pp.version < 410 and std.mem.eql(u8, name, "gl_in")) {
-      // emit diagnostic, set last_error_line/column, return error
-      return error.SemanticFailed;
-  }
-  ```
-
-- [ ] **Step 4: Run, confirm both tests pass**
-
-- [ ] **Step 5: Commit**
-
-### Task 4.3: Reject unknown `#extension` with a warning (not silent accept)
+### Task 4.2: WGSL bitfield — `BitFieldInsert` / `BitFieldUExtract` / `BitFieldSExtract`
 
 **Files:**
-- Modify: `src/preprocessor.zig` — extension recognition path
-- Test: `tests/preprocessor_tests.zig`
+- Modify: `src/spirv_to_wgsl.zig`
+- Test: `tests/conformance/stress/wgsl_bitfield_ops.frag` already exists; verify WGSL output is now correct
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Write failing assertion test on the existing fixture's WGSL output**
 
-  ```zig
-  test "preprocessor: unknown extension emits warning diagnostic" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 450
-          \\#extension GL_TOTALLY_MADE_UP : require
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() { fragColor = vec4(1.0); }
-          ;
-      var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
-      defer { for (diags.items) |d| alloc.free(d.message); diags.deinit(alloc); }
-      _ = try glslpp.compileToSPIRVWithDiagnostics(alloc, src, .{ .stage = .fragment }, &diags);
-      // require → error, enable → warning. With "require", we expect error.
-      // For warning, change the test to use "enable" and check for warning kind.
-      var found_diag = false;
-      for (diags.items) |d| {
-          if (std.mem.indexOf(u8, d.message, "GL_TOTALLY_MADE_UP") != null) {
-              found_diag = true;
-              break;
-          }
-      }
-      try std.testing.expect(found_diag);
-  }
-  ```
+- [ ] **Step 2: Add handlers — WGSL has `insertBits(value, insert, offset, count)`, `extractBits(value, offset, count)`**
 
-- [ ] **Step 2: Run test (fails — currently silent accept)**
-
-- [ ] **Step 3: Patch preprocessor.zig**
-
-  Around the `#extension` recognition list, on no-match: emit a warning diagnostic for `enable` / `warn` behavior, and an error for `require`. Keep the rest of compilation going.
-
-- [ ] **Step 4: Run tests**
-
-- [ ] **Step 5: Commit**
-
-### Task 4.4: ESSL 300 profile recognition + `__VERSION__` = 300
-
-**Files:**
-- Modify: `src/preprocessor.zig` — accept `#version 300 es` and set `is_essl`
-- Test: `tests/version_tests.zig`
-
-- [ ] **Step 1: Write failing test**
-
-  ```zig
-  test "version: 300 es profile parses and __VERSION__ reports 300" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 300 es
-          \\precision mediump float;
-          \\out vec4 fragColor;
-          \\void main() {
-          \\#if __VERSION__ == 300
-          \\    fragColor = vec4(1.0);
-          \\#else
-          \\    fragColor = vec4(0.0);
-          \\#endif
-          \\}
-          ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment, .version = 300 });
-      defer alloc.free(spirv);
-      try std.testing.expect(spirv.len > 0);
-  }
-  ```
-
-- [ ] **Step 2: Run test (fails — `es` profile or `precision mediump float` likely chokes)**
-
-- [ ] **Step 3: Patch preprocessor to accept `es` profile**
-
-  In `#version` parsing, also consume an optional profile token (`core` / `compatibility` / `es`) and set `pp.profile`. Treat `es` by setting `is_essl = true`.
-
-- [ ] **Step 4: Patch parser to accept `precision` qualifier**
-
-  Make `precision mediump float;` a no-op declaration if not already. Check whether the parser already handles it.
-
-- [ ] **Step 5: Run tests**
-
-- [ ] **Step 6: Commit**
-
-### Task 4.5: Add 5 conformance fixtures for non-430 versions
-
-**Files:**
-- Create: `tests/conformance/stress/version_330_simple.frag`, `version_450_subgroup.comp`, `version_460_atomic.comp`, `version_300_es_simple.frag`, `version_310_es_compute.comp`
-- These get picked up automatically by the conformance runner.
-
-- [ ] **Step 1: Author the five fixtures**
-
-  Each file should be a minimal-but-version-specific shader that requires features added in that version.
-
-- [ ] **Step 2: Run conformance**
-
-  ```bash
-  mise exec -- zig build conformance --summary all 2>&1 | grep -E "version_|PASS:|FAIL"
-  ```
-
-  Expected: all 5 pass; total goes from 2087 → 2092.
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Verify, commit**
 
 ---
 
-## Milestone 5 — WGSL opcode depth
+## Milestone 5 — HLSL polish
 
-Add the 6 opcode families the audit identified. Each task is one family.
-
-### Task 5.1: WGSL derivatives — `OpDPdx` / `OpDPdy` / `OpFwidth`
-
-**Files:**
-- Modify: `src/spirv_to_wgsl.zig` main opcode switch
-- Test: `tests/conformance/stress/wgsl_derivatives_explicit.frag` (probably exists; check)
-
-- [ ] **Step 1: Write failing test**
-
-  ```zig
-  test "wgsl: derivatives map to dpdx/dpdy/fwidth" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 450
-          \\layout(location=0) in vec2 uv;
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() {
-          \\    float dx = dFdx(uv.x);
-          \\    float dy = dFdy(uv.y);
-          \\    float fw = fwidth(uv.x);
-          \\    fragColor = vec4(dx, dy, fw, 1.0);
-          \\}
-          ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
-      defer alloc.free(spirv);
-      const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
-      defer alloc.free(wgsl);
-      try std.testing.expect(std.mem.indexOf(u8, wgsl, "dpdx(") != null);
-      try std.testing.expect(std.mem.indexOf(u8, wgsl, "dpdy(") != null);
-      try std.testing.expect(std.mem.indexOf(u8, wgsl, "fwidth(") != null);
-  }
-  ```
-
-- [ ] **Step 2: Run test (fails)**
-
-- [ ] **Step 3: Add handlers in spirv_to_wgsl.zig**
-
-  ```zig
-  .DPdx, .DPdxFine, .DPdxCoarse => { try emitUnary(w, "dpdx", inst, names); },
-  .DPdy, .DPdyFine, .DPdyCoarse => { try emitUnary(w, "dpdy", inst, names); },
-  .Fwidth, .FwidthFine, .FwidthCoarse => { try emitUnary(w, "fwidth", inst, names); },
-  ```
-
-  Provide `emitUnary` if not already present.
-
-- [ ] **Step 4: Run tests**
-
-- [ ] **Step 5: Commit**
-
-### Task 5.2: WGSL bitfield ops — `BitFieldInsert` / `BitFieldUExtract` / `BitFieldSExtract`
-
-**Files:**
-- Modify: `src/spirv_to_wgsl.zig`
-- Test: `tests/conformance/stress/wgsl_bitfield_ops.frag` (already exists; ensure WGSL output is correct)
-
-- [ ] **Step 1: Write failing test (WGSL contains `insertBits`/`extractBits`)**
-
-- [ ] **Step 2: Implement handlers — WGSL has `insertBits(...)` and `extractBits(...)`**
-
-- [ ] **Step 3: Run, commit**
-
-### Task 5.3: WGSL packing — `PackSnorm2x16` / `PackUnorm2x16` / `PackHalf2x16` and unpack variants
-
-**Files:**
-- Modify: `src/spirv_to_wgsl.zig`
-- Test: new `tests/conformance/stress/wgsl_pack_unpack.frag`
-
-- [ ] **Step 1: Author the fixture and write a test asserting WGSL output contains `pack2x16snorm`, `unpack2x16snorm`, etc.**
-
-- [ ] **Step 2: Implement WGSL ExtInst mappings (the GLSL.std.450 extended set has these as `PackSnorm2x16=36`, etc.)**
-
-- [ ] **Step 3: Run, commit**
-
-### Task 5.4: WGSL subgroup shuffles — `GroupNonUniformShuffle*`
-
-**Files:**
-- Modify: `src/spirv_to_wgsl.zig`
-- Test: new `tests/conformance/stress/wgsl_subgroup_shuffle.comp`
-
-- [ ] **Step 1: Author fixture using `subgroupShuffle` / `subgroupShuffleXor` / `subgroupShuffleUp` / `subgroupShuffleDown`**
-
-- [ ] **Step 2: Test asserts WGSL output mentions `subgroupShuffle*` (WGSL spec names)**
-
-- [ ] **Step 3: Implement handlers**
-
-- [ ] **Step 4: Run, commit**
-
-### Task 5.5: WGSL atomic compare-exchange and exchange — `AtomicCompareExchange` / `AtomicExchange`
-
-**Files:**
-- Modify: `src/spirv_to_wgsl.zig`
-- Test: new `tests/conformance/stress/wgsl_atomic_cas.comp`
-
-- [ ] **Step 1-4:** Same pattern as above.
-
-### Task 5.6: WGSL ballot — `GroupNonUniformBallot` + bit count / extract
-
-**Files:**
-- Modify: `src/spirv_to_wgsl.zig`
-- Test: new `tests/conformance/stress/wgsl_ballot.comp`
-
-- [ ] **Step 1-4:** Same pattern. WGSL spec uses `subgroupBallot`, `countOneBits`, `extractBits`.
-
-### Task 5.7: WGSL barrier validation
-
-The audit noted that `ControlBarrier` / `MemoryBarrier` currently emit a comment no-op. Convert to proper `workgroupBarrier()` / `storageBarrier()` calls.
-
-**Files:**
-- Modify: `src/spirv_to_wgsl.zig` lines around 2728-2760
-- Test: `tests/conformance/stress/wgsl_2d_compute.comp` (already exists; verify output)
-
-- [ ] **Step 1: Write failing test asserting WGSL output contains `workgroupBarrier()`**
-- [ ] **Step 2: Replace the comment-only path with real emission**
-- [ ] **Step 3: Run, commit**
-
-### Task 5.8: Naga validation pass on full stress corpus
-
-After 5.1-5.7, run `naga` against every emitted WGSL to catch missed handlers.
-
-**Files:**
-- Modify: `tools/wgsl_fuzz.zig` (or add a one-off script) to invoke `naga validate`
-- Run via `zig build test-realworld`
-
-- [ ] **Step 1: Run the realworld step**
-
-  ```bash
-  mise exec -- zig build test-realworld 2>&1 | tail -10
-  ```
-
-- [ ] **Step 2: For every shader that fails naga, identify the opcode that produced bad WGSL and file as a subtask**
-
-- [ ] **Step 3: Iterate until naga pass rate hits 100%**
-
-- [ ] **Step 4: Commit each fix as a separate commit**
-
----
-
-## Milestone 6 — HLSL / MSL polish
-
-### Task 6.1: HLSL Shader Model 5.0 emission variant
+### Task 5.1: HLSL SM 5.0 differentiated output (POSITION not SV_Position)
 
 **Files:**
 - Modify: `src/spirv_to_hlsl.zig` — branch on `options.shader_model`
@@ -1615,26 +782,23 @@ After 5.1-5.7, run `naga` against every emitted WGSL to catch missed handlers.
           .binding_shift = -1, .shader_model = 50,
       });
       defer alloc.free(hlsl);
-      // SM 5.0 uses POSITION semantic; SM 6.0 uses SV_Position
+      // SM 5.0 → POSITION; SM 6.0 → SV_Position
       try std.testing.expect(std.mem.indexOf(u8, hlsl, "POSITION") != null);
+      try std.testing.expect(std.mem.indexOf(u8, hlsl, "SV_Position") == null);
   }
   ```
 
-- [ ] **Step 2: Run test (fails — currently emits SV_Position regardless)**
+- [ ] **Step 2: Add a `posSemantic(opts) []const u8` helper that returns `"POSITION"` for SM < 60, `"SV_Position"` otherwise. Use it everywhere `SV_Position` is currently emitted.**
 
-- [ ] **Step 3: Branch on `shader_model`**
+  Same pattern for other system-value semantics that differ between SM 5 and SM 6.
 
-  Where the emitter writes semantic strings, gate on `shader_model < 60`. Use a small helper `posSemantic(opts)` returning `"POSITION"` or `"SV_Position"`.
+- [ ] **Step 3: Verify, commit**
 
-- [ ] **Step 4: Run tests**
-
-- [ ] **Step 5: Commit**
-
-### Task 6.2: HLSL mesh shader `[OutputTopology]` and `mesh<>` signature
+### Task 5.2: HLSL mesh `[OutputTopology]` and `mesh<>` signature
 
 **Files:**
-- Modify: `src/spirv_to_hlsl.zig` line ~1429
-- Test: `tests/hlsl_mesh_tests.zig`
+- Modify: `src/spirv_to_hlsl.zig` around line 1429 (current TODO)
+- Test: new `tests/hlsl_mesh_tests.zig`
 
 - [ ] **Step 1: Write failing test**
 
@@ -1654,32 +818,51 @@ After 5.1-5.7, run `naga` against every emitted WGSL to catch missed handlers.
       const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
       defer alloc.free(hlsl);
       try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"triangle\")]") != null);
-      try std.testing.expect(std.mem.indexOf(u8, hlsl, "mesh<") != null);
+      try std.testing.expect(std.mem.indexOf(u8, hlsl, "out vertices") != null);
   }
   ```
 
-- [ ] **Step 2: Run test (fails)**
+- [ ] **Step 2: Implement**
 
-- [ ] **Step 3: Implement OutputTopology detection**
+  In the mesh entry-point emit path:
+  1. Inspect SPIR-V execution-mode opcodes (`OutputTriangleStrip`, `OutputPoints`, `OutputLineStrip`, `OutputTrianglesEXT`) to choose the topology string.
+  2. Emit `[OutputTopology("...")]` attribute.
+  3. Rewrite the function signature to HLSL 6.5 mesh form: `void main(uint tid : SV_DispatchThreadID, out vertices VOut verts[N], out indices uint3 prims[P])`.
 
-  In the mesh entry-point emit path, inspect SPIR-V execution-mode opcodes (`OutputTriangleStrip`, `OutputPoints`, `OutputLineStrip`, `OutputTrianglesEXT`) and emit the matching `[OutputTopology("...")]` attribute.
+- [ ] **Step 3: Verify, commit**
 
-- [ ] **Step 4: Emit `mesh<>` signature**
-
-  Compose the return type as `void main(out vertices ... , out indices ... )` per the HLSL 6.5 mesh signature pattern.
-
-- [ ] **Step 5: Run tests**
-
-- [ ] **Step 6: Commit**
-
-### Task 6.3: MSL argument buffers (`--msl-argument-buffers`)
+### Task 5.3: Validate via DXC on Windows
 
 **Files:**
-- Modify: `src/spirv_to_msl.zig` — add `argument_buffers: bool` option
-- Modify: `src/root.zig` `SpirvToMslOptions` (or per-call options struct)
-- Test: `tests/msl_argbuf_tests.zig`
+- Modify: `tools/dxc_batch_test.zig` to compile the mesh fixture, expand its `--shader-model` matrix
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1-3:** Add fixtures, run DXC, fix any output that DXC rejects.
+
+---
+
+## Milestone 6 — MSL argument buffers
+
+### Task 6.1: Add `argument_buffers: bool` to MSL options
+
+**Files:**
+- Modify: `src/root.zig` `MslCompileOptions`
+- Modify: `src/spirv_to_msl.zig`
+- Test: new `tests/msl_argbuf_tests.zig`
+
+- [ ] **Step 1: Add the option**
+
+  In `src/root.zig`:
+  ```zig
+  pub const SpirvToMslOptions = struct {
+      metal_version: u32 = 21,
+      entry_point_name: ?[]const u8 = null,
+      argument_buffers: bool = false,
+  };
+  ```
+
+  Thread through to the MSL emitter.
+
+- [ ] **Step 2: Write failing test**
 
   ```zig
   test "msl: argument_buffers=true wraps bindings in argument_buffer struct" {
@@ -1701,53 +884,29 @@ After 5.1-5.7, run `naga` against every emitted WGSL to catch missed handlers.
   }
   ```
 
-- [ ] **Step 2: Run test (fails)**
+- [ ] **Step 3: Implement**
 
-- [ ] **Step 3: Implement argument-buffer wrapping**
-
-  When `argument_buffers` is true, emit a single `struct spvDescriptorSetBufferN { ... }` per set containing UBO pointers + texture/sampler refs, then change the main signature to `[[buffer(N)]] constant spvDescriptorSetBufferN& setN`.
-
-- [ ] **Step 4: Run tests**
-
-- [ ] **Step 5: Commit**
-
-### Task 6.4: GLSL output: support emitting `#version 450` / `#version 460`
-
-**Files:**
-- Modify: `src/spirv_to_glsl.zig` — honor `options.version` value beyond 430
-- Test: `tests/glsl_version_tests.zig`
-
-- [ ] **Step 1: Write failing test**
-
-  ```zig
-  test "glsl out: emits requested version header" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 430
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() { fragColor = vec4(1.0); }
-          ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
-      defer alloc.free(spirv);
-      const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .glsl_version = 460 });
-      defer alloc.free(glsl);
-      try std.testing.expect(std.mem.startsWith(u8, glsl, "#version 460"));
-  }
+  When `argument_buffers` is true, for each descriptor set N, emit:
+  ```msl
+  struct spvDescriptorSetBufferN {
+      constant U& u [[id(0)]];
+      texture2d<float> tex [[id(1)]];
+      sampler texSmp [[id(2)]];
+  };
   ```
+  And change the main signature to take `[[buffer(N)]] constant spvDescriptorSetBufferN& setN`.
 
-- [ ] **Step 2: Run test (fails — emits 430 regardless)**
+- [ ] **Step 4: Verify, commit**
 
-- [ ] **Step 3: Patch glsl emit**
+### Task 6.2: CLI flag for `--msl-argument-buffers`
 
-  Use the `glsl_version` option to format the header. Validate the requested version is in the supported set (330 / 410 / 420 / 430 / 440 / 450 / 460) and reject others with `error.UnsupportedGlslVersion`.
-
-- [ ] **Step 4: Run tests**
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 1-3:** Add flag in `src/cli.zig`, plumb through, test via CLI smoke.
 
 ---
 
 ## Milestone 7 — C ABI surface
+
+Confirmed entirely missing. This is the biggest single unlock for non-Zig adopters.
 
 ### Task 7.1: Define the C header
 
@@ -1756,16 +915,12 @@ After 5.1-5.7, run `naga` against every emitted WGSL to catch missed handlers.
 
 - [ ] **Step 1: Write the header by hand**
 
-  Hand-written so reviewers can inspect; not auto-generated. Cover compile, cross-compile, reflect, free, error handling.
-
   ```c
   // SPDX-License-Identifier: MIT OR Apache-2.0
   #ifndef GLSLPP_H
   #define GLSLPP_H
-
   #include <stddef.h>
   #include <stdint.h>
-
   #ifdef __cplusplus
   extern "C" {
   #endif
@@ -1794,43 +949,34 @@ After 5.1-5.7, run `naga` against every emitted WGSL to catch missed handlers.
 
   typedef struct {
       glslpp_stage_t stage;
-      uint32_t version;      // 330..460 or 300/310/320 for ESSL
-      int is_essl;           // 0 = core, 1 = es
+      uint32_t version;
+      int is_essl;
   } glslpp_compile_options_t;
 
-  /// GLSL → SPIR-V. Caller frees `*spirv_words` via glslpp_free_u32().
   glslpp_status_t glslpp_compile(
       const char* glsl_source, size_t glsl_len,
       const glslpp_compile_options_t* opts,
-      uint32_t** spirv_words, size_t* spirv_word_count
-  );
+      uint32_t** spirv_words, size_t* spirv_word_count);
 
-  /// SPIR-V → HLSL. Caller frees `*hlsl` via glslpp_free_str().
   glslpp_status_t glslpp_to_hlsl(
       const uint32_t* spirv_words, size_t spirv_word_count,
-      int shader_model,    // 50, 60, 61, 65, 67
-      char** hlsl, size_t* hlsl_len
-  );
+      int shader_model,
+      char** hlsl, size_t* hlsl_len);
 
   glslpp_status_t glslpp_to_glsl(
       const uint32_t* spirv_words, size_t spirv_word_count,
       int glsl_version,
-      char** glsl, size_t* glsl_len
-  );
+      char** glsl, size_t* glsl_len);
 
   glslpp_status_t glslpp_to_msl(
       const uint32_t* spirv_words, size_t spirv_word_count,
       int msl_version, int argument_buffers,
-      char** msl, size_t* msl_len
-  );
+      char** msl, size_t* msl_len);
 
   glslpp_status_t glslpp_to_wgsl(
       const uint32_t* spirv_words, size_t spirv_word_count,
-      char** wgsl, size_t* wgsl_len
-  );
+      char** wgsl, size_t* wgsl_len);
 
-  /// Get the last error message for diagnostic display.
-  /// Returns NULL if no error occurred. Pointer is valid until next glslpp_* call on this thread.
   const char* glslpp_last_error_message(void);
   uint32_t    glslpp_last_error_line(void);
   uint32_t    glslpp_last_error_column(void);
@@ -1844,222 +990,91 @@ After 5.1-5.7, run `naga` against every emitted WGSL to catch missed handlers.
   #endif // GLSLPP_H
   ```
 
-- [ ] **Step 2: Commit header**
-
-  ```bash
-  git add include/glslpp.h
-  git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
-      commit -m "c-abi: add glslpp.h public header"
-  ```
+- [ ] **Step 2: Commit**
 
 ### Task 7.2: Implement the C ABI in Zig
 
 **Files:**
 - Create: `src/c_abi.zig`
-- Modify: `src/root.zig` to optionally re-export c_abi functions
-- Modify: `build.zig` to add a shared+static library target with the C ABI
+- Modify: `build.zig` to add a `c-lib` step producing shared + static libs
 
-- [ ] **Step 1: Write a Zig consumer test that calls the C ABI from Zig via the same `export fn` interface**
+- [ ] **Step 1: Write a Zig integration test that calls the exported functions**
 
-  ```zig
-  // tests/c_abi_tests.zig
-  const std = @import("std");
-  const c_abi = @import("c_abi.zig");
+  Use `tests/c_abi_tests.zig` calling the exported Zig functions directly (cross-language smoke is task 7.3).
 
-  test "c-abi: compile and free" {
-      var spirv: ?[*]u32 = null;
-      var count: usize = 0;
-      const src = "#version 430\nlayout(location=0) out vec4 fragColor;\nvoid main(){fragColor=vec4(1.0);}";
-      const opts = c_abi.glslpp_compile_options_t{
-          .stage = c_abi.GLSLPP_STAGE_FRAGMENT,
-          .version = 430,
-          .is_essl = 0,
-      };
-      const st = c_abi.glslpp_compile(src.ptr, src.len, &opts, &spirv, &count);
-      try std.testing.expectEqual(@as(c_abi.glslpp_status_t, c_abi.GLSLPP_OK), st);
-      try std.testing.expect(count > 5);
-      c_abi.glslpp_free_u32(spirv);
-  }
-  ```
+- [ ] **Step 2: Implement c_abi.zig**
 
-- [ ] **Step 2: Run (fails — c_abi.zig doesn't exist)**
-
-- [ ] **Step 3: Implement c_abi.zig**
+  Use a length-prefix trick to make `glslpp_free_u32` work with bare pointers: allocate `8 + n*4` bytes, store `n` at offset 0, return pointer at offset 8. Free by reading the length-prefix and freeing the original allocation.
 
   ```zig
   // SPDX-License-Identifier: MIT OR Apache-2.0
-  //! C ABI shim. Every exported symbol matches `include/glslpp.h`.
   const std = @import("std");
   const glslpp = @import("root.zig");
 
   threadlocal var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-
   fn alloc() std.mem.Allocator { return gpa.allocator(); }
 
   pub const glslpp_status_t = c_int;
   pub const GLSLPP_OK: glslpp_status_t = 0;
-  pub const GLSLPP_ERR_OOM: glslpp_status_t = 1;
-  // ...
+  // ... (mirror header)
 
-  pub const glslpp_stage_t = c_int;
-  pub const GLSLPP_STAGE_FRAGMENT: glslpp_stage_t = 1;
-  // ...
-
-  pub const glslpp_compile_options_t = extern struct {
-      stage: glslpp_stage_t,
-      version: u32,
-      is_essl: c_int,
-  };
-
-  export fn glslpp_compile(
-      glsl_src: [*]const u8, glsl_len: usize,
-      opts: *const glslpp_compile_options_t,
-      out_spirv: *?[*]u32, out_count: *usize,
-  ) callconv(.C) glslpp_status_t {
+  // Implementation detail: store [length:u64][bytes...] so caller can free
+  // without knowing the size.
+  fn allocSized(bytes: usize) ![*]u8 {
       const a = alloc();
-      const src = a.allocSentinel(u8, glsl_len, 0) catch return GLSLPP_ERR_OOM;
-      @memcpy(src[0..glsl_len], glsl_src[0..glsl_len]);
-      const stage: glslpp.Stage = switch (opts.stage) {
-          GLSLPP_STAGE_FRAGMENT => .fragment,
-          // ...
-          else => return GLSLPP_ERR_INVALID_INPUT,
-      };
-      const words = glslpp.compileToSPIRV(a, src, .{ .stage = stage, .version = opts.version }) catch |e| {
-          a.free(src);
-          return switch (e) {
-              error.OutOfMemory => GLSLPP_ERR_OOM,
-              error.LexFailed => GLSLPP_ERR_LEX,
-              error.PreprocessFailed => GLSLPP_ERR_PREPROCESS,
-              error.ParseFailed => GLSLPP_ERR_PARSE,
-              error.SemanticFailed => GLSLPP_ERR_SEMANTIC,
-              error.CodegenFailed => GLSLPP_ERR_CODEGEN,
-              else => GLSLPP_ERR_OOM,
-          };
-      };
-      a.free(src);
-      out_spirv.* = @ptrCast(@constCast(words.ptr));
-      out_count.* = words.len;
-      return GLSLPP_OK;
+      const buf = try a.alloc(u8, 8 + bytes);
+      std.mem.writeInt(u64, buf[0..8], @as(u64, @intCast(bytes)), .little);
+      return buf.ptr + 8;
   }
 
-  export fn glslpp_free_u32(p: ?[*]u32) callconv(.C) void {
-      // We cannot know the length from a bare pointer; track length elsewhere
-      // or use a header. Simplest: keep a registry. See implementation note in
-      // doc comment.
+  fn freeSized(p: ?[*]u8) void {
+      if (p) |raw| {
+          const start = raw - 8;
+          const n = std.mem.readInt(u64, start[0..8], .little);
+          alloc().free(start[0 .. 8 + @as(usize, @intCast(n))]);
+      }
   }
+
+  export fn glslpp_compile(...) callconv(.C) glslpp_status_t { ... }
+  export fn glslpp_to_hlsl(...) callconv(.C) glslpp_status_t { ... }
+  // ... etc.
   ```
 
-  The free-by-pointer challenge is real: typical solution is to prepend a length header into the allocation, or to use a small registry. Use the prepend-header approach: `glslpp_compile` allocates `8 + word_count*4` bytes, stores `word_count` at offset 0, returns pointer at offset 8.
+- [ ] **Step 3: Wire build.zig**
 
-- [ ] **Step 4: Implement free with length header**
+  Add `c-lib` step producing both `.a` (static) and `.so`/`.dll`/`.dylib` (shared) artifacts.
 
-- [ ] **Step 5: Add similar exports for `glslpp_to_{hlsl,glsl,msl,wgsl}`, `glslpp_last_error_*`, `glslpp_free_str`**
+- [ ] **Step 4: Verify, commit**
 
-- [ ] **Step 6: Wire build.zig to produce shared + static C libs**
-
-  ```zig
-  // In build.zig, after existing lib target:
-  const c_lib_step = b.step("c-lib", "Build C-ABI shared and static libraries");
-  const c_mod = b.createModule(.{
-      .root_source_file = b.path("src/c_abi.zig"),
-      .target = target, .optimize = optimize,
-  });
-  c_mod.addImport("glslpp", glslpp_mod);
-  const c_static = b.addLibrary(.{ .name = "glslpp_c", .root_module = c_mod, .linkage = .static });
-  const c_shared = b.addLibrary(.{ .name = "glslpp_c", .root_module = c_mod, .linkage = .dynamic });
-  b.installArtifact(c_static);
-  b.installArtifact(c_shared);
-  c_lib_step.dependOn(&c_static.step);
-  c_lib_step.dependOn(&c_shared.step);
-  ```
-
-- [ ] **Step 7: Build and run smoke test**
-
-  ```bash
-  mise exec -- zig build c-lib && mise exec -- zig build test 2>&1 | grep "Build Summary"
-  ```
-
-- [ ] **Step 8: Commit**
-
-### Task 7.3: C consumer smoke test
+### Task 7.3: End-to-end C consumer
 
 **Files:**
 - Create: `examples/c/main.c`
-- Create: `examples/c/Makefile` (or update build.zig to compile + link this)
+- Modify: `build.zig` to add `c-example` step that compiles and links the C file
+- Modify: `.github/workflows/ci.yml` to run the C example on every PR
 
-- [ ] **Step 1: Write `examples/c/main.c`**
+- [ ] **Step 1: Write `examples/c/main.c`** that calls `glslpp_compile` + `glslpp_to_hlsl`, prints SPIR-V word count and HLSL output, frees both.
 
-  ```c
-  #include "glslpp.h"
-  #include <stdio.h>
-  #include <string.h>
+- [ ] **Step 2: Build it via Zig (using `b.addExecutable` with `.files = &.{ "examples/c/main.c" }` and `.link_libc = true`, linking the shared C lib).**
 
-  int main(void) {
-      const char *src =
-          "#version 430\n"
-          "layout(location=0) out vec4 fragColor;\n"
-          "void main() { fragColor = vec4(1.0, 0.5, 0.25, 1.0); }\n";
-      glslpp_compile_options_t opts = { .stage = GLSLPP_STAGE_FRAGMENT, .version = 430, .is_essl = 0 };
-      uint32_t *spirv = NULL;
-      size_t   count = 0;
-      glslpp_status_t st = glslpp_compile(src, strlen(src), &opts, &spirv, &count);
-      if (st != GLSLPP_OK) {
-          fprintf(stderr, "compile failed: %d (%s)\n", st, glslpp_last_error_message());
-          return 1;
-      }
-      printf("SPIR-V: %zu words\n", count);
+- [ ] **Step 3: Run it, verify output**
 
-      char *hlsl = NULL; size_t hlsl_len = 0;
-      st = glslpp_to_hlsl(spirv, count, 60, &hlsl, &hlsl_len);
-      if (st != GLSLPP_OK) {
-          fprintf(stderr, "hlsl failed: %d\n", st);
-          glslpp_free_u32(spirv);
-          return 1;
-      }
-      printf("--- HLSL ---\n%.*s\n", (int)hlsl_len, hlsl);
-
-      glslpp_free_str(hlsl);
-      glslpp_free_u32(spirv);
-      return 0;
-  }
-  ```
-
-- [ ] **Step 2: Add a build.zig step to compile and link the C consumer**
-
-  Use `b.addExecutable` with `.{ .files = &.{ "examples/c/main.c" }, .link_libc = true }` and link against the C shared lib.
-
-- [ ] **Step 3: Run it**
-
-  ```bash
-  mise exec -- zig build c-example && ./zig-out/bin/c-example
-  ```
-
-  Expected: prints SPIR-V word count and the HLSL source.
-
-- [ ] **Step 4: Add a CI job to invoke the C example end-to-end**
-
-  Append to `.github/workflows/ci.yml`:
+- [ ] **Step 4: Add CI job**
 
   ```yaml
-    c-abi:
-      name: c-abi smoke
-      needs: build-test
-      runs-on: ubuntu-latest
-      steps:
-        - uses: actions/checkout@v4
-        - uses: mlugg/setup-zig@v1
-          with: { version: 0.15.2 }
-        - run: zig build c-lib
-        - run: zig build c-example
-        - run: ./zig-out/bin/c-example
+  c-abi:
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with: { version: 0.15.2 }
+      - run: zig build c-lib
+      - run: zig build c-example
+      - run: ./zig-out/bin/c-example
   ```
 
 - [ ] **Step 5: Commit**
-
-  ```bash
-  git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
-      commit -m "c-abi: end-to-end C consumer + CI smoke test"
-  ```
 
 ---
 
@@ -2068,99 +1083,111 @@ After 5.1-5.7, run `naga` against every emitted WGSL to catch missed handlers.
 ### Task 8.1: Scalar block layout (`GL_EXT_scalar_block_layout`)
 
 **Files:**
-- Modify: `src/codegen.zig` `layoutAlignment` / `layoutSize` to gate on `is_scalar`
-- Modify: `src/preprocessor.zig` to recognize `GL_EXT_scalar_block_layout`
-- Test: `tests/layout_tests.zig`
+- Modify: `src/preprocessor.zig` known-extension list
+- Modify: `src/codegen.zig` `layoutAlignment` / `layoutSize` / `layoutArrayStride` to gate on `is_scalar`
+- Test: new `tests/scalar_layout_tests.zig`
 
-- [ ] **Step 1: Write failing test** comparing UBO offsets emitted for the same struct with and without `#extension GL_EXT_scalar_block_layout : require`
+- [ ] **Step 1: Write failing test** comparing emitted offsets for the same struct with vs without `#extension GL_EXT_scalar_block_layout : require`
 
-- [ ] **Step 2: Implement scalar branch**
+- [ ] **Step 2: Add `is_scalar: bool` to the layout context; when true, `layoutAlignment` returns 1 for member alignment, matching scalar packing rules**
 
-  Scalar = no alignment padding; everything packed tightly. Add `is_scalar: bool` to layout context and gate `layoutAlignment` to return 1 for scalars in struct members.
+- [ ] **Step 3: Verify, commit**
 
-- [ ] **Step 3: Run, commit**
-
-### Task 8.2: `binding_shift` for non-HLSL backends
+### Task 8.2: Recognize `GL_EXT_buffer_reference` extension
 
 **Files:**
-- Modify: `src/root.zig` — extend `SpirvToGlslOptions` / `SpirvToMslOptions` / `SpirvToWgslOptions` to include `binding_shift`
-- Modify: each cross-compiler to honor it
-- Test: `tests/binding_shift_tests.zig`
+- Modify: `src/preprocessor.zig` known-extension list
+- Test: `tests/buffer_ref_tests.zig`
 
-- [ ] **Step 1-N:** TDD as above per backend.
+- [ ] **Step 1: Currently the extension isn't in the known list — it's silently rejected. Add it.**
 
-### Task 8.3: Library-vs-library benchmark
+- [ ] **Step 2: Write test asserting `#extension GL_EXT_buffer_reference : require` does not produce an unknown-extension diagnostic** (and that subsequent buffer-reference syntax compiles correctly using the existing parser/codegen support)
+
+- [ ] **Step 3: Verify, commit**
+
+### Task 8.3: Descriptor remap for non-HLSL backends
 
 **Files:**
-- Create: `tools/bench_lib_vs_lib.zig` — links `libglslang.a` + `libspirv-cross.a` as Zig C++ deps, runs the same shaders, measures algorithmic delta (not subprocess overhead)
-- Modify: `BENCHMARKS.md` with the new table
+- Modify: `src/root.zig` — add `binding_shift: i32 = 0` to `SpirvToGlslOptions`, `SpirvToMslOptions`, `SpirvToWgslOptions`
+- Modify: each cross-compiler to honour it
+- Test: per-backend tests
 
-- [ ] **Step 1: Add build infrastructure for linking C++ static libs**
+- [ ] **Step 1-N:** Mirror existing HLSL pattern in each backend, with a small test per backend.
 
-  Build glslang from source (subtree or `git submodule`) using its CMake → static archive output. Configure `build.zig` to pull the static archives in.
+### Task 8.4: Library-vs-library benchmark
 
-  This is the largest task in the plan — could be 1-2 days alone. If too heavy, fall back to: ship a `libglslang.h`-only shim that opens the system Vulkan SDK's installed `libglslang.dll` via runtime `LoadLibrary` and compares via in-process calls.
+**Files:**
+- Create: `tools/bench_lib_vs_lib.zig`
+- Modify: `build.zig` to optionally build/link `libglslang.a` + `libspirv-cross.a`
 
-- [ ] **Step 2: Write the benchmark harness mirroring `tools/bench_compare.zig`**
+- [ ] **Step 1: Add build infrastructure**
 
-- [ ] **Step 3: Run and add results to BENCHMARKS.md**
+  Easiest path: `git submodule add` of glslang + SPIRV-Cross, configure their CMakes to produce static archives, link via Zig's C interop. Document any platform-specific quirks.
+
+  Fallback: shim that uses `LoadLibrary`/`dlopen` to load the installed Vulkan SDK's `libglslang.dll` at runtime.
+
+- [ ] **Step 2: Mirror `tools/bench_compare.zig` structure but using in-process function calls instead of subprocess**
+
+- [ ] **Step 3: Add results to BENCHMARKS.md**
+
+- [ ] **Step 4: Add a `bench-lib` build step**
+
+### Task 8.5: Populate `tests/external/` corpus for naga validation
+
+**Files:**
+- Modify: `tests/external/README.md` (or create) — instructions for fetching a public WGSL test corpus
+- Modify: `tests/realworld_tests.zig` — if needed
+
+- [ ] **Step 1: Audit current `tests/external/` directory state**
+
+- [ ] **Step 2: Either add real shaders directly (small set) or add a fetch script that pulls a known corpus (e.g., a few canonical Naga test cases or a curated subset of SPIRV-Cross fixtures)**
+
+- [ ] **Step 3: Verify `mise exec -- zig build test-realworld` actually runs naga validation against multiple shaders. Record the pass rate. Add to TEST_COVERAGE.md.**
 
 - [ ] **Step 4: Commit**
 
-### Task 8.4: Buffer-reference extension recognition
-
-**Files:**
-- Modify: `src/preprocessor.zig` — add `GL_EXT_buffer_reference` to the known list
-- Modify: `src/reflection.zig` — add `buffer_references: []const Resource` field
-- Test: `tests/buffer_ref_tests.zig`
-
-- [ ] **Step 1: Write failing test** asserting `#extension GL_EXT_buffer_reference : require` does not produce an unknown-extension warning, and that reflection reports the buffer-reference struct
-
-- [ ] **Step 2-N:** Implement
-
 ---
 
-## Acceptance criteria (run after every milestone)
+## Acceptance criteria (after every milestone)
 
 ```bash
-# All must remain green:
-mise exec -- zig build test --summary all       # ≥ 1600+ tests pass, 0 leaks
-mise exec -- zig build test-hlsl --summary all  # 780+ pass
-mise exec -- zig build conformance              # ≥ 2087/2087 PASS
-mise exec -- zig build fuzz -- --count 5000     # 5000 pass, 0 crashes
-mise exec -- zig build examples                 # both examples build
+# All must remain green (with adjusted baselines as work lands):
+mise exec -- zig build test --summary all          # 1640+ pass after M1 (added orphaned tests)
+mise exec -- zig build test-hlsl --summary all     # 780+ pass
+mise exec -- zig build conformance                 # 2087+ PASS
+mise exec -- zig build fuzz -- --count 5000        # 5000 pass, 0 crashes
+mise exec -- zig build examples                    # builds
 mise exec -- env GLSLPP_BENCH_GLSLANG=... GLSLPP_BENCH_SPIRVX=... zig build bench-compare
 ```
 
-Any regression in the conformance count, leak count, or fuzz crash count is a **STOP**: roll back and investigate.
+Any regression in those numbers is a **STOP**: roll back and investigate.
 
 ## Estimated effort
 
 | Milestone | Tasks | Rough duration |
 |---|---:|---|
-| 0 Test harness foundations | 2 | 2 h |
-| 1 Diagnostics quality | 8 | 1–2 days |
-| 2 Reflection completeness | 6 | 1.5 days |
-| 3 Spec constants | 5 | 1.5 days |
-| 4 GLSL versions & extensions | 5 | 1 day |
-| 5 WGSL opcode depth | 8 | 2–3 days |
-| 6 HLSL/MSL polish | 4 | 1.5 days |
-| 7 C ABI | 3 | 2 days |
-| 8 Closing the loop | 4 | 2–4 days (8.3 dominates) |
+| 1 Repair test infrastructure | 4 | 2 h |
+| 2 Reflection completion | 5 | 0.5–1 day |
+| 3 Spec constants completion | 6 | 2 days (3.5 is the long pole) |
+| 4 WGSL final opcode coverage | 2 | 0.5 day |
+| 5 HLSL polish | 3 | 1 day |
+| 6 MSL argument buffers | 2 | 1 day |
+| 7 C ABI | 3 | 1.5–2 days |
+| 8 Closing the loop | 5 | 2–4 days (8.4 dominates) |
 
-**Total:** ~50 tasks, **2–3 weeks** of focused work for a single competent contributor, faster if subagent-driven.
+**Total:** **~30 tasks, ~1 week of focused work** for a single competent contributor. Significantly smaller than the prior plan's 50-task / 2–3-week estimate because the prior plan duplicated already-shipped G1/G2/G3/G4/G5 work.
 
 ## Self-review notes
 
-- **Spec coverage:** every gap from the post-audit roadmap has at least one task. Reflection's 4 gap areas, diagnostics' 5 patch sites + path threading + multi-error, spec consts' 4 sub-features + override API, GLSL versions' 5 sub-features, WGSL's 6 opcode families + barrier + naga validation, C ABI's header + impl + smoke, plus 4 closing items.
-- **No placeholders:** every step lists either exact code, exact bash, or exact files. The single soft spot is Task 8.3 (library-vs-library benchmark) — it intentionally leaves the C++ build details flexible because they depend on host platform; a fallback (runtime DLL load) is named explicitly.
-- **Type consistency:** `SpecOverride`, `glslpp_status_t`, `glslpp_compile_options_t`, `crossCompileRoundTrip`, `expectDiagnostic` are all used consistently across tasks.
+- **Spec coverage:** every genuine gap from the second-pass audit has a task. Items already shipped have been removed.
+- **No placeholders:** every step lists either exact code, exact bash, or exact files. Task 8.4 (library-vs-library benchmark) intentionally leaves the C++ build details flexible because they depend on platform; a fallback path is named.
+- **Type consistency:** `SpecOverride`, `glslpp_status_t`, `glslpp_compile_options_t`, `ImageFormat`, `expectDiagnostic` are consistent across tasks.
 
 ## Execution handoff
 
-Plan complete and saved to `docs/roadmap/2026-05-26-drop-in-replacement-plan.md`. Two execution options:
+Plan revised and saved to `docs/roadmap/2026-05-26-drop-in-replacement-plan.md`. Two execution options:
 
-1. **Subagent-Driven (recommended)** — I dispatch a fresh subagent per task, review between tasks, fast iteration. Best for this plan because tasks are independent within most milestones.
-2. **Inline Execution** — Execute tasks in this session using `executing-plans`, batch execution with checkpoints.
+1. **Subagent-Driven (recommended)** — fresh subagent per task, review checkpoints, fast iteration.
+2. **Inline Execution** — execute tasks in this session using `executing-plans`, batch with checkpoints.
 
-Which approach?
+Already in flight from this session: **M0.1 (expectDiagnostic helper)** is committed at `4742d229`. Marked done in tracker even though M0 is no longer a milestone in this revised plan — the helper is still useful for any future diagnostic-tests work.
