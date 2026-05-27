@@ -15,6 +15,7 @@ pub const Preprocessor = struct {
     has_ext_mesh_shader: bool = false,
     has_ext_ray_tracing: bool = false,
     has_ext_fragment_shader_interlock: bool = false,
+    has_ext_scalar_block_layout: bool = false,
 
     // Include support
     include_paths: []const []const u8 = &.{},
@@ -981,6 +982,7 @@ pub const Preprocessor = struct {
                                          std.mem.eql(u8, ext_name, "GL_EXT_mesh_shader") or
                                          std.mem.eql(u8, ext_name, "GL_KHR_ray_tracing") or
                                          std.mem.eql(u8, ext_name, "GL_ARB_fragment_shader_interlock") or
+                                         std.mem.eql(u8, ext_name, "GL_EXT_scalar_block_layout") or
                                          std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_basic") or
                                          std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_vote") or
                                          std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_arithmetic") or
@@ -995,6 +997,9 @@ pub const Preprocessor = struct {
                                         }
                                         if (std.mem.eql(u8, ext_name, "GL_ARB_fragment_shader_interlock")) {
                                             self.has_ext_fragment_shader_interlock = true;
+                                        }
+                                        if (std.mem.eql(u8, ext_name, "GL_EXT_scalar_block_layout")) {
+                                            self.has_ext_scalar_block_layout = true;
                                         }
                                         const name_dup = try self.alloc.dupe(u8, ext_name);
                                         const one_tok = lexer.Token{ .tag = .int_literal, .loc = tokens[i].loc, .start = 0, .len = 1 };
