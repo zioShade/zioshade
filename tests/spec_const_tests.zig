@@ -171,6 +171,165 @@ test "M3.6: SpecOverride empty list is a no-op (no copy, no leak)" {
     try std.testing.expect(spv.len > 5);
 }
 
+// ── M3.4: OpSpecConstantComposite for vec/mat spec consts ──
+
+const SHADER_VEC3_SPEC =
+    \\#version 450
+    \\layout(constant_id=2) const vec3 TINT = vec3(0.5, 0.5, 0.5);
+    \\layout(location=0) out vec4 fragColor;
+    \\void main() { fragColor = vec4(TINT, 1.0); }
+;
+
+test "M3.4 SPIR-V: vec3 spec const emits OpSpecConstantComposite (op 51)" {
+    const alloc = std.testing.allocator;
+    const spirv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    var found_composite = false;
+    var op50_count: usize = 0;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        const op = spirv[i] & 0xFFFF;
+        if (op == 51) found_composite = true;
+        if (op == 50) op50_count += 1;
+        if (wc == 0) break;
+        i += wc;
+    }
+    try std.testing.expect(found_composite);
+    // Three per-scalar OpSpecConstants for the vec3 components.
+    try std.testing.expectEqual(@as(usize, 3), op50_count);
+}
+
+test "M3.4 SPIR-V: vec3 components decorated with sequential SpecIds (2, 3, 4)" {
+    const alloc = std.testing.allocator;
+    const spirv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    // Walk for OpDecorate ... SpecId N. Expect SpecIds 2, 3, 4 present and 5 absent.
+    var seen2 = false;
+    var seen3 = false;
+    var seen4 = false;
+    var seen5 = false;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        const op = spirv[i] & 0xFFFF;
+        if (op == 71 and wc >= 4 and spirv[i + 2] == 1) { // SpecId decoration
+            const sid = spirv[i + 3];
+            if (sid == 2) seen2 = true;
+            if (sid == 3) seen3 = true;
+            if (sid == 4) seen4 = true;
+            if (sid == 5) seen5 = true;
+        }
+        if (wc == 0) break;
+        i += wc;
+    }
+    try std.testing.expect(seen2);
+    try std.testing.expect(seen3);
+    try std.testing.expect(seen4);
+    try std.testing.expect(!seen5);
+}
+
+test "M3.4 SPIR-V: vec3 component default literal is 0.5 (bit pattern 0x3F000000)" {
+    const alloc = std.testing.allocator;
+    const spirv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    // Walk for OpSpecConstant (50) and check at least one has literal == bits(0.5).
+    const expected: u32 = @bitCast(@as(f32, 0.5));
+    var found = false;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        const op = spirv[i] & 0xFFFF;
+        if (op == 50 and wc >= 4 and spirv[i + 3] == expected) { found = true; break; }
+        if (wc == 0) break;
+        i += wc;
+    }
+    try std.testing.expect(found);
+}
+
+test "M3.4 GLSL: vec3 spec const cross-compiles to per-scalar + composite const" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const glsl = try glslpp.spirvToGLSL(alloc, spv, .{});
+    defer alloc.free(glsl);
+    // Three per-scalar layout(constant_id) declarations and a vec3 composite.
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "layout(constant_id = 2)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "layout(constant_id = 3)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "layout(constant_id = 4)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "const vec3") != null);
+}
+
+test "M3.4 HLSL: vec3 spec const cross-compiles to per-scalar + static const composite" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .binding_shift = -1, .shader_model = 60 });
+    defer alloc.free(hlsl);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "[[vk::constant_id(2)]]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "[[vk::constant_id(3)]]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "[[vk::constant_id(4)]]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "static const float3") != null);
+}
+
+test "M3.4 MSL: vec3 spec const cross-compiles to per-scalar [[function_constant]] + composite" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const msl = try glslpp.spirvToMSL(alloc, spv, .{});
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "[[function_constant(2)]]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "[[function_constant(3)]]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "[[function_constant(4)]]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "constant float3") != null);
+}
+
+test "M3.4 WGSL: vec3 spec const cross-compiles to per-scalar overrides + composite const" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@id(2)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@id(3)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@id(4)") != null);
+    // WGSL emits either `vec3f` (short form) or `vec3<f32>` for vec3<f32>.
+    const has_short = std.mem.indexOf(u8, wgsl, "vec3f") != null;
+    const has_long = std.mem.indexOf(u8, wgsl, "vec3<f32>") != null;
+    try std.testing.expect(has_short or has_long);
+    // The composite reassembled as a `const`, not an `override` (WGSL spec
+    // requires scalar-typed overrides only).
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "const ") != null);
+}
+
+const SHADER_VEC4_SPEC =
+    \\#version 450
+    \\layout(constant_id=10) const vec4 OFFSET = vec4(1.0, 2.0, 3.0, 4.0);
+    \\layout(location=0) out vec4 fragColor;
+    \\void main() { fragColor = OFFSET; }
+;
+
+test "M3.4 SPIR-V: vec4 spec const emits 4 OpSpecConstants + OpSpecConstantComposite" {
+    const alloc = std.testing.allocator;
+    const spirv = try glslpp.compileToSPIRV(alloc, SHADER_VEC4_SPEC, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    var found_composite = false;
+    var op50_count: usize = 0;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        const op = spirv[i] & 0xFFFF;
+        if (op == 51) found_composite = true;
+        if (op == 50) op50_count += 1;
+        if (wc == 0) break;
+        i += wc;
+    }
+    try std.testing.expect(found_composite);
+    try std.testing.expectEqual(@as(usize, 4), op50_count);
+}
+
+// ── M3.6: SpecOverride non-matching ──
+
 test "M3.6: SpecOverride non-matching spec_id is silently ignored" {
     const alloc = std.testing.allocator;
     const overrides = [_]glslpp.SpecOverride{
@@ -195,3 +354,4 @@ test "M3.6: SpecOverride non-matching spec_id is silently ignored" {
     }
     try std.testing.expect(found_orig);
 }
+
