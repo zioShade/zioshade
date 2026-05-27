@@ -440,6 +440,21 @@ pub fn build(b: *std.Build) void {
     hlsl_mesh_test_step.dependOn(&run_hlsl_mesh_tests.step);
     test_step.dependOn(&run_hlsl_mesh_tests.step);
 
+    // Buffer reference extension tests (M8.2: GL_EXT_buffer_reference)
+    const buffer_ref_test_step = b.step("test-buffer-ref", "Run buffer reference extension recognition tests");
+    const buffer_ref_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/buffer_ref_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    buffer_ref_test_mod.addImport("glslpp", glslpp_mod);
+    const run_buffer_ref_tests = b.addRunArtifact(b.addTest(.{
+        .name = "buffer-ref-tests",
+        .root_module = buffer_ref_test_mod,
+    }));
+    buffer_ref_test_step.dependOn(&run_buffer_ref_tests.step);
+    test_step.dependOn(&run_buffer_ref_tests.step);
+
     // Scalar block layout tests (M8.1: GL_EXT_scalar_block_layout)
     const scalar_layout_test_step = b.step("test-scalar-layout", "Run scalar block layout tests");
     const scalar_layout_test_mod = b.createModule(.{
