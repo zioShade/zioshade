@@ -79,6 +79,14 @@ pub fn main() !void {
             else if (std.mem.eql(u8, s, "geometry")) stage_override = .geometry
             else if (std.mem.eql(u8, s, "tessellation_control")) stage_override = .tessellation_control
             else if (std.mem.eql(u8, s, "tessellation_evaluation")) stage_override = .tessellation_evaluation
+            else if (std.mem.eql(u8, s, "mesh")) stage_override = .mesh
+            else if (std.mem.eql(u8, s, "task")) stage_override = .task
+            else if (std.mem.eql(u8, s, "raygen")) stage_override = .raygen
+            else if (std.mem.eql(u8, s, "closesthit")) stage_override = .closesthit
+            else if (std.mem.eql(u8, s, "miss")) stage_override = .miss
+            else if (std.mem.eql(u8, s, "intersection")) stage_override = .intersection
+            else if (std.mem.eql(u8, s, "anyhit")) stage_override = .anyhit
+            else if (std.mem.eql(u8, s, "callable")) stage_override = .callable
             else fatal("unknown stage: {s}", .{s});
         } else if (std.mem.eql(u8, args[i], "--entry-point")) {
             i += 1;
