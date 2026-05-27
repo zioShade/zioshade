@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Compute shader: writes 1.0 into a per-thread slot of an SSBO.
+// NOTE: HLSL compute SSBO emit is known-buggy as of c77f5452.
+//       Expected to FAIL HLSL; should PASS SPIR-V + GLSL + MSL + WGSL.
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) buffer Buf {
+    float data[];
+} b;
+
+void main() {
+    b.data[gl_GlobalInvocationID.x] = 1.0;
+}
