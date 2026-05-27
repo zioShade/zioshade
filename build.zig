@@ -440,6 +440,21 @@ pub fn build(b: *std.Build) void {
     hlsl_mesh_test_step.dependOn(&run_hlsl_mesh_tests.step);
     test_step.dependOn(&run_hlsl_mesh_tests.step);
 
+    // binding_shift tests (M8.3: binding_shift for GLSL/MSL/WGSL)
+    const binding_shift_test_step = b.step("test-binding-shift", "Run binding_shift cross-compile tests");
+    const binding_shift_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/binding_shift_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    binding_shift_test_mod.addImport("glslpp", glslpp_mod);
+    const run_binding_shift_tests = b.addRunArtifact(b.addTest(.{
+        .name = "binding-shift-tests",
+        .root_module = binding_shift_test_mod,
+    }));
+    binding_shift_test_step.dependOn(&run_binding_shift_tests.step);
+    test_step.dependOn(&run_binding_shift_tests.step);
+
     // Buffer reference extension tests (M8.2: GL_EXT_buffer_reference)
     const buffer_ref_test_step = b.step("test-buffer-ref", "Run buffer reference extension recognition tests");
     const buffer_ref_test_mod = b.createModule(.{
