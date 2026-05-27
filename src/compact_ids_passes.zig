@@ -83,6 +83,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 172, 173, 174, 175, 176, 177, 178, 179 => true, // Integer comparisons
                 180, 182, 184, 186, 188, 190 => true, // FOrd comparisons
                 194, 195, 196, 197, 198, 199, 200 => true, // Shift + Bit ops
+                201, 202, 203 => true, // OpBitFieldInsert, OpBitFieldSExtract, OpBitFieldUExtract (pure)
                 207...215 => true, // Derivatives
                 12 => true, // ExtInst
                 // Type instructions (result_only, no side effects)
