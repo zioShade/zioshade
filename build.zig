@@ -466,6 +466,22 @@ pub fn build(b: *std.Build) void {
     hlsl_mesh_test_step.dependOn(&run_hlsl_mesh_tests.step);
     test_step.dependOn(&run_hlsl_mesh_tests.step);
 
+    // HLSL vertex signature tests (M5.0: VS_INPUT/VS_OUTPUT + SV_Position;
+    // M5.1: SM 5.0 POSITION vs SM 6.0 SV_Position differentiation)
+    const hlsl_vertex_test_step = b.step("test-hlsl-vertex", "Run HLSL vertex signature tests");
+    const hlsl_vertex_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/hlsl_vertex_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hlsl_vertex_test_mod.addImport("glslpp", glslpp_mod);
+    const run_hlsl_vertex_tests = b.addRunArtifact(b.addTest(.{
+        .name = "hlsl-vertex-tests",
+        .root_module = hlsl_vertex_test_mod,
+    }));
+    hlsl_vertex_test_step.dependOn(&run_hlsl_vertex_tests.step);
+    test_step.dependOn(&run_hlsl_vertex_tests.step);
+
     // MSL argument-buffer tests (M6: --msl-argument-buffers option)
     const msl_argbuf_test_step = b.step("test-msl-argbuf", "Run MSL argument-buffer tests");
     const msl_argbuf_test_mod = b.createModule(.{

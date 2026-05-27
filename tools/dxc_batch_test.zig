@@ -73,10 +73,11 @@ fn dxcProfile(alloc: std.mem.Allocator, stage: SpvStage, sm: u32) !?[]u8 {
         .compute => try std.fmt.allocPrint(alloc, "cs_{d}_{d}", .{ major, minor }),
         .mesh => try std.fmt.allocPrint(alloc, "ms_{d}_{d}", .{ major, minor }),
         .task => try std.fmt.allocPrint(alloc, "as_{d}_{d}", .{ major, minor }),
+        // M5.0 (vertex signature emission) shipped, so vertex maps to vs_*.
+        .vertex => try std.fmt.allocPrint(alloc, "vs_{d}_{d}", .{ major, minor }),
         // Stages we know glslpp doesn't yet emit valid HLSL for. They are
-        // tracked as deferred roadmap items (M5.0 vertex, M5.2 v2 mesh)
+        // tracked as deferred roadmap items (M5.2 v2 mesh)
         // or simply unimplemented (raytracing, geometry, tess).
-        .vertex,
         .geometry,
         .tess_control,
         .tess_eval,
@@ -93,7 +94,7 @@ fn dxcProfile(alloc: std.mem.Allocator, stage: SpvStage, sm: u32) !?[]u8 {
 
 fn skipReason(stage: SpvStage) []const u8 {
     return switch (stage) {
-        .vertex => "vertex stage — M5.0 not yet implemented",
+        .vertex => "vertex stage — shipped (should never SKIP)",
         .mesh => "mesh stage — M5.2 v2 deferred",
         .task => "task stage — not yet implemented",
         .geometry => "geometry stage — not yet implemented",
@@ -101,6 +102,7 @@ fn skipReason(stage: SpvStage) []const u8 {
         .raygen, .intersection, .anyhit, .closesthit, .miss, .callable => "ray-tracing stage — not yet implemented",
         .unknown => "unknown execution model",
         .fragment, .compute => unreachable, // never SKIPped, always run
+        // .vertex handled above
     };
 }
 
@@ -273,7 +275,7 @@ pub fn main() !void {
         const b = buckets.get(s) orelse continue;
         if (b.pass == 0 and b.fail == 0 and b.skip == 0) continue;
         const suffix: []const u8 = switch (s) {
-            .vertex => "  (M5.0 not implemented)",
+            .vertex => "",
             .mesh => "  (M5.2 v2 deferred)",
             .task => "  (not implemented)",
             .geometry, .tess_control, .tess_eval => "  (not implemented)",

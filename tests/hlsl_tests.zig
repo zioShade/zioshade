@@ -1813,8 +1813,12 @@ test "T28.2: vertex shader with gl_Position" {
     ;
     const hlsl = try compileToHlslStage(source, .vertex);
     defer alloc.free(hlsl);
-    // Just verify it compiles
-    try assertContains(hlsl, "void main");
+    // Post-M5.0 the vertex entry signature is `VS_OUTPUT main(VS_INPUT input)`
+    // with `gl_Position : SV_Position` in the output struct. `gl_PointSize`
+    // remains a deferred output builtin (TODO in spirv_to_hlsl), so we don't
+    // assert on its emission here — just that the new signature compiles.
+    try assertContains(hlsl, "VS_OUTPUT main");
+    try assertContains(hlsl, "SV_Position");
 }
 
 test "T28.3: mat4 construction from columns" {

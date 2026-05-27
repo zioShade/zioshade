@@ -754,7 +754,9 @@ each scalar component via its own SpecId.
 
 ### Task 5.0 (NEW, prerequisite to 5.1) — Implement vertex shader entry-point signature
 
-**Status (2026-05-27):** Discovered during M5.1 attempt. The HLSL backend currently emits vertex shaders as `void main() { ...; gl_Position = ...; return; }` — no input/output struct, no semantics, `gl_Position` is a bare global. DXC will reject this. This is a load-bearing gap, not a polish issue.
+**Status:** SHIPPED 2026-05-27 (combined commit with M5.1) — vertex signature emission + SM 5.0 differentiation. The HLSL backend now emits `struct VS_INPUT { ... };`, `struct VS_OUTPUT { ... };`, and a `VS_OUTPUT main(VS_INPUT input)` entry signature with `gl_Position : SV_Position` (SM 6.0+) or `POSITION` (SM 5.0). Per-location inputs/outputs map to `TEXCOORD<N>`. `gl_VertexID` / `gl_InstanceID` map to `SV_VertexID` / `SV_InstanceID`. Body load/store routing is achieved by rewriting Input/Output variable names to `input.<field>` / `output.<field>` before body emission, so existing OpLoad/OpStore code paths produce the right routed expressions with no per-instruction restructuring. Deferred for v1 (TODO): `gl_PointSize`, `gl_ClipDistance`, `gl_CullDistance`, per-vertex interface blocks (`gl_PerVertex`). Covered by 4 tests in `tests/hlsl_vertex_tests.zig`; vertex fixture `tests/spirv_bins/vertex_minimal.spv` PASSES `dxc -T vs_6_0 -E main`.
+
+**Original status (2026-05-27):** Discovered during M5.1 attempt. The HLSL backend currently emits vertex shaders as `void main() { ...; gl_Position = ...; return; }` — no input/output struct, no semantics, `gl_Position` is a bare global. DXC will reject this. This is a load-bearing gap, not a polish issue.
 
 **Files:**
 - Modify: `src/spirv_to_hlsl.zig` — extend the entry-signature dispatch (line ~1437) to handle `.Vertex` execution model.
@@ -772,7 +774,9 @@ This is roughly the same scope as M5.2's mesh signature work — probably 1–2 
 
 ### Task 5.1: HLSL SM 5.0 differentiated output (POSITION not SV_Position)
 
-**Status (2026-05-27):** BLOCKED on Task 5.0 above. The string-swap is one helper function; the real work is implementing vertex signature emission first. Once Task 5.0 lands, M5.1 reduces to a `posSemantic(shader_model)` helper called from the new vertex signature emit point.
+**Status:** SHIPPED 2026-05-27 alongside Task 5.0. `posSemantic(shader_model)` returns `"POSITION"` for SM < 6.0 and `"SV_Position"` for SM 6.0+; used by the vertex signature emit path. Regression-locked by `tests/hlsl_vertex_tests.zig` (`hlsl vertex sm5: uses POSITION (legacy)` + `hlsl vertex sm6: uses SV_Position`).
+
+**Original status (2026-05-27):** BLOCKED on Task 5.0 above. The string-swap is one helper function; the real work is implementing vertex signature emission first. Once Task 5.0 lands, M5.1 reduces to a `posSemantic(shader_model)` helper called from the new vertex signature emit point.
 
 
 
