@@ -33,6 +33,48 @@
 #ifndef GLSLPP_H
 #define GLSLPP_H
 
+/* Semantic version of the glslpp C ABI. Bump MAJOR on any ABI break.
+ *
+ * NOTE: This is the version of the C ABI surface defined by this header,
+ * NOT the version of the glslpp library as a whole. The library version
+ * lives in `build.zig.zon` and evolves independently. The C ABI starts at
+ * 0.1.0 and only bumps when the structural shape of this header changes
+ * (new/removed/reordered functions, struct field layout changes, enum
+ * value renumbering, etc.) — not on every library release. Do NOT try to
+ * sync these to the library version automatically.
+ */
+#define GLSLPP_VERSION_MAJOR 0
+#define GLSLPP_VERSION_MINOR 1
+#define GLSLPP_VERSION_PATCH 0
+
+/* Export-visibility macro for public function declarations.
+ *
+ * Consumers building against a shared glslpp library should define
+ * `GLSLPP_USE_SHARED` before including this header on Windows so the
+ * declarations resolve to `__declspec(dllimport)`. The glslpp build
+ * itself defines `GLSLPP_BUILD_SHARED` when producing a shared library
+ * so the same declarations become `__declspec(dllexport)`. On ELF
+ * platforms with GCC/Clang, `GLSLPP_BUILD_SHARED` opts the symbols into
+ * default visibility for `-fvisibility=hidden` builds. In all other
+ * cases (static linking, unknown compiler) `GLSLPP_API` expands to
+ * nothing.
+ */
+#if defined(_WIN32) || defined(__CYGWIN__)
+  #if defined(GLSLPP_BUILD_SHARED)
+    #define GLSLPP_API __declspec(dllexport)
+  #elif defined(GLSLPP_USE_SHARED)
+    #define GLSLPP_API __declspec(dllimport)
+  #else
+    #define GLSLPP_API
+  #endif
+#else
+  #if defined(GLSLPP_BUILD_SHARED) && (defined(__GNUC__) || defined(__clang__))
+    #define GLSLPP_API __attribute__((visibility("default")))
+  #else
+    #define GLSLPP_API
+  #endif
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -102,6 +144,11 @@ typedef enum {
  * preprocessing pass against the GLSL source before calling
  * `glslpp_compile`. They may be added in a later milestone.
  */
+/* glslpp_compile_options_t: fields may be added across glslpp minor versions.
+ * Consumers MUST recompile against the header that matches the library
+ * version they link to. There is no `struct_size` discriminator (yet).
+ * Check GLSLPP_VERSION_MAJOR/MINOR at compile time if you need to feature-gate.
+ */
 typedef struct {
     /** Shader stage. Default: GLSLPP_STAGE_FRAGMENT. */
     glslpp_stage_t stage;
@@ -155,7 +202,7 @@ typedef struct {
  *         failure, see `glslpp_last_error_message`/`_line`/`_column` for
  *         diagnostics. `*spirv_words` is set to NULL on failure.
  */
-glslpp_status_t glslpp_compile(
+GLSLPP_API glslpp_status_t glslpp_compile(
     const char* glsl_source,
     size_t glsl_len,
     const glslpp_compile_options_t* opts,
@@ -192,7 +239,7 @@ glslpp_status_t glslpp_compile(
  *
  * @return GLSLPP_OK or a GLSLPP_ERR_* code.
  */
-glslpp_status_t glslpp_to_hlsl(
+GLSLPP_API glslpp_status_t glslpp_to_hlsl(
     const uint32_t* spirv_words,
     size_t spirv_word_count,
     int32_t binding_shift,
@@ -219,7 +266,7 @@ glslpp_status_t glslpp_to_hlsl(
  *
  * @return GLSLPP_OK or a GLSLPP_ERR_* code.
  */
-glslpp_status_t glslpp_to_glsl(
+GLSLPP_API glslpp_status_t glslpp_to_glsl(
     const uint32_t* spirv_words,
     size_t spirv_word_count,
     uint32_t glsl_version,
@@ -251,7 +298,7 @@ glslpp_status_t glslpp_to_glsl(
  *
  * @return GLSLPP_OK or a GLSLPP_ERR_* code.
  */
-glslpp_status_t glslpp_to_msl(
+GLSLPP_API glslpp_status_t glslpp_to_msl(
     const uint32_t* spirv_words,
     size_t spirv_word_count,
     uint32_t metal_version,
@@ -274,7 +321,7 @@ glslpp_status_t glslpp_to_msl(
  *
  * @return GLSLPP_OK or a GLSLPP_ERR_* code.
  */
-glslpp_status_t glslpp_to_wgsl(
+GLSLPP_API glslpp_status_t glslpp_to_wgsl(
     const uint32_t* spirv_words,
     size_t spirv_word_count,
     const char* entry_point,
@@ -295,21 +342,21 @@ glslpp_status_t glslpp_to_wgsl(
  * call on the same thread. Copy the string if you need to retain it.
  * Do NOT free it.
  */
-const char* glslpp_last_error_message(void);
+GLSLPP_API const char* glslpp_last_error_message(void);
 
 /**
  * Returns the 1-based source line of the most recent error on the
  * calling thread, or 0 if no error has been recorded / the error has
  * no associated source location.
  */
-uint32_t glslpp_last_error_line(void);
+GLSLPP_API uint32_t glslpp_last_error_line(void);
 
 /**
  * Returns the 1-based source column of the most recent error on the
  * calling thread, or 0 if no error has been recorded / the error has
  * no associated source location.
  */
-uint32_t glslpp_last_error_column(void);
+GLSLPP_API uint32_t glslpp_last_error_column(void);
 
 /* ---------------------------------------------------------------------------
  * Buffer release
@@ -325,7 +372,7 @@ uint32_t glslpp_last_error_column(void);
  * uses an internal length-prefix layout, so the C `free()` is NOT a
  * valid substitute.
  */
-void glslpp_free_str(char* s);
+GLSLPP_API void glslpp_free_str(char* s);
 
 /**
  * Release a `uint32_t*` buffer previously returned by `glslpp_compile`
@@ -336,7 +383,7 @@ void glslpp_free_str(char* s);
  * substitute (the visible pointer is offset from the underlying
  * allocator block).
  */
-void glslpp_free_u32(uint32_t* p);
+GLSLPP_API void glslpp_free_u32(uint32_t* p);
 
 #ifdef __cplusplus
 } /* extern "C" */
