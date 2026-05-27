@@ -1599,6 +1599,23 @@ const Analyzer = struct {
                                     .init_value = build.id,
                                     .is_ssa = true,
                                 });
+                                // Bind the user-facing GLSL identifier onto the
+                                // matching spec_constant_ops entry so codegen
+                                // can emit an OpName that downstream backends
+                                // surface (HLSL/GLSL/MSL/WGSL) instead of the
+                                // auto-generated `v{id}` fallback. Only the
+                                // outermost expression's result_id gets a user
+                                // name; intermediate sub-expressions stay
+                                // anonymous (their synthetic `.specop.<id>`
+                                // key is left untouched and codegen skips
+                                // those when emitting names).
+                                var sco_iter = self.spec_constant_ops.iterator();
+                                while (sco_iter.next()) |entry| {
+                                    if (entry.value_ptr.result_id == build.id) {
+                                        entry.value_ptr.user_name = node.data.name;
+                                        break;
+                                    }
+                                }
                                 return; // No global variable / no IR instruction.
                             }
                         }

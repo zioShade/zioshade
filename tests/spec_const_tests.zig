@@ -34,9 +34,10 @@ test "M3.2 HLSL: int spec const emits [[vk::constant_id(N)]] const" {
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "= 8;") != null);
     // The old comment-only placeholder must be gone.
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "// specialization constant") == null);
-    // NOTE: the spec-const variable name is auto-generated ("v1") rather than
-    // user-declared ("N") because codegen does not currently emit OpName for
-    // spec constants. Tracked as a follow-up for the codegen layer.
+    // Codegen emits OpName for spec consts so the user-declared identifier
+    // (`N`) appears in the output instead of the backend's auto-generated
+    // `v{id}` fallback.
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "const int N = 8;") != null);
 }
 
 // ── M3.3: bool spec consts via OpSpecConstantTrue / OpSpecConstantFalse ──
@@ -434,12 +435,11 @@ test "M3.5 SPIR-V: all four arithmetic ops emit OpSpecConstantOp" {
 }
 
 test "M3.5 GLSL: cross-compile preserves derived const as expression" {
-    // The GLSL backend uses an auto-generated name (e.g. v1) for the
-    // leaf spec const since codegen does not currently emit OpName for
-    // spec consts (also documented in the M3.2 HLSL test). Confirm the
-    // backend renders the binary operator rather than folding to a
-    // literal -- i.e. that an expression `<lhs> * <something>` survives
-    // the round-trip.
+    // Confirm that the GLSL backend renders the binary operator rather than
+    // folding to a literal. Codegen now emits OpName for spec consts and
+    // for top-level derived spec consts, so the leaf identifier (`SIZE`)
+    // and the user-bound derived name (`DOUBLE`) round-trip through the
+    // backend.
     const alloc = std.testing.allocator;
     const src =
         \\#version 450
@@ -452,10 +452,103 @@ test "M3.5 GLSL: cross-compile preserves derived const as expression" {
     defer alloc.free(spirv);
     const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{});
     defer alloc.free(glsl);
-    // Expect the leaf spec const to be declared `layout(constant_id = 1) const int <name> = 4;`
-    try std.testing.expect(std.mem.indexOf(u8, glsl, "layout(constant_id = 1)") != null);
-    // And the derived value to be expressed -- some emitted backend
-    // should at least retain a `*` and the leaf-const name (auto-named
-    // `v1` etc., so we only check for the operator and the constant).
+    // Leaf spec const declared with user identifier preserved.
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "layout(constant_id = 1) const int SIZE = 4") != null);
+    // Derived const rendered as an expression, not folded.
     try std.testing.expect(std.mem.indexOf(u8, glsl, "*") != null);
+    // User-facing derived identifier preserved.
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "DOUBLE") != null);
+}
+
+// ── OpName for spec consts: original GLSL identifiers preserved everywhere ──
+
+test "spec const: original GLSL name preserved across all backends" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(constant_id=1) const int MY_SIZE = 8;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(float(MY_SIZE)); }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // GLSL
+    {
+        const out = try glslpp.spirvToGLSL(alloc, spv, .{});
+        defer alloc.free(out);
+        if (std.mem.indexOf(u8, out, "MY_SIZE") == null) {
+            std.debug.print("GLSL backend missing MY_SIZE:\n{s}\n", .{out});
+            try std.testing.expect(false);
+        }
+    }
+    // HLSL
+    {
+        const out = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+        defer alloc.free(out);
+        if (std.mem.indexOf(u8, out, "MY_SIZE") == null) {
+            std.debug.print("HLSL backend missing MY_SIZE:\n{s}\n", .{out});
+            try std.testing.expect(false);
+        }
+    }
+    // MSL
+    {
+        const out = try glslpp.spirvToMSL(alloc, spv, .{});
+        defer alloc.free(out);
+        if (std.mem.indexOf(u8, out, "MY_SIZE") == null) {
+            std.debug.print("MSL backend missing MY_SIZE:\n{s}\n", .{out});
+            try std.testing.expect(false);
+        }
+    }
+    // WGSL
+    {
+        const out = try glslpp.spirvToWGSL(alloc, spv, .{});
+        defer alloc.free(out);
+        if (std.mem.indexOf(u8, out, "MY_SIZE") == null) {
+            std.debug.print("WGSL backend missing MY_SIZE:\n{s}\n", .{out});
+            try std.testing.expect(false);
+        }
+    }
+}
+
+test "spec const: derived user-bound name preserved across all backends" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(constant_id=1) const int SIZE = 4;
+        \\const int DOUBLE_SIZE = SIZE * 2;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(float(DOUBLE_SIZE)); }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // GLSL
+    {
+        const out = try glslpp.spirvToGLSL(alloc, spv, .{});
+        defer alloc.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "SIZE") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "DOUBLE_SIZE") != null);
+    }
+    // HLSL
+    {
+        const out = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+        defer alloc.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "SIZE") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "DOUBLE_SIZE") != null);
+    }
+    // MSL
+    {
+        const out = try glslpp.spirvToMSL(alloc, spv, .{});
+        defer alloc.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "SIZE") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "DOUBLE_SIZE") != null);
+    }
+    // WGSL
+    {
+        const out = try glslpp.spirvToWGSL(alloc, spv, .{});
+        defer alloc.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "SIZE") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "DOUBLE_SIZE") != null);
+    }
 }

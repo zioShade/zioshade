@@ -44,6 +44,14 @@ pub const SpecConstantOp = struct {
     /// a spec constant / derived spec constant emitted earlier. Owned
     /// slice; freed in `Module.deinit`.
     operand_ids: []const u32,
+    /// User-visible GLSL identifier this derived constant was bound to,
+    /// if any. Set for top-level `const T NAME = <spec-expr>;` declarations;
+    /// `null` for intermediate sub-expressions that never receive a user-
+    /// facing binding. Codegen uses this (when set) to emit an OpName so
+    /// downstream backends print the original identifier instead of the
+    /// auto-generated `v{id}` fallback. Borrowed view into the
+    /// `spec_constant_ops` map key when present; not separately owned.
+    user_name: ?[]const u8 = null,
 };
 
 /// Literal constants required by spec_constant_ops operands. Semantic emits
