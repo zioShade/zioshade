@@ -91,3 +91,23 @@ jobs:
           version: 0.15.2
       - name: Quick fuzz pass
         run: zig build fuzz -- --count 5000
+
+  c-abi:
+    name: C ABI smoke
+    needs: build-test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.15.2
+      - name: Build C ABI library and example
+        run: |
+          zig build c-lib --summary all
+          zig build c-example --summary all
+      - name: Run C consumer
+        run: zig build run-c-example

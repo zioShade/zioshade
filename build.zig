@@ -85,6 +85,36 @@ pub fn build(b: *std.Build) void {
     c_lib_step.dependOn(&install_c_shared.step);
     c_lib_step.dependOn(&install_c_headers.step);
 
+    // C consumer example (M7.3) — build with: zig build c-example
+    //
+    // Compiles `examples/c/main.c` against the public C header and links it
+    // against the static C ABI library. We pick the static handle so the
+    // resulting executable runs without runtime DLL search-path concerns on
+    // Windows (no need to copy `glslpp_c_shared.dll` next to the .exe).
+    const c_example_step = b.step("c-example", "Build the C consumer example demonstrating the glslpp C ABI");
+    const c_example_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+    });
+    c_example_mod.link_libc = true;
+    c_example_mod.addCSourceFile(.{
+        .file = b.path("examples/c/main.c"),
+        .flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Wpedantic" },
+    });
+    c_example_mod.addIncludePath(b.path("include"));
+    const c_example_exe = b.addExecutable(.{
+        .name = "c-example",
+        .root_module = c_example_mod,
+    });
+    c_example_exe.linkLibrary(c_static);
+    b.installArtifact(c_example_exe);
+    c_example_step.dependOn(&c_example_exe.step);
+
+    // `zig build run-c-example` — actually execute the C consumer.
+    const run_c_example_step = b.step("run-c-example", "Run the C ABI example");
+    const run_c_example = b.addRunArtifact(c_example_exe);
+    run_c_example_step.dependOn(&run_c_example.step);
+
     const test_step = b.step("test", "Run all tests");
 
     const run_unit_tests = b.addRunArtifact(b.addTest(.{
