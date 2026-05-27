@@ -57,6 +57,14 @@ fn wgslSafeName(name: []const u8, buf: *[64]u8) []const u8 {
     return buf[0..result.len];
 }
 
+/// Marks a struct member as the target of WGSL atomic ops.
+/// `scalar` → wrap whole field in `atomic<T>` (e.g. `counter: atomic<u32>`)
+/// `array_element` → wrap element type (e.g. `data: array<atomic<u32>>`)
+const AtomicFieldKind = enum { scalar, array_element };
+
+const AtomicFieldKey = struct { struct_id: u32, member_idx: u32 };
+const AtomicFieldMap = std.AutoHashMap(AtomicFieldKey, AtomicFieldKind);
+
 fn getMemberName(module: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
     const raw = common.commonGetMemberName(module.instructions, struct_id, member_idx, buf, "_");
     if (!isWgslKeyword(raw)) return raw;
@@ -72,20 +80,20 @@ fn getArraySuffix(module: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
     return common.commonGetArraySuffix(module.instructions, module.id_defs, ptr_type_id, false);
 }
 
-fn emitStructForwardDecls(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
+fn emitStructForwardDecls(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), atomic_fields: *const AtomicFieldMap) !void {
     const inst = getDef(module, root_type_id) orelse return;
     switch (inst.op) {
         .TypeStruct => {
-            try emitOneStructForwardDecl(module, names, root_type_id, w, alloc, emitted, emitted_names);
+            try emitOneStructForwardDecl(module, names, root_type_id, w, alloc, emitted, emitted_names, atomic_fields);
         },
-        .TypePointer => if (inst.words.len > 3) try emitStructForwardDecls(module, names, inst.words[3], w, alloc, emitted, emitted_names),
-        .TypeArray => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names),
-        .TypeMatrix, .TypeVector => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names),
+        .TypePointer => if (inst.words.len > 3) try emitStructForwardDecls(module, names, inst.words[3], w, alloc, emitted, emitted_names, atomic_fields),
+        .TypeArray => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names, atomic_fields),
+        .TypeMatrix, .TypeVector => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names, atomic_fields),
         else => {},
     }
 }
 
-fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
+fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), atomic_fields: *const AtomicFieldMap) !void {
     const inst = getDef(module, type_id) orelse return;
     if (inst.op != .TypeStruct) return;
     if (inst.words.len > 2) {
@@ -95,9 +103,9 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
             if (mt_inst) |mi2| {
                 if (mi2.op == .TypeArray and mi2.words.len > 2) {
                     // Array member — recurse into element type
-                    try emitOneStructForwardDecl(module, names, mi2.words[2], w, alloc, emitted, emitted_names);
+                    try emitOneStructForwardDecl(module, names, mi2.words[2], w, alloc, emitted, emitted_names, atomic_fields);
                 } else {
-                    try emitOneStructForwardDecl(module, names, mt_id, w, alloc, emitted, emitted_names);
+                    try emitOneStructForwardDecl(module, names, mt_id, w, alloc, emitted, emitted_names, atomic_fields);
                 }
             }
         }
@@ -112,17 +120,31 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
         const mti = getDef(module, mt_id);
         var mname_buf: [32]u8 = undefined;
         const mname = getMemberName(module, type_id, @as(u32, @intCast(mi)), &mname_buf);
+        const atomic_kind: ?AtomicFieldKind = atomic_fields.get(.{ .struct_id = type_id, .member_idx = @intCast(mi) });
         if (mti) |mi2| {
             if (mi2.op == .TypeArray and mi2.words.len > 3) {
                 const et = try wgslType(module, mi2.words[2], names, alloc);
                 const li = getDef(module, mi2.words[3]);
                 const lv: u32 = if (li) |l| l.words[3] else 1;
-                try w.print("    {s}: array<{s}, {d}>,\n", .{ mname, et, lv });
+                if (atomic_kind == .array_element) {
+                    try w.print("    {s}: array<atomic<{s}>, {d}>,\n", .{ mname, et, lv });
+                } else {
+                    try w.print("    {s}: array<{s}, {d}>,\n", .{ mname, et, lv });
+                }
+                continue;
+            }
+            if (mi2.op == .TypeRuntimeArray and mi2.words.len > 2 and atomic_kind == .array_element) {
+                const et = try wgslType(module, mi2.words[2], names, alloc);
+                try w.print("    {s}: array<atomic<{s}>>,\n", .{ mname, et });
                 continue;
             }
         }
         const mt = try wgslType(module, mt_id, names, alloc);
-        try w.print("    {s}: {s},\n", .{ mname, mt });
+        if (atomic_kind == .scalar) {
+            try w.print("    {s}: atomic<{s}>,\n", .{ mname, mt });
+        } else {
+            try w.print("    {s}: {s},\n", .{ mname, mt });
+        }
     }
     try w.writeAll("}\n");
 }
@@ -406,6 +428,63 @@ fn resolvePointee(module: *const ParsedModule, id: u32) ?u32 {
         return common.resolvePointeeType(module, inst.words[1]);
     }
     return null;
+}
+
+/// Scan the module for OpAtomic* ops and record which SSBO struct members are
+/// their targets. The result feeds struct emission so that those fields are
+/// wrapped in `atomic<T>` (or `array<atomic<T>>` for atomic ops on array
+/// elements). Walks the OpAccessChain feeding each atomic op, tracking the
+/// type at each index. The deepest struct-member access along the chain is the
+/// field to mark; any array/vector indices that follow it indicate
+/// array-element atomics.
+fn collectAtomicFields(module: *const ParsedModule, out: *AtomicFieldMap) !void {
+    for (module.instructions) |inst| {
+        const is_atomic = switch (inst.op) {
+            .AtomicIAdd, .AtomicISub, .AtomicAnd, .AtomicOr, .AtomicXor,
+            .AtomicUMin, .AtomicSMin, .AtomicUMax, .AtomicSMax,
+            .AtomicFAddEXT, .AtomicExchange, .AtomicCompareExchange,
+            => true,
+            else => false,
+        };
+        if (!is_atomic) continue;
+        if (inst.words.len < 4) continue;
+        const ptr_id = inst.words[3];
+        const ptr_inst = common.getDef(module, ptr_id) orelse continue;
+        if (ptr_inst.op != .AccessChain) continue;
+        if (ptr_inst.words.len < 5) continue;
+        const base_id = ptr_inst.words[3];
+
+        var current_type_id: ?u32 = resolvePointee(module, base_id);
+        var last_struct_id: ?u32 = null;
+        var last_member_idx: u32 = 0;
+        var indices_after_last_struct: u32 = 0;
+
+        for (ptr_inst.words[4..]) |index_id| {
+            const tid = current_type_id orelse break;
+            const ti = common.getDef(module, tid) orelse break;
+            switch (ti.op) {
+                .TypeStruct => {
+                    const idx_inst = common.getDef(module, index_id) orelse break;
+                    if (idx_inst.op != .Constant or idx_inst.words.len < 4) break;
+                    const mi = idx_inst.words[3];
+                    last_struct_id = tid;
+                    last_member_idx = mi;
+                    indices_after_last_struct = 0;
+                    if (mi + 2 < ti.words.len) current_type_id = ti.words[mi + 2] else current_type_id = null;
+                },
+                .TypeArray, .TypeRuntimeArray, .TypeVector, .TypeMatrix => {
+                    indices_after_last_struct += 1;
+                    if (ti.words.len > 2) current_type_id = ti.words[2] else current_type_id = null;
+                },
+                else => break,
+            }
+        }
+
+        if (last_struct_id) |sid| {
+            const kind: AtomicFieldKind = if (indices_after_last_struct == 0) .scalar else .array_element;
+            try out.put(.{ .struct_id = sid, .member_idx = last_member_idx }, kind);
+        }
+    }
 }
 
 /// Resolve the value type of an ID by tracing its defining instruction.
@@ -713,6 +792,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         try w.print("var<private> {s}: {s};\n", .{ name, rt });
     }
 
+    // Detect SSBO struct fields that are the target of OpAtomic* ops.
+    // WGSL requires such fields to be declared as `atomic<T>` (or `array<atomic<T>>`
+    // when the atomic op indexes into an array field). naga rejects atomic ops on
+    // non-atomic typed members with: "atomic operation is done on a pointer to a non-atomic".
+    var atomic_fields = AtomicFieldMap.init(arena);
+    defer atomic_fields.deinit();
+    collectAtomicFields(&module, &atomic_fields) catch {};
+
     // Emit struct forward declarations for types used in cbuffers
     var emitted_structs = std.AutoHashMap(u32, void).init(arena);
     defer emitted_structs.deinit();
@@ -720,8 +807,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     defer emitted_names.deinit();
 
     for (cbuffers.items) |cb| {
-        try emitStructForwardDecls(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names);
-        try emitOneStructForwardDecl(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names);
+        try emitStructForwardDecls(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
+        try emitOneStructForwardDecl(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
     }
 
     // Emit struct forward declarations for types used as local variables
@@ -751,7 +838,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                         if (ti) |tinst| {
                             if (tinst.op == .TypeStruct and local_structs.get(tid) == null) {
                                 local_structs.put(tid, {}) catch {};
-                                try emitOneStructForwardDecl(&module, &names, tid, w, arena, &emitted_structs, &emitted_names);
+                                try emitOneStructForwardDecl(&module, &names, tid, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
                             }
                         }
                     }
@@ -880,7 +967,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                         const type_name = try wgslType(&module, pointee_type, &names, arena);
                         const var_name = names.get(inst.words[2]) orelse "shared";
                         // Emit struct declaration for array element types
-                        try emitOneStructForwardDecl(&module, &names, pointee_type, w, arena, &emitted_structs, &emitted_names);
+                        try emitOneStructForwardDecl(&module, &names, pointee_type, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
                         try w.print("var<workgroup> {s}: {s};\n\n", .{ var_name, type_name });
                     }
                 }
@@ -1032,10 +1119,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             const ft = getDef(&module, func_type_id);
             if (ft) |fti| {
                 if (fti.op == .TypeFunction and fti.words.len > 2) {
-                    try emitOneStructForwardDecl(&module, &names, fti.words[2], w, arena, &emitted_structs, &emitted_names);
+                    try emitOneStructForwardDecl(&module, &names, fti.words[2], w, arena, &emitted_structs, &emitted_names, &atomic_fields);
                     // Also emit for param types
                     for (fti.words[3..]) |param_tid| {
-                        try emitOneStructForwardDecl(&module, &names, param_tid, w, arena, &emitted_structs, &emitted_names);
+                        try emitOneStructForwardDecl(&module, &names, param_tid, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
                     }
                 }
             }
@@ -1051,7 +1138,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             {
                 if (scan.words.len > 1) {
                     const type_id = scan.words[1];
-                    try emitOneStructForwardDecl(&module, &names, type_id, w, arena, &emitted_structs, &emitted_names);
+                    try emitOneStructForwardDecl(&module, &names, type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
                 }
             }
         }
