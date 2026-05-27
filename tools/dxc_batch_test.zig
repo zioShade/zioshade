@@ -45,8 +45,10 @@ fn detectStage(spv: []const u32) SpvStage {
                 3 => .geometry,
                 4 => .fragment,
                 5 => .compute,
-                5267 => .task,
-                5268 => .mesh,
+                5267 => .task, // TaskNV (legacy)
+                5268 => .mesh, // MeshNV (legacy)
+                5364 => .task, // TaskEXT (GL_EXT_mesh_shader)
+                5365 => .mesh, // MeshEXT (GL_EXT_mesh_shader)
                 5313 => .raygen,
                 5314 => .intersection,
                 5315 => .anyhit,
@@ -71,8 +73,11 @@ fn dxcProfile(alloc: std.mem.Allocator, stage: SpvStage, sm: u32) !?[]u8 {
     return switch (stage) {
         .fragment => try std.fmt.allocPrint(alloc, "ps_{d}_{d}", .{ major, minor }),
         .compute => try std.fmt.allocPrint(alloc, "cs_{d}_{d}", .{ major, minor }),
-        .mesh => try std.fmt.allocPrint(alloc, "ms_{d}_{d}", .{ major, minor }),
-        .task => try std.fmt.allocPrint(alloc, "as_{d}_{d}", .{ major, minor }),
+        // Mesh & amplification shaders require Shader Model 6.5+. Skip with
+        // null when caller passed an older SM so the driver classifies it
+        // (clearly) instead of returning a bogus profile string.
+        .mesh => if (sm < 65) null else try std.fmt.allocPrint(alloc, "ms_{d}_{d}", .{ major, minor }),
+        .task => if (sm < 65) null else try std.fmt.allocPrint(alloc, "as_{d}_{d}", .{ major, minor }),
         // M5.0 (vertex signature emission) shipped, so vertex maps to vs_*.
         .vertex => try std.fmt.allocPrint(alloc, "vs_{d}_{d}", .{ major, minor }),
         // Stages we know glslpp doesn't yet emit valid HLSL for. They are
@@ -95,7 +100,7 @@ fn dxcProfile(alloc: std.mem.Allocator, stage: SpvStage, sm: u32) !?[]u8 {
 fn skipReason(stage: SpvStage) []const u8 {
     return switch (stage) {
         .vertex => "vertex stage — shipped (should never SKIP)",
-        .mesh => "mesh stage — M5.2 v2 deferred",
+        .mesh => "mesh stage — needs SM 6.5+ (pass -- <dxc> <dir> 65)",
         .task => "task stage — not yet implemented",
         .geometry => "geometry stage — not yet implemented",
         .tess_control, .tess_eval => "tessellation stage — not yet implemented",
@@ -276,7 +281,7 @@ pub fn main() !void {
         if (b.pass == 0 and b.fail == 0 and b.skip == 0) continue;
         const suffix: []const u8 = switch (s) {
             .vertex => "",
-            .mesh => "  (M5.2 v2 deferred)",
+            .mesh => "  (signature OK, body routing deferred — M5.2 v2.c)",
             .task => "  (not implemented)",
             .geometry, .tess_control, .tess_eval => "  (not implemented)",
             .raygen, .intersection, .anyhit, .closesthit, .miss, .callable => "  (not implemented)",
