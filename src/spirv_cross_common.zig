@@ -745,3 +745,38 @@ pub fn getCachedParse(alloc: std.mem.Allocator, spirv_words: []const u32) !Parse
     _shared_cache_alloc = alloc;
     return m;
 }
+
+// ---------------------------------------------------------------------------
+// Binding shift helper (M8.3)
+// ---------------------------------------------------------------------------
+//
+// Apply a signed shift to a SPIR-V descriptor binding number. Used by
+// the GLSL/MSL/WGSL backends to remap binding spaces between APIs (e.g.
+// when a host engine reserves binding=0 for its own resources and shaders
+// must be shifted up by one).
+//
+// Mirrors the i32 signed-add semantics of `HlslCompileOptions.binding_shift`.
+// Results that go negative clamp to 0 (HLSL's behaviour at the binding emit
+// point); going below zero would otherwise be a nonsense binding index.
+
+/// Apply a signed binding shift, clamping negative results to 0.
+pub fn applyBindingShift(binding: u32, shift: i32) u32 {
+    const widened: i64 = @as(i64, binding) + @as(i64, shift);
+    if (widened <= 0) return 0;
+    if (widened > std.math.maxInt(u32)) return std.math.maxInt(u32);
+    return @intCast(widened);
+}
+
+test "applyBindingShift: identity" {
+    try std.testing.expectEqual(@as(u32, 5), applyBindingShift(5, 0));
+}
+
+test "applyBindingShift: negative shift" {
+    try std.testing.expectEqual(@as(u32, 1), applyBindingShift(2, -1));
+    try std.testing.expectEqual(@as(u32, 0), applyBindingShift(0, -1));
+    try std.testing.expectEqual(@as(u32, 0), applyBindingShift(1, -2));
+}
+
+test "applyBindingShift: positive shift" {
+    try std.testing.expectEqual(@as(u32, 7), applyBindingShift(2, 5));
+}

@@ -10,10 +10,16 @@ const ParsedModule = common.ParsedModule;
 const DecorationEntry = common.DecorationEntry;
 
 /// Options for SPIR-V → WGSL cross-compilation.
-/// Currently empty — reserved for future options.
 pub const WgslCompileOptions = struct {
     /// Entry point name to compile (default: "main").
     entry_point_name: []const u8 = "main",
+    /// Shift all descriptor bindings by this amount. -1 remaps binding=1 → @binding(0).
+    /// Negative results clamp to 0. Mirrors `HlslCompileOptions.binding_shift`.
+    ///
+    /// Note: WGSL's @group is derived from the binding number (group = binding/2);
+    /// the shift is applied before the group derivation, so a non-trivial shift
+    /// can also change @group values.
+    binding_shift: i32 = 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -777,8 +783,9 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
 
     // Emit uniform buffers
     for (cbuffers.items) |cb| {
-        const group = @divFloor(cb.binding, 2);
-        const binding = cb.binding;
+        const shifted_cb_binding = common.applyBindingShift(cb.binding, options.binding_shift);
+        const group = @divFloor(shifted_cb_binding, 2);
+        const binding = shifted_cb_binding;
         const type_name = blk: {
             // Resolve pointer type to pointee type
             const ptr_inst = getDef(&module, cb.type_id);
@@ -902,8 +909,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
         used_tex_bindings.put(tex_binding, {}) catch {};
         used_tex_bindings.put(tex_binding + 1, {}) catch {}; // sampler slot
-        const group = @divFloor(tex_binding, 2);
-        const binding = tex_binding;
+        // Apply user-requested binding shift after collision resolution. The
+        // group is derived from the shifted binding so a non-zero shift can
+        // move @group as well, which is the desired behaviour for descriptor
+        // remapping.
+        const shifted_tex = common.applyBindingShift(tex_binding, options.binding_shift);
+        const shifted_sampler = common.applyBindingShift(tex_binding + 1, options.binding_shift);
+        const group = @divFloor(shifted_tex, 2);
+        const binding = shifted_tex;
         const tex_type = try wgslType(&module, tex.image_type_id, &names, arena);
         if (tex.is_storage) {
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, binding, tex.name, tex_type });
@@ -912,7 +925,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             // Emit paired sampler
             const sampler_name = try std.fmt.allocPrint(arena, "{s}_sampler", .{tex.name});
             try sampler_names.append(arena, .{ .name = sampler_name, .binding = tex.binding + 1 });
-            try w.print("@group({d}) @binding({d})\nvar {s}: sampler;\n\n", .{ group, binding + 1, sampler_name });
+            try w.print("@group({d}) @binding({d})\nvar {s}: sampler;\n\n", .{ group, shifted_sampler, sampler_name });
         }
     }
 
