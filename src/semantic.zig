@@ -5155,6 +5155,53 @@ const Analyzer = struct {
                             .ty = result_ty,
                         });
                         return .{ .ty = result_ty, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "bitfieldInsert")) {
+                        // bitfieldInsert(base, insert, offset, count) → OpBitFieldInsert
+                        // (core SPIR-V opcode 201, not GLSL.std.450). The result type
+                        // matches the first arg (int/uint/ivecN/uvecN) and is preserved
+                        // for vector forms — SPIR-V supports vector base+insert with
+                        // scalar offset/count natively.
+                        if (arg_tids.items.len < 4) {
+                            return .{ .ty = result_ty, .id = result_id };
+                        }
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 4);
+                        operands[0] = .{ .id = arg_tids.items[0].id }; // base
+                        operands[1] = .{ .id = arg_tids.items[1].id }; // insert
+                        operands[2] = .{ .id = arg_tids.items[2].id }; // offset
+                        operands[3] = .{ .id = arg_tids.items[3].id }; // count
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .bit_field_insert,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = result_ty,
+                        });
+                        return .{ .ty = result_ty, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "bitfieldExtract")) {
+                        // bitfieldExtract(value, offset, count) → OpBitFieldSExtract (202)
+                        // for signed int/ivecN values, OpBitFieldUExtract (203) for
+                        // unsigned uint/uvecN values. The discriminant is the first
+                        // argument's element type (resolved at semantic-analysis time);
+                        // result type matches the first arg, including vector forms.
+                        if (arg_tids.items.len < 3) {
+                            return .{ .ty = result_ty, .id = result_id };
+                        }
+                        const is_unsigned = switch (arg_tids.items[0].ty) {
+                            .uint, .uvec2, .uvec3, .uvec4 => true,
+                            else => false,
+                        };
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 3);
+                        operands[0] = .{ .id = arg_tids.items[0].id }; // value
+                        operands[1] = .{ .id = arg_tids.items[1].id }; // offset
+                        operands[2] = .{ .id = arg_tids.items[2].id }; // count
+                        try self.instructions.append(self.alloc, .{
+                            .tag = if (is_unsigned) .bit_field_u_extract else .bit_field_s_extract,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = result_ty,
+                        });
+                        return .{ .ty = result_ty, .id = result_id };
                     } else if (std.mem.eql(u8, node.data.name, "mix")) {
                         // mix(x, y, a): if a is boolean, use OpSelect(a, x, y); otherwise FMix
                         if (arg_tids.items.len >= 3 and (arg_tids.items[2].ty.isBoolVector() or arg_tids.items[2].ty == .bool)) {
@@ -7035,6 +7082,7 @@ const Analyzer = struct {
             "findLSB", "findMSB",
             "bitCount",
             "bitfieldReverse",
+            "bitfieldInsert", "bitfieldExtract",
             "imageSize", "imageLoad", "imageStore", "textureSize",
             "textureSamples", "imageSamples", "textureOffset", "textureLodOffset", "texelFetchOffset", "textureGrad", "textureGather", "textureGatherOffsets",
             "textureGradOffset", "textureProjLod", "textureProjGrad",
@@ -7253,6 +7301,10 @@ const Analyzer = struct {
             return null;
         // bitfieldReverse is a core SPIR-V op (OpBitReverse), not GLSL.std.450
         if (std.mem.eql(u8, name, "bitfieldReverse"))
+            return null;
+        // bitfieldInsert / bitfieldExtract are core SPIR-V ops (OpBitFieldInsert,
+        // OpBitFieldSExtract, OpBitFieldUExtract), not GLSL.std.450.
+        if (std.mem.eql(u8, name, "bitfieldInsert") or std.mem.eql(u8, name, "bitfieldExtract"))
             return null;
         return null;
     }

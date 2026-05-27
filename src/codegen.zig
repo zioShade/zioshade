@@ -5352,6 +5352,50 @@ const Codegen = struct {
                 try self.emitWord(result_id);
                 try self.emitWord(val_id);
             },
+            .bit_field_insert => {
+                // OpBitFieldInsert result_type result_id base insert offset count (wc=7)
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const base_id = self.operandId(resolved, 0);
+                const insert_id = self.operandId(resolved, 1);
+                const offset_id = self.operandId(resolved, 2);
+                const count_id = self.operandId(resolved, 3);
+                try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.BitFieldInsert)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(base_id);
+                try self.emitWord(insert_id);
+                try self.emitWord(offset_id);
+                try self.emitWord(count_id);
+            },
+            .bit_field_s_extract => {
+                // OpBitFieldSExtract result_type result_id base offset count (wc=6)
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const base_id = self.operandId(resolved, 0);
+                const offset_id = self.operandId(resolved, 1);
+                const count_id = self.operandId(resolved, 2);
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.BitFieldSExtract)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(base_id);
+                try self.emitWord(offset_id);
+                try self.emitWord(count_id);
+            },
+            .bit_field_u_extract => {
+                // OpBitFieldUExtract result_type result_id base offset count (wc=6)
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const base_id = self.operandId(resolved, 0);
+                const offset_id = self.operandId(resolved, 1);
+                const count_id = self.operandId(resolved, 2);
+                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.BitFieldUExtract)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(base_id);
+                try self.emitWord(offset_id);
+                try self.emitWord(count_id);
+            },
             .derivative => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;

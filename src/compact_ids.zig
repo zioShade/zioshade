@@ -169,6 +169,8 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         197 => rt(2, "ii"),        // OpBitwiseOr
         198...199 => rt(2, "ii"),  // OpBitwiseXor, OpBitwiseAnd
         204...205 => rt(2, "i"),   // OpBitReverse, OpBitCount
+        201 => rt(2, "iiii"),      // OpBitFieldInsert: base, insert, offset, count
+        202...203 => rt(2, "iii"), // OpBitFieldSExtract, OpBitFieldUExtract: base, offset, count
         200 => rt(2, "i"),         // OpNot
         // --- Derivatives ---
         207...215 => rt(2, "i"),   // OpDPdx..OpFwidthCoarse
