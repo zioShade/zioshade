@@ -360,6 +360,17 @@ pub const MslCompileOptions = struct {
     /// (their indices are separate namespaces, but glslpp's convention — matching
     /// HLSL — is one shift across all kinds). Negative results clamp to 0.
     binding_shift: i32 = 0,
+    /// When true, group descriptor-set resources into `spvDescriptorSetBufferN`
+    /// structs and pass each set as a single [[buffer(N)]] argument-buffer
+    /// parameter. Matches the Metal 2+ idiom and SPIRV-Cross's
+    /// `--msl-argument-buffers` output. Default: false (legacy per-resource binding).
+    ///
+    /// v1 scope (M6): set 0 only; UBO + sampled-image (split into texture +
+    /// sampler [[id]] slots); fragment + compute entry points. Multiple sets
+    /// and storage buffers are deferred to M6 v2. `binding_shift` still applies
+    /// to the single `[[buffer(N)]]` of each argument buffer; it does NOT apply
+    /// to the `[[id]]` slots inside the struct.
+    argument_buffers: bool = false,
 };
 
 pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: MslCompileOptions) ![]const u8 {
@@ -469,6 +480,36 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         }
     }
 
+    // M6 v1: argument-buffer descriptor-set struct emission.
+    //
+    // When options.argument_buffers is true, group all resources used by the
+    // entry point into a single `spvDescriptorSetBuffer0` struct with
+    // sequential `[[id(N)]]` slots. v1 assumes everything lives in set 0
+    // (matches SPIRV-Cross's behavior for the canonical fixture and the
+    // current resource-tracking shape, which doesn't yet store per-resource
+    // set indices). Multi-set support is deferred to M6 v2.
+    //
+    // Storage buffers are NOT yet emitted into the argument buffer (v1 scope:
+    // UBO + sampled image only). When a shader has both an SSBO and argbuf
+    // is requested, the SSBO continues to bind via the legacy per-resource
+    // path. v2 acceptance: SSBOs participate in the set struct as
+    // `device Buf* sb [[id(N)]];`.
+    if (options.argument_buffers and (cbuffers.items.len > 0 or textures.items.len > 0)) {
+        try w.writeAll("struct spvDescriptorSetBuffer0\n{\n");
+        var id_slot: u32 = 0;
+        for (cbuffers.items) |cb| {
+            try w.print("    constant {s}& {s} [[id({d})]];\n", .{ cb.name, cb.name, id_slot });
+            id_slot += 1;
+        }
+        for (textures.items) |tex| {
+            try w.print("    texture2d<float> {s} [[id({d})]];\n", .{ tex.name, id_slot });
+            id_slot += 1;
+            try w.print("    sampler {s}Smplr [[id({d})]];\n", .{ tex.name, id_slot });
+            id_slot += 1;
+        }
+        try w.writeAll("};\n\n");
+    }
+
     // Output struct for fragment
     if (is_frag) {
         try w.writeAll("struct main0_out\n{\n    float4 _fragColor [[color(0)]];\n};\n\n");
@@ -560,9 +601,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     if (local_structs_msl.count() > 0) try w.writeAll("\n");
 
     // Emit non-entry functions first
-    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute_like, options.binding_shift); }
+    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute_like, options.binding_shift, options.argument_buffers); }
     // Emit entry function last
-    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute_like, options.binding_shift);
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute_like, options.binding_shift, options.argument_buffers);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -886,6 +927,7 @@ fn emitFunction(
     storage_buffers: *const std.ArrayList(CbufferDecl),
     is_compute: bool,
     binding_shift: i32,
+    argument_buffers: bool,
 ) !void {
     const fi = getDef(m, func_id) orelse return;
     if (fi.op != .Function or fi.words.len < 5) return;
@@ -1054,29 +1096,48 @@ fn emitFunction(
         try w.writeAll("(");
 
         first_param = true;
-        for (cbuffers.items) |cb| {
-            if (!first_param) try w.writeAll(", ");
-            const cb_b = common.applyBindingShift(cb.binding, binding_shift);
-            try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb_b});
+        const has_set0 = argument_buffers and (cbuffers.items.len > 0 or textures.items.len > 0);
+        if (has_set0) {
+            // M6 v1: one argument-buffer param per descriptor set (set 0 only).
+            // The struct fields supply the [[id(N)]] slots; binding_shift still
+            // applies to the outer [[buffer(N)]] of the set itself.
+            const set0_b = common.applyBindingShift(0, binding_shift);
+            try w.print("constant spvDescriptorSetBuffer0& set0 [[buffer({d})]]", .{set0_b});
             first_param = false;
-        }
-        for (textures.items) |tex| {
-            if (!first_param) try w.writeAll(", ");
-            const tex_b = common.applyBindingShift(tex.binding, binding_shift);
-            try w.print("texture2d<float> {s} [[texture({d})]]", .{tex.name, tex_b});
-            try w.print(", sampler {s}Smplr [[sampler({d})]]", .{tex.name, tex_b});
-            first_param = false;
+        } else {
+            for (cbuffers.items) |cb| {
+                if (!first_param) try w.writeAll(", ");
+                const cb_b = common.applyBindingShift(cb.binding, binding_shift);
+                try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb_b});
+                first_param = false;
+            }
+            for (textures.items) |tex| {
+                if (!first_param) try w.writeAll(", ");
+                const tex_b = common.applyBindingShift(tex.binding, binding_shift);
+                try w.print("texture2d<float> {s} [[texture({d})]]", .{tex.name, tex_b});
+                try w.print(", sampler {s}Smplr [[sampler({d})]]", .{tex.name, tex_b});
+                first_param = false;
+            }
         }
         if (!first_param) try w.writeAll(", ");
         try w.writeAll("float4 gl_FragCoord [[position]])");
 
         try w.writeAll("\n{\n    main0_out out = {};\n    ");
         try w.print("{s}_impl(out._fragColor, gl_FragCoord.xy", .{func_name});
-        for (cbuffers.items) |cb| {
-            try w.print(", {s}_1", .{cb.name});
-        }
-        for (textures.items) |tex| {
-            try w.print(", {s}, {s}Smplr", .{tex.name, tex.name});
+        if (has_set0) {
+            for (cbuffers.items) |cb| {
+                try w.print(", set0.{s}", .{cb.name});
+            }
+            for (textures.items) |tex| {
+                try w.print(", set0.{s}, set0.{s}Smplr", .{tex.name, tex.name});
+            }
+        } else {
+            for (cbuffers.items) |cb| {
+                try w.print(", {s}_1", .{cb.name});
+            }
+            for (textures.items) |tex| {
+                try w.print(", {s}, {s}Smplr", .{tex.name, tex.name});
+            }
         }
         try w.writeAll(");\n    return out;\n}\n");
         return;
@@ -1090,7 +1151,13 @@ fn emitFunction(
 
         var first_param = true;
 
-        // Emit storage buffers as device pointers
+        // M6 v1: compute argbuf scope — only UBO + sampled images go into the
+        // set struct. Storage buffers continue to bind per-resource (deferred
+        // to v2). The struct itself only exists when cbuffers/textures are
+        // non-empty (see spirvToMSL emission gate).
+        const has_set0 = argument_buffers and (cbuffers.items.len > 0 or textures.items.len > 0);
+
+        // Emit storage buffers as device pointers (always per-resource in v1)
         for (storage_buffers.items) |sb| {
             if (!first_param) try w.writeAll(", ");
             const sb_b = common.applyBindingShift(sb.binding, binding_shift);
@@ -1098,12 +1165,19 @@ fn emitFunction(
             first_param = false;
         }
 
-        // Emit uniform buffers
-        for (cbuffers.items) |cb| {
+        if (has_set0) {
             if (!first_param) try w.writeAll(", ");
-            const cb_b = common.applyBindingShift(cb.binding, binding_shift);
-            try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb_b});
+            const set0_b = common.applyBindingShift(0, binding_shift);
+            try w.print("constant spvDescriptorSetBuffer0& set0 [[buffer({d})]]", .{set0_b});
             first_param = false;
+        } else {
+            // Emit uniform buffers
+            for (cbuffers.items) |cb| {
+                if (!first_param) try w.writeAll(", ");
+                const cb_b = common.applyBindingShift(cb.binding, binding_shift);
+                try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb_b});
+                first_param = false;
+            }
         }
 
         // Thread position
@@ -1111,6 +1185,20 @@ fn emitFunction(
         try w.writeAll("uint3 gl_GlobalInvocationID [[thread_position_in_grid]]");
 
         try w.writeAll(")\n{\n");
+
+        // M6 v1: kernel body still references `Name_1` / `Name` from the body
+        // emitter. With argbuf mode, we materialise references to those names
+        // as local aliases of the set-struct fields so emitBody output keeps
+        // working without per-instruction rewrite.
+        if (has_set0) {
+            for (cbuffers.items) |cb| {
+                try w.print("    constant {s}& {s}_1 = set0.{s};\n", .{cb.name, cb.name, cb.name});
+            }
+            for (textures.items) |tex| {
+                try w.print("    texture2d<float> {s} = set0.{s};\n", .{tex.name, tex.name});
+                try w.print("    sampler {s}Smplr = set0.{s}Smplr;\n", .{tex.name, tex.name});
+            }
+        }
 
         // Emit workgroup (shared) variables
         var idx = func_idx + 1;

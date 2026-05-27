@@ -883,65 +883,67 @@ should round-trip through `glslpp hlsl --stage mesh` and then pass `dxc -T ms_6_
 
 ## Milestone 6 — MSL argument buffers
 
-### Task 6.1: Add `argument_buffers: bool` to MSL options
+### Task 6.1: Add `argument_buffers: bool` to MSL options — SHIPPED (v1)
 
-**Files:**
-- Modify: `src/root.zig` `MslCompileOptions`
-- Modify: `src/spirv_to_msl.zig`
-- Test: new `tests/msl_argbuf_tests.zig`
+Shipped in this commit. `MslCompileOptions.argument_buffers` (default `false`)
+gates emission of a `spvDescriptorSetBuffer0` struct that bundles all set-0
+resources with sequential `[[id(N)]]` slots, plus a `constant
+spvDescriptorSetBuffer0& set0 [[buffer(0)]]` entry-point parameter (fragment
+and compute paths). UBOs occupy one slot; sampled images split into a
+`texture2d<float>` slot and a `sampler` slot (matching SPIRV-Cross). The
+fragment wrapper calls `main_impl(... set0.u, set0.tex, set0.texSmplr)`; the
+compute kernel materialises local aliases (`constant U& u_1 = set0.u;`,
+`texture2d<float> tex = set0.tex;`, `sampler texSmplr = set0.texSmplr;`) so
+existing body emission keeps working without per-instruction rewrite.
 
-- [ ] **Step 1: Add the option**
+`binding_shift` continues to apply to the outer `[[buffer(N)]]` of the
+argument buffer itself (one per set); it does NOT apply to the `[[id]]` slots
+inside.
 
-  In `src/root.zig`:
-  ```zig
-  pub const SpirvToMslOptions = struct {
-      metal_version: u32 = 21,
-      entry_point_name: ?[]const u8 = null,
-      argument_buffers: bool = false,
-  };
-  ```
+Covered by `tests/msl_argbuf_tests.zig` (4 tests: struct emission, signature
+shape, sequential `[[id]]` slots, default-false negative control).
 
-  Thread through to the MSL emitter.
+### Task 6.2: CLI flag for `--msl-argument-buffers` — SHIPPED
 
-- [ ] **Step 2: Write failing test**
+Shipped in this commit. `glslpp msl <input> --msl-argument-buffers` plumbs
+through to `spirvToMSL({ .argument_buffers = true, ... })`. Help text updated.
 
-  ```zig
-  test "msl: argument_buffers=true wraps bindings in argument_buffer struct" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 450
-          \\layout(set=0, binding=0) uniform U { vec4 c; } u;
-          \\layout(set=0, binding=1) uniform sampler2D tex;
-          \\layout(location=0) in vec2 uv;
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() { fragColor = u.c * texture(tex, uv); }
-          ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
-      defer alloc.free(spirv);
-      const msl = try glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
-      defer alloc.free(msl);
-      try std.testing.expect(std.mem.indexOf(u8, msl, "struct spvDescriptorSetBuffer0") != null);
-      try std.testing.expect(std.mem.indexOf(u8, msl, "[[buffer(0)]]") != null);
-  }
-  ```
+### Task 6.v2 — Argument buffers v2 (DEFERRED from M6 v1)
 
-- [ ] **Step 3: Implement**
+The v1 surface above covers the canonical drop-in case (set 0, UBO + sampled
+image, fragment + compute). The following items are intentionally deferred:
 
-  When `argument_buffers` is true, for each descriptor set N, emit:
-  ```msl
-  struct spvDescriptorSetBufferN {
-      constant U& u [[id(0)]];
-      texture2d<float> tex [[id(1)]];
-      sampler texSmp [[id(2)]];
-  };
-  ```
-  And change the main signature to take `[[buffer(N)]] constant spvDescriptorSetBufferN& setN`.
+- [ ] **Task 6.v2.a — Multiple descriptor sets**
+  Today v1 emits a single `spvDescriptorSetBuffer0`; resources from `set=1`,
+  `set=2`, etc. would all collapse into set 0 because `CbufferDecl` /
+  `TextureDecl` don't track the set index. Acceptance: a fixture with
+  `layout(set=0, binding=0) uniform A` and `layout(set=1, binding=0) uniform
+  B` emits two structs (`spvDescriptorSetBuffer0` and
+  `spvDescriptorSetBuffer1`) and two entry-point parameters (`set0
+  [[buffer(0)]]`, `set1 [[buffer(1)]]`).
 
-- [ ] **Step 4: Verify, commit**
+- [ ] **Task 6.v2.b — Storage buffers in the set struct**
+  Today v1 keeps SSBOs on the legacy per-resource binding path even when
+  `argument_buffers = true`, because the canonical fixture doesn't exercise
+  SSBOs and adding them cleanly requires the same set-tracking work as
+  v2.a. Acceptance: a compute shader with `layout(set=0, binding=0) buffer
+  Buf { ... } sb;` and `--msl-argument-buffers` emits
+  `device Buf* sb [[id(0)]];` inside `spvDescriptorSetBuffer0` and removes
+  the standalone `device Buf* sb [[buffer(0)]]` parameter.
 
-### Task 6.2: CLI flag for `--msl-argument-buffers`
+- [ ] **Task 6.v2.c — Storage images / subpass inputs in the set struct**
+  Out of scope for v1 (the existing MSL backend doesn't emit storage images
+  even in legacy mode — see M8 audit). Acceptance follows v2.b once storage
+  images are handled at all.
 
-- [ ] **Step 1-3:** Add flag in `src/cli.zig`, plumb through, test via CLI smoke.
+- [ ] **Task 6.v2.d — Body rewrite for direct resource refs (cleanup)**
+  v1's compute path materialises local aliases (`constant U& u_1 =
+  set0.u;`) so the body emitter can keep using the legacy names. This is
+  semantically equivalent and matches what SPIRV-Cross does internally with
+  its name remapper, but a cleaner v2 would emit `set0.u` references
+  directly from the body emitter and drop the alias declarations.
+  Acceptance: kernel body emits `set0.u_1.c` instead of pre-declaring
+  `u_1`. Non-blocking — purely cosmetic.
 
 ---
 
