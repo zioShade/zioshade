@@ -43,12 +43,86 @@ fn isStructType(module: *const ParsedModule, type_id: u32) bool {
     return false;
 }
 
+// Strict WGSL keywords + reserved words from https://www.w3.org/TR/WGSL/#reserved-words
+// plus the commonly-emitted predeclared type / address-space names that
+// callers also can't legally use as identifiers. Reserved words include `ref`,
+// which is what the GL_EXT_buffer_reference fixture trips over.
+const wgsl_reserved_words = std.StaticStringMap(void).initComptime(.{
+    // Keywords (§ Keyword Summary)
+    .{ "alias", {} },         .{ "break", {} },         .{ "case", {} },
+    .{ "const", {} },         .{ "const_assert", {} },  .{ "continue", {} },
+    .{ "continuing", {} },    .{ "default", {} },       .{ "diagnostic", {} },
+    .{ "discard", {} },       .{ "else", {} },          .{ "enable", {} },
+    .{ "false", {} },         .{ "fn", {} },            .{ "for", {} },
+    .{ "if", {} },            .{ "let", {} },           .{ "loop", {} },
+    .{ "override", {} },      .{ "requires", {} },      .{ "return", {} },
+    .{ "struct", {} },        .{ "switch", {} },        .{ "true", {} },
+    .{ "var", {} },           .{ "while", {} },
+    // Reserved words (§ Reserved Words)
+    .{ "NULL", {} },          .{ "Self", {} },          .{ "abstract", {} },
+    .{ "active", {} },        .{ "alignas", {} },       .{ "alignof", {} },
+    .{ "as", {} },            .{ "asm", {} },           .{ "asm_fragment", {} },
+    .{ "async", {} },         .{ "attribute", {} },     .{ "auto", {} },
+    .{ "await", {} },         .{ "become", {} },        .{ "binding_array", {} },
+    .{ "cast", {} },          .{ "catch", {} },         .{ "class", {} },
+    .{ "co_await", {} },      .{ "co_return", {} },     .{ "co_yield", {} },
+    .{ "coherent", {} },      .{ "column_major", {} },  .{ "common", {} },
+    .{ "compile", {} },       .{ "compile_fragment", {} }, .{ "concept", {} },
+    .{ "const_cast", {} },    .{ "consteval", {} },     .{ "constexpr", {} },
+    .{ "constinit", {} },     .{ "crate", {} },         .{ "debugger", {} },
+    .{ "decltype", {} },      .{ "delete", {} },        .{ "demote", {} },
+    .{ "demote_to_helper", {} }, .{ "do", {} },         .{ "dynamic_cast", {} },
+    .{ "enum", {} },          .{ "explicit", {} },      .{ "export", {} },
+    .{ "extends", {} },       .{ "extern", {} },        .{ "external", {} },
+    .{ "fallthrough", {} },   .{ "filter", {} },        .{ "final", {} },
+    .{ "finally", {} },       .{ "friend", {} },        .{ "from", {} },
+    .{ "fxgroup", {} },       .{ "get", {} },           .{ "goto", {} },
+    .{ "groupshared", {} },   .{ "highp", {} },         .{ "impl", {} },
+    .{ "implements", {} },    .{ "import", {} },        .{ "inline", {} },
+    .{ "instanceof", {} },    .{ "interface", {} },     .{ "layout", {} },
+    .{ "lowp", {} },          .{ "macro", {} },         .{ "macro_rules", {} },
+    .{ "match", {} },         .{ "mediump", {} },       .{ "meta", {} },
+    .{ "mod", {} },           .{ "module", {} },        .{ "move", {} },
+    .{ "mut", {} },           .{ "mutable", {} },       .{ "namespace", {} },
+    .{ "new", {} },           .{ "nil", {} },           .{ "noexcept", {} },
+    .{ "noinline", {} },      .{ "nointerpolation", {} }, .{ "non_coherent", {} },
+    .{ "noncoherent", {} },   .{ "noperspective", {} }, .{ "null", {} },
+    .{ "nullptr", {} },       .{ "of", {} },            .{ "operator", {} },
+    .{ "package", {} },       .{ "packoffset", {} },    .{ "partition", {} },
+    .{ "pass", {} },          .{ "patch", {} },         .{ "pixelfragment", {} },
+    .{ "precise", {} },       .{ "precision", {} },     .{ "premerge", {} },
+    .{ "priv", {} },          .{ "protected", {} },     .{ "pub", {} },
+    .{ "public", {} },        .{ "readonly", {} },      .{ "ref", {} },
+    .{ "regardless", {} },    .{ "register", {} },      .{ "reinterpret_cast", {} },
+    .{ "require", {} },       .{ "resource", {} },      .{ "restrict", {} },
+    .{ "self", {} },          .{ "set", {} },           .{ "shared", {} },
+    .{ "sizeof", {} },        .{ "smooth", {} },        .{ "snorm", {} },
+    .{ "static", {} },        .{ "static_assert", {} }, .{ "static_cast", {} },
+    .{ "std", {} },           .{ "subroutine", {} },    .{ "super", {} },
+    .{ "target", {} },        .{ "template", {} },      .{ "this", {} },
+    .{ "thread_local", {} },  .{ "throw", {} },         .{ "trait", {} },
+    .{ "try", {} },           .{ "type", {} },          .{ "typedef", {} },
+    .{ "typeid", {} },        .{ "typename", {} },      .{ "typeof", {} },
+    .{ "union", {} },         .{ "unless", {} },        .{ "unorm", {} },
+    .{ "unsafe", {} },        .{ "unsized", {} },       .{ "use", {} },
+    .{ "using", {} },         .{ "varying", {} },       .{ "virtual", {} },
+    .{ "volatile", {} },      .{ "wgsl", {} },          .{ "where", {} },
+    .{ "with", {} },          .{ "writeonly", {} },     .{ "yield", {} },
+    // Predeclared scalar / address-space / type names that are also illegal
+    // as identifiers — kept from the previous (pre-spec) list for back-compat.
+    .{ "array", {} },         .{ "atomic", {} },        .{ "bool", {} },
+    .{ "f16", {} },           .{ "f32", {} },           .{ "function", {} },
+    .{ "i32", {} },           .{ "mat2x2", {} },        .{ "mat2x3", {} },
+    .{ "mat2x4", {} },        .{ "mat3x2", {} },        .{ "mat3x3", {} },
+    .{ "mat3x4", {} },        .{ "mat4x2", {} },        .{ "mat4x3", {} },
+    .{ "mat4x4", {} },        .{ "private", {} },       .{ "ptr", {} },
+    .{ "storage", {} },       .{ "u32", {} },           .{ "uniform", {} },
+    .{ "vec2", {} },          .{ "vec3", {} },          .{ "vec4", {} },
+    .{ "workgroup", {} },
+});
+
 fn isWgslKeyword(name: []const u8) bool {
-    const reserved = [_][]const u8{ "fn", "let", "var", "const", "if", "else", "for", "while", "loop", "switch", "case", "default", "break", "continue", "return", "struct", "type", "true", "false", "discard", "enable", "override", "private", "storage", "uniform", "workgroup", "function", "array", "atomic", "bool", "f16", "f32", "i32", "u32", "mat2x2", "mat2x3", "mat2x4", "mat3x2", "mat3x3", "mat3x4", "mat4x2", "mat4x3", "mat4x4", "ptr", "vec2", "vec3", "vec4" };
-    for (&reserved) |kw| {
-        if (std.mem.eql(u8, name, kw)) return true;
-    }
-    return false;
+    return wgsl_reserved_words.has(name);
 }
 
 fn wgslSafeName(name: []const u8, buf: *[64]u8) []const u8 {
@@ -273,6 +347,20 @@ fn collectDecorations(alloc: std.mem.Allocator, module: *const ParsedModule, dec
 
 fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8)) void {
     common.collectNames(alloc, module, names);
+
+    // Post-process: rename OpName-sourced identifiers that collide with WGSL
+    // reserved words. We restrict to OpName ids (not constant ids) so we don't
+    // mangle `true`/`false` constant literals that share the names map.
+    // Struct member names (OpMemberName) are handled separately by getMemberName.
+    for (module.instructions) |inst| {
+        if (inst.op != .Name or inst.words.len < 3) continue;
+        const id = inst.words[1];
+        const current = names.get(id) orelse continue;
+        if (!isWgslKeyword(current)) continue;
+        const renamed = std.fmt.allocPrint(alloc, "{s}_", .{current}) catch continue;
+        if (names.fetchPut(id, renamed) catch null) |old| alloc.free(old.value);
+    }
+
     // Post-process: simplify uniform vector constructors like vec3f(0.0, 0.0, 0.0) → vec3f(0.0)
     var it = names.iterator();
     var replacements = std.ArrayList(struct { key: u32, val: []const u8 }).initCapacity(alloc, 16) catch return;
