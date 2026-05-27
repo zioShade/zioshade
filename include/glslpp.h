@@ -281,9 +281,9 @@ GLSLPP_API glslpp_status_t glslpp_to_glsl(
  * @param spirv_words        Pointer to SPIR-V words.
  * @param spirv_word_count   Number of 32-bit words.
  * @param metal_version      Target Metal version, packed as
- *                           major*10000 + minor*100 (e.g., 20000 = 2.0,
- *                           30000 = 3.0). See `spirv_to_msl.zig` for the
- *                           authoritative encoding.
+ *                           major*10 + minor (e.g., 21 = Metal 2.1,
+ *                           30 = Metal 3.0). Mirrors
+ *                           `spirv_to_msl.MslCompileOptions.metal_version`.
  * @param argument_buffers   Reserved for M6. The Metal argument-buffer
  *                           code path is not yet implemented; this
  *                           parameter is part of the ABI now to avoid a
