@@ -38,6 +38,53 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(cli_exe);
     cli_step.dependOn(&cli_exe.step);
 
+    // C ABI libraries (M7.2) — build with: zig build c-lib
+    //
+    // Produces both a static and a shared library so external consumers can
+    // pick whichever suits their distribution model. The shared variant gets
+    // a `_shared` suffix because on Windows both linkages emit a `.lib` file
+    // (the shared one is the import library beside its `.dll`), and the two
+    // would otherwise clobber each other in `zig-out/lib`. On ELF platforms
+    // the static would be `libglslpp_c.a` and the shared
+    // `libglslpp_c_shared.so`. Consumers pick the artifact they want.
+    const c_abi_mod = b.createModule(.{
+        .root_source_file = b.path("src/c_abi.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    c_abi_mod.addImport("glslpp", glslpp_mod);
+
+    const c_abi_shared_mod = b.createModule(.{
+        .root_source_file = b.path("src/c_abi.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    c_abi_shared_mod.addImport("glslpp", glslpp_mod);
+
+    const c_lib_step = b.step("c-lib", "Build glslpp C ABI shared + static libraries");
+    const c_static = b.addLibrary(.{
+        .name = "glslpp_c",
+        .root_module = c_abi_mod,
+        .linkage = .static,
+    });
+    const c_shared = b.addLibrary(.{
+        .name = "glslpp_c_shared",
+        .root_module = c_abi_shared_mod,
+        .linkage = .dynamic,
+    });
+    // Install only when the user explicitly asks for `zig build c-lib`,
+    // not on every default build — both artifacts are >1m to compile.
+    const install_c_static = b.addInstallArtifact(c_static, .{});
+    const install_c_shared = b.addInstallArtifact(c_shared, .{});
+    const install_c_headers = b.addInstallDirectory(.{
+        .source_dir = b.path("include"),
+        .install_dir = .header,
+        .install_subdir = "",
+    });
+    c_lib_step.dependOn(&install_c_static.step);
+    c_lib_step.dependOn(&install_c_shared.step);
+    c_lib_step.dependOn(&install_c_headers.step);
+
     const test_step = b.step("test", "Run all tests");
 
     const run_unit_tests = b.addRunArtifact(b.addTest(.{
@@ -154,6 +201,30 @@ pub fn build(b: *std.Build) void {
     }));
     diag_test_step.dependOn(&run_diag_tests.step);
     test_step.dependOn(&run_diag_tests.step);
+
+    // C ABI tests (M7.2) — run with: zig build test-c-abi
+    const c_abi_test_step = b.step("test-c-abi", "Run C ABI export-wrapper tests");
+    const c_abi_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/c_abi_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    c_abi_test_mod.addImport("glslpp", glslpp_mod);
+    // The tests need access to the c_abi module by name so they can call
+    // the exported wrappers directly.
+    const c_abi_test_inner_mod = b.createModule(.{
+        .root_source_file = b.path("src/c_abi.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    c_abi_test_inner_mod.addImport("glslpp", glslpp_mod);
+    c_abi_test_mod.addImport("c_abi", c_abi_test_inner_mod);
+    const run_c_abi_tests = b.addRunArtifact(b.addTest(.{
+        .name = "c-abi-tests",
+        .root_module = c_abi_test_mod,
+    }));
+    c_abi_test_step.dependOn(&run_c_abi_tests.step);
+    test_step.dependOn(&run_c_abi_tests.step);
 
     // Specialization-constant cross-compile tests (M3) — run with: zig build test-spec-const
     const spec_test_step = b.step("test-spec-const", "Run specialization-constant cross-compile tests");
