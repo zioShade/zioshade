@@ -451,6 +451,19 @@ pub fn build(b: *std.Build) void {
     }));
     test_step.dependOn(&run_mesh_reg_tests.step);
 
+    // Mesh codegen body tests (M5.2 v3 — OpStore emission for mesh outputs)
+    const mesh_codegen_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/mesh_codegen_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mesh_codegen_test_mod.addImport("glslpp", glslpp_mod);
+    const run_mesh_codegen_tests = b.addRunArtifact(b.addTest(.{
+        .name = "mesh-codegen-tests",
+        .root_module = mesh_codegen_test_mod,
+    }));
+    test_step.dependOn(&run_mesh_codegen_tests.step);
+
     // HLSL mesh signature tests (M5.2: [OutputTopology] + mesh<> signature)
     const hlsl_mesh_test_step = b.step("test-hlsl-mesh", "Run HLSL mesh signature tests");
     const hlsl_mesh_test_mod = b.createModule(.{
