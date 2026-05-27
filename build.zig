@@ -291,8 +291,13 @@ pub fn build(b: *std.Build) void {
     hlsl_test_step.dependOn(&run_hlsl_tests.step);
     test_step.dependOn(&run_hlsl_tests.step);
 
-    // DXC batch test — run with: zig build test-dxc
-    const dxc_test_step = b.step("test-dxc", "Run DXC compilation test on all SPIR-V → HLSL outputs");
+    // DXC batch test (M5.3) — run with: zig build test-dxc [-- <dxc> <spv_dir> <sm>]
+    // Stage-aware: detects each SPIR-V fixture's execution model and selects
+    // the matching DXC target profile (ps_*, cs_*, ms_*, as_*); stages we don't
+    // yet emit valid HLSL for (vertex/raygen/...) are reported as SKIP.
+    // Defaults: dxc=C:/VulkanSDK/.../dxc.exe, spv_dir=tests/spirv_bins, sm=60.
+    // Opt-in only: not wired into the main `test` step because it needs DXC.
+    const dxc_test_step = b.step("test-dxc", "Run DXC compilation test on all SPIR-V → HLSL outputs (stage-aware)");
     const dxc_test_mod = b.createModule(.{
         .root_source_file = b.path("tools/dxc_batch_test.zig"),
         .target = target,
@@ -304,6 +309,10 @@ pub fn build(b: *std.Build) void {
         .root_module = dxc_test_mod,
     });
     const run_dxc_test = b.addRunArtifact(dxc_exe);
+    // Forward extra `--` args so `zig build test-dxc -- <dxc> <spv_dir> <sm>` works.
+    if (b.args) |a| {
+        for (a) |arg| run_dxc_test.addArg(arg);
+    }
     dxc_test_step.dependOn(&run_dxc_test.step);
 
     // GLSL backend tests — run with: zig build test-glsl

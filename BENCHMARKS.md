@@ -60,3 +60,50 @@ This matches how most build pipelines actually integrate the C++ toolchain — `
 For wintty's startup sequence (10 shaders): subprocess approach would take ~1.8 s before the terminal renders a frame. glslpp turns that into ~10 ms. That's the original motivation — a real engineering constraint, not a microbenchmark.
 
 For your own project: if you compile shaders at build time (offline) the win is "fewer seconds of CMake friction." If you compile shaders at runtime (hot-reload, JIT specialization), the win is "this is actually viable now."
+
+## DXC validation snapshot (M5.3)
+
+End-to-end validation of glslpp's HLSL output: every SPIR-V fixture in
+`tests/spirv_bins/` is cross-compiled to HLSL, written to a temp file, and
+fed to `dxc.exe` with a per-stage target profile (`ps_*` / `cs_*` /
+`ms_*` / `as_*`) derived from the fixture's `OpEntryPoint` execution
+model. Stages glslpp does not yet emit valid HLSL for (vertex, raygen,
+geometry, tess, etc.) are reported as **SKIP** with a roadmap reference.
+
+> **Reproduce:** `zig build test-dxc [-- <dxc_path> <spv_dir> <sm>]` —
+> defaults to `C:/VulkanSDK/1.4.341.1/Bin/dxc.exe`, `tests/spirv_bins`,
+> SM `60`.
+
+**Snapshot — commit `b14d0429`, 2026-05-27, SM 6.0, DXC 1.10 (5180):**
+
+| Stage | PASS | FAIL | SKIP | Notes |
+|---|---:|---:|---:|---|
+| `fragment` | 47 | 4 | 0 | spirv-cross corpus, all pre-existing fixtures |
+| `compute`  |  0 | 1 | 0 | `compute_minimal.spv`, fails on SSBO subscript |
+| **Total**  | **47** | **5** | **0** | 52 fixtures processed |
+
+The corpus is **51 fragment + 1 compute** — no vertex/mesh/raytracing
+fixtures yet, so the per-stage SKIP buckets are empty. The infrastructure
+is in place; when M5.0 (vertex), M5.2 v2 (mesh), and ray-tracing
+fixtures are added, the tool will pick them up automatically.
+
+**Top failure reasons (DXC stderr, first 80 chars):**
+
+| Count | Error |
+|---:|---|
+| 3 | `error: invalid semantic 'SV_Barycentrics' for ps 6.0` |
+| 1 | `error: validation errors` |
+| 1 | `error: subscripted value is not an array, matrix, or vector` |
+
+- The three `SV_Barycentrics` failures (`barycentric-{khr,khr-io-block,nv}.spv`)
+  require SM 6.1+. They pass at `sm=61`; with default SM 6.0 they're
+  intentional dialect failures, not glslpp bugs.
+- `complex-expression-in-access-chain.spv` hits DXC's internal validator
+  (likely a row/column-major access-chain emit corner case).
+- `compute_minimal.spv` exposes an SSBO emit issue in the compute path —
+  glslpp's HLSL output writes `b.data[0]` against a struct without the
+  expected indexable representation. Filed for follow-up.
+
+Fragment pass rate: **47/51 = 92.2%**. The infrastructure is the
+deliverable; the four DXC-reported errors are real follow-ups (one
+glslpp emit bug, three "wrong target SM" sanity-check failures).
