@@ -462,6 +462,10 @@ pub const Qualifier = packed struct {
     is_hit_attribute: bool = false,
     is_callable_data: bool = false,
     is_incoming_callable_data: bool = false,
+    /// `perprimitiveEXT` (GL_EXT_mesh_shader) — marks a mesh-shader output as
+    /// per-primitive. Propagates to a SPIR-V `PerPrimitiveEXT` decoration so the
+    /// HLSL backend can route the variable into a `struct PrimOut`. (M5.2 v2.b)
+    is_perprimitive_ext: bool = false,
 };
 
 pub const InputTopology = enum { points, lines, lines_adjacency, triangles, triangles_adjacency };
