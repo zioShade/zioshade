@@ -100,6 +100,8 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .local_size = analyzer.local_size,
         .heap_types = try analyzer.heap_types.toOwnedSlice(alloc),
         .spec_constants = analyzer.spec_constants,
+        .spec_constant_ops = analyzer.spec_constant_ops,
+        .spec_op_literals = try analyzer.spec_op_literals.toOwnedSlice(alloc),
         .depth_greater = analyzer.has_depth_greater,
         .depth_less = analyzer.has_depth_less,
         .depth_unchanged = analyzer.has_depth_unchanged,
@@ -134,6 +136,8 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
     analyzer.globals = .empty;
     analyzer.heap_types = .empty;
     analyzer.spec_constants = .{};
+    analyzer.spec_constant_ops = .{};
+    analyzer.spec_op_literals = .empty;
     for (analyzer.instructions.items) |inst| {
         if (inst.operands.len > 0) {
             analyzer.alloc.free(inst.operands);
@@ -348,6 +352,15 @@ const Analyzer = struct {
     // Heap-allocated AST types that transfer to Module for cleanup
     heap_types: std.ArrayListUnmanaged(*ast.Type) = .empty,
     spec_constants: std.StringHashMapUnmanaged(ir.SpecConstant) = .{},
+    spec_constant_ops: std.StringArrayHashMapUnmanaged(ir.SpecConstantOp) = .{},
+    /// SSA result_ids that correspond to spec-derived constants. Used
+    /// when walking initializer expressions to detect spec-derived sub-
+    /// expressions and trigger OpSpecConstantOp emission.
+    spec_const_ids: std.AutoHashMapUnmanaged(u32, void) = .{},
+    /// Literal-const operands required by spec_constant_ops. Deduped by
+    /// (type_tag, value) via spec_op_literal_cache.
+    spec_op_literals: std.ArrayListUnmanaged(ir.SpecOpLiteralConst) = .empty,
+    spec_op_literal_cache: std.AutoHashMapUnmanaged(u64, u32) = .{},
     // Fragment execution mode flags
     has_early_fragment_tests: bool = false,
     has_pixel_interlock_ordered: bool = false,
@@ -429,6 +442,20 @@ const Analyzer = struct {
             }
             self.spec_constants.deinit(self.alloc);
         }
+        // Free owned name keys + operand_ids slices in spec_constant_ops (error path).
+        {
+            var sco_it = self.spec_constant_ops.iterator();
+            while (sco_it.next()) |entry| {
+                self.alloc.free(entry.key_ptr.*);
+                if (entry.value_ptr.operand_ids.len > 0) {
+                    self.alloc.free(entry.value_ptr.operand_ids);
+                }
+            }
+            self.spec_constant_ops.deinit(self.alloc);
+        }
+        self.spec_const_ids.deinit(self.alloc);
+        self.spec_op_literals.deinit(self.alloc);
+        self.spec_op_literal_cache.deinit(self.alloc);
         {
             var it = self.overloads.iterator();
             while (it.next()) |entry| {
@@ -462,6 +489,136 @@ const Analyzer = struct {
         const id = self.next_id;
         self.next_id += 1;
         return id;
+    }
+
+    /// Result of walking a const-initializer expression for M3.5 spec-derived
+    /// detection.
+    const SpecOpBuild = struct {
+        /// SSA id of the resulting value (an OpConstant, OpSpecConstant,
+        /// or OpSpecConstantOp).
+        id: u32,
+        ty: ast.Type,
+        /// True if the value transitively depends on any specialization
+        /// constant -- the caller turns the whole expression into an
+        /// OpSpecConstantOp.
+        is_spec_derived: bool,
+    };
+
+    /// Allocate (or reuse) an OpConstant operand for a literal node that
+    /// feeds into an OpSpecConstantOp. Deduped per (type_tag, value) so
+    /// the same OpConstant id is shared across multiple derived consts.
+    fn ensureSpecOpLiteral(self: *Analyzer, ty: ast.Type, value: u32) !u32 {
+        const tag: u32 = @intFromEnum(ty);
+        const key = (@as(u64, tag) << 32) | @as(u64, value);
+        if (self.spec_op_literal_cache.get(key)) |id| return id;
+        const id = self.allocId();
+        try self.spec_op_literals.append(self.alloc, .{
+            .result_id = id,
+            .type_tag = tag,
+            .value = value,
+        });
+        try self.spec_op_literal_cache.put(self.alloc, key, id);
+        return id;
+    }
+
+    /// Walk a const-initializer expression looking for spec-derived sub-
+    /// expressions (M3.5). On success returns a SpecOpBuild describing
+    /// the resulting value. Returns null when the expression is unsupported
+    /// (caller falls back to the normal const-global path, which would in
+    /// turn run normal constant folding / OpVariable emission).
+    ///
+    /// v1 scope: scalar int/uint/float over `+`/`-`/`*`/`/`. Vectors,
+    /// matrices, bools, unary ops, comparisons, and function calls are
+    /// out of scope and return null.
+    fn tryBuildSpecConstOp(self: *Analyzer, node: ast.Node) Error!?SpecOpBuild {
+        switch (node.tag) {
+            .int_literal => {
+                const val: u32 = @intCast(node.data.int_val);
+                const id = try self.ensureSpecOpLiteral(.int, val);
+                return .{ .id = id, .ty = .int, .is_spec_derived = false };
+            },
+            .uint_literal => {
+                const val: u32 = @intCast(node.data.int_val);
+                const id = try self.ensureSpecOpLiteral(.uint, val);
+                return .{ .id = id, .ty = .uint, .is_spec_derived = false };
+            },
+            .float_literal => {
+                const val: f32 = @floatCast(node.data.float_val);
+                const val_bits: u32 = @bitCast(val);
+                const id = try self.ensureSpecOpLiteral(.float, val_bits);
+                return .{ .id = id, .ty = .float, .is_spec_derived = false };
+            },
+            .group => {
+                if (node.data.children.len != 1) return null;
+                return self.tryBuildSpecConstOp(node.data.children[0]);
+            },
+            .identifier => {
+                const sym = self.lookup(node.data.name) orelse return null;
+                if (sym.kind != .var_sym) return null;
+                // The symbol must be SSA (spec consts and derived spec
+                // consts are declared with init_value set to their result_id).
+                const sssa_id = sym.init_value orelse return null;
+                if (!sym.is_ssa) return null;
+                const is_spec = self.spec_const_ids.contains(sssa_id);
+                return .{ .id = sssa_id, .ty = sym.ty, .is_spec_derived = is_spec };
+            },
+            .binary_op => {
+                if (node.data.children.len != 2) return null;
+                const op = node.data.op orelse return null;
+                const op_kind: enum { add, sub, mul, div } = switch (op) {
+                    .add => .add,
+                    .sub => .sub,
+                    .mul => .mul,
+                    .div => .div,
+                    else => return null,
+                };
+                const left = try self.tryBuildSpecConstOp(node.data.children[0]) orelse return null;
+                const right = try self.tryBuildSpecConstOp(node.data.children[1]) orelse return null;
+                const is_spec = left.is_spec_derived or right.is_spec_derived;
+                if (!is_spec) return null; // Pure-literal expressions stay on the normal fold path.
+                // v1: both operands must share a scalar arithmetic type.
+                if (!std.meta.eql(left.ty, right.ty)) return null;
+                const result_ty = left.ty;
+                const is_int_family = result_ty == .int or result_ty == .uint;
+                const is_float_family = result_ty == .float;
+                if (!is_int_family and !is_float_family) return null;
+                // Map (op, family) -> SPIR-V opcode.
+                // IAdd=128, FAdd=129, ISub=130, FSub=131, IMul=132, FMul=133,
+                // SDiv=135, FDiv=136.
+                const spirv_opcode: u32 = if (is_float_family) switch (op_kind) {
+                    .add => @as(u32, 129),
+                    .sub => @as(u32, 131),
+                    .mul => @as(u32, 133),
+                    .div => @as(u32, 136),
+                } else switch (op_kind) {
+                    .add => @as(u32, 128),
+                    .sub => @as(u32, 130),
+                    .mul => @as(u32, 132),
+                    // SDiv works for both int and uint (the result is identical
+                    // for non-negative operands; we keep the codegen single-
+                    // sourced here per the M3.5 v1 plan).
+                    .div => @as(u32, 135),
+                };
+                const result_id = self.allocId();
+                const operand_ids = try self.alloc.alloc(u32, 2);
+                operand_ids[0] = left.id;
+                operand_ids[1] = right.id;
+                // Key the spec_constant_ops entry by a unique synthetic
+                // name. The user-facing name is bound in the symbol table
+                // separately at the var_decl site; intermediate sub-
+                // expressions don't need a user-visible name.
+                const key_name = try std.fmt.allocPrint(self.alloc, ".specop.{d}", .{result_id});
+                try self.spec_constant_ops.put(self.alloc, key_name, .{
+                    .result_id = result_id,
+                    .type_tag = @intFromEnum(result_ty),
+                    .spirv_opcode = spirv_opcode,
+                    .operand_ids = operand_ids,
+                });
+                try self.spec_const_ids.put(self.alloc, result_id, {});
+                return .{ .id = result_id, .ty = result_ty, .is_spec_derived = true };
+            },
+            else => return null,
+        }
     }
 
     /// Ensure a TypedId is uint type, converting from int if needed
@@ -1409,8 +1566,45 @@ const Analyzer = struct {
                                 .component_literals = owned_lits,
                                 .type_tag = @intFromEnum(sc_ty),
                             });
+                            // Track the scalar spec const result_id so derived-
+                            // expression detection (M3.5) can flag references to it.
+                            if (!is_composite) {
+                                try self.spec_const_ids.put(self.alloc, sc_ir_id, {});
+                            }
                             return; // Don't create a global variable
                         }
+                    }
+                }
+                // M3.5: const declarations whose initializer transitively
+                // depends on a specialization constant lower to
+                // OpSpecConstantOp instead of becoming a normal global
+                // variable. The walker returns null when the expression
+                // is unsupported (non-scalar, non-arithmetic, etc.) or
+                // when no spec const participates -- both cases fall
+                // through to the regular const-global path below.
+                if (node.tag == .var_decl and node.data.qualifier != null and
+                    node.data.qualifier.?.is_const and
+                    node.data.name.len > 0 and
+                    node.data.children.len > 0)
+                {
+                    if (self.tryBuildSpecConstOp(node.data.children[0])) |maybe_build| {
+                        if (maybe_build) |build| {
+                            if (build.is_spec_derived) {
+                                // Declare the user-facing name as an SSA symbol
+                                // mapped to the derived const's result_id.
+                                try self.declare(node.data.name, .{
+                                    .kind = .var_sym,
+                                    .ty = build.ty,
+                                    .ir_id = build.id,
+                                    .init_value = build.id,
+                                    .is_ssa = true,
+                                });
+                                return; // No global variable / no IR instruction.
+                            }
+                        }
+                    } else |_| {
+                        // On error (alloc failure etc.), let the normal path
+                        // try -- it will surface a meaningful error if any.
                     }
                 }
                 const ir_id = self.allocId();

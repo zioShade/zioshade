@@ -25,6 +25,39 @@ pub const SpecConstant = struct {
     type_tag: u32,
 };
 
+/// Derived specialization-constant expression: const int X = SIZE * 2;
+/// emits an OpSpecConstantOp (opcode 52) that the consumer re-evaluates
+/// at pipeline-creation time whenever any leaf spec constant is overridden.
+/// result_id is the SSA id assigned to the derived const so that
+/// references in shader code resolve to it directly.
+pub const SpecConstantOp = struct {
+    /// SSA id of the derived const itself.
+    result_id: u32,
+    /// AST type tag of the result (matches operand types -- v1 limits scope
+    /// to scalar arithmetic so all operands share this type).
+    type_tag: u32,
+    /// SPIR-V opcode applied to the operands. v1 emits one of:
+    /// IAdd(128), FAdd(129), ISub(130), FSub(131), IMul(132), FMul(133),
+    /// SDiv(135), FDiv(136).
+    spirv_opcode: u32,
+    /// IDs of the operands. Each must already be a regular OpConstant or
+    /// a spec constant / derived spec constant emitted earlier. Owned
+    /// slice; freed in `Module.deinit`.
+    operand_ids: []const u32,
+};
+
+/// Literal constants required by spec_constant_ops operands. Semantic emits
+/// an entry per literal (deduped by type+value); codegen lowers each to an
+/// OpConstant before the OpSpecConstantOp consumers, and also populates the
+/// codegen-side emitted_constants cache so function-body references reuse
+/// the same SSA id.
+pub const SpecOpLiteralConst = struct {
+    result_id: u32,
+    type_tag: u32,
+    /// For int/uint/bool: raw u32 value. For float: f32 bit-pattern.
+    value: u32,
+};
+
 pub const Module = struct {
     functions: []const Function,
     globals: []const Global,
@@ -36,6 +69,13 @@ pub const Module = struct {
     // Heap-allocated AST types that must be freed with the module
     heap_types: []*ast.Type = &.{},
     spec_constants: std.StringHashMapUnmanaged(SpecConstant) = .{},
+    /// Derived spec-const expressions: keyed by GLSL identifier; insertion-
+    /// ordered so codegen can emit them in their natural dependency order
+    /// (operands always refer to earlier entries or to scalar spec consts).
+    spec_constant_ops: std.StringArrayHashMapUnmanaged(SpecConstantOp) = .{},
+    /// Literal-constant operands referenced by spec_constant_ops. Owned;
+    /// freed in Module.deinit. Order doesn't matter (codegen scans by value).
+    spec_op_literals: []const SpecOpLiteralConst = &.{},
     // Fragment shader depth / early test flags
     depth_greater: bool = false,
     depth_less: bool = false,
@@ -96,6 +136,20 @@ pub const Module = struct {
             }
         }
         self.spec_constants.deinit(self.alloc);
+        // Free spec_constant_ops keys and operand_ids slices
+        {
+            var sco_iter = self.spec_constant_ops.iterator();
+            while (sco_iter.next()) |entry| {
+                self.alloc.free(entry.key_ptr.*);
+                if (entry.value_ptr.operand_ids.len > 0) {
+                    self.alloc.free(entry.value_ptr.operand_ids);
+                }
+            }
+        }
+        self.spec_constant_ops.deinit(self.alloc);
+        if (self.spec_op_literals.len > 0) {
+            self.alloc.free(self.spec_op_literals);
+        }
         // Free heap-allocated AST types
         for (self.heap_types) |ptr| {
             self.alloc.destroy(ptr);
