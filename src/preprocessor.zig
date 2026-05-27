@@ -983,6 +983,7 @@ pub const Preprocessor = struct {
                                          std.mem.eql(u8, ext_name, "GL_KHR_ray_tracing") or
                                          std.mem.eql(u8, ext_name, "GL_ARB_fragment_shader_interlock") or
                                          std.mem.eql(u8, ext_name, "GL_EXT_scalar_block_layout") or
+                                         std.mem.eql(u8, ext_name, "GL_EXT_buffer_reference") or
                                          std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_basic") or
                                          std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_vote") or
                                          std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_arithmetic") or
