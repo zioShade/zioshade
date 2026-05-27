@@ -479,26 +479,31 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
 
     // Emit specialization constants as MSL constant declarations
     for (module.instructions) |inst| {
-        if (inst.op == .SpecConstant and inst.words.len > 3) {
-            const result_id = inst.words[2];
-            const name = names.get(result_id) orelse continue;
-            const type_id = inst.words[1];
-            const type_str = try mslType(&module, type_id, &names, aa);
-            const spec_id: ?u32 = blk: {
-                const dec_list = decs.get(result_id) orelse break :blk null;
-                for (dec_list.items) |d| {
-                    if (d.decoration == .spec_id and d.extra.len > 0) break :blk d.extra[0];
-                }
-                break :blk null;
-            };
-            if (spec_id) |sid| {
-                const default_val = if (inst.words.len > 3) inst.words[3] else 0;
-                if (std.mem.eql(u8, type_str, "float")) {
-                    const fv: f32 = @bitCast(default_val);
-                    try w.print("constant {s} {s} [[function_constant({d})]] = {d};\n", .{type_str, name, sid, fv});
-                } else {
-                    try w.print("constant {s} {s} [[function_constant({d})]] = {d};\n", .{type_str, name, sid, default_val});
-                }
+        const is_scalar_sc = inst.op == .SpecConstant and inst.words.len > 3;
+        const is_bool_sc = (inst.op == .SpecConstantTrue or inst.op == .SpecConstantFalse) and inst.words.len > 2;
+        if (!is_scalar_sc and !is_bool_sc) continue;
+        const result_id = inst.words[2];
+        const name = names.get(result_id) orelse continue;
+        const type_id = inst.words[1];
+        const type_str = try mslType(&module, type_id, &names, aa);
+        const spec_id: ?u32 = blk: {
+            const dec_list = decs.get(result_id) orelse break :blk null;
+            for (dec_list.items) |d| {
+                if (d.decoration == .spec_id and d.extra.len > 0) break :blk d.extra[0];
+            }
+            break :blk null;
+        };
+        const sid = spec_id orelse continue;
+        if (is_bool_sc) {
+            const bool_val: []const u8 = if (inst.op == .SpecConstantTrue) "true" else "false";
+            try w.print("constant bool {s} [[function_constant({d})]] = {s};\n", .{ name, sid, bool_val });
+        } else {
+            const default_val = inst.words[3];
+            if (std.mem.eql(u8, type_str, "float")) {
+                const fv: f32 = @bitCast(default_val);
+                try w.print("constant {s} {s} [[function_constant({d})]] = {d};\n", .{ type_str, name, sid, fv });
+            } else {
+                try w.print("constant {s} {s} [[function_constant({d})]] = {d};\n", .{ type_str, name, sid, default_val });
             }
         }
     }
@@ -583,7 +588,7 @@ fn findEntryPoint(module: *const ParsedModule, name: []const u8) ?u32 {
 fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
     return switch(op) {
         .TypeVoid,.TypeBool,.TypeInt,.TypeFloat,.TypeVector,.TypeMatrix,.TypeImage,.TypeSampler,.TypeSampledImage,.TypeArray,.TypeRuntimeArray,.TypeStruct,.TypePointer,.TypeFunction,.TypeForwardPointer,.TypeAccelerationStructureKHR,.TypeRayQueryKHR,.TypeTensorARM => if(words.len>1) words[1] else null,
-        .ConstantTrue,.ConstantFalse,.Constant,.ConstantComposite,.SpecConstant,.Undef => if(words.len>2) words[2] else null,
+        .ConstantTrue,.ConstantFalse,.Constant,.ConstantComposite,.SpecConstant,.SpecConstantTrue,.SpecConstantFalse,.SpecConstantComposite,.SpecConstantOp,.Undef => if(words.len>2) words[2] else null,
         .Variable,.Function,.FunctionParameter => if(words.len>2) words[2] else null,
         .Load,.AccessChain,.CompositeConstruct,.CompositeExtract,.CompositeInsert,.VectorShuffle,.SampledImage,.ImageSampleImplicitLod,.ImageSampleExplicitLod,.ImageFetch,.ImageGather,.ImageQuerySizeLod,.ImageQuerySize,.ImageTexelPointer,.FunctionCall,.CopyObject,.Phi,.ConvertFToS,.ConvertSToF,.ConvertUToF,.ConvertFToU,.UConvert,.SConvert,.FConvert,.Bitcast,.SNegate,.FNegate,.IAdd,.FAdd,.ISub,.FSub,.IMul,.FMul,.UDiv,.SDiv,.FDiv,.UMod,.SRem,.SMod,.FRem,.FMod,.VectorTimesScalar,.MatrixTimesScalar,.VectorTimesMatrix,.MatrixTimesVector,.MatrixTimesMatrix,.Dot,.Transpose,.OuterProduct,.Select,.LogicalOr,.LogicalAnd,.LogicalNot,.IEqual,.INotEqual,.UGreaterThan,.SGreaterThan,.UGreaterThanEqual,.SGreaterThanEqual,.ULessThan,.SLessThan,.ULessThanEqual,.SLessThanEqual,.FOrdEqual,.FOrdNotEqual,.FOrdLessThan,.FOrdGreaterThan,.FOrdLessThanEqual,.FOrdGreaterThanEqual,.FUnordEqual,.FUnordNotEqual,.FUnordLessThan,.FUnordGreaterThan,.FUnordLessThanEqual,.FUnordGreaterThanEqual,.ShiftRightLogical,.ShiftRightArithmetic,.ShiftLeftLogical,.BitwiseOr,.BitwiseXor,.BitwiseAnd,.Not,.BitReverse,.BitCount,.IsNan,.IsInf,.All,.Any,.DPdx,.DPdy,.Fwidth,.DPdxFine,.DPdyFine,.FwidthFine,.DPdxCoarse,.DPdyCoarse,.FwidthCoarse,.VectorExtractDynamic,.ExtInst,.OpImage,.AtomicIAdd,.AtomicISub,.AtomicExchange,.AtomicSMin,.AtomicUMin,.AtomicSMax,.AtomicUMax,.AtomicAnd,.AtomicOr,.AtomicXor,.AtomicCompareExchange,.AtomicFAddEXT,.ImageSampleDrefImplicitLod,.ImageSampleDrefExplicitLod,.ImageSampleProjImplicitLod,.ImageSampleProjExplicitLod,.ImageDrefGather,.ImageQueryLod,.ImageQueryLevels,.ImageQuerySamples,.ImageRead => if(words.len>2) words[2] else null,
         else => null,

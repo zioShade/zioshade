@@ -137,7 +137,8 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
 
         // Constants: type=word[1], result=word[2]
         .ConstantTrue, .ConstantFalse, .Constant, .ConstantComposite,
-        .SpecConstant, .Undef,
+        .SpecConstant, .SpecConstantTrue, .SpecConstantFalse,
+        .SpecConstantComposite, .SpecConstantOp, .Undef,
         => if (words.len > 2) words[2] else null,
 
         // Variable/Function/Param: type=word[1], result=word[2]
@@ -440,37 +441,38 @@ pub fn spirvToHLSL(
     }
     detectOutParams(&module, entry_id, &out_param_info, aa);
 
-    // Emit specialization constants as HLSL static const declarations
+    // Emit specialization constants as HLSL [[vk::constant_id(N)]] const declarations.
+    // DXC's SPIR-V code path turns these into real OpSpecConstants; for DXIL (pure
+    // D3D12) the attribute is ignored and they behave as compile-time constants.
     for (module.instructions) |inst| {
-        if (inst.op == .SpecConstant and inst.words.len > 3) {
-            const result_id = inst.words[2];
-            const name = names.get(result_id) orelse continue;
-            const type_id = inst.words[1];
-            const type_str = try hlslType(&module, type_id, &names, aa);
-            const spec_id: ?u32 = blk: {
-                const dec_list = decorations.get(result_id) orelse break :blk null;
-                for (dec_list.items) |d| {
-                    if (d.decoration == .spec_id and d.extra.len > 0) break :blk d.extra[0];
-                }
-                break :blk null;
-            };
-            if (spec_id) |sid| {
-                const default_val = if (inst.words.len > 3) inst.words[3] else 0;
-                // Emit DXC-recognized `[[vk::constant_id(N)]]` attribute on a
-                // `const` declaration. DXC's SPIR-V code path turns this into
-                // a real `OpSpecConstant` when targeting Vulkan. For DXIL
-                // (pure D3D12) the attribute is ignored and the value behaves
-                // as a normal compile-time constant — matches SPIRV-Cross's
-                // emission.
-                if (std.mem.eql(u8, type_str, "float")) {
-                    const fv: f32 = @bitCast(default_val);
-                    try w.print("[[vk::constant_id({d})]] const {s} {s} = {d};\n", .{ sid, type_str, name, fv });
-                } else if (std.mem.eql(u8, type_str, "int")) {
-                    const iv: i32 = @bitCast(default_val);
-                    try w.print("[[vk::constant_id({d})]] const {s} {s} = {d};\n", .{ sid, type_str, name, iv });
-                } else {
-                    try w.print("[[vk::constant_id({d})]] const {s} {s} = {d};\n", .{ sid, type_str, name, default_val });
-                }
+        const is_scalar_sc = inst.op == .SpecConstant and inst.words.len > 3;
+        const is_bool_sc = (inst.op == .SpecConstantTrue or inst.op == .SpecConstantFalse) and inst.words.len > 2;
+        if (!is_scalar_sc and !is_bool_sc) continue;
+        const result_id = inst.words[2];
+        const name = names.get(result_id) orelse continue;
+        const type_id = inst.words[1];
+        const type_str = try hlslType(&module, type_id, &names, aa);
+        const spec_id: ?u32 = blk: {
+            const dec_list = decorations.get(result_id) orelse break :blk null;
+            for (dec_list.items) |d| {
+                if (d.decoration == .spec_id and d.extra.len > 0) break :blk d.extra[0];
+            }
+            break :blk null;
+        };
+        const sid = spec_id orelse continue;
+        if (is_bool_sc) {
+            const bool_val: []const u8 = if (inst.op == .SpecConstantTrue) "true" else "false";
+            try w.print("[[vk::constant_id({d})]] const bool {s} = {s};\n", .{ sid, name, bool_val });
+        } else {
+            const default_val = inst.words[3];
+            if (std.mem.eql(u8, type_str, "float")) {
+                const fv: f32 = @bitCast(default_val);
+                try w.print("[[vk::constant_id({d})]] const {s} {s} = {d};\n", .{ sid, type_str, name, fv });
+            } else if (std.mem.eql(u8, type_str, "int")) {
+                const iv: i32 = @bitCast(default_val);
+                try w.print("[[vk::constant_id({d})]] const {s} {s} = {d};\n", .{ sid, type_str, name, iv });
+            } else {
+                try w.print("[[vk::constant_id({d})]] const {s} {s} = {d};\n", .{ sid, type_str, name, default_val });
             }
         }
     }
