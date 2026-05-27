@@ -421,6 +421,22 @@ pub const Type = union(enum) {
     pub fn samplerResultType(self: Type) Type {
         return self.samplerBaseType().toVec4();
     }
+
+    /// True for GLSL `image*D` family — storage images that emit
+    /// `OpTypeImage` with Sampled=2 and a meaningful Format operand.
+    pub fn isStorageImage(self: Type) bool {
+        return switch (self) {
+            .image2d, .iimage2d, .uimage2d,
+            .image_buffer, .iimage_buffer, .uimage_buffer,
+            .image2d_ms, .image2d_ms_array,
+            .image1d, .iimage1d, .uimage1d,
+            .image3d, .iimage3d, .uimage3d,
+            .image_cube, .iimage_cube, .uimage_cube,
+            .image2d_array, .iimage2d_array, .uimage2d_array,
+            .image_cube_array, .iimage_cube_array, .uimage_cube_array => true,
+            else => false,
+        };
+    }
 };
 
 pub const Qualifier = packed struct {
@@ -452,6 +468,17 @@ pub const InputTopology = enum { points, lines, lines_adjacency, triangles, tria
 
 pub const OutputTopology = enum { triangles, lines, points };
 pub const TessSpacing = enum { equal, fractional_even, fractional_odd };
+
+/// SPIR-V image format qualifier. Values map 1:1 to the SPIR-V `Image Format`
+/// enum (Unknown=0, Rgba32f=1, ..., R8ui=39). Used for storage-image
+/// `layout(rgbaN) image2D` qualifiers.
+pub const ImageFormat = enum {
+    rgba32f, rgba16f, r32f, rgba8, rgba8_snorm,
+    rg32f, rg16f, r11f_g11f_b10f, r16f, rgba16, rgb10_a2, rg16, rg8, r16, r8,
+    rgba16_snorm, rg16_snorm, rg8_snorm, r16_snorm, r8_snorm,
+    rgba32i, rgba16i, rgba8i, r32i, rg32i, rg16i, rg8i, r16i, r8i,
+    rgba32ui, rgba16ui, rgba8ui, r32ui, rgb10_a2ui, rg32ui, rg16ui, rg8ui, r16ui, r8ui,
+};
 
 pub const Layout = struct {
     location: ?u32 = null,
@@ -492,6 +519,10 @@ pub const Layout = struct {
     vertex_order_cw: bool = false,
     isolines: bool = false,
     quads: bool = false,
+    /// SPIR-V storage-image format (from `layout(rgbaN) image*D`). `null` when
+    /// the GLSL source didn't specify a format qualifier (codegen falls back to
+    /// `Unknown`).
+    image_format: ?ImageFormat = null,
 };
 
 pub const StructMember = struct {
