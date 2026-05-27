@@ -119,16 +119,23 @@ const wgsl_reserved_words = std.StaticStringMap(void).initComptime(.{
     .{ "storage", {} },       .{ "u32", {} },           .{ "uniform", {} },
     .{ "vec2", {} },          .{ "vec3", {} },          .{ "vec4", {} },
     .{ "workgroup", {} },
+    // Predeclared texture / sampler types (§ Texture Types, § Sampler Types).
+    // Not strictly reserved by the spec, but shadowing them produces output
+    // that confuses naga's diagnostics and may break under future revisions.
+    .{ "sampler", {} },                  .{ "sampler_comparison", {} },
+    .{ "texture_1d", {} },               .{ "texture_2d", {} },
+    .{ "texture_2d_array", {} },         .{ "texture_3d", {} },
+    .{ "texture_cube", {} },             .{ "texture_cube_array", {} },
+    .{ "texture_multisampled_2d", {} },  .{ "texture_depth_2d", {} },
+    .{ "texture_depth_2d_array", {} },   .{ "texture_depth_cube", {} },
+    .{ "texture_depth_cube_array", {} }, .{ "texture_depth_multisampled_2d", {} },
+    .{ "texture_storage_1d", {} },       .{ "texture_storage_2d", {} },
+    .{ "texture_storage_2d_array", {} }, .{ "texture_storage_3d", {} },
+    .{ "texture_external", {} },
 });
 
 fn isWgslKeyword(name: []const u8) bool {
     return wgsl_reserved_words.has(name);
-}
-
-fn wgslSafeName(name: []const u8, buf: *[64]u8) []const u8 {
-    if (!isWgslKeyword(name)) return name;
-    const result = std.fmt.bufPrint(buf, "{s}_", .{name}) catch return name;
-    return buf[0..result.len];
 }
 
 /// Marks a struct member as the target of WGSL atomic ops.
@@ -142,7 +149,10 @@ const AtomicFieldMap = std.AutoHashMap(AtomicFieldKey, AtomicFieldKind);
 fn getMemberName(module: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
     const raw = common.commonGetMemberName(module.instructions, struct_id, member_idx, buf, "_");
     if (!isWgslKeyword(raw)) return raw;
-    // Keyword conflict: append _ to the existing buffer
+    // Keyword conflict: append `_` to the existing buffer.
+    // commonGetMemberName caps raw.len at buf.len - 1 (= 31), so the
+    // suffix always fits in buf[raw.len]. The bounds check is a safety net
+    // for future relaxations of that cap.
     if (raw.len + 1 <= buf.len) {
         buf[raw.len] = '_';
         return buf[0 .. raw.len + 1];
@@ -178,6 +188,14 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
             // TypePointer to TypeStruct — never emit the pointee struct, and
             // naga rejects the WGSL with
             // `no definition in scope for identifier: <pointee>`.
+            //
+            // Depth cap of 8 protects against pathological cycles in
+            // malformed SPIR-V. Realistic wrapper chains are 1–3 deep
+            // (e.g. `TypePointer → TypeRuntimeArray → TypeStruct`); hitting
+            // 8 means the input is adversarial. On overflow we silently
+            // skip emitting the pointee, which re-introduces the
+            // FloatRef-class diagnostic from naga — informative enough to
+            // diagnose without us adding error-handling at this layer.
             var cur_id = mt_id;
             var depth: u32 = 0;
             while (depth < 8) : (depth += 1) {
@@ -363,12 +381,30 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
     common.collectNames(alloc, module, names);
 
     // Post-process: rename OpName-sourced identifiers that collide with WGSL
-    // reserved words. We restrict to OpName ids (not constant ids) so we don't
-    // mangle `true`/`false` constant literals that share the names map.
-    // Struct member names (OpMemberName) are handled separately by getMemberName.
+    // reserved words. Struct member names (OpMemberName) are handled
+    // separately by getMemberName.
+    //
+    // Critical: OpName can target a constant id, and common.collectNames
+    // also overwrites names[constant_id] with the constant's *literal text*
+    // ("true", "false", "1.0", composite-constructor string, ...). Because
+    // OpName precedes constants in the SPIR-V binary layout, the literal
+    // wins in the map. Renaming naively would corrupt the literal — e.g.
+    // `const bool ENABLED = true;` would emit `if (true_) { ... }`, which
+    // naga rejects as an unknown identifier. glslpp's own frontend only
+    // attaches OpName to globals/functions/spec-constants, but external
+    // SPIR-V (glslang, hand-crafted) freely names plain constants, so the
+    // skip is required for `spirvToWGSL` as a public API.
     for (module.instructions) |inst| {
         if (inst.op != .Name or inst.words.len < 3) continue;
         const id = inst.words[1];
+        const target = getDef(module, id) orelse continue;
+        switch (target.op) {
+            .Constant, .ConstantTrue, .ConstantFalse, .ConstantComposite,
+            .SpecConstant, .SpecConstantTrue, .SpecConstantFalse,
+            .SpecConstantComposite, .SpecConstantOp,
+            => continue,
+            else => {},
+        }
         const current = names.get(id) orelse continue;
         if (!isWgslKeyword(current)) continue;
         const renamed = std.fmt.allocPrint(alloc, "{s}_", .{current}) catch continue;
