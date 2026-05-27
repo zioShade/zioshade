@@ -355,3 +355,107 @@ test "M3.6: SpecOverride non-matching spec_id is silently ignored" {
     try std.testing.expect(found_orig);
 }
 
+
+// -- M3.5: OpSpecConstantOp for derived spec const expressions ----------
+
+test "M3.5 SPIR-V: int*const emits OpSpecConstantOp" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(constant_id=1) const int SIZE = 4;
+        \\const int DOUBLE = SIZE * 2;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(float(DOUBLE)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    var found = false;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        const op = spirv[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == 52) {
+            found = true;
+            break;
+        }
+        i += wc;
+    }
+    try std.testing.expect(found);
+}
+
+test "M3.5 SPIR-V: nested expression emits two OpSpecConstantOp" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(constant_id=1) const int SIZE = 4;
+        \\const int QUAD = SIZE * 2 * 2;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(float(QUAD)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    var count: u32 = 0;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        const op = spirv[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == 52) count += 1;
+        i += wc;
+    }
+    try std.testing.expectEqual(@as(u32, 2), count);
+}
+
+test "M3.5 SPIR-V: all four arithmetic ops emit OpSpecConstantOp" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(constant_id=1) const int A = 4;
+        \\const int ADD = A + 1;
+        \\const int SUB = A - 1;
+        \\const int MUL = A * 2;
+        \\const int DIV = A / 2;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(float(ADD + SUB + MUL + DIV)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    var count: u32 = 0;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        const op = spirv[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == 52) count += 1;
+        i += wc;
+    }
+    try std.testing.expect(count >= 4);
+}
+
+test "M3.5 GLSL: cross-compile preserves derived const as expression" {
+    // The GLSL backend uses an auto-generated name (e.g. v1) for the
+    // leaf spec const since codegen does not currently emit OpName for
+    // spec consts (also documented in the M3.2 HLSL test). Confirm the
+    // backend renders the binary operator rather than folding to a
+    // literal -- i.e. that an expression `<lhs> * <something>` survives
+    // the round-trip.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(constant_id=1) const int SIZE = 4;
+        \\const int DOUBLE = SIZE * 2;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(float(DOUBLE)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    defer alloc.free(glsl);
+    // Expect the leaf spec const to be declared `layout(constant_id = 1) const int <name> = 4;`
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "layout(constant_id = 1)") != null);
+    // And the derived value to be expressed -- some emitted backend
+    // should at least retain a `*` and the leaf-const name (auto-named
+    // `v1` etc., so we only check for the operator and the constant).
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "*") != null);
+}

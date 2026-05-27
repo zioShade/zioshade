@@ -67,7 +67,7 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         49 => rt(2, ""),           // OpSpecConstantFalse
         50 => rt(2, "l"),          // OpSpecConstant
         51 => rt(2, "I"),          // OpSpecConstantComposite: constituents...
-        52 => rt(2, "lL"),         // OpSpecConstantOp: opcode literal + operand literals (conservative)
+        52 => rt(2, "lI"),         // OpSpecConstantOp: literal opcode then variable-length IDs (M3.5)
         // --- Function ---
         54 => rt(2, "li"),         // OpFunction: control, func-type
         55 => rt(2, ""),           // OpFunctionParameter

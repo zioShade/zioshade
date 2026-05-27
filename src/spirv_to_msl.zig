@@ -572,6 +572,29 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         }
         try w.writeAll(");\n");
     }
+    // M3.5: emit OpSpecConstantOp as derived const expressions. MSL's
+    // SPIRV-Cross compatible idiom is `constant T X = a OP b;` -- the
+    // value is computed at function-constant binding time when MSL
+    // materialises function_constants.
+    for (module.instructions) |inst| {
+        if (inst.op != .SpecConstantOp or inst.words.len != 6) continue;
+        const type_id = inst.words[1];
+        const result_id = inst.words[2];
+        const opcode_lit = inst.words[3];
+        const name = names.get(result_id) orelse continue;
+        const type_str = try mslType(&module, type_id, &names, aa);
+        const op_str: ?[]const u8 = switch (opcode_lit) {
+            128, 129 => @as([]const u8, "+"),
+            130, 131 => @as([]const u8, "-"),
+            132, 133 => @as([]const u8, "*"),
+            134, 135, 136 => @as([]const u8, "/"),
+            else => null,
+        };
+        const op = op_str orelse continue;
+        const op0 = names.get(inst.words[4]) orelse continue;
+        const op1 = names.get(inst.words[5]) orelse continue;
+        try w.print("constant {s} {s} = {s} {s} {s};\n", .{ type_str, name, op0, op, op1 });
+    }
     try w.writeAll("\n");
 
     // Emit struct declarations for types used as local variables
