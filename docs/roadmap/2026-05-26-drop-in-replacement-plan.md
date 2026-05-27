@@ -1204,13 +1204,13 @@ Confirmed entirely missing. This is the biggest single unlock for non-Zig adopte
 - Modify: `tests/external/README.md` (or create) — instructions for fetching a public WGSL test corpus
 - Modify: `tests/realworld_tests.zig` — if needed
 
-- [ ] **Step 1: Audit current `tests/external/` directory state**
+- [x] **Step 1: Audit current `tests/external/` directory state** — empty (.gitignore swallowed everything).
 
-- [ ] **Step 2: Either add real shaders directly (small set) or add a fetch script that pulls a known corpus (e.g., a few canonical Naga test cases or a curated subset of SPIRV-Cross fixtures)**
+- [x] **Step 2: Either add real shaders directly (small set) or add a fetch script that pulls a known corpus** — hand-authored 13 shaders covering fragment/vertex/compute, sampler2D, MRT, derivatives, attributes, SSBO write, shared memory, atomicAdd, spec const loop bound, GL_EXT_buffer_reference, GL_EXT_scalar_block_layout. SPDX-licensed (MIT OR Apache-2.0). See `tests/external/README.md`.
 
-- [ ] **Step 3: Verify `mise exec -- zig build test-realworld` actually runs naga validation against multiple shaders. Record the pass rate. Add to TEST_COVERAGE.md.**
+- [x] **Step 3: Verify `mise exec -- zig build test-realworld` actually runs naga validation against multiple shaders. Record the pass rate. Add to TEST_COVERAGE.md.** — extended the runner to test all 4 cross-compile backends + naga; snapshot in `docs/realworld-corpus.md`. SPIR-V/GLSL/HLSL/MSL/WGSL all pass 13/13; naga passes 11/13 (atomicAdd needs `atomic<u32>` wrapping; `ref` is a WGSL reserved keyword — two real WGSL backend gaps surfaced).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ---
 

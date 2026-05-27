@@ -1,2 +1,9 @@
+# Only track the curated corpus (shaders + README). Anything else (downloaded
+# corpora, transient fetches by fetch_more_shaders.py, etc.) stays untracked.
 *
 !.gitignore
+!README.md
+!*.frag
+!*.vert
+!*.comp
+!*.glsl
