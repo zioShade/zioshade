@@ -76,3 +76,34 @@ test "buffer_reference WGSL backend escapes ref reserved keyword" {
         return error.WgslReservedKeywordEmitted;
     }
 }
+
+// M8.5 regression: WGSL backend must forward-declare the buffer_reference
+// pointee struct. Before, `emitOneStructForwardDecl` only recursed through
+// TypeArray member types, missing TypePointer — so the field
+// `ref_: FloatRef,` was emitted without a corresponding `struct FloatRef`,
+// and naga rejected the WGSL with `no definition in scope for identifier:
+// FloatRef`.
+test "buffer_reference WGSL backend emits pointee struct declaration" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\#extension GL_EXT_buffer_reference : require
+        \\layout(buffer_reference, std430) readonly buffer FloatRef { float v; };
+        \\layout(set=0, binding=0) uniform U { FloatRef ref; } u;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(u.ref.v); }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    const wgsl = try glslpp.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+
+    if (std.mem.indexOf(u8, wgsl, "struct FloatRef") == null) {
+        std.debug.print(
+            "WGSL output references FloatRef but never declares it:\n{s}\n",
+            .{wgsl},
+        );
+        return error.WgslMissingPointeeStruct;
+    }
+}
