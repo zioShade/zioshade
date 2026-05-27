@@ -3541,6 +3541,63 @@ const Codegen = struct {
             // as indices (which is illegal in SPIR-V).
             // Spec constant references are resolved via constant_alias in codegen.
         }
+        // M3.5: emit literal-const operands for OpSpecConstantOp (these
+        // are regular OpConstants that any OpSpecConstantOp may reference
+        // alongside spec consts). Cache them in emitted_constants so any
+        // function-body reference to the same value reuses the id.
+        for (self.module.spec_op_literals) |lit| {
+            const TypeTagL = @typeInfo(ast.Type).@"union".tag_type.?;
+            const tagL: TypeTagL = @enumFromInt(lit.type_tag);
+            const tyL: ast.Type = switch (tagL) {
+                .int => .int,
+                .uint => .uint,
+                .float => .float,
+                else => .int,
+            };
+            const type_id_L = try self.ensureType(tyL);
+            const cache_key_L = (@as(u64, type_id_L) << 32) | @as(u64, lit.value);
+            if (self.emitted_constants.get(cache_key_L)) |existing| {
+                if (lit.result_id != existing) {
+                    try self.constant_alias.put(self.alloc, lit.result_id, existing);
+                }
+            } else {
+                try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Constant)));
+                try self.emitTypeWord(type_id_L);
+                try self.emitTypeWord(lit.result_id);
+                try self.emitTypeWord(lit.value);
+                try self.emitted_constants.put(self.alloc, cache_key_L, lit.result_id);
+            }
+        }
+        // M3.5: emit OpSpecConstantOp instructions. Operands always come
+        // from earlier-emitted spec consts / spec const ops / literal
+        // consts, so the insertion-ordered StringArrayHashMap gives the
+        // correct topological order (semantic builds inner expressions
+        // before outer ones, so a forward iteration is dependency-safe).
+        var sco_iter = self.module.spec_constant_ops.iterator();
+        while (sco_iter.next()) |entry| {
+            const sco = entry.value_ptr.*;
+            const TypeTagS = @typeInfo(ast.Type).@"union".tag_type.?;
+            const tagS: TypeTagS = @enumFromInt(sco.type_tag);
+            const tyS: ast.Type = switch (tagS) {
+                .int => .int,
+                .uint => .uint,
+                .float => .float,
+                else => .int,
+            };
+            const result_type_id = try self.ensureType(tyS);
+            const n_ops: u16 = @intCast(sco.operand_ids.len);
+            // wc = 4 + N (header + result_type + result_id + opcode-literal + N operands)
+            const wc: u16 = 4 + n_ops;
+            try self.emitTypeWord(spirv.encodeInstructionHeader(wc, @intFromEnum(spirv.Op.SpecConstantOp)));
+            try self.emitTypeWord(result_type_id);
+            try self.emitTypeWord(sco.result_id);
+            try self.emitTypeWord(sco.spirv_opcode);
+            for (sco.operand_ids) |op_id| {
+                // Resolve constant_alias in case an operand was deduped.
+                const real_id = if (self.constant_alias.get(op_id)) |aliased| aliased else op_id;
+                try self.emitTypeWord(real_id);
+            }
+        }
         // Pre-scan ALL function bodies for constants and emit them.
         // This ensures constants defined in one function are available when
         // referenced by another function (cross-function const_cache reuse).
