@@ -25,6 +25,8 @@ const Instruction = struct {
     words: []const u32,
 };
 
+const MeshTopology = enum { triangles, lines, points };
+
 const ParsedModule = struct {
     instructions: []const Instruction,
     id_defs: []const ?usize,
@@ -32,6 +34,9 @@ const ParsedModule = struct {
     execution_model: spirv.ExecutionModel = .Fragment,
     local_size: [3]u32 = [3]u32{ 1, 1, 1 },
     early_fragment_tests: bool = false,
+    mesh_topology: ?MeshTopology = null,
+    mesh_max_vertices: ?u32 = null,
+    mesh_max_primitives: ?u32 = null,
 
     pub fn deinit(self: *ParsedModule, alloc: std.mem.Allocator) void {
         // instructions was allocated via ArrayList.initCapacity
@@ -105,6 +110,22 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
             }
             if (mode == .EarlyFragmentTests) {
                 module.early_fragment_tests = true;
+            }
+            // Mesh shader execution modes (M5.2)
+            if (mode == .OutputTrianglesEXT) {
+                module.mesh_topology = .triangles;
+            } else if (mode == .OutputLinesEXT) {
+                module.mesh_topology = .lines;
+            } else if (mode == .OutputPoints) {
+                // OutputPoints (27) is shared with geometry shaders; only treat as
+                // mesh topology when the entry point is a mesh shader.
+                if (module.execution_model == .MeshEXT) {
+                    module.mesh_topology = .points;
+                }
+            } else if (mode == .OutputVertices and inst.words.len >= 4) {
+                module.mesh_max_vertices = inst.words[3];
+            } else if (mode == .OutputPrimitivesEXT and inst.words.len >= 4) {
+                module.mesh_max_primitives = inst.words[3];
             }
         }
     }
@@ -1437,8 +1458,12 @@ fn emitFunction(
             module.local_size[1],
             module.local_size[2],
         });
-        // TODO: emit [OutputTopology("triangle")] and mesh<> signature
-        // For now, emit as compute-like
+        const topo_str: []const u8 = if (module.mesh_topology) |t| switch (t) {
+            .triangles => "triangle",
+            .lines => "line",
+            .points => "point",
+        } else "triangle";
+        try w.print("[OutputTopology(\"{s}\")]\n", .{topo_str});
     }
     if (is_rt) {
         if (module.local_size[0] > 1 or module.local_size[1] > 1 or module.local_size[2] > 1) {
@@ -1679,6 +1704,60 @@ fn emitFunction(
                 }
             }
         }
+    }
+
+    // Mesh shader: emit thread builtins + `out vertices`/`out indices` signature (M5.2)
+    if (is_mesh) {
+        const max_verts = module.mesh_max_vertices orelse blk: {
+            std.debug.assert(false); // SPIR-V mesh shader missing OutputVertices
+            break :blk 64;
+        };
+        const max_prims = module.mesh_max_primitives orelse blk: {
+            std.debug.assert(false); // SPIR-V mesh shader missing OutputPrimitivesEXT
+            break :blk 64;
+        };
+        const prim_index_type: []const u8 = if (module.mesh_topology) |t| switch (t) {
+            .triangles => "uint3",
+            .lines => "uint2",
+            .points => "uint",
+        } else "uint3";
+
+        // Collect per-vertex outputs: Output storage class, has Location decoration,
+        // not built-in. For v1 we expect a single per-vertex output; if absent we
+        // emit a placeholder float4 to keep the signature syntactically valid.
+        var mesh_out_var_id: ?u32 = null;
+        var mesh_out_elem_type_id: u32 = 0;
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc != .Output) continue;
+            const vid = inst.words[2];
+            if (getDecorationValue(decorations, vid, .built_in) != null) continue;
+            // Resolve pointee → expect TypeArray of element type
+            const pointee = resolvePointeeType(module, vid) orelse continue;
+            const pt_inst = getDef(module, pointee) orelse continue;
+            if (pt_inst.op == .TypeArray and pt_inst.words.len > 2) {
+                mesh_out_var_id = vid;
+                mesh_out_elem_type_id = pt_inst.words[2];
+                break;
+            }
+        }
+
+        if (!first_input) try w.writeAll(", ");
+        first_input = false;
+        try w.writeAll("uint3 tid : SV_DispatchThreadID");
+        try w.writeAll(", uint3 gtid : SV_GroupThreadID");
+        try w.writeAll(", uint3 gid : SV_GroupID");
+
+        if (mesh_out_var_id) |vid| {
+            const elem_type = try hlslType(module, mesh_out_elem_type_id, names, alloc);
+            const vname = names.get(vid) orelse "verts";
+            try w.print(", out vertices {s} {s}[{d}]", .{ elem_type, vname, max_verts });
+        } else {
+            // No per-vertex output — emit a placeholder so the signature is still mesh-like.
+            try w.print(", out vertices float4 verts[{d}]", .{max_verts});
+        }
+        try w.print(", out indices {s} prims[{d}]", .{ prim_index_type, max_prims });
     }
 
     const has_mrt = is_fragment and output_vars.items.len > 1;
