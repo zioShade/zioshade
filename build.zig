@@ -425,6 +425,21 @@ pub fn build(b: *std.Build) void {
     }));
     test_step.dependOn(&run_mesh_reg_tests.step);
 
+    // HLSL mesh signature tests (M5.2: [OutputTopology] + mesh<> signature)
+    const hlsl_mesh_test_step = b.step("test-hlsl-mesh", "Run HLSL mesh signature tests");
+    const hlsl_mesh_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/hlsl_mesh_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hlsl_mesh_test_mod.addImport("glslpp", glslpp_mod);
+    const run_hlsl_mesh_tests = b.addRunArtifact(b.addTest(.{
+        .name = "hlsl-mesh-tests",
+        .root_module = hlsl_mesh_test_mod,
+    }));
+    hlsl_mesh_test_step.dependOn(&run_hlsl_mesh_tests.step);
+    test_step.dependOn(&run_hlsl_mesh_tests.step);
+
     // Ray tracing pipeline tests
     const ray_tracing_test_step = b.step("test-ray-tracing", "Run ray tracing pipeline tests");
     const ray_tracing_test_mod = b.createModule(.{
