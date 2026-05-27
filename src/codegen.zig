@@ -3827,62 +3827,43 @@ const Codegen = struct {
         for (self.module.globals) |global| {
             if (global.result_id == 0) continue; // Skip unassigned globals
 
-            // Mesh shader per-vertex outputs must be arrays in SPIR-V
-            var needs_array = false;
-            var array_size: u32 = 0;
-            if (global.storage_class == .output and self.module.mesh_max_vertices != null) {
-                if (std.mem.eql(u8, global.name, "gl_MeshPerVertexEXT")) {
-                    needs_array = true;
-                    array_size = self.module.mesh_max_vertices.?;
-                }
-            }
-            if (global.storage_class == .output and self.module.mesh_max_primitives != null) {
-                if (std.mem.eql(u8, global.name, "gl_PrimitiveTriangleIndicesEXT") or
-                    std.mem.eql(u8, global.name, "gl_PrimitiveLineIndicesEXT") or
-                    std.mem.eql(u8, global.name, "gl_PrimitivePointIndicesEXT"))
-                {
-                    needs_array = true;
-                    array_size = self.module.mesh_max_primitives.?;
+            // NOTE: M5.2 v3 — the mesh-shader per-vertex/per-primitive builtins
+            // (gl_MeshPerVertexEXT, gl_PrimitiveTriangleIndicesEXT, …) used
+            // to be wrapped into OpTypeArray here at codegen time because
+            // semantic registered them as scalar types. Semantic now
+            // registers them as proper `.array` types sized from the parsed
+            // layout, so the generic ensurePointerType path emits the right
+            // OpTypeArray for free. Wrapping again here would double-wrap.
+            //
+            // User-declared mesh outputs (`layout(location=N) out vec4 foo[];`)
+            // arrive with array size 0 (the GLSL `[]` syntax = unsized in
+            // source, deferred to layout). For Vulkan they must be sized
+            // arrays — OpTypeRuntimeArray is not allowed for plain Output
+            // storage class. Patch the size from the mesh layout here
+            // (max_vertices for per-vertex outputs, max_primitives for
+            // perprimitiveEXT-qualified outputs).
+            var effective_ty = global.ty;
+            var patched_array: ast.Type = undefined;
+            var patched_base: ast.Type = undefined;
+            if (global.storage_class == .output and effective_ty == .array and effective_ty.array.size == 0) {
+                const mesh_size: ?u32 = if (global.qualifier.is_perprimitive_ext)
+                    self.module.mesh_max_primitives
+                else
+                    self.module.mesh_max_vertices;
+                if (mesh_size) |sz| {
+                    // Construct a sized copy on the stack — only used for
+                    // ensurePointerType below, so the slice lifetime is fine.
+                    patched_base = effective_ty.array.base.*;
+                    patched_array = .{ .array = .{ .base = &patched_base, .size = sz } };
+                    effective_ty = patched_array;
                 }
             }
 
-            if (needs_array) {
-                // Emit: %arr = OpTypeArray %base_type %const_size
-                //        %ptr = OpTypePointer Output %arr
-                //        OpVariable %ptr Output
-                const base_type_id = try self.ensureType(global.ty);
-                const size_const_id = try self.emitIntConstant(array_size);
-                const arr_key = (@as(u64, base_type_id) << 32) | @as(u64, array_size);
-                const arr_type_id = if (self.emitted_array_types.get(arr_key)) |cached| cached else blk: {
-                    const aid = self.allocId();
-                    try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeArray)));
-                    try self.emitTypeWord(aid);
-                    try self.emitTypeWord(base_type_id);
-                    try self.emitTypeWord(size_const_id);
-                    try self.emitted_array_types.put(self.alloc, arr_key, aid);
-                    break :blk aid;
-                };
-                const ptr_key = (@as(u64, arr_type_id) << 32) | @as(u64, @intFromEnum(global.storage_class));
-                const ptr_type_id = if (self.emitted_ptr_types.get(ptr_key)) |cached| cached else blk: {
-                    const pid = self.allocId();
-                    try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
-                    try self.emitTypeWord(pid);
-                    try self.emitTypeWord(@intFromEnum(global.storage_class));
-                    try self.emitTypeWord(arr_type_id);
-                    try self.emitted_ptr_types.put(self.alloc, ptr_key, pid);
-                    break :blk pid;
-                };
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Variable)));
-                try self.emitWord(ptr_type_id);
-                try self.emitWord(global.result_id);
-                try self.emitWord(@intFromEnum(global.storage_class));
-            } else {
-                const ptr_type_id = try self.ensurePointerType(global.ty, global.storage_class);
-                try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Variable)));
-                try self.emitWord(ptr_type_id);
-                try self.emitWord(global.result_id);
-                try self.emitWord(@intFromEnum(global.storage_class));
-            }
+            const ptr_type_id = try self.ensurePointerType(effective_ty, global.storage_class);
+            try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Variable)));
+            try self.emitWord(ptr_type_id);
+            try self.emitWord(global.result_id);
+            try self.emitWord(@intFromEnum(global.storage_class));
         }
     }
 
