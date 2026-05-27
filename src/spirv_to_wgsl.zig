@@ -916,6 +916,35 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
     }
 
+    // Emit specialization constants as `@id(N) override NAME: TYPE = DEFAULT;`.
+    // WGSL spec-const syntax (override declaration) requires the @id attribute
+    // to precede the `override` keyword and applies only to scalar types
+    // (bool / i32 / u32 / f32). Composite spec consts would require M3.4.
+    var sc_emitted_any = false;
+    for (module.instructions) |sc_inst| {
+        if (sc_inst.op == .SpecConstant and sc_inst.words.len > 3) {
+            const result_id = sc_inst.words[2];
+            const name = names.get(result_id) orelse continue;
+            const type_id = sc_inst.words[1];
+            const type_str = try wgslType(&module, type_id, &names, arena);
+            const sid = getDecVal(&decorations, result_id, .spec_id) orelse continue;
+            const default_val = sc_inst.words[3];
+            // Format default per type: f32 needs decimal, i32/u32 don't.
+            if (std.mem.eql(u8, type_str, "f32")) {
+                const fv: f32 = @bitCast(default_val);
+                try w.print("@id({d}) override {s}: {s} = {d};\n", .{ sid, name, type_str, fv });
+            } else if (std.mem.eql(u8, type_str, "i32")) {
+                const iv: i32 = @bitCast(default_val);
+                try w.print("@id({d}) override {s}: {s} = {d};\n", .{ sid, name, type_str, iv });
+            } else {
+                // u32 / fallback
+                try w.print("@id({d}) override {s}: {s} = {d}u;\n", .{ sid, name, type_str, default_val });
+            }
+            sc_emitted_any = true;
+        }
+    }
+    if (sc_emitted_any) try w.writeAll("\n");
+
     // Emit non-entry functions first
     var func_ids = std.ArrayList(u32).initCapacity(arena, 8) catch return error.OutOfMemory;
     var func_idx_map = std.AutoHashMap(u32, usize).init(arena);

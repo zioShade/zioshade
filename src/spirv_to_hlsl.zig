@@ -456,11 +456,20 @@ pub fn spirvToHLSL(
             };
             if (spec_id) |sid| {
                 const default_val = if (inst.words.len > 3) inst.words[3] else 0;
+                // Emit DXC-recognized `[[vk::constant_id(N)]]` attribute on a
+                // `const` declaration. DXC's SPIR-V code path turns this into
+                // a real `OpSpecConstant` when targeting Vulkan. For DXIL
+                // (pure D3D12) the attribute is ignored and the value behaves
+                // as a normal compile-time constant — matches SPIRV-Cross's
+                // emission.
                 if (std.mem.eql(u8, type_str, "float")) {
                     const fv: f32 = @bitCast(default_val);
-                    try w.print("// specialization constant {d}\nstatic const {s} {s} = {d};\n", .{sid, type_str, name, fv});
+                    try w.print("[[vk::constant_id({d})]] const {s} {s} = {d};\n", .{ sid, type_str, name, fv });
+                } else if (std.mem.eql(u8, type_str, "int")) {
+                    const iv: i32 = @bitCast(default_val);
+                    try w.print("[[vk::constant_id({d})]] const {s} {s} = {d};\n", .{ sid, type_str, name, iv });
                 } else {
-                    try w.print("// specialization constant {d}\nstatic const {s} {s} = {d};\n", .{sid, type_str, name, default_val});
+                    try w.print("[[vk::constant_id({d})]] const {s} {s} = {d};\n", .{ sid, type_str, name, default_val });
                 }
             }
         }
