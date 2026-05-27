@@ -760,7 +760,29 @@ Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default va
 
 ## Milestone 5 — HLSL polish
 
+### Task 5.0 (NEW, prerequisite to 5.1) — Implement vertex shader entry-point signature
+
+**Status (2026-05-27):** Discovered during M5.1 attempt. The HLSL backend currently emits vertex shaders as `void main() { ...; gl_Position = ...; return; }` — no input/output struct, no semantics, `gl_Position` is a bare global. DXC will reject this. This is a load-bearing gap, not a polish issue.
+
+**Files:**
+- Modify: `src/spirv_to_hlsl.zig` — extend the entry-signature dispatch (line ~1437) to handle `.Vertex` execution model.
+- Test: extend `tests/hlsl_tests.zig` or add `tests/hlsl_vertex_tests.zig`.
+
+**What's needed:**
+1. Collect `Input` and `Output` storage-class variables (already done for other stages — find the existing helper).
+2. Build vertex `void main(InVertex i, out OutVertex o)` style signature with semantics:
+   - Per-location `TEXCOORD<n>` for non-builtin input/output locations
+   - `gl_Position` output → `SV_Position` (or `POSITION` under SM 5.0; see Task 5.1 below)
+   - Other vertex builtins (`gl_VertexID`, `gl_InstanceID`) → matching SV_ semantics
+3. Rewrite the body so writes to former-globals route into the `out` struct.
+
+This is roughly the same scope as M5.2's mesh signature work — probably 1–2 days.
+
 ### Task 5.1: HLSL SM 5.0 differentiated output (POSITION not SV_Position)
+
+**Status (2026-05-27):** BLOCKED on Task 5.0 above. The string-swap is one helper function; the real work is implementing vertex signature emission first. Once Task 5.0 lands, M5.1 reduces to a `posSemantic(shader_model)` helper called from the new vertex signature emit point.
+
+
 
 **Files:**
 - Modify: `src/spirv_to_hlsl.zig` — branch on `options.shader_model`
