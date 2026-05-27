@@ -284,6 +284,23 @@ pub fn build(b: *std.Build) void {
     wpack_test_step.dependOn(&run_wpack_tests.step);
     test_step.dependOn(&run_wpack_tests.step);
 
+    // Semantic-level bitfield built-in tests — run with: zig build test-bitfield-builtin
+    // Covers GLSL 400+ `bitfieldInsert` and `bitfieldExtract` (signed + unsigned)
+    // including vector forms. Complements wgsl_packing_bitfield_tests (which
+    // hand-crafts SPIR-V) by exercising the real semantic path end-to-end.
+    const bitfield_test_step = b.step("test-bitfield-builtin", "Run GLSL bitfield built-in (bitfieldInsert/bitfieldExtract) tests");
+    const bitfield_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/bitfield_builtin_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bitfield_test_mod.addImport("glslpp", glslpp_mod);
+    const run_bitfield_tests = b.addRunArtifact(b.addTest(.{
+        .root_module = bitfield_test_mod,
+    }));
+    bitfield_test_step.dependOn(&run_bitfield_tests.step);
+    test_step.dependOn(&run_bitfield_tests.step);
+
     const run_hlsl_tests = b.addRunArtifact(b.addTest(.{
         .name = "hlsl-tests",
         .root_module = hlsl_test_mod,
