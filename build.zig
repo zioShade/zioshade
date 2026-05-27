@@ -155,6 +155,20 @@ pub fn build(b: *std.Build) void {
     diag_test_step.dependOn(&run_diag_tests.step);
     test_step.dependOn(&run_diag_tests.step);
 
+    // Specialization-constant cross-compile tests (M3) — run with: zig build test-spec-const
+    const spec_test_step = b.step("test-spec-const", "Run specialization-constant cross-compile tests");
+    const spec_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/spec_const_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    spec_test_mod.addImport("glslpp", glslpp_mod);
+    const run_spec_tests = b.addRunArtifact(b.addTest(.{
+        .root_module = spec_test_mod,
+    }));
+    spec_test_step.dependOn(&run_spec_tests.step);
+    test_step.dependOn(&run_spec_tests.step);
+
     const run_hlsl_tests = b.addRunArtifact(b.addTest(.{
         .name = "hlsl-tests",
         .root_module = hlsl_test_mod,
