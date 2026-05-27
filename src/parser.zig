@@ -454,6 +454,11 @@ const Parser = struct {
                     } else if (std.mem.eql(u8, ident_text, "incomingCallableDataEXT")) {
                         q.is_incoming_callable_data = true;
                         _ = self.advance(); found = true;
+                    } else if (std.mem.eql(u8, ident_text, "perprimitiveEXT")) {
+                        // GL_EXT_mesh_shader: marks an `out` variable as
+                        // per-primitive rather than per-vertex.
+                        q.is_perprimitive_ext = true;
+                        _ = self.advance(); found = true;
                     } else break;
                 },
                 else => break,

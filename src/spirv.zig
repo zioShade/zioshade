@@ -438,6 +438,9 @@ pub const Decoration = enum(u32) {
     spec_id = 1,
     per_vertex_khr = 4285,
     per_vertex_nv = 5285,
+    /// `PerPrimitiveEXT` — GL_EXT_mesh_shader per-primitive output marker.
+    /// Spec value 5271. (M5.2 v2.b)
+    per_primitive_ext = 5271,
     _,
 };
 

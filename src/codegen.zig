@@ -2999,6 +2999,12 @@ const Codegen = struct {
             if (global.qualifier.is_noperspective and (global.storage_class == .input or global.storage_class == .output)) {
                 try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.no_perspective));
             }
+            // Emit PerPrimitiveEXT decoration for perprimitiveEXT-qualified
+            // mesh-shader output variables. (M5.2 v2.b — required so the HLSL
+            // backend can distinguish per-vertex vs per-primitive outputs.)
+            if (global.qualifier.is_perprimitive_ext and global.storage_class == .output) {
+                try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.per_primitive_ext));
+            }
             // Emit NonWritable/NonReadable/Coherent/Restrict for buffer and image variables
             if (global.storage_class == .storage_buffer) {
                 if (global.qualifier.is_readonly) {

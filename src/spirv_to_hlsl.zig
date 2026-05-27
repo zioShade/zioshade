@@ -1638,7 +1638,96 @@ fn emitFunction(
             module.local_size[2],
         });
     }
+    // -------------------------------------------------------------------------
+    // Mesh stage: emit `struct VertexOut` (and optional `struct PrimOut`) so
+    // the entry-point signature can reference them. (M5.2 v2.a / v2.b)
+    //
+    // Per-vertex outputs go into `VertexOut`; outputs decorated `PerPrimitiveEXT`
+    // go into `PrimOut`. We always seed `VertexOut` with a `gl_Position :
+    // SV_Position` field because DXC requires every mesh per-vertex output
+    // element to carry a position. Body store routing (v2.c) is out of scope
+    // for the M5.2 v2 baseline — the test contract only checks signature shape.
+    // -------------------------------------------------------------------------
+    const MeshField = struct {
+        id: u32,
+        orig_name: []const u8,
+        elem_type_id: u32,
+        location: ?u32,
+    };
+    var mesh_vtx_fields = std.ArrayList(MeshField).initCapacity(alloc, 4) catch return error.OutOfMemory;
+    defer mesh_vtx_fields.deinit(alloc);
+    var mesh_prim_fields = std.ArrayList(MeshField).initCapacity(alloc, 4) catch return error.OutOfMemory;
+    defer mesh_prim_fields.deinit(alloc);
+
     if (is_mesh) {
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc != .Output) continue;
+            const vid = inst.words[2];
+            // Skip built-ins (Position etc.) — gl_Position is injected explicitly.
+            if (getDecorationValue(decorations, vid, .built_in) != null) continue;
+            // Mesh outputs are GLSL arrays implicitly sized to max_vertices /
+            // max_primitives — they materialise in SPIR-V as either
+            // TypeArray (sized) or TypeRuntimeArray (unsized).
+            const pointee = resolvePointeeType(module, vid) orelse continue;
+            const pt_inst = getDef(module, pointee) orelse continue;
+            var elem_type_id: u32 = 0;
+            if (pt_inst.op == .TypeArray and pt_inst.words.len > 2) {
+                elem_type_id = pt_inst.words[2];
+            } else if (pt_inst.op == .TypeRuntimeArray and pt_inst.words.len > 2) {
+                elem_type_id = pt_inst.words[2];
+            } else {
+                continue;
+            }
+            const orig = names.get(vid) orelse "var";
+            const loc = getDecorationValue(decorations, vid, .location);
+            const fld = MeshField{
+                .id = vid,
+                .orig_name = orig,
+                .elem_type_id = elem_type_id,
+                .location = loc,
+            };
+            if (hasDecoration(decorations, vid, .per_primitive_ext)) {
+                mesh_prim_fields.append(alloc, fld) catch {};
+            } else {
+                mesh_vtx_fields.append(alloc, fld) catch {};
+            }
+        }
+        // Stable sort by location (no location → last).
+        const MeshSort = struct {
+            fn lessThan(_: void, a: MeshField, b: MeshField) bool {
+                const al = a.location orelse std.math.maxInt(u32);
+                const bl = b.location orelse std.math.maxInt(u32);
+                return al < bl;
+            }
+        };
+        std.sort.insertion(MeshField, mesh_vtx_fields.items, {}, MeshSort.lessThan);
+        std.sort.insertion(MeshField, mesh_prim_fields.items, {}, MeshSort.lessThan);
+
+        // Emit `struct VertexOut`. Always include `gl_Position : SV_Position`
+        // as the first field (DXC requires it on the per-vertex output element).
+        try w.writeAll("struct VertexOut\n{\n");
+        try w.print("    float4 gl_Position : {s};\n", .{posSemantic(shader_model)});
+        for (mesh_vtx_fields.items, 0..) |fld, i| {
+            const tname = try hlslType(module, fld.elem_type_id, names, alloc);
+            // Use COLOR<N> for arbitrary per-vertex user data — matches
+            // spirv-cross / fxc convention and keeps DXC happy.
+            try w.print("    {s} {s} : COLOR{d};\n", .{ tname, fld.orig_name, i });
+        }
+        try w.writeAll("};\n\n");
+
+        // Emit `struct PrimOut` only when at least one per-primitive output
+        // exists. Empty struct is invalid HLSL and DXC complains.
+        if (mesh_prim_fields.items.len > 0) {
+            try w.writeAll("struct PrimOut\n{\n");
+            for (mesh_prim_fields.items, 0..) |fld, i| {
+                const tname = try hlslType(module, fld.elem_type_id, names, alloc);
+                try w.print("    {s} {s} : COLOR{d};\n", .{ tname, fld.orig_name, i });
+            }
+            try w.writeAll("};\n\n");
+        }
+
         try w.print("[numthreads({d}, {d}, {d})]\n", .{
             module.local_size[0],
             module.local_size[1],
@@ -1897,7 +1986,9 @@ fn emitFunction(
         }
     }
 
-    // Mesh shader: emit thread builtins + `out vertices`/`out indices` signature (M5.2)
+    // Mesh shader: emit thread builtins + `out vertices`/`out indices`
+    // signature, plus optional `out primitives` parameter for per-primitive
+    // outputs. (M5.2 v2.a / v2.b)
     if (is_mesh) {
         const max_verts = module.mesh_max_vertices orelse blk: {
             std.debug.assert(false); // SPIR-V mesh shader missing OutputVertices
@@ -1916,42 +2007,23 @@ fn emitFunction(
             break :blk "uint3";
         };
 
-        // Collect per-vertex outputs: Output storage class, has Location decoration,
-        // not built-in. For v1 we expect a single per-vertex output; if absent we
-        // emit a placeholder float4 to keep the signature syntactically valid.
-        var mesh_out_var_id: ?u32 = null;
-        var mesh_out_elem_type_id: u32 = 0;
-        for (module.instructions) |inst| {
-            if (inst.op != .Variable or inst.words.len < 4) continue;
-            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-            if (sc != .Output) continue;
-            const vid = inst.words[2];
-            if (getDecorationValue(decorations, vid, .built_in) != null) continue;
-            // Resolve pointee → expect TypeArray of element type
-            const pointee = resolvePointeeType(module, vid) orelse continue;
-            const pt_inst = getDef(module, pointee) orelse continue;
-            if (pt_inst.op == .TypeArray and pt_inst.words.len > 2) {
-                mesh_out_var_id = vid;
-                mesh_out_elem_type_id = pt_inst.words[2];
-                break;
-            }
-        }
-
         if (!first_input) try w.writeAll(", ");
         first_input = false;
         try w.writeAll("uint3 tid : SV_DispatchThreadID");
         try w.writeAll(", uint3 gtid : SV_GroupThreadID");
         try w.writeAll(", uint3 gid : SV_GroupID");
 
-        if (mesh_out_var_id) |vid| {
-            const elem_type = try hlslType(module, mesh_out_elem_type_id, names, alloc);
-            const vname = names.get(vid) orelse "verts";
-            try w.print(", out vertices {s} {s}[{d}]", .{ elem_type, vname, max_verts });
-        } else {
-            // No per-vertex output — emit a placeholder so the signature is still mesh-like.
-            try w.print(", out vertices float4 verts[{d}]", .{max_verts});
-        }
+        // `out vertices VertexOut verts[max_vertices]` — references the
+        // VertexOut struct emitted earlier in the file.
+        try w.print(", out vertices VertexOut verts[{d}]", .{max_verts});
+        // `out indices <topology-shape> prims[max_primitives]` — topology
+        // index buffer (uint3 for triangles, uint2 for lines, uint for points).
         try w.print(", out indices {s} prims[{d}]", .{ prim_index_type, max_prims });
+        // `out primitives PrimOut prims_data[max_primitives]` — only when
+        // `perprimitiveEXT`-decorated outputs exist.
+        if (mesh_prim_fields.items.len > 0) {
+            try w.print(", out primitives PrimOut prims_data[{d}]", .{max_prims});
+        }
     }
 
     const has_mrt = is_fragment and output_vars.items.len > 1;
