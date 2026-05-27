@@ -16,12 +16,17 @@ pub const Instruction = struct {
     words: []const u32,
 };
 
+pub const MeshTopology = enum { triangles, lines, points };
+
 pub const ParsedModule = struct {
     instructions: []const Instruction,
     id_defs: []const ?usize,
     entry_point_id: ?u32 = null,
     execution_model: spirv.ExecutionModel = .Fragment,
     local_size: [3]u32 = [3]u32{ 1, 1, 1 },
+    mesh_topology: ?MeshTopology = null,
+    mesh_max_vertices: ?u32 = null,
+    mesh_max_primitives: ?u32 = null,
 
     pub fn deinit(self: *ParsedModule, alloc: std.mem.Allocator) void {
         if (self.instructions.len > 0) {
@@ -87,6 +92,22 @@ pub fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
                     inst.words[4],
                     inst.words[5],
                 };
+            }
+            // Mesh shader execution modes
+            if (mode == .OutputTrianglesEXT) {
+                module.mesh_topology = .triangles;
+            } else if (mode == .OutputLinesEXT) {
+                module.mesh_topology = .lines;
+            } else if (mode == .OutputPoints) {
+                // OutputPoints (27) is shared with geometry shaders; only treat as
+                // mesh topology when the entry point is a mesh shader.
+                if (module.execution_model == .MeshEXT) {
+                    module.mesh_topology = .points;
+                }
+            } else if (mode == .OutputVertices and inst.words.len >= 4) {
+                module.mesh_max_vertices = inst.words[3];
+            } else if (mode == .OutputPrimitivesEXT and inst.words.len >= 4) {
+                module.mesh_max_primitives = inst.words[3];
             }
         }
     }
