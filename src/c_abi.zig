@@ -70,8 +70,13 @@ fn alloc() std.mem.Allocator {
 const PREFIX: usize = 8;
 
 fn allocBytes(n: usize) ?[*]u8 {
+    // Explicit 8-byte alignment: the payload at `start + PREFIX` must satisfy
+    // u32 (and worse) dereferences from C consumers. Strict-alignment targets
+    // (ARM32, MIPS, RISC-V without misaligned-access support) will fault if
+    // the SPIR-V word buffer isn't at least 4-byte aligned; requesting u64
+    // alignment for the prefix block makes the payload at +8 also 8-aligned.
     const a = alloc();
-    const buf = a.alloc(u8, PREFIX + n) catch return null;
+    const buf = a.alignedAlloc(u8, .of(u64), PREFIX + n) catch return null;
     std.mem.writeInt(u64, buf[0..8], @as(u64, n), .little);
     return buf.ptr + PREFIX;
 }
@@ -80,7 +85,10 @@ fn freeBytes(p: ?[*]u8) void {
     const raw = p orelse return;
     const start = raw - PREFIX;
     const n: usize = @intCast(std.mem.readInt(u64, start[0..8], .little));
-    alloc().free(start[0 .. PREFIX + n]);
+    // `start` came from an 8-aligned alloc above; restore the aligned slice
+    // type so `Allocator.free` sees the correct `Slice.alignment`.
+    const aligned: [*]align(8) u8 = @ptrCast(@alignCast(start));
+    alloc().free(aligned[0 .. PREFIX + n]);
 }
 
 // ---------------------------------------------------------------------------

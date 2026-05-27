@@ -160,10 +160,11 @@ typedef struct {
     uint32_t version;
 
     /**
-     * Non-zero if the input is GLSL ES (OpenGL ES Shading Language)
-     * rather than desktop GLSL. Used at the preprocessor layer for
-     * dialect-specific behavior. Mostly informational at this layer.
-     * Default: 0 (desktop GLSL).
+     * Reserved for future use. Currently the impl infers ESSL automatically
+     * from the `#version 100`/`#version 300 es` line in the source, so
+     * setting this field has no observable effect. The field is part of the
+     * ABI now so a future release can wire it through without breaking
+     * existing consumers. Pass 0.
      */
     int is_essl;
 
