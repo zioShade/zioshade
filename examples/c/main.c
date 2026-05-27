@@ -28,11 +28,13 @@ int main(void) {
     // -----------------------------------------------------------------------
     // GLSL -> SPIR-V
     // -----------------------------------------------------------------------
-    glslpp_compile_options_t opts;
+    // Zero-initialise so future-added fields default to 0/NULL — keeps this
+    // example forward-compatible across minor ABI bumps.
+    glslpp_compile_options_t opts = {0};
     opts.stage = GLSLPP_STAGE_FRAGMENT;
     opts.version = 450;
     opts.is_essl = 0;
-    opts.spirv_version_packed = 15;
+    opts.spirv_version_packed = 15;  // SPIR-V 1.5, packed as major*10 + minor
 
     uint32_t* spirv_words = NULL;
     size_t spirv_word_count = 0;

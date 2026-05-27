@@ -92,6 +92,10 @@ jobs:
       - name: Quick fuzz pass
         run: zig build fuzz -- --count 5000
 
+  # Smoke-tests the public C ABI surface across all three OSes by building the
+  # static + shared libraries and running the C consumer example end-to-end.
+  # Kept separate from build-test so a C-side regression doesn't mask Zig test
+  # failures (and vice versa).
   c-abi:
     name: C ABI smoke
     needs: build-test
