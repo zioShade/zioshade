@@ -357,22 +357,33 @@ pub fn spirvToHLSL(
             };
             // Strip __ssbo_buf__ prefix from the name for emission
             const clean_name = if (std.mem.startsWith(u8, cb.name, "__ssbo_buf__")) cb.name["__ssbo_buf__".len..] else cb.name;
-            // Emit struct forward declaration for the SSBO struct type
-            hlslEmitOneStructForwardDecl(&module, &names, cb.type_id, w, aa, &emitted_structs, &emitted_names2) catch {};
-            if (has_interlock) {
-                const uav_binding: u32 = @intCast(binding);
-                const struct_name = blk2: {
-                    const struct_inst = getDef(&module, cb.type_id);
-                    break :blk2 if (struct_inst != null and struct_inst.?.op == .TypeStruct) hlslSafeName(names.get(struct_inst.?.words[1]) orelse "Struct") else "Struct";
-                };
-                try w.print("RasterizerOrderedStructuredBuffer<{s}> {s} : register(u{d});\n\n", .{ struct_name, clean_name, uav_binding });
+            const uav_binding: u32 = @intCast(binding);
+            // If the struct is exactly `{ T data[]; }`, flatten to
+            // `RWStructuredBuffer<T>`. HLSL forbids unsized array struct
+            // members, so the wrapper would collapse `data` to a scalar.
+            if (ssboRuntimeArrayElement(&module, cb.type_id)) |elem_type_id| {
+                const elem_name = hlslType(&module, elem_type_id, &names, aa) catch "float";
+                if (has_interlock) {
+                    try w.print("RasterizerOrderedStructuredBuffer<{s}> {s} : register(u{d});\n\n", .{ elem_name, clean_name, uav_binding });
+                } else {
+                    try w.print("RWStructuredBuffer<{s}> {s} : register(u{d});\n\n", .{ elem_name, clean_name, uav_binding });
+                }
             } else {
-                const struct_name = blk2: {
-                    const struct_inst = getDef(&module, cb.type_id);
-                    break :blk2 if (struct_inst != null and struct_inst.?.op == .TypeStruct) names.get(struct_inst.?.words[1]) orelse "Struct" else "Struct";
-                };
-                const uav_binding: u32 = @intCast(binding);
-                try w.print("RWStructuredBuffer<{s}> {s} : register(u{d});\n\n", .{ struct_name, clean_name, uav_binding });
+                // Emit struct forward declaration for the SSBO struct type
+                hlslEmitOneStructForwardDecl(&module, &names, cb.type_id, w, aa, &emitted_structs, &emitted_names2) catch {};
+                if (has_interlock) {
+                    const struct_name = blk2: {
+                        const struct_inst = getDef(&module, cb.type_id);
+                        break :blk2 if (struct_inst != null and struct_inst.?.op == .TypeStruct) hlslSafeName(names.get(struct_inst.?.words[1]) orelse "Struct") else "Struct";
+                    };
+                    try w.print("RasterizerOrderedStructuredBuffer<{s}> {s} : register(u{d});\n\n", .{ struct_name, clean_name, uav_binding });
+                } else {
+                    const struct_name = blk2: {
+                        const struct_inst = getDef(&module, cb.type_id);
+                        break :blk2 if (struct_inst != null and struct_inst.?.op == .TypeStruct) names.get(struct_inst.?.words[1]) orelse "Struct" else "Struct";
+                    };
+                    try w.print("RWStructuredBuffer<{s}> {s} : register(u{d});\n\n", .{ struct_name, clean_name, uav_binding });
+                }
             }
         } else {
             try w.print("cbuffer {s} : register(b{d})\n{{\n", .{ cb.name, binding });
@@ -3759,8 +3770,85 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     const base_name = if (is_ssbo) base_name_raw["__ssbo_buf__".len..] else base_name_raw;
     const base_is_cb = isUniformVariable(module, base_id) and !is_ssbo;
     const cb_prefix = if (base_is_cb) base_name else "";
+
+    // Runtime-array SSBO `{ T data[]; }` was flattened to RWStructuredBuffer<T>.
+    // The access `b.data[i]` becomes `b[i]` — drop the struct-member index and
+    // map the runtime-array index to the buffer index.
+    const struct_type_id_opt = resolvePointeeType(module, base_id);
+    const ssbo_elem_type: ?u32 = if (is_ssbo) blk: {
+        const sid = struct_type_id_opt orelse break :blk null;
+        break :blk ssboRuntimeArrayElement(module, sid);
+    } else null;
+    if (ssbo_elem_type != null and indices.len >= 1) {
+        try w.writeAll(base_name);
+        // indices[0] is the struct member index (always 0); drop it.
+        // indices[1] (if present) is the buffer index; otherwise `b` alone.
+        if (indices.len >= 2) {
+            const idx_buf_id = indices[1];
+            const idx_inst = getDef(module, idx_buf_id);
+            if (idx_inst) |def| {
+                if (def.op == .Constant and def.words.len > 3) {
+                    try w.print("[{d}]", .{def.words[3]});
+                } else {
+                    try w.print("[{s}]", .{names.get(idx_buf_id) orelse "i"});
+                }
+            } else {
+                try w.print("[{s}]", .{names.get(idx_buf_id) orelse "i"});
+            }
+        }
+        // Walk remaining indices (into the element type) with the original logic.
+        var cur_type: ?u32 = ssbo_elem_type;
+        for (indices[@min(indices.len, 2)..]) |index_id| {
+            const idx_inst = getDef(module, index_id);
+            if (idx_inst) |def| {
+                if (def.op == .Constant and def.words.len > 3) {
+                    const val = def.words[3];
+                    const is_vector = if (cur_type) |tid| blk: { const ti = getDef(module, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
+                    if (is_vector) {
+                        try w.writeAll(switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
+                    } else {
+                        var used_name = false;
+                        if (cur_type) |tid| {
+                            const ti = getDef(module, tid);
+                            if (ti) |tinst| {
+                                if (tinst.op == .TypeStruct) {
+                                    var mname_buf: [32]u8 = undefined;
+                                    const mname = hlslGetMemberName(module, tid, val, &mname_buf);
+                                    try w.print(".{s}", .{mname});
+                                    used_name = true;
+                                }
+                            }
+                        }
+                        if (!used_name) try w.print("[{d}]", .{val});
+                    }
+                    if (cur_type) |tid| {
+                        const ti = getDef(module, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeVector) { cur_type = tinst.words[2]; }
+                            else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur_type = tinst.words[val + 2]; }
+                            else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                            else { cur_type = null; }
+                        }
+                    }
+                } else {
+                    try w.print("[{s}]", .{names.get(index_id) orelse "i"});
+                    if (cur_type) |tid| {
+                        const ti = getDef(module, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                            else { cur_type = null; }
+                        }
+                    }
+                }
+            } else {
+                try w.print("[{s}]", .{names.get(index_id) orelse "i"});
+            }
+        }
+        return;
+    }
+
     if (is_ssbo) try w.print("{s}[0]", .{base_name}) else if (!base_is_cb) try w.writeAll(base_name);
-    var cur_type: ?u32 = resolvePointeeType(module, base_id);
+    var cur_type: ?u32 = struct_type_id_opt;
     var first_member = true;
     for (indices) |index_id| {
         const idx_inst = getDef(module, index_id);
@@ -3861,6 +3949,81 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
 
     var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
     defer buf.deinit(alloc);
+
+    // Runtime-array SSBO `{ T data[]; }` was flattened to RWStructuredBuffer<T>.
+    // The access `b.data[i]` becomes `b[i]` — drop the struct-member index and
+    // map the runtime-array index to the buffer index.
+    const pointee_type_id = resolvePointeeType(module, base_id);
+    const ssbo_elem_type: ?u32 = if (is_ssbo) blk: {
+        const sid = pointee_type_id orelse break :blk null;
+        break :blk ssboRuntimeArrayElement(module, sid);
+    } else null;
+    if (ssbo_elem_type) |elem_type| {
+        try buf.appendSlice(alloc, base_name);
+        // indices[0] is the struct member index (always 0); drop it.
+        if (indices.len >= 2) {
+            const idx_buf_id = indices[1];
+            const idx_inst = getDef(module, idx_buf_id);
+            if (idx_inst) |def| {
+                if (def.op == .Constant and def.words.len > 3) {
+                    try buf.print(alloc, "[{d}]", .{def.words[3]});
+                } else {
+                    try buf.print(alloc, "[{s}]", .{names.get(idx_buf_id) orelse "i"});
+                }
+            } else {
+                try buf.print(alloc, "[{s}]", .{names.get(idx_buf_id) orelse "i"});
+            }
+        }
+        var cur: ?u32 = elem_type;
+        for (indices[@min(indices.len, 2)..]) |index_id| {
+            const idx_inst = getDef(module, index_id);
+            if (idx_inst) |def| {
+                if (def.op == .Constant and def.words.len > 3) {
+                    const val = def.words[3];
+                    const is_vector = if (cur) |tid| blk2: { const ti = getDef(module, tid); break :blk2 ti != null and ti.?.op == .TypeVector; } else false;
+                    if (is_vector) {
+                        try buf.appendSlice(alloc, switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
+                    } else {
+                        var used_name = false;
+                        if (cur) |tid| {
+                            const ti = getDef(module, tid);
+                            if (ti) |tinst| {
+                                if (tinst.op == .TypeStruct) {
+                                    var mname_buf: [32]u8 = undefined;
+                                    const mname = hlslGetMemberName(module, tid, val, &mname_buf);
+                                    try buf.print(alloc, ".{s}", .{mname});
+                                    used_name = true;
+                                }
+                            }
+                        }
+                        if (!used_name) try buf.print(alloc, "._m{d}", .{val});
+                    }
+                    if (cur) |tid| {
+                        const ti = getDef(module, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeVector) { cur = tinst.words[2]; }
+                            else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur = tinst.words[val + 2]; }
+                            else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur = tinst.words[2]; }
+                            else { cur = null; }
+                        }
+                    }
+                } else {
+                    try buf.print(alloc, "[{s}]", .{names.get(index_id) orelse "i"});
+                    if (cur) |tid| {
+                        const ti = getDef(module, tid);
+                        if (ti) |tinst| {
+                            if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur = tinst.words[2]; }
+                            else { cur = null; }
+                        }
+                    }
+                }
+            } else {
+                try buf.print(alloc, "[{s}]", .{names.get(index_id) orelse "i"});
+            }
+        }
+        return buf.toOwnedSlice(alloc);
+    }
+
     if (is_ssbo) {
         try buf.print(alloc, "{s}[0]", .{base_name});
     } else if (!base_is_cbuffer) {
@@ -3868,7 +4031,7 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     }
 
     // Walk the type chain starting from the base pointer's pointee type
-    var current_type_id: ?u32 = resolvePointeeType(module, base_id);
+    var current_type_id: ?u32 = pointee_type_id;
     var first_member = true; // Only use cbuffer prefix for the first member access
 
     for (indices) |index_id| {
@@ -3977,6 +4140,22 @@ fn isUniformVariable(module: *const ParsedModule, id: u32) bool {
         return sc == .Uniform or sc == .StorageBuffer;
     }
     return false;
+}
+
+/// If `struct_type_id` resolves to a TypeStruct whose only member is a
+/// TypeRuntimeArray, return that runtime-array's element type id. Used to
+/// flatten SSBOs shaped like `struct { T data[]; }` to a bare
+/// `RWStructuredBuffer<T>` — HLSL has no unsized array members, so keeping
+/// the struct wrapper collapses the runtime array to a scalar and DXC then
+/// rejects any indexed access into it.
+fn ssboRuntimeArrayElement(module: *const ParsedModule, struct_type_id: u32) ?u32 {
+    const inst = getDef(module, struct_type_id) orelse return null;
+    if (inst.op != .TypeStruct) return null;
+    if (inst.words.len != 3) return null; // [header, struct_id, member0_type]
+    const member_type_id = inst.words[2];
+    const m = getDef(module, member_type_id) orelse return null;
+    if (m.op != .TypeRuntimeArray or m.words.len < 3) return null;
+    return m.words[2];
 }
 
 fn isSSBOVariable(module: *const ParsedModule, decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32) bool {
