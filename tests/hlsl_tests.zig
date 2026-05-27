@@ -13854,3 +13854,33 @@ test "HLSL: SSBO struct forward declaration from SPIR-V binary" {
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "RWStructuredBuffer<UBO>") != null);
 }
 
+// SSBO whose struct is exactly `struct { runtime_array<T> }` must drop the
+// struct wrapper and emit `RWStructuredBuffer<T>` directly. Otherwise the
+// runtime-array member collapses to a scalar in HLSL (HLSL has no unsized
+// array members) and DXC rejects the subsequent `.member[i]` access with
+// "subscripted value is not an array, matrix, or vector".
+//
+// Source GLSL (compiled to tests/spirv_bins/compute_minimal.spv):
+//   layout(std430, binding=0) buffer Buf { float data[]; } b;
+//   void main() { b.data[0] = 1.0; }
+test "HLSL: compute SSBO with runtime array drops struct wrapper" {
+    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/compute_minimal.spv", 1024 * 1024);
+    defer alloc.free(spv_data);
+    const spv_u32_len = spv_data.len / 4;
+    const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+
+    // The SSBO must be flattened to RWStructuredBuffer<float>.
+    try assertContains(hlsl, "RWStructuredBuffer<float> b");
+
+    // The Buf struct must NOT be forward-declared (it would emit a scalar
+    // member that breaks the indexed access below).
+    try assertNotContains(hlsl, "struct Buf");
+
+    // The access `b.data[0] = 1.0` must lower to `b[0] = 1.0`, not the
+    // broken `b[0].data[0]` form that DXC rejects.
+    try assertContains(hlsl, "b[0] = 1.0");
+    try assertNotContains(hlsl, ".data[");
+}
+
