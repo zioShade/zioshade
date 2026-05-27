@@ -93,6 +93,18 @@ pub const Stage = enum {
 /// Target SPIR-V version for code generation.
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
 
+/// A single specialization-constant value override applied at compile time.
+/// `value_u32` is the raw 32-bit payload — the consumer chooses the bit
+/// representation matching the spec const's declared type:
+///   - `int`   → cast via `@bitCast(i32)`
+///   - `uint`  → use directly as u32
+///   - `float` → cast via `@bitCast(f32)`
+///   - `bool`  → 0 for false, non-zero (typically 1) for true
+pub const SpecOverride = struct {
+    spec_id: u32,
+    value_u32: u32,
+};
+
 /// Resource limits for shader compilation.
 pub const ResourceLimits = struct {
     /// Maximum uniform components per stage.
@@ -364,6 +376,109 @@ pub fn compileToSPIRV(
         last_compile_detail = .codegen_failed;
         return error.CodegenFailed;
     };
+}
+
+/// Same as `compileToSPIRV` but applies one or more specialization-constant
+/// overrides after codegen. For each override, walks the emitted SPIR-V
+/// looking for `OpDecorate <target> SpecId <override.spec_id>` and rewrites
+/// the matching constant instruction's literal payload to `override.value_u32`.
+///
+/// Behaviour per opcode:
+///   - `OpSpecConstant` (50): rewrites the literal at words[3].
+///   - `OpSpecConstantTrue` (48) / `OpSpecConstantFalse` (49): swaps the
+///     opcode in-place to match the override value (non-zero → True,
+///     zero → False); the wc/structure is unchanged because both are
+///     3-word instructions.
+///
+/// Composite (`OpSpecConstantComposite`) and op-derived
+/// (`OpSpecConstantOp`) overrides are not applied — those forms don't
+/// carry a single literal payload. An override pointing at one of those
+/// is silently ignored.
+pub fn compileToSPIRVWithSpecOverrides(
+    alloc: std.mem.Allocator,
+    source: [:0]const u8,
+    options: CompileOptions,
+    overrides: []const SpecOverride,
+) Error![]const u32 {
+    const words = try compileToSPIRV(alloc, source, options);
+    if (overrides.len == 0) return words;
+    // Copy to a mutable buffer (compileToSPIRV returns owned memory; we
+    // free it after mutation).
+    const mut = alloc.alloc(u32, words.len) catch {
+        alloc.free(words);
+        return error.OutOfMemory;
+    };
+    @memcpy(mut, words);
+    alloc.free(words);
+    applySpecOverrides(mut, overrides);
+    return mut;
+}
+
+/// Apply specialization-constant overrides to an existing SPIR-V word
+/// stream in-place. Used by `compileToSPIRVWithSpecOverrides`; exposed
+/// publicly so external callers (e.g., the CLI) can apply overrides to
+/// SPIR-V produced by an earlier `compileToSPIRV` call without re-running
+/// the full pipeline.
+///
+/// Walks the word stream, builds `result_id -> spec_id` map from
+/// `OpDecorate ... SpecId N`, then rewrites literal/opcode in any
+/// `OpSpecConstant{,True,False}` whose result_id matches an override.
+pub fn applySpecOverrides(words: []u32, overrides: []const SpecOverride) void {
+    if (words.len < 5) return;
+    // Pass 1: scan for SpecId decorations. Build a tiny linear map
+    // (small N — typically < 32 spec consts in real shaders).
+    const Pair = struct { result_id: u32, spec_id: u32 };
+    var pairs: [256]Pair = undefined;
+    var pair_count: usize = 0;
+    var i: usize = 5;
+    while (i < words.len) {
+        const wc: u32 = words[i] >> 16;
+        const op: u16 = @truncate(words[i] & 0xFFFF);
+        if (wc == 0) break;
+        // OpDecorate (71): [op|wc] target decoration_kind [literal...]
+        // SpecId decoration is enum value 1; payload at words[i+3].
+        if (op == 71 and wc >= 4 and words[i + 2] == 1) {
+            if (pair_count < pairs.len) {
+                pairs[pair_count] = .{ .result_id = words[i + 1], .spec_id = words[i + 3] };
+                pair_count += 1;
+            }
+        }
+        i += wc;
+    }
+
+    // Pass 2: rewrite matching OpSpecConstant* instructions in-place.
+    i = 5;
+    while (i < words.len) {
+        const wc: u32 = words[i] >> 16;
+        const op: u16 = @truncate(words[i] & 0xFFFF);
+        if (wc == 0) break;
+        const result_id: u32 = switch (op) {
+            48, 49, 50 => if (wc >= 3) words[i + 2] else 0, // SpecConstantTrue/False/(scalar)
+            else => 0,
+        };
+        if (result_id != 0) {
+            // Look up spec_id for this result_id
+            var spec_id: ?u32 = null;
+            for (pairs[0..pair_count]) |p| {
+                if (p.result_id == result_id) { spec_id = p.spec_id; break; }
+            }
+            if (spec_id) |sid| {
+                // Find override with matching spec_id
+                for (overrides) |ov| {
+                    if (ov.spec_id != sid) continue;
+                    if (op == 50 and wc >= 4) {
+                        words[i + 3] = ov.value_u32;
+                    } else if (op == 48 or op == 49) {
+                        // Swap True/False based on override value (LSB).
+                        const new_op: u32 = if (ov.value_u32 != 0) 48 else 49;
+                        words[i] = (wc << 16) | new_op;
+                    }
+                    break;
+                }
+            }
+        }
+        i += wc;
+    }
 }
 
 /// Compile GLSL source to SPIR-V without optimization (for debugging).

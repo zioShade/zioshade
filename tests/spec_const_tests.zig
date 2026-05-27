@@ -107,3 +107,91 @@ test "M3.3 MSL: bool spec const cross-compiles to [[function_constant(N)]] = tru
     try std.testing.expect(std.mem.indexOf(u8, msl, "[[function_constant(1)]]") != null);
     try std.testing.expect(std.mem.indexOf(u8, msl, "= true;") != null);
 }
+
+// ── M3.6: SpecOverride API + CLI flag ──
+
+test "M3.6: SpecOverride rewrites int spec const literal" {
+    const alloc = std.testing.allocator;
+    const overrides = [_]glslpp.SpecOverride{
+        .{ .spec_id = 3, .value_u32 = 99 },
+    };
+    const spv = try glslpp.compileToSPIRVWithSpecOverrides(
+        alloc, SHADER_INT_SPEC, .{ .stage = .fragment }, overrides[0..],
+    );
+    defer alloc.free(spv);
+    // Walk for OpSpecConstant (50) whose literal == 99
+    var found = false;
+    var i: usize = 5;
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const op = spv[i] & 0xFFFF;
+        if (op == 50 and wc >= 4 and spv[i + 3] == 99) {
+            found = true;
+            break;
+        }
+        if (wc == 0) break;
+        i += wc;
+    }
+    try std.testing.expect(found);
+}
+
+test "M3.6: SpecOverride swaps bool spec const True <-> False" {
+    const alloc = std.testing.allocator;
+    // Source declares `ENABLE_FX = true` (SpecId 1). Override to false.
+    const overrides = [_]glslpp.SpecOverride{
+        .{ .spec_id = 1, .value_u32 = 0 },
+    };
+    const spv = try glslpp.compileToSPIRVWithSpecOverrides(
+        alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment }, overrides[0..],
+    );
+    defer alloc.free(spv);
+    // After override the OpSpecConstantTrue (48) should become OpSpecConstantFalse (49).
+    var found_true = false;
+    var found_false = false;
+    var i: usize = 5;
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const op = spv[i] & 0xFFFF;
+        if (op == 48) found_true = true;
+        if (op == 49) found_false = true;
+        if (wc == 0) break;
+        i += wc;
+    }
+    try std.testing.expect(!found_true);
+    try std.testing.expect(found_false);
+}
+
+test "M3.6: SpecOverride empty list is a no-op (no copy, no leak)" {
+    const alloc = std.testing.allocator;
+    const empty: []const glslpp.SpecOverride = &.{};
+    const spv = try glslpp.compileToSPIRVWithSpecOverrides(
+        alloc, SHADER_INT_SPEC, .{ .stage = .fragment }, empty,
+    );
+    defer alloc.free(spv);
+    try std.testing.expect(spv.len > 5);
+}
+
+test "M3.6: SpecOverride non-matching spec_id is silently ignored" {
+    const alloc = std.testing.allocator;
+    const overrides = [_]glslpp.SpecOverride{
+        .{ .spec_id = 999, .value_u32 = 0xDEADBEEF },
+    };
+    const spv = try glslpp.compileToSPIRVWithSpecOverrides(
+        alloc, SHADER_INT_SPEC, .{ .stage = .fragment }, overrides[0..],
+    );
+    defer alloc.free(spv);
+    // Original literal 8 should still be present (not 0xDEADBEEF)
+    var found_orig = false;
+    var i: usize = 5;
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const op = spv[i] & 0xFFFF;
+        if (op == 50 and wc >= 4 and spv[i + 3] == 8) {
+            found_orig = true;
+            break;
+        }
+        if (wc == 0) break;
+        i += wc;
+    }
+    try std.testing.expect(found_orig);
+}
