@@ -462,6 +462,59 @@ const Parser = struct {
         return if (found) q else null;
     }
 
+    /// Map a GLSL `layout(...)` bare identifier to its SPIR-V image-format
+    /// enum value. Returns `null` if the identifier isn't a known format
+    /// qualifier — caller falls through to the other layout-identifier
+    /// branches. All 40 SPIR-V Image Format entries are recognized so reflection
+    /// can report any qualifier the GLSL spec allows.
+    fn parseImageFormatIdent(text_in: []const u8) ?ast.ImageFormat {
+        const map = .{
+            .{ "rgba32f", ast.ImageFormat.rgba32f },
+            .{ "rgba16f", ast.ImageFormat.rgba16f },
+            .{ "r32f", ast.ImageFormat.r32f },
+            .{ "rgba8", ast.ImageFormat.rgba8 },
+            .{ "rgba8_snorm", ast.ImageFormat.rgba8_snorm },
+            .{ "rg32f", ast.ImageFormat.rg32f },
+            .{ "rg16f", ast.ImageFormat.rg16f },
+            .{ "r11f_g11f_b10f", ast.ImageFormat.r11f_g11f_b10f },
+            .{ "r16f", ast.ImageFormat.r16f },
+            .{ "rgba16", ast.ImageFormat.rgba16 },
+            .{ "rgb10_a2", ast.ImageFormat.rgb10_a2 },
+            .{ "rg16", ast.ImageFormat.rg16 },
+            .{ "rg8", ast.ImageFormat.rg8 },
+            .{ "r16", ast.ImageFormat.r16 },
+            .{ "r8", ast.ImageFormat.r8 },
+            .{ "rgba16_snorm", ast.ImageFormat.rgba16_snorm },
+            .{ "rg16_snorm", ast.ImageFormat.rg16_snorm },
+            .{ "rg8_snorm", ast.ImageFormat.rg8_snorm },
+            .{ "r16_snorm", ast.ImageFormat.r16_snorm },
+            .{ "r8_snorm", ast.ImageFormat.r8_snorm },
+            .{ "rgba32i", ast.ImageFormat.rgba32i },
+            .{ "rgba16i", ast.ImageFormat.rgba16i },
+            .{ "rgba8i", ast.ImageFormat.rgba8i },
+            .{ "r32i", ast.ImageFormat.r32i },
+            .{ "rg32i", ast.ImageFormat.rg32i },
+            .{ "rg16i", ast.ImageFormat.rg16i },
+            .{ "rg8i", ast.ImageFormat.rg8i },
+            .{ "r16i", ast.ImageFormat.r16i },
+            .{ "r8i", ast.ImageFormat.r8i },
+            .{ "rgba32ui", ast.ImageFormat.rgba32ui },
+            .{ "rgba16ui", ast.ImageFormat.rgba16ui },
+            .{ "rgba8ui", ast.ImageFormat.rgba8ui },
+            .{ "r32ui", ast.ImageFormat.r32ui },
+            .{ "rgb10_a2ui", ast.ImageFormat.rgb10_a2ui },
+            .{ "rg32ui", ast.ImageFormat.rg32ui },
+            .{ "rg16ui", ast.ImageFormat.rg16ui },
+            .{ "rg8ui", ast.ImageFormat.rg8ui },
+            .{ "r16ui", ast.ImageFormat.r16ui },
+            .{ "r8ui", ast.ImageFormat.r8ui },
+        };
+        inline for (map) |entry| {
+            if (std.mem.eql(u8, text_in, entry[0])) return entry[1];
+        }
+        return null;
+    }
+
     fn tryLayout(self: *Parser) Error!?ast.Layout {
         if (self.current().tag != .kw_layout) return null;
         _ = self.advance();
@@ -535,6 +588,8 @@ const Parser = struct {
                     layout.isolines = true;
                 } else if (std.mem.eql(u8, ident_text, "quads")) {
                     layout.quads = true;
+                } else if (parseImageFormatIdent(ident_text)) |fmt| {
+                    layout.image_format = fmt;
                 } else if (self.current().tag == .eq) {
                     _ = self.advance();
                     const val_text = self.text(self.current());

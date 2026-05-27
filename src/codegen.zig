@@ -1382,6 +1382,56 @@ const Codegen = struct {
         }
     }
 
+    /// Map an `ast.ImageFormat` to its SPIR-V `Image Format` enum value.
+    /// Mirrors the SPIR-V spec — `Unknown=0` is implicit when no qualifier was
+    /// supplied (caller emits 0 in that case).
+    fn imageFormatToSpv(f: ast.ImageFormat) u32 {
+        return switch (f) {
+            .rgba32f => 1, .rgba16f => 2, .r32f => 3, .rgba8 => 4, .rgba8_snorm => 5,
+            .rg32f => 6, .rg16f => 7, .r11f_g11f_b10f => 8, .r16f => 9, .rgba16 => 10,
+            .rgb10_a2 => 11, .rg16 => 12, .rg8 => 13, .r16 => 14, .r8 => 15,
+            .rgba16_snorm => 16, .rg16_snorm => 17, .rg8_snorm => 18, .r16_snorm => 19, .r8_snorm => 20,
+            .rgba32i => 21, .rgba16i => 22, .rgba8i => 23, .r32i => 24, .rg32i => 25,
+            .rg16i => 26, .rg8i => 27, .r16i => 28, .r8i => 29,
+            .rgba32ui => 30, .rgba16ui => 31, .rgba8ui => 32, .r32ui => 33, .rgb10_a2ui => 34,
+            .rg32ui => 35, .rg16ui => 36, .rg8ui => 37, .r16ui => 38, .r8ui => 39,
+        };
+    }
+
+    /// Emit an `OpTypeImage` for a storage image (`Sampled=2`) with the
+    /// `Format` operand populated from the GLSL `layout(rgbaN)` qualifier.
+    /// Returns the freshly allocated result id. Caller is responsible for
+    /// pinning this id in `emitted_types` so subsequent type lookups reuse it.
+    fn emitStorageImageType(self: *Codegen, ty: ast.Type, fmt: ast.ImageFormat) error{OutOfMemory}!u32 {
+        // (dim, depth, arrayed, multisampled) per SPIR-V `Image Dim`/operands.
+        const ImageShape = struct { dim: u32, arrayed: u32, multisampled: u32 };
+        const shape: ImageShape = switch (ty) {
+            .image2d, .iimage2d, .uimage2d => .{ .dim = 1, .arrayed = 0, .multisampled = 0 },
+            .image2d_ms => .{ .dim = 1, .arrayed = 0, .multisampled = 1 },
+            .image2d_ms_array => .{ .dim = 1, .arrayed = 1, .multisampled = 1 },
+            .image2d_array, .iimage2d_array, .uimage2d_array => .{ .dim = 1, .arrayed = 1, .multisampled = 0 },
+            .image3d, .iimage3d, .uimage3d => .{ .dim = 2, .arrayed = 0, .multisampled = 0 },
+            .image_cube, .iimage_cube, .uimage_cube => .{ .dim = 3, .arrayed = 0, .multisampled = 0 },
+            .image_cube_array, .iimage_cube_array, .uimage_cube_array => .{ .dim = 3, .arrayed = 1, .multisampled = 0 },
+            .image1d, .iimage1d, .uimage1d => .{ .dim = 0, .arrayed = 0, .multisampled = 0 },
+            .image_buffer, .iimage_buffer, .uimage_buffer => .{ .dim = 5, .arrayed = 0, .multisampled = 0 },
+            else => unreachable, // caller must filter to storage images
+        };
+        const base: ast.Type = ty.samplerBaseType();
+        const base_id = try self.ensureType(base);
+        const id = self.allocId();
+        try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+        try self.emitTypeWord(id);
+        try self.emitTypeWord(base_id);
+        try self.emitTypeWord(shape.dim);
+        try self.emitTypeWord(0); // Depth
+        try self.emitTypeWord(shape.arrayed);
+        try self.emitTypeWord(shape.multisampled);
+        try self.emitTypeWord(2); // Sampled = 2 (storage image)
+        try self.emitTypeWord(imageFormatToSpv(fmt));
+        return id;
+    }
+
     fn ensureType(self: *Codegen, ty: ast.Type) error{OutOfMemory}!u32 {
         // Normalize aliases for dedup: mat2 == mat2x2, mat3 == mat3x3, mat4 == mat4x4
         const normalized = switch (ty) {
@@ -3723,6 +3773,22 @@ const Codegen = struct {
             if (referenced_names.contains(entry.key_ptr.*)) {
                 _ = try self.ensureType(.{ .named = entry.key_ptr.* });
             }
+        }
+        // Pre-pass: for storage-image globals that carry an explicit
+        // `layout(rgbaN)` qualifier, pre-emit a format-aware `OpTypeImage`
+        // and seed `emitted_types` so subsequent `ensureType(image2d)` calls
+        // (both here for the variable's pointer type, and later during
+        // function-body emission for loads of this image) all resolve to the
+        // same id. Globals without a format qualifier fall through to the
+        // generic `ensureType` path that emits `ImageFormat=Unknown`.
+        for (self.module.globals) |global| {
+            if (!global.ty.isStorageImage()) continue;
+            const layout = global.layout orelse continue;
+            const fmt = layout.image_format orelse continue;
+            const key = @intFromEnum(global.ty);
+            if (self.emitted_types.contains(key)) continue; // already pinned
+            const id = try self.emitStorageImageType(global.ty, fmt);
+            try self.emitted_types.put(self.alloc, key, id);
         }
         for (self.module.globals) |global| {
             _ = try self.ensureType(global.ty);

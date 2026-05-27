@@ -146,61 +146,83 @@ test "reflection M2.1: storage_images populated for writable image2D" {
     try std.testing.expectEqual(@as(u32, 0), res.storage_images[0].binding);
 }
 
-test "reflection M2.4: storage_image exposes rgba8 format from explicit OpTypeImage" {
-    // Hand-crafted minimal SPIR-V module exposing a storage image with
-    // explicit Format=Rgba8 (SPIR-V Image Format value 4). We don't go
-    // through glslpp's GLSL→SPIR-V codegen here because that path currently
-    // emits Format=Unknown for `layout(rgba8) image2D` (separate codegen
-    // bug; reflection-side handling is the M2.4 scope).
+test "reflection M2.4: storage_image exposes rgba8 format via real GLSL compile" {
+    // End-to-end: GLSL `layout(rgba8) image2D` -> codegen emits Format=Rgba8
+    // on `OpTypeImage` -> reflection exposes `image_format = .rgba8`.
     const alloc = std.testing.allocator;
-    const words = [_]u32{
-        // SPIR-V header
-        0x07230203, // magic
-        0x00010000, // version 1.0
-        0x000d000d, // generator
-        20,         // ID bound
-        0,          // schema
-        // OpCapability Shader (opcode 17, wc 2)
-        (2 << 16) | 17, 1,
-        // OpMemoryModel Logical GLSL450 (opcode 14, wc 3)
-        (3 << 16) | 14, 0, 1,
-        // OpEntryPoint GLCompute %2 "main" (opcode 15, wc 5: model, id, "main\0")
-        (5 << 16) | 15, 5, 2, 0x6e69616d, 0x00000000,
-        // OpExecutionMode %2 LocalSize 1 1 1 (opcode 16, wc 6)
-        (6 << 16) | 16, 2, 17, 1, 1, 1,
-        // OpName %2 "main" (opcode 5, wc 4)
-        (4 << 16) | 5, 2, 0x6e69616d, 0x00000000,
-        // OpDecorate %5 DescriptorSet 0 (opcode 71, wc 4)
-        (4 << 16) | 71, 5, 34, 0,
-        // OpDecorate %5 Binding 0 (opcode 71, wc 4)
-        (4 << 16) | 71, 5, 33, 0,
-        // %3 = OpTypeVoid (opcode 19, wc 2)
-        (2 << 16) | 19, 3,
-        // %4 = OpTypeFunction %3 (opcode 33, wc 3)
-        (3 << 16) | 33, 4, 3,
-        // %6 = OpTypeFloat 32 (opcode 22, wc 3)
-        (3 << 16) | 22, 6, 32,
-        // %7 = OpTypeImage %6 2D 0 0 0 2 Rgba8 (opcode 25, wc 9)
-        //                                ^----- Sampled=2 (storage image)
-        //                                  ^--- Format=4 (Rgba8)
-        (9 << 16) | 25, 7, 6, 1, 0, 0, 0, 2, 4,
-        // %8 = OpTypePointer UniformConstant %7 (opcode 32, wc 4: result, storage_class=0, pointee)
-        (4 << 16) | 32, 8, 0, 7,
-        // %5 = OpVariable %8 UniformConstant (opcode 59, wc 4)
-        (4 << 16) | 59, 8, 5, 0,
-        // %2 = OpFunction %3 None %4 (opcode 54, wc 5)
-        (5 << 16) | 54, 3, 2, 0, 4,
-        // OpLabel %9 (opcode 248, wc 2)
-        (2 << 16) | 248, 9,
-        // OpReturn (opcode 253, wc 1)
-        (1 << 16) | 253,
-        // OpFunctionEnd (opcode 56, wc 1)
-        (1 << 16) | 56,
-    };
-    var res = try glslpp.reflectSPIRV(alloc, &words);
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 430
+        \\layout(local_size_x=1) in;
+        \\layout(set=0, binding=0, rgba8) uniform image2D destImg;
+        \\void main() { imageStore(destImg, ivec2(0), vec4(1.0)); }
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.storage_images.len);
     try std.testing.expectEqual(@as(?glslpp.reflection.ImageFormat, .rgba8), res.storage_images[0].image_format);
+}
+
+test "reflection M2.4: storage_image format rgba32f" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 430
+        \\layout(local_size_x=1) in;
+        \\layout(set=0, binding=0, rgba32f) uniform image2D destImg;
+        \\void main() { imageStore(destImg, ivec2(0), vec4(1.0)); }
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.storage_images.len);
+    try std.testing.expectEqual(@as(?glslpp.reflection.ImageFormat, .rgba32f), res.storage_images[0].image_format);
+}
+
+test "reflection M2.4: storage_image format r32i" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 430
+        \\layout(local_size_x=1) in;
+        \\layout(set=0, binding=0, r32i) uniform iimage2D destImg;
+        \\void main() { imageStore(destImg, ivec2(0), ivec4(1)); }
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.storage_images.len);
+    try std.testing.expectEqual(@as(?glslpp.reflection.ImageFormat, .r32i), res.storage_images[0].image_format);
+}
+
+test "reflection M2.4: storage_image format r32ui" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 430
+        \\layout(local_size_x=1) in;
+        \\layout(set=0, binding=0, r32ui) uniform uimage2D destImg;
+        \\void main() { imageStore(destImg, ivec2(0), uvec4(1)); }
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.storage_images.len);
+    try std.testing.expectEqual(@as(?glslpp.reflection.ImageFormat, .r32ui), res.storage_images[0].image_format);
+}
+
+test "reflection M2.4: storage_image without format qualifier reports null" {
+    // Sanity: when GLSL omits the format qualifier, codegen emits
+    // `ImageFormat=Unknown` and reflection surfaces `null`.
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 430
+        \\layout(local_size_x=1) in;
+        \\layout(set=0, binding=0) uniform image2D destImg;
+        \\void main() { imageStore(destImg, ivec2(0), vec4(1.0)); }
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.storage_images.len);
+    try std.testing.expectEqual(@as(?glslpp.reflection.ImageFormat, null), res.storage_images[0].image_format);
 }
 
 test "reflection M2.2: subpass_inputs populated for subpassInput" {
