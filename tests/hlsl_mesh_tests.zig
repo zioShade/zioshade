@@ -17,6 +17,9 @@ test "hlsl mesh: emits OutputTopology and mesh<> signature" {
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"triangle\")]") != null);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "out vertices") != null);
+    // Negative guard: must not also emit other topologies.
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"line\")]") == null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"point\")]") == null);
 }
 
 test "hlsl mesh: lines topology emits [OutputTopology(\"line\")]" {
@@ -34,6 +37,9 @@ test "hlsl mesh: lines topology emits [OutputTopology(\"line\")]" {
     const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"line\")]") != null);
+    // Negative guard: must not also emit other topologies.
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"triangle\")]") == null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"point\")]") == null);
 }
 
 test "hlsl mesh: points topology emits [OutputTopology(\"point\")]" {
@@ -51,4 +57,7 @@ test "hlsl mesh: points topology emits [OutputTopology(\"point\")]" {
     const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"point\")]") != null);
+    // Negative guard: must not also emit other topologies.
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"triangle\")]") == null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"line\")]") == null);
 }

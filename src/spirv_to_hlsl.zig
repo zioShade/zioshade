@@ -1462,7 +1462,10 @@ fn emitFunction(
             .triangles => "triangle",
             .lines => "line",
             .points => "point",
-        } else "triangle";
+        } else blk: {
+            std.debug.assert(false); // mesh SPIR-V missing OutputTriangles/Lines/Points execution mode
+            break :blk "triangle";
+        };
         try w.print("[OutputTopology(\"{s}\")]\n", .{topo_str});
     }
     if (is_rt) {
@@ -1720,7 +1723,10 @@ fn emitFunction(
             .triangles => "uint3",
             .lines => "uint2",
             .points => "uint",
-        } else "uint3";
+        } else blk: {
+            std.debug.assert(false); // mesh SPIR-V missing OutputTriangles/Lines/Points execution mode
+            break :blk "uint3";
+        };
 
         // Collect per-vertex outputs: Output storage class, has Location decoration,
         // not built-in. For v1 we expect a single per-vertex output; if absent we
