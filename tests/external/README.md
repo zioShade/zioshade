@@ -35,12 +35,13 @@ PASS/FAIL — it just skips the external validation step.
 These shaders intentionally pin known-buggy paths so they don't silently
 start passing without a roadmap note:
 
-- `06_minimal.vert` — HLSL backend doesn't yet emit a valid vertex entry
-  signature (tracked as M5.0 in the roadmap). Expected to fail HLSL
-  cross-compile.
 - `08_ssbo_write.comp` — HLSL compute SSBO emit is known-buggy as of
   commit `c77f5452`. Expected to fail HLSL cross-compile; should still
   PASS SPIR-V + WGSL + MSL + GLSL.
+
+(`06_minimal.vert` previously belonged here while M5.0 was pending; the
+M5.0 vertex signature emission shipped on 2026-05-27 and the shader now
+round-trips cleanly through every backend including HLSL.)
 
 The remaining shaders should compile cleanly across all backends.
 

@@ -629,15 +629,17 @@ pub fn spirvToHLSL(
     // Emit non-entry functions first (user-defined functions)
     for (func_ids.items) |fid| {
         if (fid == entry_id) continue; // emit entry last
-        try emitFunction(&module, &names, &decorations, fid, w, aa, false, &out_param_info);
+        try emitFunction(&module, &names, &decorations, fid, w, aa, false, &out_param_info, options.shader_model);
     }
 
     // Detect MRT (multiple render targets) for fragment entry
     var mrt_count: u32 = 0;
-    for (module.instructions) |inst| {
-        if (inst.op == .Variable and inst.words.len >= 4) {
-            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-            if (sc == .Output) mrt_count += 1;
+    if (module.execution_model == .Fragment) {
+        for (module.instructions) |inst| {
+            if (inst.op == .Variable and inst.words.len >= 4) {
+                const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+                if (sc == .Output) mrt_count += 1;
+            }
         }
     }
     if (mrt_count > 1) {
@@ -680,7 +682,7 @@ pub fn spirvToHLSL(
     }
 
     // Emit entry function last
-    try emitFunction(&module, &names, &decorations, entry_id, w, aa, true, &out_param_info);
+    try emitFunction(&module, &names, &decorations, entry_id, w, aa, true, &out_param_info, options.shader_model);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -1314,6 +1316,13 @@ fn detectOutParams(
     }
 }
 
+/// Returns the HLSL semantic to use for `gl_Position` in the vertex-shader
+/// output struct: `POSITION` for Shader Model < 6.0 (HLSL 5.x / D3D11
+/// down-compile path) and `SV_Position` for SM 6.0+. (M5.1)
+fn posSemantic(shader_model: u32) []const u8 {
+    return if (shader_model < 60) "POSITION" else "SV_Position";
+}
+
 fn emitFunction(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -1323,6 +1332,7 @@ fn emitFunction(
     alloc: std.mem.Allocator,
     is_entry: bool,
     out_param_info: *const std.AutoHashMap(u32, std.ArrayList(usize)),
+    shader_model: u32,
 ) !void {
     const func_inst = getDef(module, func_id) orelse return;
     if (func_inst.op != .Function or func_inst.words.len < 5) return;
@@ -1498,6 +1508,129 @@ fn emitFunction(
     const is_anyhit = is_entry and module.execution_model == .AnyHitKHR;
     const is_callable = is_entry and module.execution_model == .CallableKHR;
     const is_rt = is_raygen or is_closesthit or is_miss or is_intersection or is_anyhit or is_callable;
+    const is_vertex = is_entry and module.execution_model == .Vertex;
+
+    // -------------------------------------------------------------------------
+    // Vertex stage: emit VS_INPUT / VS_OUTPUT structs and route Input/Output
+    // SPIR-V variables through them. (M5.0)
+    //
+    // Strategy: collect all `Input` and `Output` storage-class globals, then
+    // rewrite their entries in the `names` map to `input.<orig>` /
+    // `output.<orig>` BEFORE body emission. Existing OpLoad/OpStore code paths
+    // resolve through `names`, so the body naturally produces the desired
+    // routed expressions without needing to rewrite every Load/Store opcode.
+    // -------------------------------------------------------------------------
+    const VtxField = struct {
+        id: u32,
+        orig_name: []const u8,
+        type_id: u32,
+        location: ?u32,
+        builtin: ?u32,
+    };
+    var vtx_inputs = std.ArrayList(VtxField).initCapacity(alloc, 4) catch return error.OutOfMemory;
+    defer vtx_inputs.deinit(alloc);
+    var vtx_outputs = std.ArrayList(VtxField).initCapacity(alloc, 4) catch return error.OutOfMemory;
+    defer vtx_outputs.deinit(alloc);
+    if (is_vertex) {
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc != .Input and sc != .Output) continue;
+            const vid = inst.words[2];
+            const pointee = resolvePointeeType(module, vid) orelse continue;
+            const orig = names.get(vid) orelse "var";
+            const builtin = getDecorationValue(decorations, vid, .built_in);
+            const loc = getDecorationValue(decorations, vid, .location);
+            // Skip per-vertex interface blocks (gl_PerVertex etc.) — out of scope for v1.
+            // These appear as struct-typed Input/Output. Bare scalars/vectors and
+            // builtins with known semantics are handled.
+            const pt_inst = getDef(module, pointee);
+            if (pt_inst) |pi| {
+                if (pi.op == .TypeStruct) continue;
+            }
+            const field = VtxField{
+                .id = vid,
+                .orig_name = orig,
+                .type_id = pointee,
+                .location = loc,
+                .builtin = builtin,
+            };
+            if (sc == .Input) {
+                vtx_inputs.append(alloc, field) catch {};
+            } else {
+                vtx_outputs.append(alloc, field) catch {};
+            }
+        }
+        // Sort inputs/outputs by location (built-ins last; they don't have one).
+        const SortCtx = struct {
+            fn lessThan(_: void, a: VtxField, b: VtxField) bool {
+                const al = a.location orelse std.math.maxInt(u32);
+                const bl = b.location orelse std.math.maxInt(u32);
+                return al < bl;
+            }
+        };
+        std.sort.insertion(VtxField, vtx_inputs.items, {}, SortCtx.lessThan);
+        std.sort.insertion(VtxField, vtx_outputs.items, {}, SortCtx.lessThan);
+
+        // Emit VS_INPUT struct.
+        try w.writeAll("struct VS_INPUT\n{\n");
+        for (vtx_inputs.items) |fld| {
+            const tname = try hlslType(module, fld.type_id, names, alloc);
+            const semantic: []const u8 = if (fld.builtin) |b| blk: {
+                const bi: spirv.BuiltIn = @enumFromInt(b);
+                break :blk switch (bi) {
+                    .vertex_id, .vertex_index => @as([]const u8, "SV_VertexID"),
+                    .instance_id, .instance_index => @as([]const u8, "SV_InstanceID"),
+                    else => @as([]const u8, "TEXCOORD0"),
+                };
+            } else "TEXCOORD0";
+            if (fld.builtin != null) {
+                try w.print("    {s} {s} : {s};\n", .{ tname, fld.orig_name, semantic });
+            } else {
+                try w.print("    {s} {s} : TEXCOORD{d};\n", .{ tname, fld.orig_name, fld.location orelse 0 });
+            }
+        }
+        try w.writeAll("};\n\n");
+
+        // Emit VS_OUTPUT struct.
+        try w.writeAll("struct VS_OUTPUT\n{\n");
+        for (vtx_outputs.items) |fld| {
+            const tname = try hlslType(module, fld.type_id, names, alloc);
+            if (fld.builtin) |b| {
+                const bi: spirv.BuiltIn = @enumFromInt(b);
+                const semantic: []const u8 = switch (bi) {
+                    .position => posSemantic(shader_model),
+                    else => continue, // unsupported vertex output builtin (gl_PointSize, gl_ClipDistance, ...) — TODO
+                };
+                try w.print("    {s} {s} : {s};\n", .{ tname, fld.orig_name, semantic });
+            } else {
+                try w.print("    {s} {s} : TEXCOORD{d};\n", .{ tname, fld.orig_name, fld.location orelse 0 });
+            }
+        }
+        try w.writeAll("};\n\n");
+
+        // Rewrite Input/Output names to `input.<orig>` / `output.<orig>` so
+        // body emission naturally produces the routed expressions. Skip
+        // unsupported output builtins so they keep their old name (the body
+        // will still write to a now-undeclared global, but that's a known
+        // v1 deferral path covered by the TODO above).
+        for (vtx_inputs.items) |fld| {
+            const new_name = try std.fmt.allocPrint(alloc, "input.{s}", .{fld.orig_name});
+            if (try names.fetchPut(fld.id, new_name)) |old| alloc.free(old.value);
+        }
+        for (vtx_outputs.items) |fld| {
+            if (fld.builtin) |b| {
+                const bi: spirv.BuiltIn = @enumFromInt(b);
+                switch (bi) {
+                    .position => {},
+                    else => continue,
+                }
+            }
+            const new_name = try std.fmt.allocPrint(alloc, "output.{s}", .{fld.orig_name});
+            if (try names.fetchPut(fld.id, new_name)) |old| alloc.free(old.value);
+        }
+    }
+
     if (is_compute or is_task) {
         try w.print("[numthreads({d}, {d}, {d})]\n", .{
             module.local_size[0],
@@ -1583,6 +1716,8 @@ fn emitFunction(
         } else {
             try w.writeAll("float4 main(");
         }
+    } else if (is_vertex) {
+        try w.writeAll("VS_OUTPUT main(VS_INPUT input");
     } else {
         try w.print("{s} {s}(", .{ return_type, func_name });
     }
@@ -1864,8 +1999,13 @@ fn emitFunction(
         }
     }
 
+    // Vertex entry: declare the local VS_OUTPUT instance the body writes into.
+    if (is_vertex) {
+        try w.writeAll("    VS_OUTPUT output;\n");
+    }
+
     // Emit body
-    try emitBody(module, names, decorations, func_idx, w, alloc, is_fragment, output_var_id);
+    try emitBody(module, names, decorations, func_idx, w, alloc, is_fragment, is_vertex, output_var_id);
 
     // Return output var for fragment
     if (is_fragment and output_var_id != null) {
@@ -1884,6 +2024,9 @@ fn emitFunction(
     } else if (is_fragment) {
         // Empty fragment shader — return default value
         try w.writeAll("    return float4(0.0, 0.0, 0.0, 0.0);\n");
+    } else if (is_vertex) {
+        // Vertex entry: return the populated output struct.
+        try w.writeAll("    return output;\n");
     }
 
     try w.writeAll("}\n");
@@ -1926,6 +2069,7 @@ fn emitBody(
     w: anytype,
     alloc: std.mem.Allocator,
     is_fragment: bool,
+    is_vertex: bool,
     output_var_id: ?u32,
 ) !void {
     // Build label → instruction index map
@@ -2000,7 +2144,7 @@ fn emitBody(
         if (inst.op == .LoopMerge and inst.words.len >= 3) {
             const merge_lbl = inst.words[1];
             const cont_lbl = inst.words[2];
-            idx = try emitWhileLoopHLSL(module, names, decorations, idx, merge_lbl, cont_lbl, &label_map, &bc_merge_map, &loop_merge_map, w, alloc, is_fragment, output_var_id);
+            idx = try emitWhileLoopHLSL(module, names, decorations, idx, merge_lbl, cont_lbl, &label_map, &bc_merge_map, &loop_merge_map, w, alloc, is_fragment, is_vertex, output_var_id);
             continue;
         }
 
@@ -2017,10 +2161,10 @@ fn emitBody(
                 const has_else = false_label != null and false_label.? != ml;
                 try w.print("    if ({s}) {{\n", .{cond_name});
                 // Emit true branch
-                idx = try emitBlock(module, names, decorations, true_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                idx = try emitBlock(module, names, decorations, true_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                 if (has_else) {
                     try w.writeAll("    } else {\n");
-                    idx = try emitBlock(module, names, decorations, false_label.?, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                    idx = try emitBlock(module, names, decorations, false_label.?, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                 }
                 try w.writeAll("    }\n");
                 // Advance to merge label
@@ -2045,19 +2189,19 @@ fn emitBody(
                 }
                 try w.print("    if ({s})\n    {{\n", .{cond_name});
                 if (converge_lbl) |cv| {
-                    idx = try emitBlock(module, names, decorations, true_label, cv, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                    idx = try emitBlock(module, names, decorations, true_label, cv, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                     if (false_label != null and false_label.? != cv) {
                         try w.writeAll("    } else {\n");
-                        idx = try emitBlock(module, names, decorations, false_label.?, cv, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                        idx = try emitBlock(module, names, decorations, false_label.?, cv, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                     }
                     try w.writeAll("    }\n");
                     if (label_map.get(cv)) |mi| { idx = mi; }
                 } else if (false_label != null) {
-                    idx = try emitBlock(module, names, decorations, true_label, false_label.?, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                    idx = try emitBlock(module, names, decorations, true_label, false_label.?, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                     try w.writeAll("    }\n");
                     if (label_map.get(false_label.?)) |mi| { idx = mi; }
                 } else {
-                    idx = try emitBlock(module, names, decorations, true_label, true_label, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                    idx = try emitBlock(module, names, decorations, true_label, true_label, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                     try w.writeAll("    }\n");
                 }
             }
@@ -2077,7 +2221,7 @@ fn emitBody(
                 // Emit default case first if it's not the merge label
                 if (default_label != ml) {
                     try w.writeAll("    default:\n");
-                    _ = try emitBlock(module, names, decorations, default_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                    _ = try emitBlock(module, names, decorations, default_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                 }
                 // Emit case labels (word 3+: pairs of literal, target)
                 var wi: usize = 3;
@@ -2086,7 +2230,7 @@ fn emitBody(
                     const target_label = inst.words[wi + 1];
                     if (target_label == ml) continue; // skip branches to merge
                     try w.print("    case {d}:\n", .{case_val});
-                    _ = try emitBlock(module, names, decorations, target_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                    _ = try emitBlock(module, names, decorations, target_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                 }
                 try w.writeAll("    }\n");
                 // Advance to merge label
@@ -2114,7 +2258,7 @@ fn emitBody(
                     try w.print("    switch ({s}) {{\n", .{selector_name});
                     if (default_label != sm) {
                         try w.writeAll("    default:\n");
-                        _ = try emitBlock(module, names, decorations, default_label, sm, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                        _ = try emitBlock(module, names, decorations, default_label, sm, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                     }
                     var wi: usize = 3;
                     while (wi + 1 < inst.words.len) : (wi += 2) {
@@ -2122,7 +2266,7 @@ fn emitBody(
                         const target_label = inst.words[wi + 1];
                         if (target_label == sm) continue;
                         try w.print("    case {d}:\n", .{cv});
-                        _ = try emitBlock(module, names, decorations, target_label, sm, &label_map, &bc_merge_map, w, alloc, is_fragment, output_var_id, "    ");
+                        _ = try emitBlock(module, names, decorations, target_label, sm, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                     }
                     try w.writeAll("    }\n");
                     if (label_map.get(sm)) |merge_idx| { idx = merge_idx; }
@@ -2133,7 +2277,7 @@ fn emitBody(
             continue;
         }
 
-        try emitInstruction(module, names, decorations, inst, w, alloc, is_fragment, output_var_id);
+        try emitInstruction(module, names, decorations, inst, w, alloc, is_fragment, is_vertex, output_var_id);
     }
 }
 
@@ -2153,6 +2297,7 @@ fn emitWhileLoopHLSL(
     w: anytype,
     alloc: std.mem.Allocator,
     is_fragment: bool,
+    is_vertex: bool,
     output_var_id: ?u32,
 ) !usize {
     // Two patterns after LoopMerge:
@@ -2251,7 +2396,7 @@ fn emitWhileLoopHLSL(
                 while (ci < cond_end) : (ci += 1) {
                     const cinst = module.instructions[ci];
                     if (cinst.op == .Label or cinst.op == .Branch or cinst.op == .SelectionMerge or cinst.op == .LoopMerge) continue;
-                    try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, output_var_id);
+                    try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, is_vertex, output_var_id);
                 }
             }
         }
@@ -2266,7 +2411,7 @@ fn emitWhileLoopHLSL(
                     if (tinst.op == .FunctionEnd) break;
                     if (tinst.op == .Label) break;
                     if (tinst.op == .Branch) continue;
-                    try emitInstruction(module, names, decorations, tinst, w, alloc, is_fragment, output_var_id);
+                    try emitInstruction(module, names, decorations, tinst, w, alloc, is_fragment, is_vertex, output_var_id);
                 }
             }
         }
@@ -2281,7 +2426,7 @@ fn emitWhileLoopHLSL(
                     if (finst.op == .FunctionEnd) break;
                     if (finst.op == .Label) break;
                     if (finst.op == .Branch) continue;
-                    try emitInstruction(module, names, decorations, finst, w, alloc, is_fragment, output_var_id);
+                    try emitInstruction(module, names, decorations, finst, w, alloc, is_fragment, is_vertex, output_var_id);
                 }
             }
             try w.writeAll("    }");
@@ -2302,7 +2447,7 @@ fn emitWhileLoopHLSL(
             while (ci < cond_end) : (ci += 1) {
                 const cinst = module.instructions[ci];
                 if (cinst.op == .Label or cinst.op == .Branch or cinst.op == .SelectionMerge or cinst.op == .LoopMerge) continue;
-                try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, output_var_id);
+                try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, is_vertex, output_var_id);
             }
         }
     }
@@ -2327,7 +2472,7 @@ fn emitWhileLoopHLSL(
                 if (binst.words.len >= 3) {
                     const nmerge = binst.words[1];
                     const ncont = binst.words[2];
-                    bi = try emitWhileLoopHLSL(module, names, decorations, bi, nmerge, ncont, label_map, bc_merge_map, loop_merge_map, w, alloc, is_fragment, output_var_id);
+                    bi = try emitWhileLoopHLSL(module, names, decorations, bi, nmerge, ncont, label_map, bc_merge_map, loop_merge_map, w, alloc, is_fragment, is_vertex, output_var_id);
                     bi -= 1; // caller will increment
                 }
                 continue;
@@ -2356,26 +2501,26 @@ fn emitWhileLoopHLSL(
                         try w.writeAll("        continue;\n");
                     } else if (tl_is_trivial_continue and nhe) {
                         try w.print("        if ({s}) continue;\n", .{ncn});
-                        bi = try emitBlock(module, names, decorations, nfl.?, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                        bi = try emitBlock(module, names, decorations, nfl.?, nmv, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
                     } else if (tl_is_trivial_break) {
                         try w.print("        if ({s}) break;\n", .{ncn});
                         if (nhe) {
-                            bi = try emitBlock(module, names, decorations, nfl.?, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                            bi = try emitBlock(module, names, decorations, nfl.?, nmv, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
                         }
                     } else if (fl_is_trivial_continue) {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
-                        bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                        bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
                         try w.writeAll("        } continue;\n");
                     } else if (fl_is_trivial_break and !nhe) {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
-                        bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                        bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
                         try w.writeAll("        }\n");
                     } else {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
-                        bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                        bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
                         if (nhe) {
                             try w.writeAll("        } else {\n");
-                            bi = try emitBlock(module, names, decorations, nfl.?, nmv, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, "        ");
+                            bi = try emitBlock(module, names, decorations, nfl.?, nmv, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
                         }
                         try w.writeAll("        }\n");
                     }
@@ -2385,7 +2530,7 @@ fn emitWhileLoopHLSL(
                 }
                 continue;
             }
-            try emitInstruction(module, names, decorations, binst, w, alloc, is_fragment, output_var_id);
+            try emitInstruction(module, names, decorations, binst, w, alloc, is_fragment, is_vertex, output_var_id);
         }
     }
     // Emit continue block (e.g., i++ in for-loops)
@@ -2398,7 +2543,7 @@ fn emitWhileLoopHLSL(
             if (cinst.op == .Label) break;
             if (cinst.op == .Branch) break;
             if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
-            try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, output_var_id);
+            try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, is_vertex, output_var_id);
         }
     }
 
@@ -2418,6 +2563,7 @@ fn emitBlock(
     w: anytype,
     alloc: std.mem.Allocator,
     is_fragment: bool,
+    is_vertex: bool,
     output_var_id: ?u32,
     indent: []const u8,
 ) !usize {
@@ -2446,10 +2592,10 @@ fn emitBlock(
             if (nested_merge) |nm| {
                 const has_else = false_lbl != null and false_lbl.? != nm;
                 try w.print("{s}    if ({s}) {{\n", .{ indent, cond_name });
-                i = try emitBlock(module, names, decorations, true_lbl, nm, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, indent);
+                i = try emitBlock(module, names, decorations, true_lbl, nm, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, indent);
                 if (has_else) {
                     try w.print("{s}    }} else {{\n", .{indent});
-                    i = try emitBlock(module, names, decorations, false_lbl.?, nm, label_map, bc_merge_map, w, alloc, is_fragment, output_var_id, indent);
+                    i = try emitBlock(module, names, decorations, false_lbl.?, nm, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, indent);
                 }
                 try w.print("{s}    }}\n", .{indent});
                 // Skip to nested merge label
@@ -2465,7 +2611,7 @@ fn emitBlock(
         // Regular instruction — emit it
         // Note: we can't easily change the indentation of emitInstruction
         // since it always emits "    " prefix. For now, accept same indentation.
-        try emitInstruction(module, names, decorations, inst, w, alloc, is_fragment, output_var_id);
+        try emitInstruction(module, names, decorations, inst, w, alloc, is_fragment, is_vertex, output_var_id);
     }
     return i;
 }
@@ -2478,12 +2624,17 @@ fn emitInstruction(
     w: anytype,
     alloc: std.mem.Allocator,
     is_fragment: bool,
+    is_vertex: bool,
     output_var_id: ?u32,
 ) !void {
     switch (inst.op) {
         .Variable => {
             if (inst.words.len < 4) return;
             const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            // Vertex Input/Output globals: live in VS_INPUT/VS_OUTPUT structs
+            // (the names map was rewritten to `input.<f>` / `output.<f>`); do
+            // not emit any local declaration.
+            if (is_vertex and (sc == .Input or sc == .Output)) return;
             // Output variables in fragment entry: declare as local (will be returned)
             if (sc == .Output and is_fragment) {
                 const result_id = inst.words[2];
@@ -2559,6 +2710,12 @@ fn emitInstruction(
                     }
                     // Skip loads from Input variable in fragment entry — they're parameters
                     if (sc == .Input and is_fragment) {
+                        is_output_load = true;
+                    }
+                    // Vertex stage: loads from Input/Output route through the rewritten
+                    // name (e.g. `input.in_pos` / `output.gl_Position`), so alias the
+                    // load result to that name and skip emitting a separate read.
+                    if ((sc == .Input or sc == .Output) and is_vertex) {
                         is_output_load = true;
                     }
                 }
@@ -3425,8 +3582,8 @@ fn emitInstruction(
             }
         },
         .Return => {
-            // Skip bare return in fragment entry — we emit the output return at function end
-            if (is_fragment) {} else {
+            // Skip bare return in fragment/vertex entry — we emit the output return at function end
+            if (is_fragment or is_vertex) {} else {
                 try w.writeAll("    return;\n");
             }
         },
