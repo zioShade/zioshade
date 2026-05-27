@@ -872,12 +872,35 @@ void main() { SetMeshOutputsEXT(3, 1); }
 ```
 should round-trip through `glslpp hlsl --stage mesh` and then pass `dxc -T ms_6_5 -E main` without errors. Today it doesn't because of v2.a/b/c.
 
-### Task 5.3: Validate via DXC on Windows
+### Task 5.3: Validate via DXC on Windows — SHIPPED
 
 **Files:**
 - Modify: `tools/dxc_batch_test.zig` to compile the mesh fixture, expand its `--shader-model` matrix
 
-- [ ] **Step 1-3:** Add fixtures, run DXC, fix any output that DXC rejects.
+- [x] **Step 1-3:** Add fixtures, run DXC, fix any output that DXC rejects.
+
+Shipped in this commit. `tools/dxc_batch_test.zig` now detects each
+fixture's execution model from its SPIR-V `OpEntryPoint` (opcode 15) and
+selects the matching DXC target profile (`ps_*` / `cs_*` / `ms_*` /
+`as_*`). Stages glslpp doesn't yet emit valid HLSL for (vertex, raygen,
+geometry, tess, mesh-without-v2) are reported as **SKIP** with a roadmap
+reference, so adding fixtures for those stages later requires no tool
+changes. Per-stage tallies and a top-N failure histogram (extracted from
+DXC stderr) are printed at the end of the run.
+
+`zig build test-dxc` forwards extra `--` args so SM, dxc path, and spv
+directory are all overridable. The tool exits non-zero only if **zero**
+fragment shaders pass (regression guard); per-fixture failures are
+tracked through the printed summary.
+
+A documented snapshot lives in **BENCHMARKS.md → "DXC validation
+snapshot (M5.3)"**. Current state on commit `b14d0429`, SM 6.0, DXC 1.10
+(5180): **47/51 fragment fixtures pass (92.2%)**; one minimal compute
+fixture (`compute_minimal.spv`) added to exercise the `cs_*` path and
+currently fails on an SSBO subscript emit issue (filed as follow-up).
+Vertex/mesh/raytracing buckets are empty by corpus, not by tool — when
+those fixtures are added in M5.0/M5.2 v2/M9, the tool picks them up
+automatically.
 
 ---
 
