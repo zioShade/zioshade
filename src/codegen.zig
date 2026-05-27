@@ -2688,6 +2688,27 @@ const Codegen = struct {
         for (self.module.functions) |func| {
             try self.emitName(func.result_id, func.name);
         }
+        // Emit OpName for specialization constants so cross-compiled output
+        // surfaces the user-declared identifier (e.g., `SIZE`) instead of
+        // the backend's auto-generated `v{id}` fallback. The `spec_constants`
+        // map is keyed by the original GLSL identifier; for derived
+        // `spec_constant_ops`, only entries that received a user-facing
+        // binding (top-level `const T NAME = <spec-expr>;`) carry a
+        // `user_name` -- intermediate sub-expressions stay anonymous.
+        {
+            var sc_iter = self.module.spec_constants.iterator();
+            while (sc_iter.next()) |entry| {
+                try self.emitName(entry.value_ptr.result_id, entry.key_ptr.*);
+            }
+        }
+        {
+            var sco_iter = self.module.spec_constant_ops.iterator();
+            while (sco_iter.next()) |entry| {
+                if (entry.value_ptr.user_name) |name| {
+                    try self.emitName(entry.value_ptr.result_id, name);
+                }
+            }
+        }
     }
 
     fn emitName(self: *Codegen, id: u32, name: []const u8) !void {
