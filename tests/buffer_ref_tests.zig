@@ -66,11 +66,12 @@ test "buffer_reference WGSL backend escapes ref reserved keyword" {
     defer alloc.free(wgsl);
 
     // The bare reserved keyword must not appear as a struct field name.
-    // Field emission in spirv_to_wgsl is `    {name}: {type},` so the
-    // distinctive substring to forbid is the keyword followed by `:`.
-    if (std.mem.indexOf(u8, wgsl, "ref:")) |_| {
+    // Field emission is `    {name}: {type},` — anchor on the leading
+    // indentation so we don't false-match `var ref: ...` or other accidental
+    // substrings, and we don't accept `ref_:` as a member-form hit.
+    if (std.mem.indexOf(u8, wgsl, "    ref:")) |_| {
         std.debug.print(
-            "WGSL output contains bare reserved keyword 'ref' as a field name:\n{s}\n",
+            "WGSL output contains bare reserved keyword 'ref' as a struct field:\n{s}\n",
             .{wgsl},
         );
         return error.WgslReservedKeywordEmitted;
@@ -105,5 +106,41 @@ test "buffer_reference WGSL backend emits pointee struct declaration" {
             .{wgsl},
         );
         return error.WgslMissingPointeeStruct;
+    }
+}
+
+// Exercises the OpName-rename post-process for a non-member identifier:
+// the uniform-block *instance* is named `ref` (a WGSL reserved word but a
+// valid GLSL identifier). The previous code only sanitized struct member
+// names via getMemberName; without the post-process, the emitted WGSL
+// would declare `var<uniform> ref: U;` and naga would reject it the same
+// way it did for member `ref:` fields.
+test "WGSL post-process renames OpName-sourced variable named like a keyword" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(set=0, binding=0) uniform U { vec4 color; } ref;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main() { fragColor = ref.color; }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    const wgsl = try glslpp.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+
+    if (std.mem.indexOf(u8, wgsl, "var<uniform> ref:") != null) {
+        std.debug.print(
+            "WGSL output declares uniform variable using bare reserved name 'ref':\n{s}\n",
+            .{wgsl},
+        );
+        return error.WgslReservedVariableEmitted;
+    }
+    if (std.mem.indexOf(u8, wgsl, "ref_") == null) {
+        std.debug.print(
+            "WGSL output is missing the sanitized variable name 'ref_':\n{s}\n",
+            .{wgsl},
+        );
+        return error.WgslVariableNotSanitized;
     }
 }
