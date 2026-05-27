@@ -922,12 +922,18 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     // (bool / i32 / u32 / f32). Composite spec consts would require M3.4.
     var sc_emitted_any = false;
     for (module.instructions) |sc_inst| {
-        if (sc_inst.op == .SpecConstant and sc_inst.words.len > 3) {
-            const result_id = sc_inst.words[2];
-            const name = names.get(result_id) orelse continue;
-            const type_id = sc_inst.words[1];
-            const type_str = try wgslType(&module, type_id, &names, arena);
-            const sid = getDecVal(&decorations, result_id, .spec_id) orelse continue;
+        const is_scalar_sc = sc_inst.op == .SpecConstant and sc_inst.words.len > 3;
+        const is_bool_sc = (sc_inst.op == .SpecConstantTrue or sc_inst.op == .SpecConstantFalse) and sc_inst.words.len > 2;
+        if (!is_scalar_sc and !is_bool_sc) continue;
+        const result_id = sc_inst.words[2];
+        const name = names.get(result_id) orelse continue;
+        const type_id = sc_inst.words[1];
+        const type_str = try wgslType(&module, type_id, &names, arena);
+        const sid = getDecVal(&decorations, result_id, .spec_id) orelse continue;
+        if (is_bool_sc) {
+            const bool_val: []const u8 = if (sc_inst.op == .SpecConstantTrue) "true" else "false";
+            try w.print("@id({d}) override {s}: bool = {s};\n", .{ sid, name, bool_val });
+        } else {
             const default_val = sc_inst.words[3];
             // Format default per type: f32 needs decimal, i32/u32 don't.
             if (std.mem.eql(u8, type_str, "f32")) {
@@ -940,8 +946,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 // u32 / fallback
                 try w.print("@id({d}) override {s}: {s} = {d}u;\n", .{ sid, name, type_str, default_val });
             }
-            sc_emitted_any = true;
         }
+        sc_emitted_any = true;
     }
     if (sc_emitted_any) try w.writeAll("\n");
 

@@ -127,7 +127,8 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         => if (words.len > 1) words[1] else null,
 
         .ConstantTrue, .ConstantFalse, .Constant, .ConstantComposite,
-        .SpecConstant, .Undef,
+        .SpecConstant, .SpecConstantTrue, .SpecConstantFalse,
+        .SpecConstantComposite, .SpecConstantOp, .Undef,
         => if (words.len > 2) words[2] else null,
 
         .Variable, .Function, .FunctionParameter,

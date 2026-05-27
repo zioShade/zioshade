@@ -1293,15 +1293,28 @@ const Analyzer = struct {
                             var default_literal: u32 = 0;
                             if (node.data.children.len > 0) {
                                 const init = try self.analyzeExpression(node.data.children[0]);
-                                // Extract literal from the constant_int instruction
+                                // Extract literal from constant_int / constant_bool / constant_float.
+                                // For booleans, default_literal carries 0 or 1 — codegen reads it
+                                // to choose OpSpecConstantTrue vs OpSpecConstantFalse.
                                 for (self.instructions.items) |inst| {
-                                    if (inst.result_id != null and inst.result_id.? == init.id and inst.tag == .constant_int) {
-                                        default_literal = switch (inst.operands[0]) {
-                                            .literal_int => |v| @intCast(v),
-                                            else => 0,
-                                        };
-                                        break;
+                                    if (inst.result_id == null or inst.result_id.? != init.id) continue;
+                                    switch (inst.tag) {
+                                        .constant_int, .constant_bool => {
+                                            default_literal = switch (inst.operands[0]) {
+                                                .literal_int => |v| @intCast(v),
+                                                else => 0,
+                                            };
+                                        },
+                                        .constant_float => {
+                                            // Float literal stored as f32 bit-pattern via .literal_float
+                                            default_literal = switch (inst.operands[0]) {
+                                                .literal_float => |v| @bitCast(v),
+                                                else => 0,
+                                            };
+                                        },
+                                        else => continue,
                                     }
+                                    break;
                                 }
                             }
                             // Declare as SSA symbol

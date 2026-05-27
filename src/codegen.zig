@@ -3303,10 +3303,20 @@ const Codegen = struct {
                 else => .int,
             };
             const result_type_id = try self.ensureType(ty);
-            try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.SpecConstant)));
-            try self.emitTypeWord(result_type_id);
-            try self.emitTypeWord(sc.result_id);
-            try self.emitTypeWord(sc.default_literal);
+            if (tag == .bool) {
+                // OpSpecConstantTrue (48) / OpSpecConstantFalse (49) are
+                // 3-word instructions with no literal payload — the truth
+                // value is encoded in the opcode itself.
+                const op: spirv.Op = if (sc.default_literal != 0) .SpecConstantTrue else .SpecConstantFalse;
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(op)));
+                try self.emitTypeWord(result_type_id);
+                try self.emitTypeWord(sc.result_id);
+            } else {
+                try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.SpecConstant)));
+                try self.emitTypeWord(result_type_id);
+                try self.emitTypeWord(sc.result_id);
+                try self.emitTypeWord(sc.default_literal);
+            }
             // DO NOT cache spec constants in emitted_constants — they would collide with
             // regular OpConstant values and cause struct AccessChain to use spec constants
             // as indices (which is illegal in SPIR-V).
