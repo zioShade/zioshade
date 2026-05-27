@@ -355,6 +355,11 @@ pub const MslCompileOptions = struct {
     metal_version: u32 = 21,
     /// Entry point name to compile (default: "main").
     entry_point_name: []const u8 = "main",
+    /// Shift all descriptor bindings by this amount. -1 remaps binding=1 → [[buffer(0)]].
+    /// Applied uniformly to [[buffer]], [[texture]], and [[sampler]] slot indices
+    /// (their indices are separate namespaces, but glslpp's convention — matching
+    /// HLSL — is one shift across all kinds). Negative results clamp to 0.
+    binding_shift: i32 = 0,
 };
 
 pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: MslCompileOptions) ![]const u8 {
@@ -536,9 +541,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     if (local_structs_msl.count() > 0) try w.writeAll("\n");
 
     // Emit non-entry functions first
-    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute_like); }
+    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute_like, options.binding_shift); }
     // Emit entry function last
-    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute_like);
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, is_compute_like, options.binding_shift);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -861,6 +866,7 @@ fn emitFunction(
     textures: *const std.ArrayList(TextureDecl),
     storage_buffers: *const std.ArrayList(CbufferDecl),
     is_compute: bool,
+    binding_shift: i32,
 ) !void {
     const fi = getDef(m, func_id) orelse return;
     if (fi.op != .Function or fi.words.len < 5) return;
@@ -1031,13 +1037,15 @@ fn emitFunction(
         first_param = true;
         for (cbuffers.items) |cb| {
             if (!first_param) try w.writeAll(", ");
-            try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb.binding});
+            const cb_b = common.applyBindingShift(cb.binding, binding_shift);
+            try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb_b});
             first_param = false;
         }
         for (textures.items) |tex| {
             if (!first_param) try w.writeAll(", ");
-            try w.print("texture2d<float> {s} [[texture({d})]]", .{tex.name, tex.binding});
-            try w.print(", sampler {s}Smplr [[sampler({d})]]", .{tex.name, tex.binding});
+            const tex_b = common.applyBindingShift(tex.binding, binding_shift);
+            try w.print("texture2d<float> {s} [[texture({d})]]", .{tex.name, tex_b});
+            try w.print(", sampler {s}Smplr [[sampler({d})]]", .{tex.name, tex_b});
             first_param = false;
         }
         if (!first_param) try w.writeAll(", ");
@@ -1066,14 +1074,16 @@ fn emitFunction(
         // Emit storage buffers as device pointers
         for (storage_buffers.items) |sb| {
             if (!first_param) try w.writeAll(", ");
-            try w.print("device {s}* {s} [[buffer({d})]]", .{sb.name, sb.name, sb.binding});
+            const sb_b = common.applyBindingShift(sb.binding, binding_shift);
+            try w.print("device {s}* {s} [[buffer({d})]]", .{sb.name, sb.name, sb_b});
             first_param = false;
         }
 
         // Emit uniform buffers
         for (cbuffers.items) |cb| {
             if (!first_param) try w.writeAll(", ");
-            try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb.binding});
+            const cb_b = common.applyBindingShift(cb.binding, binding_shift);
+            try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb_b});
             first_param = false;
         }
 

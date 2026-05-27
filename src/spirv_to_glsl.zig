@@ -293,6 +293,9 @@ pub const GlslCompileOptions = struct {
     es: bool = false,
     /// Entry point name to compile (default: "main").
     entry_point_name: []const u8 = "main",
+    /// Shift all descriptor bindings by this amount. -1 remaps binding=1 → binding=0.
+    /// Negative results clamp to 0. Mirrors `HlslCompileOptions.binding_shift`.
+    binding_shift: i32 = 0,
 };
 
 // Use shared parse cache from root (avoids circular import — cache is passed via allocator context)
@@ -361,7 +364,8 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
 
     for (cbuffers.items) |cb| {
-        try w.print("layout(binding = {d}, std140) uniform {s}\n{{\n", .{cb.binding, cb.name});
+        const shifted = common.applyBindingShift(cb.binding, options.binding_shift);
+        try w.print("layout(binding = {d}, std140) uniform {s}\n{{\n", .{shifted, cb.name});
         try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa);
         try w.print("}} {s}_1;\n\n", .{cb.name});
     }
@@ -376,8 +380,9 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 if (!is_ssbo) continue;
                 const rid = inst.words[2];
                 const binding = getDecVal(&decs, rid, .binding) orelse continue;
+                const shifted_binding = common.applyBindingShift(binding, options.binding_shift);
                 const name = names.get(rid) orelse continue;
-                try w.print("layout(std430, binding = {d}) buffer {s}\n{{\n", .{binding, name});
+                try w.print("layout(std430, binding = {d}) buffer {s}\n{{\n", .{shifted_binding, name});
                 // Emit struct members from the pointee type
                 const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
                 if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
@@ -388,12 +393,13 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
     }
     for (textures.items) |tex| {
+        const tex_shifted = common.applyBindingShift(tex.binding, options.binding_shift);
         if (tex.is_storage) {
             const itype = if (std.mem.eql(u8, tex.dim_str, "Buffer")) (if (tex.is_uint) "uimageBuffer" else if (tex.is_int) "iimageBuffer" else "imageBuffer") else std.fmt.allocPrint(aa, "{s}image{s}", .{if (tex.is_uint) "u" else if (tex.is_int) "i" else "", tex.dim_str}) catch "image2D";
-            try w.print("layout(binding = {d}, {s}) uniform {s} {s};\n", .{tex.binding, tex.format_str, itype, tex.name});
+            try w.print("layout(binding = {d}, {s}) uniform {s} {s};\n", .{tex_shifted, tex.format_str, itype, tex.name});
         } else {
             const stype = if (tex.is_uint) std.fmt.allocPrint(aa, "usampler{s}", .{tex.dim_str}) catch "usampler2D" else if (tex.is_int) std.fmt.allocPrint(aa, "isampler{s}", .{tex.dim_str}) catch "isampler2D" else if (std.mem.eql(u8, tex.dim_str, "2D")) "sampler2D" else std.fmt.allocPrint(aa, "sampler{s}", .{tex.dim_str}) catch "sampler2D";
-            try w.print("layout(binding = {d}) uniform {s} {s};\n", .{tex.binding, stype, tex.name});
+            try w.print("layout(binding = {d}) uniform {s} {s};\n", .{tex_shifted, stype, tex.name});
         }
     }
     if (textures.items.len > 0) try w.writeAll("\n");
