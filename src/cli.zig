@@ -35,6 +35,8 @@ pub fn main() !void {
             \\  --glsl-version <ver>  GLSL output version: 330–460 (default: 430)
             \\  --shader-model <ver>  HLSL shader model: 50, 60 (default: 60)
             \\  --metal-version <ver> MSL version: 21, 24, 30 (default: 21)
+            \\  --msl-argument-buffers
+            \\                        Emit Metal 2+ argument buffers (spvDescriptorSetBufferN)
             \\  --stdin               Read input from stdin
             \\  --help                Show this help
             \\
@@ -52,6 +54,7 @@ pub fn main() !void {
     var glsl_version: u32 = 430;
     var shader_model: u32 = 60;
     var metal_version: u32 = 21;
+    var msl_arg_buffers = false;
     var use_stdin = false;
 
     var include_paths = std.ArrayList([]const u8).initCapacity(alloc, 4) catch return;
@@ -138,6 +141,8 @@ pub fn main() !void {
             i += 1;
             if (i >= args.len) fatal("missing argument after --metal-version", .{});
             metal_version = std.fmt.parseInt(u32, args[i], 10) catch fatal("invalid metal version: {s}", .{args[i]});
+        } else if (std.mem.eql(u8, args[i], "--msl-argument-buffers")) {
+            msl_arg_buffers = true;
         } else if (std.mem.eql(u8, args[i], "--stdin")) {
             use_stdin = true;
         } else {
@@ -174,11 +179,11 @@ pub fn main() !void {
         }
     } else if (std.mem.eql(u8, command, "msl")) {
         if (is_spv and !use_stdin) {
-            try doSpvToMsl(alloc, input, output_path, entry_point, metal_version);
+            try doSpvToMsl(alloc, input, output_path, entry_point, metal_version, msl_arg_buffers);
         } else {
             const source = try readInput(alloc, input_path, use_stdin);
             defer alloc.free(source);
-            try doGlslToMsl(alloc, source, output_path, stage, include_paths.items, defines.items, entry_point, metal_version);
+            try doGlslToMsl(alloc, source, output_path, stage, include_paths.items, defines.items, entry_point, metal_version, msl_arg_buffers);
         }
     } else if (std.mem.eql(u8, command, "wgsl")) {
         if (is_spv and !use_stdin) {
@@ -342,18 +347,19 @@ fn doGlslToGlsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const
 
 // ── SPIR-V → MSL ───────────────────────────────────────────────────
 
-fn doSpvToMsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, entry_point: ?[]const u8, metal_version: u32) !void {
+fn doSpvToMsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, entry_point: ?[]const u8, metal_version: u32, argument_buffers: bool) !void {
     const spv = try readSpv(alloc, input);
     defer alloc.free(spv);
     const result = glslpp.spirvToMSL(alloc, spv, .{
         .metal_version = metal_version,
         .entry_point_name = entry_point orelse "main",
+        .argument_buffers = argument_buffers,
     }) catch |e| crossErr(e);
     defer alloc.free(result);
     try writeOutput(output, result);
 }
 
-fn doGlslToMsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8, metal_version: u32) !void {
+fn doGlslToMsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8, metal_version: u32, argument_buffers: bool) !void {
     const spv = compileWithDiagsOrExit(alloc, source, .{
         .stage = stage,
         .include_paths = include_paths,
@@ -363,6 +369,7 @@ fn doGlslToMsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const 
     const result = glslpp.spirvToMSL(alloc, spv, .{
         .metal_version = metal_version,
         .entry_point_name = entry_point orelse "main",
+        .argument_buffers = argument_buffers,
     }) catch |e| crossErr(e);
     defer alloc.free(result);
     try writeOutput(output, result);
