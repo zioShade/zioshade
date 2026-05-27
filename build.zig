@@ -169,6 +169,20 @@ pub fn build(b: *std.Build) void {
     spec_test_step.dependOn(&run_spec_tests.step);
     test_step.dependOn(&run_spec_tests.step);
 
+    // WGSL packing + bitfield tests (M4) — run with: zig build test-wgsl-pack
+    const wpack_test_step = b.step("test-wgsl-pack", "Run WGSL packing/bitfield cross-compile tests");
+    const wpack_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/wgsl_packing_bitfield_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    wpack_test_mod.addImport("glslpp", glslpp_mod);
+    const run_wpack_tests = b.addRunArtifact(b.addTest(.{
+        .root_module = wpack_test_mod,
+    }));
+    wpack_test_step.dependOn(&run_wpack_tests.step);
+    test_step.dependOn(&run_wpack_tests.step);
+
     const run_hlsl_tests = b.addRunArtifact(b.addTest(.{
         .name = "hlsl-tests",
         .root_module = hlsl_test_mod,
