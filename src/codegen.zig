@@ -3022,42 +3022,50 @@ const Codegen = struct {
 
     /// Compute alignment for a type under the given layout rule.
     fn layoutAlignment(self: *Codegen, ty: ast.Type, kind: LayoutKind) u32 {
-        if (kind == .scalar) {
-            // Scalar layout: alignment of any type is the alignment of its scalar component.
-            // No 16-byte rounding, no vec3-to-vec4 padding.
-            return switch (ty) {
-                .int8, .uint8,
-                .i8vec2, .u8vec2, .i8vec3, .u8vec3, .i8vec4, .u8vec4 => 1,
-                .int16, .uint16, .float16,
-                .i16vec2, .u16vec2, .f16vec2,
-                .i16vec3, .u16vec3, .f16vec3,
-                .i16vec4, .u16vec4, .f16vec4 => 2,
-                .float, .int, .uint, .bool,
-                .vec2, .ivec2, .uvec2,
-                .vec3, .ivec3, .uvec3,
-                .vec4, .ivec4, .uvec4,
-                .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
-                .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 4,
-                .array => |arr| self.layoutAlignment(arr.base.*, kind),
-                .named => |name| blk: {
-                    const td = self.module.types.get(name) orelse break :blk 4;
-                    if (td.is_buffer_reference) break :blk 8;
-                    const type_id = self.emitted_named_types.get(name) orelse break :blk 4;
-                    if (self.layout_visited.contains(type_id)) break :blk 8;
-                    self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 4;
-                    defer _ = self.layout_visited.remove(type_id);
-                    var max_align: u32 = 1;
-                    for (td.members) |member| {
-                        const ma = self.layoutAlignment(member.ty, kind);
-                        if (ma > max_align) max_align = ma;
-                    }
-                    break :blk max_align;
-                },
-                else => 4,
-            };
+        switch (kind) {
+            .scalar => return self.layoutAlignmentScalar(ty),
+            .std430 => return self.layoutAlignmentStd430(ty),
+            .std140 => return self.layoutAlignmentStd140(ty),
         }
-        if (kind == .std430) {
-            return switch (ty) {
+    }
+
+    fn layoutAlignmentScalar(self: *Codegen, ty: ast.Type) u32 {
+        // Scalar layout: alignment of any type is the alignment of its scalar component.
+        // No 16-byte rounding, no vec3-to-vec4 padding.
+        return switch (ty) {
+            .int8, .uint8,
+            .i8vec2, .u8vec2, .i8vec3, .u8vec3, .i8vec4, .u8vec4 => 1,
+            .int16, .uint16, .float16,
+            .i16vec2, .u16vec2, .f16vec2,
+            .i16vec3, .u16vec3, .f16vec3,
+            .i16vec4, .u16vec4, .f16vec4 => 2,
+            .float, .int, .uint, .bool,
+            .vec2, .ivec2, .uvec2,
+            .vec3, .ivec3, .uvec3,
+            .vec4, .ivec4, .uvec4,
+            .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
+            .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 4,
+            .array => |arr| self.layoutAlignmentScalar(arr.base.*),
+            .named => |name| blk: {
+                const td = self.module.types.get(name) orelse break :blk 4;
+                if (td.is_buffer_reference) break :blk 8; // pointer alignment
+                const type_id = self.emitted_named_types.get(name) orelse break :blk 4;
+                if (self.layout_visited.contains(type_id)) break :blk 8; // self-ref cycle: pointer
+                self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 4;
+                defer _ = self.layout_visited.remove(type_id);
+                var max_align: u32 = 1;
+                for (td.members) |member| {
+                    const ma = self.layoutAlignmentScalar(member.ty);
+                    if (ma > max_align) max_align = ma;
+                }
+                break :blk max_align;
+            },
+            else => 4,
+        };
+    }
+
+    fn layoutAlignmentStd430(self: *Codegen, ty: ast.Type) u32 {
+        return switch (ty) {
                 .int8, .uint8 => 1,
                 .int16, .uint16, .float16 => 2,
                 .i8vec2, .u8vec2 => 2,
@@ -3069,25 +3077,27 @@ const Codegen = struct {
                 .vec3, .vec4, .ivec3, .ivec4, .uvec3, .uvec4 => 16,
                 .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
                 .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 16,
-                .array => |arr| self.layoutAlignment(arr.base.*, kind), // std430: array alignment = element alignment
-                .named => |name| blk: {
-                    // Struct alignment = max alignment of its members
-                    const td = self.module.types.get(name) orelse break :blk 16;
-                    if (td.is_buffer_reference) break :blk 8; // pointer alignment
-                    const type_id = self.emitted_named_types.get(name) orelse break :blk 16;
-                    if (self.layout_visited.contains(type_id)) break :blk 8; // self-ref cycle: pointer
-                    self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 16;
-                    defer _ = self.layout_visited.remove(type_id);
-                    var max_align: u32 = 4;
-                    for (td.members) |member| {
-                        const ma = self.layoutAlignment(member.ty, kind);
-                        if (ma > max_align) max_align = ma;
-                    }
-                    break :blk max_align;
-                },
-                else => 4,
-            };
-        }
+            .array => |arr| self.layoutAlignmentStd430(arr.base.*), // std430: array alignment = element alignment
+            .named => |name| blk: {
+                // Struct alignment = max alignment of its members
+                const td = self.module.types.get(name) orelse break :blk 16;
+                if (td.is_buffer_reference) break :blk 8; // pointer alignment
+                const type_id = self.emitted_named_types.get(name) orelse break :blk 16;
+                if (self.layout_visited.contains(type_id)) break :blk 8; // self-ref cycle: pointer
+                self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 16;
+                defer _ = self.layout_visited.remove(type_id);
+                var max_align: u32 = 4;
+                for (td.members) |member| {
+                    const ma = self.layoutAlignmentStd430(member.ty);
+                    if (ma > max_align) max_align = ma;
+                }
+                break :blk max_align;
+            },
+            else => 4,
+        };
+    }
+
+    fn layoutAlignmentStd140(self: *Codegen, ty: ast.Type) u32 {
         return switch (ty) {
             .float, .int, .uint, .bool => 4,
             .vec2, .ivec2, .uvec2 => 8,
@@ -3100,12 +3110,12 @@ const Codegen = struct {
                 const td = self.module.types.get(name) orelse break :blk 16;
                 if (td.is_buffer_reference) break :blk 8; // pointer alignment
                 const type_id = self.emitted_named_types.get(name) orelse break :blk 16;
-                if (self.layout_visited.contains(type_id)) break :blk 8; // self-ref cycle
+                if (self.layout_visited.contains(type_id)) break :blk 8; // self-ref cycle: pointer
                 self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 16;
                 defer _ = self.layout_visited.remove(type_id);
                 var max_align: u32 = 4;
                 for (td.members) |member| {
-                    const ma = self.layoutAlignment(member.ty, kind);
+                    const ma = self.layoutAlignmentStd140(member.ty);
                     if (ma > max_align) max_align = ma;
                 }
                 break :blk max_align;

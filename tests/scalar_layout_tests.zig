@@ -24,8 +24,9 @@ fn findMemberOffset(spv: []const u32, member_index: u32) ?u32 {
     return null;
 }
 
-/// Walk SPIR-V words and return the literal of the first OpDecorate ...
-/// ArrayStride instruction.
+/// Walk SPIR-V words and return the literal of the *first* OpDecorate ...
+/// ArrayStride instruction. Assumes the test shader contains exactly one
+/// runtime array — do not use on multi-array modules.
 fn findFirstArrayStride(spv: []const u32) ?u32 {
     var i: usize = 5;
     while (i < spv.len) {
@@ -60,6 +61,8 @@ test "scalar layout: float+vec3 packs vec3 at offset 4 with GL_EXT_scalar_block_
         return;
     };
     try std.testing.expectEqual(@as(u32, 4), offset_b);
+    // Negative guard: must NOT pad to the std140 vec3-aligned-to-16 offset.
+    try std.testing.expect(offset_b != 16);
 }
 
 test "scalar layout: float+vec3 pads to offset 16 without extension (std140 default)" {
