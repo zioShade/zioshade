@@ -404,7 +404,11 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
     if (textures.items.len > 0) try w.writeAll("\n");
 
-    // Emit specialization constants as layout(constant_id = N) const declarations
+    // Emit specialization constants as layout(constant_id = N) const declarations.
+    // Per-scalar OpSpecConstants get one declaration; the OpSpecConstantComposite
+    // gets a `const vecN <name> = vecN(c0, c1, ...);` declaration referencing the
+    // scalar names (no constant_id — that lives on the scalars). Override the
+    // scalars via SpecId, the composite recomputes at pipeline time.
     for (module.instructions) |inst| {
         const is_scalar_sc = inst.op == .SpecConstant and inst.words.len > 3;
         const is_bool_sc = (inst.op == .SpecConstantTrue or inst.op == .SpecConstantFalse) and inst.words.len > 2;
@@ -434,6 +438,25 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 try w.print("layout(constant_id = {d}) const {s} {s} = {d};\n", .{ sid, type_str, name, default_val });
             }
         }
+    }
+    // OpSpecConstantComposite: emit `const vecN <name> = vecN(c0, c1, ...);` —
+    // no constant_id on the composite (the SpecIds live on the per-scalar
+    // OpSpecConstants); the composite is rebuilt at pipeline time from the
+    // (possibly overridden) scalars.
+    for (module.instructions) |inst| {
+        if (inst.op != .SpecConstantComposite or inst.words.len <= 3) continue;
+        const result_id = inst.words[2];
+        const name = names.get(result_id) orelse continue;
+        const type_id = inst.words[1];
+        const type_str = try glslType(&module, type_id, &names, aa);
+        const constituents = inst.words[3..];
+        try w.print("const {s} {s} = {s}(", .{ type_str, name, type_str });
+        for (constituents, 0..) |c_id, i| {
+            if (i > 0) try w.writeAll(", ");
+            const c_name = names.get(c_id) orelse "0";
+            try w.writeAll(c_name);
+        }
+        try w.writeAll(");\n");
     }
     try w.writeAll("\n");
 

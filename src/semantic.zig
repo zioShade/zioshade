@@ -416,11 +416,16 @@ const Analyzer = struct {
             }
             self.types.deinit(self.alloc);
         }
-        // Free owned name keys in the spec_constants map
+        // Free owned name keys and component_literals slices in the spec_constants map.
+        // Note: when analysis succeeds, Module takes ownership and this map is cleared
+        // (`.spec_constants = .{}` in analyze()), so this only runs on error paths.
         {
-            var sc_key_it = self.spec_constants.keyIterator();
-            while (sc_key_it.next()) |key_ptr| {
-                self.alloc.free(key_ptr.*);
+            var sc_it = self.spec_constants.iterator();
+            while (sc_it.next()) |entry| {
+                self.alloc.free(entry.key_ptr.*);
+                if (entry.value_ptr.component_literals.len > 0) {
+                    self.alloc.free(entry.value_ptr.component_literals);
+                }
             }
             self.spec_constants.deinit(self.alloc);
         }
@@ -1289,34 +1294,104 @@ const Analyzer = struct {
                         if (layout.constant_id) |cid| {
                             const sc_ir_id = self.allocId();
                             const sc_ty = node.data.ty orelse .int;
-                            // Get the default literal value
-                            var default_literal: u32 = 0;
+
+                            // Build the list of per-component literals.
+                            // Scalars: length-1 slice. Vec/mat: per-component literals
+                            // extracted from the type_constructor's argument list.
+                            //
+                            // M3.4 v1 scope: only literal arguments are accepted for
+                            // vec/mat. Non-literal args (expressions) cause us to fall
+                            // back to all-zero defaults — the user's CPU-side override
+                            // will still take effect per component via SpecId+i.
+                            var component_literals = std.ArrayListUnmanaged(u32).empty;
+                            errdefer component_literals.deinit(self.alloc);
+
+                            const is_composite = sc_ty.isVector() or sc_ty.isMatrix();
+
                             if (node.data.children.len > 0) {
-                                const init = try self.analyzeExpression(node.data.children[0]);
-                                // Extract literal from constant_int / constant_bool / constant_float.
-                                // For booleans, default_literal carries 0 or 1 — codegen reads it
-                                // to choose OpSpecConstantTrue vs OpSpecConstantFalse.
-                                for (self.instructions.items) |inst| {
-                                    if (inst.result_id == null or inst.result_id.? != init.id) continue;
-                                    switch (inst.tag) {
-                                        .constant_int, .constant_bool => {
-                                            default_literal = switch (inst.operands[0]) {
-                                                .literal_int => |v| @intCast(v),
-                                                else => 0,
-                                            };
-                                        },
-                                        .constant_float => {
-                                            // Float literal stored as f32 bit-pattern via .literal_float
-                                            default_literal = switch (inst.operands[0]) {
-                                                .literal_float => |v| @bitCast(v),
-                                                else => 0,
-                                            };
-                                        },
-                                        else => continue,
+                                const init_node = node.data.children[0];
+
+                                if (is_composite and init_node.tag == .type_constructor) {
+                                    // vec3(0.5, 0.5, 0.5) or mat3(1.0, 0.0, ...)
+                                    const n = sc_ty.numComponents();
+                                    try component_literals.ensureTotalCapacity(self.alloc, n);
+
+                                    // Walk constructor args; extract scalar literals.
+                                    // If any arg is non-literal, leave its component as 0.
+                                    const args = init_node.data.children;
+                                    const elem_ty = sc_ty.elementType();
+                                    const is_float_elem = elem_ty == .float or elem_ty == .double or elem_ty == .float16;
+
+                                    _ = is_float_elem;
+                                    // GLSL also allows `vec3(0.5)` to mean splat; if the constructor
+                                    // has fewer args than components and the only arg is scalar,
+                                    // replicate it. Conservatively detect splat: 1 arg, n_components > 1.
+                                    const is_splat = args.len == 1 and n > 1;
+                                    var i_arg: usize = 0;
+                                    while (i_arg < n) : (i_arg += 1) {
+                                        var lit: u32 = 0;
+                                        const src_idx: usize = if (is_splat) 0 else i_arg;
+                                        if (src_idx < args.len) {
+                                            const arg = args[src_idx];
+                                            // Direct AST literal extraction (avoids emitting IR).
+                                            switch (arg.tag) {
+                                                .int_literal, .uint_literal => {
+                                                    const v = arg.data.int_val;
+                                                    // For float-element composites, convert int → float.
+                                                    if (elem_ty == .float or elem_ty == .double or elem_ty == .float16) {
+                                                        const fv: f32 = @floatFromInt(v);
+                                                        lit = @as(u32, @bitCast(fv));
+                                                    } else {
+                                                        lit = @as(u32, @bitCast(@as(i32, @truncate(v))));
+                                                    }
+                                                },
+                                                .float_literal => {
+                                                    const fv: f32 = @floatCast(arg.data.float_val);
+                                                    lit = @as(u32, @bitCast(fv));
+                                                },
+                                                else => {
+                                                    // Non-literal arg: default to 0. For float
+                                                    // composites, 0.0 == bit-pattern 0 already.
+                                                    lit = 0;
+                                                },
+                                            }
+                                        }
+                                        component_literals.appendAssumeCapacity(lit);
                                     }
-                                    break;
+                                } else {
+                                    // Scalar spec const: reuse existing extraction logic.
+                                    var default_literal: u32 = 0;
+                                    const init = try self.analyzeExpression(init_node);
+                                    for (self.instructions.items) |inst| {
+                                        if (inst.result_id == null or inst.result_id.? != init.id) continue;
+                                        switch (inst.tag) {
+                                            .constant_int, .constant_bool => {
+                                                default_literal = switch (inst.operands[0]) {
+                                                    .literal_int => |v| @intCast(v),
+                                                    else => 0,
+                                                };
+                                            },
+                                            .constant_float => {
+                                                default_literal = switch (inst.operands[0]) {
+                                                    .literal_float => |v| @bitCast(v),
+                                                    else => 0,
+                                                };
+                                            },
+                                            else => continue,
+                                        }
+                                        break;
+                                    }
+                                    try component_literals.append(self.alloc, default_literal);
                                 }
+                            } else if (!is_composite) {
+                                // Scalar with no initializer: default 0.
+                                try component_literals.append(self.alloc, 0);
+                            } else {
+                                // Composite with no initializer: zero-fill.
+                                const n = sc_ty.numComponents();
+                                try component_literals.appendNTimes(self.alloc, 0, n);
                             }
+
                             // Declare as SSA symbol
                             try self.declare(node.data.name, .{
                                 .kind = .var_sym,
@@ -1327,10 +1402,11 @@ const Analyzer = struct {
                             });
                             // Store spec constant info for codegen
                             const owned_name = try self.alloc.dupe(u8, node.data.name);
+                            const owned_lits = try component_literals.toOwnedSlice(self.alloc);
                             try self.spec_constants.put(self.alloc, owned_name, .{
                                 .result_id = sc_ir_id,
                                 .spec_id = cid,
-                                .default_literal = default_literal,
+                                .component_literals = owned_lits,
                                 .type_tag = @intFromEnum(sc_ty),
                             });
                             return; // Don't create a global variable

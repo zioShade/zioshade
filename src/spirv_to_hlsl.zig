@@ -497,6 +497,26 @@ pub fn spirvToHLSL(
             }
         }
     }
+    // OpSpecConstantComposite: assemble the vec/mat from already-declared
+    // per-scalar spec consts. `static const vecN <name> = vecN(c0, c1, ...);`
+    // DXC's SPIR-V codegen path materialises this back into a real
+    // OpSpecConstantComposite; for DXIL the static const is folded at
+    // compile time.
+    for (module.instructions) |inst| {
+        if (inst.op != .SpecConstantComposite or inst.words.len <= 3) continue;
+        const result_id = inst.words[2];
+        const name = names.get(result_id) orelse continue;
+        const type_id = inst.words[1];
+        const type_str = try hlslType(&module, type_id, &names, aa);
+        const constituents = inst.words[3..];
+        try w.print("static const {s} {s} = {s}(", .{ type_str, name, type_str });
+        for (constituents, 0..) |c_id, i| {
+            if (i > 0) try w.writeAll(", ");
+            const c_name = names.get(c_id) orelse "0";
+            try w.writeAll(c_name);
+        }
+        try w.writeAll(");\n");
+    }
     try w.writeAll("\n");
 
     // Emit struct declarations for types used in constant composites

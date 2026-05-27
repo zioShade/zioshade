@@ -116,6 +116,7 @@ fn generateInternal(
         .access_chain_cache = .{},
         .interface_bool_ptrs = .{},
         .codegen_pure_cache = .{},
+        .spec_const_component_ids = .{},
     };
     defer cg.deinit();
 
@@ -399,6 +400,11 @@ const Codegen = struct {
     access_chain_cache: std.AutoHashMapUnmanaged(u64, u32), // (base_id << 32 | index_id) -> result_id, cleared per function
     interface_bool_ptrs: std.AutoHashMapUnmanaged(u32, ast.Type), // ptr_id -> original AST type (bool/bvecN) for interface bool conversion
     codegen_pure_cache: std.AutoHashMapUnmanaged(u64, u32), // general pure op cache for codegen-level dedup
+    // Map: composite spec-const result_id -> slice of per-scalar component ids
+    // (one OpSpecConstant per scalar, each gets its own SpecId decoration).
+    // Used by emitDecorations to emit `OpDecorate <component_id> SpecId <spec_id+i>`.
+    // Slices are owned by this codegen and freed in deinit.
+    spec_const_component_ids: std.AutoHashMapUnmanaged(u32, []const u32),
 
     fn deinit(self: *Codegen) void {
         self.emitted_types.deinit(self.alloc);
@@ -417,6 +423,13 @@ const Codegen = struct {
         self.access_chain_cache.deinit(self.alloc);
         self.interface_bool_ptrs.deinit(self.alloc);
         self.codegen_pure_cache.deinit(self.alloc);
+        {
+            var it = self.spec_const_component_ids.valueIterator();
+            while (it.next()) |slice_ptr| {
+                if (slice_ptr.*.len > 0) self.alloc.free(slice_ptr.*);
+            }
+            self.spec_const_component_ids.deinit(self.alloc);
+        }
         self.words.deinit(self.alloc);
         self.type_section.deinit(self.alloc);
         self.decoration_section.deinit(self.alloc);
@@ -2934,10 +2947,31 @@ const Codegen = struct {
                 }
             }
         }
-        // Emit SpecId decorations for specialization constants
+        // Emit SpecId decorations for SCALAR specialization constants.
+        // For composite (vec/mat) spec consts the SpecId decorations go on each
+        // per-scalar `OpSpecConstant` rather than on the
+        // `OpSpecConstantComposite` (which has no literal payload to
+        // override). Because component IDs aren't allocated until
+        // `emitTypesAndConstants` runs, the composite-component decorations
+        // are emitted there (into `decoration_section`, which is later
+        // spliced into the annotation section).
         var spec_iter = self.module.spec_constants.iterator();
         while (spec_iter.next()) |entry| {
             const sc = entry.value_ptr.*;
+            const TypeTagInner = @typeInfo(ast.Type).@"union".tag_type.?;
+            const tag_inner: TypeTagInner = @enumFromInt(sc.type_tag);
+            const is_composite = switch (tag_inner) {
+                .vec2, .vec3, .vec4,
+                .ivec2, .ivec3, .ivec4,
+                .uvec2, .uvec3, .uvec4,
+                .bvec2, .bvec3, .bvec4,
+                .mat2, .mat3, .mat4,
+                .mat2x2, .mat2x3, .mat2x4,
+                .mat3x2, .mat3x3, .mat3x4,
+                .mat4x2, .mat4x3, .mat4x4 => true,
+                else => false,
+            };
+            if (is_composite) continue; // emitted later via decoration_section
             try self.emitDecorate(sc.result_id, @intFromEnum(spirv.Decoration.spec_id), sc.spec_id);
         }
         // QCOM image processing decorations
@@ -3376,22 +3410,131 @@ const Codegen = struct {
                 .uint16 => .uint16,
                 .float16 => .float16,
                 .double => .double,
+                .vec2 => .vec2,
+                .vec3 => .vec3,
+                .vec4 => .vec4,
+                .ivec2 => .ivec2,
+                .ivec3 => .ivec3,
+                .ivec4 => .ivec4,
+                .uvec2 => .uvec2,
+                .uvec3 => .uvec3,
+                .uvec4 => .uvec4,
+                .mat2 => .mat2,
+                .mat3 => .mat3,
+                .mat4 => .mat4,
+                .mat2x2 => .mat2x2,
+                .mat2x3 => .mat2x3,
+                .mat2x4 => .mat2x4,
+                .mat3x2 => .mat3x2,
+                .mat3x3 => .mat3x3,
+                .mat3x4 => .mat3x4,
+                .mat4x2 => .mat4x2,
+                .mat4x3 => .mat4x3,
+                .mat4x4 => .mat4x4,
                 else => .int,
             };
-            const result_type_id = try self.ensureType(ty);
             if (tag == .bool) {
                 // OpSpecConstantTrue (48) / OpSpecConstantFalse (49) are
                 // 3-word instructions with no literal payload — the truth
                 // value is encoded in the opcode itself.
-                const op: spirv.Op = if (sc.default_literal != 0) .SpecConstantTrue else .SpecConstantFalse;
+                const result_type_id = try self.ensureType(ty);
+                const literal: u32 = if (sc.component_literals.len > 0) sc.component_literals[0] else 0;
+                const op: spirv.Op = if (literal != 0) .SpecConstantTrue else .SpecConstantFalse;
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(op)));
                 try self.emitTypeWord(result_type_id);
                 try self.emitTypeWord(sc.result_id);
+            } else if (ty.isVector() or ty.isMatrix()) {
+                // Composite spec const: emit one OpSpecConstant per component
+                // (each gets its own SpecId via the decoration loop), then
+                // OpSpecConstantComposite groups them into the final value.
+                //
+                // For matrices: SPIR-V represents a matrix as a composite of
+                // column vectors. We emit per-scalar OpSpecConstants and group
+                // them into per-column OpSpecConstantComposites, then a final
+                // OpSpecConstantComposite over the columns. The per-scalar
+                // SpecId decorations let CPU-side override each scalar
+                // independently via SpecId = spec_id + i.
+                const elem_ty = ty.elementType();
+                const elem_type_id = try self.ensureType(elem_ty);
+                const n_components = ty.numComponents();
+
+                // Emit per-scalar OpSpecConstants. component_ids[i] is the
+                // result id of the i-th scalar component. Ownership transferred
+                // to spec_const_component_ids below.
+                const component_ids = try self.alloc.alloc(u32, n_components);
+                errdefer self.alloc.free(component_ids);
+
+                var i: u32 = 0;
+                while (i < n_components) : (i += 1) {
+                    const cid = self.allocId();
+                    component_ids[i] = cid;
+                    const lit: u32 = if (i < sc.component_literals.len) sc.component_literals[i] else 0;
+                    try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.SpecConstant)));
+                    try self.emitTypeWord(elem_type_id);
+                    try self.emitTypeWord(cid);
+                    try self.emitTypeWord(lit);
+                    // Emit SpecId decoration to the decoration_section (spliced into
+                    // the annotation section later, alongside other decorations).
+                    try self.emitDecorationSectionDecorate(cid, @intFromEnum(spirv.Decoration.spec_id), sc.spec_id + i);
+                }
+
+                if (ty.isMatrix()) {
+                    // Group scalars into per-column vec composites, then group
+                    // columns into the matrix.
+                    const col_ty = ty.columnType(); // vecR
+                    const col_type_id = try self.ensureType(col_ty);
+                    const n_cols = ty.numColumns();
+                    const n_rows = col_ty.numComponents();
+                    var col_ids = try self.alloc.alloc(u32, n_cols);
+                    defer self.alloc.free(col_ids);
+
+                    var c: u32 = 0;
+                    while (c < n_cols) : (c += 1) {
+                        const col_id = self.allocId();
+                        col_ids[c] = col_id;
+                        const header = spirv.encodeInstructionHeader(@as(u16, 3 + @as(u16, @intCast(n_rows))), @intFromEnum(spirv.Op.SpecConstantComposite));
+                        try self.emitTypeWord(header);
+                        try self.emitTypeWord(col_type_id);
+                        try self.emitTypeWord(col_id);
+                        var r: u32 = 0;
+                        while (r < n_rows) : (r += 1) {
+                            try self.emitTypeWord(component_ids[c * n_rows + r]);
+                        }
+                    }
+
+                    const mat_type_id = try self.ensureType(ty);
+                    const header_m = spirv.encodeInstructionHeader(@as(u16, 3 + @as(u16, @intCast(n_cols))), @intFromEnum(spirv.Op.SpecConstantComposite));
+                    try self.emitTypeWord(header_m);
+                    try self.emitTypeWord(mat_type_id);
+                    try self.emitTypeWord(sc.result_id);
+                    var k: u32 = 0;
+                    while (k < n_cols) : (k += 1) {
+                        try self.emitTypeWord(col_ids[k]);
+                    }
+                } else {
+                    // Vector: single OpSpecConstantComposite over the scalars.
+                    const vec_type_id = try self.ensureType(ty);
+                    const header = spirv.encodeInstructionHeader(@as(u16, 3 + @as(u16, @intCast(n_components))), @intFromEnum(spirv.Op.SpecConstantComposite));
+                    try self.emitTypeWord(header);
+                    try self.emitTypeWord(vec_type_id);
+                    try self.emitTypeWord(sc.result_id);
+                    var j: u32 = 0;
+                    while (j < n_components) : (j += 1) {
+                        try self.emitTypeWord(component_ids[j]);
+                    }
+                }
+
+                // Stash per-component ids on the codegen for SpecId decoration emission.
+                // Ownership of `component_ids` transfers to the map; deinit frees it.
+                try self.spec_const_component_ids.put(self.alloc, sc.result_id, component_ids);
             } else {
+                // Scalar (non-bool) spec constant.
+                const result_type_id = try self.ensureType(ty);
+                const literal: u32 = if (sc.component_literals.len > 0) sc.component_literals[0] else 0;
                 try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.SpecConstant)));
                 try self.emitTypeWord(result_type_id);
                 try self.emitTypeWord(sc.result_id);
-                try self.emitTypeWord(sc.default_literal);
+                try self.emitTypeWord(literal);
             }
             // DO NOT cache spec constants in emitted_constants — they would collide with
             // regular OpConstant values and cause struct AccessChain to use spec constants

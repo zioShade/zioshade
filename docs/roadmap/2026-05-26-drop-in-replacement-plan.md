@@ -559,46 +559,38 @@ Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default va
 
 - [ ] **Step 5: Verify, commit**
 
-### Task 3.4: Emit `OpSpecConstantComposite` for vector/matrix spec consts
+### Task 3.4: Emit `OpSpecConstantComposite` for vector/matrix spec consts ✅ DONE
+
+Shipped. `layout(constant_id=N) const vec3/vec4/mat3/mat4 X = vec3(...)` now lowers
+to per-scalar `OpSpecConstant`s (SpecId N, N+1, ...) grouped by an
+`OpSpecConstantComposite` (opcode 51). Matrices emit per-column inner composites
+then a final outer composite.
 
 **Files:**
-- Modify: `src/parser.zig` (allow vector literal as spec-const default)
-- Modify: `src/codegen.zig` spec const emission
-- Test: `tests/spec_const_tests.zig`
+- `src/ir.zig` — `SpecConstant.component_literals: []const u32` slice replaces
+  the old single `default_literal: u32` field (length-1 for scalars, N for vec/mat).
+- `src/semantic.zig` — extracts per-component literals from `type_constructor`
+  args (scalar literals + GLSL splat form). Non-literal args fall back to 0.
+- `src/codegen.zig` — composite branch emits N `OpSpecConstant` + a final
+  `OpSpecConstantComposite`. Matrices use a two-tier emission: per-scalar →
+  per-column → matrix. Per-scalar `SpecId` decorations go into the
+  `decoration_section` (spliced into the annotation section) because
+  component IDs are only known after `emitTypesAndConstants` runs.
+- `src/compact_ids.zig` — added `getOpInfo` entries for opcodes 48/49/51/52
+  so DCE can read `OpSpecConstantComposite` operands and keep the per-scalar
+  `OpSpecConstant`s alive.
+- `src/compact_ids_passes.zig` — added 48/49/51/52 to the "dead-safe" list so
+  the composite/Op forms can be removed only when truly unreferenced.
+- `src/spirv_to_{glsl,hlsl,msl,wgsl}.zig` — backends emit per-scalar
+  spec-const declarations (with their SpecIds) plus a composite assembled from
+  the scalar names. WGSL uses a `const` (override only supports scalars).
+- `tests/spec_const_tests.zig` — 8 new tests cover SPIR-V opcode emission,
+  sequential SpecIds, 0.5 bit-pattern, vec4 case, and all four backends.
 
-- [ ] **Step 1: Write failing test**
-
-  ```zig
-  test "spec const: vec3 emits OpSpecConstantComposite" {
-      const alloc = std.testing.allocator;
-      const src =
-          \\#version 450
-          \\layout(constant_id=2) const vec3 TINT = vec3(0.5, 0.5, 0.5);
-          \\layout(location=0) out vec4 fragColor;
-          \\void main() { fragColor = vec4(TINT, 1.0); }
-          ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
-      defer alloc.free(spirv);
-      // OpSpecConstantComposite = 51
-      var found = false;
-      var i: usize = 5;
-      while (i < spirv.len) {
-          const wc = spirv[i] >> 16;
-          const op = spirv[i] & 0xFFFF;
-          if (op == 51) { found = true; break; }
-          i += wc;
-      }
-      try std.testing.expect(found);
-  }
-  ```
-
-- [ ] **Step 2: Parser change** — accept `vec3(a,b,c)` constructor as spec-const initializer
-
-- [ ] **Step 3: Codegen change** — emit `OpSpecConstant` per component (each with its own incremented SpecId), then `OpSpecConstantComposite` grouping them by type
-
-- [ ] **Step 4: Update each cross-compiler to emit a composite initializer in target syntax**
-
-- [ ] **Step 5: Verify, commit**
+**Verification:** `zig build test` → 1716/1716 (+8 vs 1708 baseline), 63/63 steps,
+0 leaks. `spirv-val --target-env vulkan1.3` passes on the smoke shader. The
+`applySpecOverrides` post-codegen rewrite still skips composites — users override
+each scalar component via its own SpecId.
 
 ### Task 3.5: Emit `OpSpecConstantOp` for derived expressions
 
