@@ -50,7 +50,7 @@ Each stress case is a single-purpose shader that, when broken in glslpp, would h
 | **MSL backend** | `zig build test` (52 msl-tests) + cross-compile of every stress fixture | 52 + 457 |
 | **GLSL round-trip** | `zig build test` (122 glsl-tests) + reference suite | 122 |
 | **WGSL backend** | `zig build test` (8 wgsl-tests) + WGSL-prefixed stress fixtures (321 cases under `tests/conformance/stress/wgsl_*`) | 8 + 321 |
-| **`naga` validation of WGSL output** | `zig build test-realworld` — separate step; not part of `zig build conformance`. See `tests/realworld_tests.zig`. | varies by external suite |
+| **`naga` validation of WGSL output** | `zig build test-realworld` — separate step; not part of `zig build conformance`. See `tests/realworld_tests.zig` and the [real-world corpus snapshot](./realworld-corpus.md). | 13 hand-authored shaders, exercises all 4 backends + naga |
 
 ## Reproducibility
 

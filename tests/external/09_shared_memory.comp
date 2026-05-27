@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Compute shader: workgroup-shared memory with a barrier.
+// Expected: all 4 backends emit successfully.
+#version 450
+
+layout(local_size_x = 64) in;
+
+shared float buf[64];
+
+layout(set = 0, binding = 0, std430) buffer Buf {
+    float data[];
+} b;
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    buf[lid] = float(lid);
+    barrier();
+    b.data[gl_GlobalInvocationID.x] = buf[(lid + 1u) % 64u];
+}
