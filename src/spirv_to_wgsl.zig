@@ -3168,16 +3168,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             51 => "frexp", // FrexpStruct
                             52 => "frexp",
                             53 => "ldexp",
-                            54 => "packSnorm4x8",
-                            55 => "packUnorm4x8",
-                            56 => "packSnorm2x16",
-                            57 => "packUnorm2x16",
-                            58 => "packHalf2x16",
-                            60 => "unpackSnorm2x16",
-                            61 => "unpackUnorm2x16",
-                            62 => "unpackHalf2x16",
-                            63 => "unpackSnorm4x8",
-                            64 => "unpackUnorm4x8",
+                            // WGSL packing intrinsics use a different name shape than GLSL:
+                            //   GLSL packSnorm4x8 → WGSL pack4x8snorm  (and so on)
+                            54 => "pack4x8snorm",
+                            55 => "pack4x8unorm",
+                            56 => "pack2x16snorm",
+                            57 => "pack2x16unorm",
+                            58 => "pack2x16float",
+                            60 => "unpack2x16snorm",
+                            61 => "unpack2x16unorm",
+                            62 => "unpack2x16float",
+                            63 => "unpack4x8snorm",
+                            64 => "unpack4x8unorm",
                             // Geometric — glslpp numbering starts at 66
                             66 => "length",
                             67 => "distance",
@@ -3286,6 +3288,31 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .BitCount => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 try writeInd(w, indent); try w.print("let {s}: {s} = countOneBits({s});\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+            },
+            // SPIR-V bitfield ops: WGSL has insertBits(e, newbits, offset, count)
+            // and extractBits(e, offset, count). The S/U variants of extract
+            // both map to extractBits — WGSL picks signed vs unsigned from
+            // the argument type (i32 vs u32). offset / count must be u32 in WGSL.
+            .BitFieldInsert => {
+                if (inst.words.len < 7) continue;
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const base = names.get(inst.words[3]) orelse "0";
+                const insert = names.get(inst.words[4]) orelse "0";
+                const offset = names.get(inst.words[5]) orelse "0u";
+                const count = names.get(inst.words[6]) orelse "0u";
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = insertBits({s}, {s}, u32({s}), u32({s}));\n", .{ rn, rt, base, insert, offset, count });
+            },
+            .BitFieldSExtract, .BitFieldUExtract => {
+                if (inst.words.len < 6) continue;
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const base = names.get(inst.words[3]) orelse "0";
+                const offset = names.get(inst.words[4]) orelse "0u";
+                const count = names.get(inst.words[5]) orelse "0u";
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = extractBits({s}, u32({s}), u32({s}));\n", .{ rn, rt, base, offset, count });
             },
 
             // Derivatives
@@ -4108,6 +4135,18 @@ fn getExtInstName(instruction: u32) ?[]const u8 {
         48 => "step",
         49 => "smoothstep",
         50 => "fma",
+        // Packing (GLSL.std.450 54-58) → WGSL pack2x16* / pack4x8*
+        54 => "pack4x8snorm",
+        55 => "pack4x8unorm",
+        56 => "pack2x16snorm",
+        57 => "pack2x16unorm",
+        58 => "pack2x16float",
+        // Unpacking (GLSL.std.450 60-64)
+        60 => "unpack2x16snorm",
+        61 => "unpack2x16unorm",
+        62 => "unpack2x16float",
+        63 => "unpack4x8snorm",
+        64 => "unpack4x8unorm",
         66 => "length",
         67 => "distance",
         68 => "cross",
