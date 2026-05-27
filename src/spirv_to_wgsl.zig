@@ -172,14 +172,28 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
     if (inst.op != .TypeStruct) return;
     if (inst.words.len > 2) {
         for (inst.words[2..]) |mt_id| {
-            // Recurse into member type to forward-declare nested structs
-            const mt_inst = getDef(module, mt_id);
-            if (mt_inst) |mi2| {
-                if (mi2.op == .TypeArray and mi2.words.len > 2) {
-                    // Array member — recurse into element type
-                    try emitOneStructForwardDecl(module, names, mi2.words[2], w, alloc, emitted, emitted_names, atomic_fields);
-                } else {
-                    try emitOneStructForwardDecl(module, names, mt_id, w, alloc, emitted, emitted_names, atomic_fields);
+            // Recurse into the member type, unwrapping wrapper types until we
+            // reach the underlying struct. Without the TypePointer unwrap,
+            // GL_EXT_buffer_reference members — encoded in SPIR-V as
+            // TypePointer to TypeStruct — never emit the pointee struct, and
+            // naga rejects the WGSL with
+            // `no definition in scope for identifier: <pointee>`.
+            var cur_id = mt_id;
+            var depth: u32 = 0;
+            while (depth < 8) : (depth += 1) {
+                const cur_inst = getDef(module, cur_id) orelse break;
+                switch (cur_inst.op) {
+                    .TypeStruct => {
+                        try emitOneStructForwardDecl(module, names, cur_id, w, alloc, emitted, emitted_names, atomic_fields);
+                        break;
+                    },
+                    .TypePointer => {
+                        if (cur_inst.words.len > 3) cur_id = cur_inst.words[3] else break;
+                    },
+                    .TypeArray, .TypeRuntimeArray, .TypeMatrix, .TypeVector => {
+                        if (cur_inst.words.len > 2) cur_id = cur_inst.words[2] else break;
+                    },
+                    else => break,
                 }
             }
         }
