@@ -64,7 +64,7 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     const is_dead_safe = struct {
         fn check(op: u16) bool {
             return switch (op) {
-                41, 42, 43, 44, 50 => true, // Constants
+                41, 42, 43, 44, 48, 49, 50, 51, 52 => true, // Constants + spec consts (SpecConstantTrue/False/Composite/Op)
                 61 => true, // Load
                 65 => true, // AccessChain
                 77, 79, 80, 81, 82, 83 => true, // Composite ops + CopyObject

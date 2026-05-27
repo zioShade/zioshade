@@ -4,7 +4,26 @@ const ast = @import("ast.zig");
 
 pub const LocalSize = struct { x: u32, y: u32, z: u32 };
 
-pub const SpecConstant = struct { result_id: u32, spec_id: u32, default_literal: u32, type_tag: u32 };
+// Specialization constant entry.
+//
+// For SCALAR spec consts (`OpSpecConstant` / `OpSpecConstantTrue/False`),
+// `component_literals` is a length-1 slice — for bools it carries 0/1 so
+// codegen can pick `True` vs `False`.
+//
+// For VECTOR/MATRIX spec consts (`OpSpecConstantComposite`), the slice
+// length matches `numComponents()` for the `type_tag` (2/3/4 for vec,
+// 4/9/16 for mat). Codegen emits one `OpSpecConstant` per component
+// (each with its own `SpecId = spec_id + i`) and groups them with an
+// `OpSpecConstantComposite` whose result_id is the entry's `result_id`.
+//
+// The slice is allocated from the Module's allocator and freed in
+// `Module.deinit`.
+pub const SpecConstant = struct {
+    result_id: u32,
+    spec_id: u32,
+    component_literals: []const u32,
+    type_tag: u32,
+};
 
 pub const Module = struct {
     functions: []const Function,
@@ -66,11 +85,14 @@ pub const Module = struct {
             self.alloc.free(entry.value_ptr.members);
         }
         self.types.deinit(self.alloc);
-        // Free spec_constants keys
+        // Free spec_constants keys and component_literals slices
         {
             var sc_iter = self.spec_constants.iterator();
             while (sc_iter.next()) |entry| {
                 self.alloc.free(entry.key_ptr.*);
+                if (entry.value_ptr.component_literals.len > 0) {
+                    self.alloc.free(entry.value_ptr.component_literals);
+                }
             }
         }
         self.spec_constants.deinit(self.alloc);

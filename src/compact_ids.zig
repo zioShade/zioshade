@@ -63,7 +63,11 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         42 => rt(2, ""),           // OpConstantFalse
         43 => rt(2, "l"),          // OpConstant (value may be multi-word for 64-bit)
         44 => rt(2, "I"),          // OpConstantComposite: constituents...
+        48 => rt(2, ""),           // OpSpecConstantTrue
+        49 => rt(2, ""),           // OpSpecConstantFalse
         50 => rt(2, "l"),          // OpSpecConstant
+        51 => rt(2, "I"),          // OpSpecConstantComposite: constituents...
+        52 => rt(2, "lL"),         // OpSpecConstantOp: opcode literal + operand literals (conservative)
         // --- Function ---
         54 => rt(2, "li"),         // OpFunction: control, func-type
         55 => rt(2, ""),           // OpFunctionParameter

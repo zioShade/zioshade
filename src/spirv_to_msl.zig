@@ -512,6 +512,25 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             }
         }
     }
+    // OpSpecConstantComposite: assemble the vec/mat from the per-scalar function
+    // constants. MSL doesn't support `[[function_constant(N)]]` on composite
+    // types directly, so we declare a plain `constant` that materialises from
+    // the (possibly overridden) per-scalar function constants.
+    for (module.instructions) |inst| {
+        if (inst.op != .SpecConstantComposite or inst.words.len <= 3) continue;
+        const result_id = inst.words[2];
+        const name = names.get(result_id) orelse continue;
+        const type_id = inst.words[1];
+        const type_str = try mslType(&module, type_id, &names, aa);
+        const constituents = inst.words[3..];
+        try w.print("constant {s} {s} = {s}(", .{ type_str, name, type_str });
+        for (constituents, 0..) |c_id, i| {
+            if (i > 0) try w.writeAll(", ");
+            const c_name = names.get(c_id) orelse "0";
+            try w.writeAll(c_name);
+        }
+        try w.writeAll(");\n");
+    }
     try w.writeAll("\n");
 
     // Emit struct declarations for types used as local variables

@@ -962,7 +962,31 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
         sc_emitted_any = true;
     }
-    if (sc_emitted_any) try w.writeAll("\n");
+    // OpSpecConstantComposite: WGSL `override` only supports scalar types
+    // (i32 / u32 / f32 / bool). Composite spec constants cannot be expressed
+    // as `override`. We emit each scalar component as an `@id(N) override` and
+    // assemble the composite via a regular `const` that references those
+    // overrides — at pipeline time the WGSL implementation substitutes the
+    // overrides and the const reduces to the user-overridden value.
+    var sc_composite_emitted_any = false;
+    for (module.instructions) |inst| {
+        if (inst.op != .SpecConstantComposite or inst.words.len <= 3) continue;
+        const result_id = inst.words[2];
+        const name = names.get(result_id) orelse continue;
+        const type_id = inst.words[1];
+        const type_str = try wgslType(&module, type_id, &names, arena);
+        const constituents = inst.words[3..];
+        try w.writeAll("// WGSL note: composite spec consts use per-scalar @id overrides; composite reassembled below.\n");
+        try w.print("const {s}: {s} = {s}(", .{ name, type_str, type_str });
+        for (constituents, 0..) |c_id, i| {
+            if (i > 0) try w.writeAll(", ");
+            const c_name = names.get(c_id) orelse "0";
+            try w.writeAll(c_name);
+        }
+        try w.writeAll(");\n");
+        sc_composite_emitted_any = true;
+    }
+    if (sc_emitted_any or sc_composite_emitted_any) try w.writeAll("\n");
 
     // Emit non-entry functions first
     var func_ids = std.ArrayList(u32).initCapacity(arena, 8) catch return error.OutOfMemory;
