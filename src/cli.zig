@@ -30,6 +30,8 @@ pub fn main() !void {
             \\  --entry-point <name>  Entry point name (default: main)
             \\  -I <path>             Add include search path (repeatable)
             \\  -D<name>[=<value>]    Define preprocessor macro
+            \\  --spec-const <ID=VAL> Override spec constant value (repeatable).
+            \\                        VAL can be decimal int, 0x-hex, or true/false.
             \\  --glsl-version <ver>  GLSL output version: 330–460 (default: 430)
             \\  --shader-model <ver>  HLSL shader model: 50, 60 (default: 60)
             \\  --metal-version <ver> MSL version: 21, 24, 30 (default: 21)
@@ -57,6 +59,9 @@ pub fn main() !void {
 
     var defines = std.ArrayList(glslpp.DefineOverride).initCapacity(alloc, 8) catch return;
     defer defines.deinit(alloc);
+
+    var spec_overrides = std.ArrayList(glslpp.SpecOverride).initCapacity(alloc, 4) catch return;
+    defer spec_overrides.deinit(alloc);
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -91,6 +96,28 @@ pub fn main() !void {
             } else {
                 try defines.append(alloc, .{ .name = def, .value = "1" });
             }
+        } else if (std.mem.eql(u8, args[i], "--spec-const")) {
+            i += 1;
+            if (i >= args.len) fatal("missing argument after --spec-const", .{});
+            const arg = args[i];
+            const eq = std.mem.indexOfScalar(u8, arg, '=') orelse fatal("--spec-const expects ID=VALUE (got '{s}')", .{arg});
+            const id_str = arg[0..eq];
+            const val_str = arg[eq + 1 ..];
+            const sid = std.fmt.parseInt(u32, id_str, 10) catch fatal("--spec-const: invalid ID '{s}'", .{id_str});
+            // Accept decimal int (signed or unsigned), hex 0x..., or "true"/"false".
+            const value_u32: u32 = blk: {
+                if (std.mem.eql(u8, val_str, "true")) break :blk 1;
+                if (std.mem.eql(u8, val_str, "false")) break :blk 0;
+                if (std.mem.startsWith(u8, val_str, "0x") or std.mem.startsWith(u8, val_str, "0X")) {
+                    break :blk std.fmt.parseInt(u32, val_str[2..], 16) catch fatal("--spec-const: invalid hex value '{s}'", .{val_str});
+                }
+                if (std.mem.startsWith(u8, val_str, "-")) {
+                    const iv = std.fmt.parseInt(i32, val_str, 10) catch fatal("--spec-const: invalid value '{s}'", .{val_str});
+                    break :blk @bitCast(iv);
+                }
+                break :blk std.fmt.parseInt(u32, val_str, 10) catch fatal("--spec-const: invalid value '{s}'", .{val_str});
+            };
+            try spec_overrides.append(alloc, .{ .spec_id = sid, .value_u32 = value_u32 });
         } else if (std.mem.eql(u8, args[i], "--glsl-version")) {
             i += 1;
             if (i >= args.len) fatal("missing argument after --glsl-version", .{});
@@ -113,6 +140,9 @@ pub fn main() !void {
     const input = input_path orelse if (!use_stdin) fatal("missing input file (use --stdin to read from stdin)", .{}) else "stdin";
     const stage = stage_override orelse detectStage(input) orelse .fragment;
     const is_spv = std.mem.endsWith(u8, input, ".spv");
+
+    // Publish parsed --spec-const overrides for compileWithDiagsOrExit to apply.
+    cli_spec_overrides = spec_overrides.items;
 
     if (std.mem.eql(u8, command, "compile")) {
         const source = try readInput(alloc, input_path, use_stdin);
@@ -418,9 +448,15 @@ fn printDiagnostic(d: glslpp.diagnostic.Diagnostic) void {
     }
 }
 
+/// Module-scope override list populated by `--spec-const ID=VALUE` parsing in
+/// `main`. Single-threaded CLI usage justifies the global; library callers
+/// should use `glslpp.compileToSPIRVWithSpecOverrides` directly.
+var cli_spec_overrides: []const glslpp.SpecOverride = &.{};
+
 /// Compile GLSL to SPIR-V, surfacing every collected Diagnostic to stderr
 /// in glslang-style format before exiting on failure. Used by all CLI
-/// commands that take GLSL source as input.
+/// commands that take GLSL source as input. Also applies any
+/// `cli_spec_overrides` populated from `--spec-const ID=VALUE` flags.
 fn compileWithDiagsOrExit(
     alloc: std.mem.Allocator,
     source: [:0]const u8,
@@ -431,10 +467,19 @@ fn compileWithDiagsOrExit(
         for (diags.items) |d| alloc.free(d.message);
         diags.deinit(alloc);
     }
-    return glslpp.compileToSPIRVWithDiagnostics(alloc, source, opts, &diags) catch |e| {
+    const spv = glslpp.compileToSPIRVWithDiagnostics(alloc, source, opts, &diags) catch |e| {
         for (diags.items) |d| printDiagnostic(d);
         compileErr(e);
     };
+    if (cli_spec_overrides.len == 0) return spv;
+    // Apply overrides (mutates the SPIR-V in a new buffer; frees the
+    // intermediate). On allocation failure we fall back to the unmodified
+    // SPIR-V — better than crashing the CLI.
+    const out = alloc.alloc(u32, spv.len) catch return spv;
+    @memcpy(out, spv);
+    alloc.free(spv);
+    glslpp.applySpecOverrides(out, cli_spec_overrides);
+    return out;
 }
 
 fn crossErr(err: anyerror) noreturn {
