@@ -1193,10 +1193,15 @@ const Analyzer = struct {
             .{ .name = "gl_BaryCoordNV", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_BaryCoordNoPerspNV", .ty = .vec3, .is_in = true, .is_out = false, .sc = .input },
             // EXT_mesh_shader builtins
-            .{ .name = "gl_MeshPerVertexEXT", .ty = .vec4, .is_in = false, .is_out = true, .sc = .output },
-            .{ .name = "gl_PrimitiveTriangleIndicesEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
-            .{ .name = "gl_PrimitiveLineIndicesEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
-            .{ .name = "gl_PrimitivePointIndicesEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
+            // NOTE: gl_MeshPerVertexEXT (the per-vertex block) and
+            // gl_PrimitiveTriangleIndicesEXT / gl_PrimitiveLineIndicesEXT /
+            // gl_PrimitivePointIndicesEXT (per-primitive index arrays) are
+            // registered below as proper array types with sizes pulled from
+            // the parsed layout (max_vertices / max_primitives). Scalar
+            // registration here would make the index access in
+            // `gl_MeshVerticesEXT[i].gl_Position = ...` fail with TypeMismatch
+            // and the whole function body would be silently dropped via
+            // tolerate_errors=true.
             .{ .name = "gl_CullPrimitiveEXT", .ty = .bool, .is_in = false, .is_out = true, .sc = .output },
             .{ .name = "gl_PrimitiveShadingRateEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
             .{ .name = "gl_TaskCountEXT", .ty = .uint, .is_in = false, .is_out = true, .sc = .output },
@@ -1328,6 +1333,86 @@ const Analyzer = struct {
             self.global_ptr_ids.put(self.alloc, id, {}) catch {};
             const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
             self.scopes.items[0].put(self.alloc, "gl_out", sym) catch return null;
+            return sym;
+        }
+
+        // EXT_mesh_shader per-vertex output (`gl_MeshVerticesEXT[]`).
+        //
+        // The GLSL spec declares this as `out gl_MeshPerVertexEXT { vec4 gl_Position; ... } gl_MeshVerticesEXT[];`
+        // We follow the existing gl_in/gl_out simplification: a flat array of
+        // vec4 (position-only) at semantic level, and the member access
+        // `gl_MeshVerticesEXT[i].gl_Position` is rewritten to the indexed
+        // element (see the shortcut in `analyzeLValue` / `analyzeExpression`).
+        //
+        // The global is registered under the block-type name
+        // `gl_MeshPerVertexEXT` (which the SPIR-V backend already knows
+        // about and emits with the correct decorations) but BOTH names alias
+        // to the same Symbol so user code can write `gl_MeshVerticesEXT[i]`
+        // or `gl_MeshPerVertexEXT[i]` interchangeably.
+        if (std.mem.eql(u8, name, "gl_MeshVerticesEXT") or std.mem.eql(u8, name, "gl_MeshPerVertexEXT")) {
+            // Reuse the existing global if the other alias was referenced first.
+            if (self.scopes.items[0].get("gl_MeshPerVertexEXT")) |existing| {
+                if (std.mem.eql(u8, name, "gl_MeshVerticesEXT")) {
+                    self.scopes.items[0].put(self.alloc, "gl_MeshVerticesEXT", existing) catch return null;
+                }
+                return existing;
+            }
+            const arr_size: u32 = self.mesh_max_vertices orelse 1;
+            const id = self.allocId();
+            const arr_base = self.alloc.create(ast.Type) catch return null;
+            arr_base.* = .vec4;
+            self.heap_types.append(self.alloc, arr_base) catch {};
+            const ty: ast.Type = .{ .array = .{ .base = arr_base, .size = arr_size } };
+            self.globals.append(self.alloc, .{
+                .name = "gl_MeshPerVertexEXT",
+                .ty = ty,
+                .qualifier = .{ .is_out = true },
+                .layout = null,
+                .storage_class = .output,
+                .result_id = id,
+            }) catch return null;
+            self.global_ptr_ids.put(self.alloc, id, {}) catch {};
+            const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
+            self.scopes.items[0].put(self.alloc, "gl_MeshPerVertexEXT", sym) catch return null;
+            self.scopes.items[0].put(self.alloc, "gl_MeshVerticesEXT", sym) catch return null;
+            return sym;
+        }
+
+        // EXT_mesh_shader per-primitive index arrays.
+        // Spec types per primitive topology:
+        //   triangles -> uvec3, lines -> uvec2, points -> uint.
+        // Each is an array of length `max_primitives`.
+        const is_tri = std.mem.eql(u8, name, "gl_PrimitiveTriangleIndicesEXT");
+        const is_line = std.mem.eql(u8, name, "gl_PrimitiveLineIndicesEXT");
+        const is_point = std.mem.eql(u8, name, "gl_PrimitivePointIndicesEXT");
+        if (is_tri or is_line or is_point) {
+            const elem_ty: ast.Type = if (is_tri) .uvec3 else if (is_line) .uvec2 else .uint;
+            // String-literal name matches the existing convention used by the
+            // static builtin table and by gl_in/gl_out: it gives the slice
+            // static lifetime so we don't need to manage ownership in `globals`.
+            const lit_name: []const u8 = if (is_tri)
+                "gl_PrimitiveTriangleIndicesEXT"
+            else if (is_line)
+                "gl_PrimitiveLineIndicesEXT"
+            else
+                "gl_PrimitivePointIndicesEXT";
+            const arr_size: u32 = self.mesh_max_primitives orelse 1;
+            const id = self.allocId();
+            const arr_base = self.alloc.create(ast.Type) catch return null;
+            arr_base.* = elem_ty;
+            self.heap_types.append(self.alloc, arr_base) catch {};
+            const ty: ast.Type = .{ .array = .{ .base = arr_base, .size = arr_size } };
+            self.globals.append(self.alloc, .{
+                .name = lit_name,
+                .ty = ty,
+                .qualifier = .{ .is_out = true },
+                .layout = null,
+                .storage_class = .output,
+                .result_id = id,
+            }) catch return null;
+            self.global_ptr_ids.put(self.alloc, id, {}) catch {};
+            const sym = Symbol{ .kind = .var_sym, .ty = ty, .ir_id = id };
+            self.scopes.items[0].put(self.alloc, lit_name, sym) catch return null;
             return sym;
         }
 
@@ -2729,11 +2814,18 @@ const Analyzer = struct {
                 // Handle gl_out[i].gl_Position = val (and gl_in[i].gl_Position = val)
                 // These arrays are arrays of vec4 (simplified gl_PerVertex),
                 // so arr[i] already IS the position. Just return the indexed pointer.
+                //
+                // Same simplification for mesh shaders: gl_MeshVerticesEXT[i] is
+                // also an array-of-vec4 standing in for the
+                // `gl_MeshPerVertexEXT { vec4 gl_Position; ... }` block.
                 const base_child = node.data.children[0];
                 if (base_child.tag == .index_access and base_child.data.children.len >= 1) {
                     const arr_base = base_child.data.children[0];
                     if (arr_base.tag == .identifier and
-                        (std.mem.eql(u8, arr_base.data.name, "gl_in") or std.mem.eql(u8, arr_base.data.name, "gl_out")))
+                        (std.mem.eql(u8, arr_base.data.name, "gl_in") or
+                            std.mem.eql(u8, arr_base.data.name, "gl_out") or
+                            std.mem.eql(u8, arr_base.data.name, "gl_MeshVerticesEXT") or
+                            std.mem.eql(u8, arr_base.data.name, "gl_MeshPerVertexEXT")))
                     {
                         if (std.mem.eql(u8, node.data.name, "gl_Position")) {
                             return self.analyzeLValue(base_child);
@@ -6579,10 +6671,15 @@ const Analyzer = struct {
                 // Handle gl_in[i].gl_Position and gl_out[i].gl_Position patterns
                 // These arrays are declared as arrays of vec4 (simplified gl_PerVertex),
                 // so arr[i] already IS the position. Skip the member access.
+                // Same simplification applies to mesh shaders'
+                // gl_MeshVerticesEXT[i] / gl_MeshPerVertexEXT[i].
                 if (base_child.tag == .index_access and base_child.data.children.len >= 1) {
                     const arr_base = base_child.data.children[0];
                     if (arr_base.tag == .identifier and
-                        (std.mem.eql(u8, arr_base.data.name, "gl_in") or std.mem.eql(u8, arr_base.data.name, "gl_out")))
+                        (std.mem.eql(u8, arr_base.data.name, "gl_in") or
+                            std.mem.eql(u8, arr_base.data.name, "gl_out") or
+                            std.mem.eql(u8, arr_base.data.name, "gl_MeshVerticesEXT") or
+                            std.mem.eql(u8, arr_base.data.name, "gl_MeshPerVertexEXT")))
                     {
                         // gl_in[i].gl_Position or gl_out[i].gl_Position etc.
                         // For now, just return the indexed element (vec4 = position)
