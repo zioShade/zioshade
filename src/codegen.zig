@@ -16,6 +16,12 @@ const inline_mb = @import("inline_multiblock.zig");
 pub const Stage = enum { vertex, fragment, compute, geometry, tessellation_control, tessellation_evaluation, mesh, task, raygen, closesthit, miss, intersection, anyhit, callable };
 pub const SPIRVVersion = enum { @"1.0", @"1.1", @"1.2", @"1.3", @"1.4", @"1.5", @"1.6" };
 
+/// Memory layout rule for a UBO/SSBO block.
+/// - std140: classic OpenGL/Vulkan UBO layout (16-byte array stride, vec3 padded to vec4).
+/// - std430: SSBO layout (tight vec3, tight array stride, but vectors still aligned to component count).
+/// - scalar: GL_EXT_scalar_block_layout — every type aligned to its scalar component, no rounding.
+pub const LayoutKind = enum { std140, std430, scalar };
+
 fn spirv_versionOrdinal(v: SPIRVVersion) u32 {
     return switch (v) {
         .@"1.0" => 0,
@@ -35,8 +41,9 @@ pub fn generate(
     spirv_version: SPIRVVersion,
     glsl_version: u32,
     is_essl: bool,
+    default_layout: LayoutKind,
 ) error{OutOfMemory, CodegenFailed}![]const u32 {
-    return generateInternal(alloc, module, stage, spirv_version, glsl_version, is_essl, false);
+    return generateInternal(alloc, module, stage, spirv_version, glsl_version, is_essl, default_layout, false);
 }
 
 pub fn generateNoOpt(
@@ -46,8 +53,9 @@ pub fn generateNoOpt(
     spirv_version: SPIRVVersion,
     glsl_version: u32,
     is_essl: bool,
+    default_layout: LayoutKind,
 ) error{OutOfMemory, CodegenFailed}![]const u32 {
-    return generateInternal(alloc, module, stage, spirv_version, glsl_version, is_essl, true);
+    return generateInternal(alloc, module, stage, spirv_version, glsl_version, is_essl, default_layout, true);
 }
 
 fn generateInternal(
@@ -57,6 +65,7 @@ fn generateInternal(
     spirv_version: SPIRVVersion,
     glsl_version: u32,
     is_essl: bool,
+    default_layout: LayoutKind,
     no_opt: bool,
 ) error{OutOfMemory, CodegenFailed}![]const u32 {
     var cg = Codegen{
@@ -85,6 +94,7 @@ fn generateInternal(
         .emitted_struct_layouts = .{},
         .layout_visited = .{},
         .default_row_major = false,
+        .default_layout = default_layout,
         .ptr_storage_class = .{},
         .sampled_image_inner_id = 0,
         .sampled_image_3d_inner_id = 0,
@@ -367,6 +377,7 @@ const Codegen = struct {
     emitted_struct_layouts: std.AutoHashMapUnmanaged(u64, u32), // hash(member_types) -> struct_type_id
     layout_visited: std.AutoHashMapUnmanaged(u32, void), // struct type_ids currently being laid out (cycle detection)
     default_row_major: bool, // current block-level matrix layout
+    default_layout: LayoutKind, // default block layout when no std140/std430 qualifier is present
     ptr_storage_class: std.AutoHashMapUnmanaged(u32, ir.SPIRVStorageClass), // result_id -> storage class for pointers
     sampled_image_inner_id: u32, // TypeImage (Sampled=1) for use with OpImage extraction
     sampled_image_3d_inner_id: u32,
@@ -2401,7 +2412,12 @@ const Codegen = struct {
                 // Emit UBO/SSBO decorations: Block + Offset/MatrixStride/ArrayStride
                 // Check if this named type is used as a uniform/storage buffer global
                 var needs_block = false;
-                var block_is_std430 = false;
+                // Layout resolution:
+                //   explicit layout(std430)         -> .std430
+                //   explicit layout(std140)         -> .std140
+                //   no explicit qualifier           -> self.default_layout (.std140 by default,
+                //                                      or .scalar if GL_EXT_scalar_block_layout is enabled)
+                var block_layout: LayoutKind = self.default_layout;
                 var block_row_major = false;
                 for (self.module.globals) |global| {
                     if (global.storage_class != .uniform and global.storage_class != .storage_buffer) continue;
@@ -2409,7 +2425,8 @@ const Codegen = struct {
                     if (!std.mem.eql(u8, global.ty.named, name)) continue;
                     needs_block = true;
                     if (global.layout) |l| {
-                        block_is_std430 = l.std430;
+                        if (l.std430) block_layout = .std430
+                        else if (l.std140) block_layout = .std140;
                         block_row_major = l.row_major;
                     }
                     break;
@@ -2419,7 +2436,7 @@ const Codegen = struct {
                 if (needs_block) {
                     try self.emitDecorationSectionDecorateNoExtra(id, @intFromEnum(spirv.Decoration.block));
                     self.default_row_major = block_row_major;
-                    try self.emitNestedStructLayout(id, td.members, block_is_std430);
+                    try self.emitNestedStructLayout(id, td.members, block_layout);
                     self.default_row_major = false;
                 }
                 // If we emitted a forward pointer, now emit the actual pointer definition
@@ -3003,9 +3020,43 @@ const Codegen = struct {
         try self.decoration_section.append(self.alloc, decoration);
     }
 
-    /// Compute alignment for a type (std140 or std430)
-    fn layoutAlignment(self: *Codegen, ty: ast.Type, is_std430: bool) u32 {
-        if (is_std430) {
+    /// Compute alignment for a type under the given layout rule.
+    fn layoutAlignment(self: *Codegen, ty: ast.Type, kind: LayoutKind) u32 {
+        if (kind == .scalar) {
+            // Scalar layout: alignment of any type is the alignment of its scalar component.
+            // No 16-byte rounding, no vec3-to-vec4 padding.
+            return switch (ty) {
+                .int8, .uint8,
+                .i8vec2, .u8vec2, .i8vec3, .u8vec3, .i8vec4, .u8vec4 => 1,
+                .int16, .uint16, .float16,
+                .i16vec2, .u16vec2, .f16vec2,
+                .i16vec3, .u16vec3, .f16vec3,
+                .i16vec4, .u16vec4, .f16vec4 => 2,
+                .float, .int, .uint, .bool,
+                .vec2, .ivec2, .uvec2,
+                .vec3, .ivec3, .uvec3,
+                .vec4, .ivec4, .uvec4,
+                .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
+                .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 4,
+                .array => |arr| self.layoutAlignment(arr.base.*, kind),
+                .named => |name| blk: {
+                    const td = self.module.types.get(name) orelse break :blk 4;
+                    if (td.is_buffer_reference) break :blk 8;
+                    const type_id = self.emitted_named_types.get(name) orelse break :blk 4;
+                    if (self.layout_visited.contains(type_id)) break :blk 8;
+                    self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 4;
+                    defer _ = self.layout_visited.remove(type_id);
+                    var max_align: u32 = 1;
+                    for (td.members) |member| {
+                        const ma = self.layoutAlignment(member.ty, kind);
+                        if (ma > max_align) max_align = ma;
+                    }
+                    break :blk max_align;
+                },
+                else => 4,
+            };
+        }
+        if (kind == .std430) {
             return switch (ty) {
                 .int8, .uint8 => 1,
                 .int16, .uint16, .float16 => 2,
@@ -3018,7 +3069,7 @@ const Codegen = struct {
                 .vec3, .vec4, .ivec3, .ivec4, .uvec3, .uvec4 => 16,
                 .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
                 .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 16,
-                .array => |arr| self.layoutAlignment(arr.base.*, is_std430), // std430: array alignment = element alignment
+                .array => |arr| self.layoutAlignment(arr.base.*, kind), // std430: array alignment = element alignment
                 .named => |name| blk: {
                     // Struct alignment = max alignment of its members
                     const td = self.module.types.get(name) orelse break :blk 16;
@@ -3029,7 +3080,7 @@ const Codegen = struct {
                     defer _ = self.layout_visited.remove(type_id);
                     var max_align: u32 = 4;
                     for (td.members) |member| {
-                        const ma = self.layoutAlignment(member.ty, is_std430);
+                        const ma = self.layoutAlignment(member.ty, kind);
                         if (ma > max_align) max_align = ma;
                     }
                     break :blk max_align;
@@ -3054,7 +3105,7 @@ const Codegen = struct {
                 defer _ = self.layout_visited.remove(type_id);
                 var max_align: u32 = 4;
                 for (td.members) |member| {
-                    const ma = self.layoutAlignment(member.ty, is_std430);
+                    const ma = self.layoutAlignment(member.ty, kind);
                     if (ma > max_align) max_align = ma;
                 }
                 break :blk max_align;
@@ -3063,8 +3114,8 @@ const Codegen = struct {
         };
     }
 
-    /// Compute size for a type (std140 or std430)
-    fn layoutSize(self: *Codegen, ty: ast.Type, is_std430: bool) u32 {
+    /// Compute size for a type under the given layout rule.
+    fn layoutSize(self: *Codegen, ty: ast.Type, kind: LayoutKind) u32 {
         return switch (ty) {
             .int8, .uint8 => 1,
             .int16, .uint16, .float16 => 2,
@@ -3078,14 +3129,21 @@ const Codegen = struct {
             .vec2, .ivec2, .uvec2 => 8,
             .vec3, .ivec3, .uvec3 => 12,
             .vec4, .ivec4, .uvec4 => 16,
-            .mat2, .mat2x2 => 2 * 16,
-            .mat3, .mat3x3 => 3 * 16,
-            .mat4, .mat4x4 => 4 * 16,
-            .mat2x3, .mat2x4 => if (self.default_row_major) self.matrixRowCount(ty) * 16 else 2 * 16,
-            .mat3x2, .mat3x4 => if (self.default_row_major) self.matrixRowCount(ty) * 16 else 3 * 16,
-            .mat4x2, .mat4x3 => if (self.default_row_major) self.matrixRowCount(ty) * 16 else 4 * 16,
+            // Matrix sizes: under scalar layout, columns are tightly packed (no vec4 stride).
+            .mat2, .mat2x2 => if (kind == .scalar) 2 * 2 * 4 else 2 * 16,
+            .mat3, .mat3x3 => if (kind == .scalar) 3 * 3 * 4 else 3 * 16,
+            .mat4, .mat4x4 => if (kind == .scalar) 4 * 4 * 4 else 4 * 16,
+            .mat2x3, .mat2x4 => if (kind == .scalar)
+                (if (self.default_row_major) self.matrixRowCount(ty) * 2 * 4 else 2 * self.matrixRowCount(ty) * 4)
+                else if (self.default_row_major) self.matrixRowCount(ty) * 16 else 2 * 16,
+            .mat3x2, .mat3x4 => if (kind == .scalar)
+                (if (self.default_row_major) self.matrixRowCount(ty) * 3 * 4 else 3 * self.matrixRowCount(ty) * 4)
+                else if (self.default_row_major) self.matrixRowCount(ty) * 16 else 3 * 16,
+            .mat4x2, .mat4x3 => if (kind == .scalar)
+                (if (self.default_row_major) self.matrixRowCount(ty) * 4 * 4 else 4 * self.matrixRowCount(ty) * 4)
+                else if (self.default_row_major) self.matrixRowCount(ty) * 16 else 4 * 16,
             .array => |arr| blk: {
-                const stride = self.layoutArrayStride(ty, is_std430);
+                const stride = self.layoutArrayStride(ty, kind);
                 break :blk stride * arr.size;
             },
             .named => |name| blk: {
@@ -3099,19 +3157,19 @@ const Codegen = struct {
                 defer _ = self.layout_visited.remove(type_id);
                 var sz: u32 = 0;
                 for (td.members) |member| {
-                    const alignment = self.layoutAlignment(member.ty, is_std430);
+                    const alignment = self.layoutAlignment(member.ty, kind);
                     sz = std.mem.alignForward(u32, sz, alignment);
-                    sz += self.layoutSize(member.ty, is_std430);
+                    sz += self.layoutSize(member.ty, kind);
                 }
-                const struct_align = self.layoutAlignment(.{ .named = name }, is_std430);
+                const struct_align = self.layoutAlignment(.{ .named = name }, kind);
                 break :blk std.mem.alignForward(u32, sz, struct_align);
             },
             else => 4,
         };
     }
 
-    /// Compute array stride (std140 or std430)
-    fn layoutArrayStride(self: *Codegen, ty: ast.Type, is_std430: bool) u32 {
+    /// Compute array stride under the given layout rule.
+    fn layoutArrayStride(self: *Codegen, ty: ast.Type, kind: LayoutKind) u32 {
         const arr = ty.array;
         // For buffer_reference element types, use pointer size (8 bytes)
         var resolved_base = arr.base.*;
@@ -3121,25 +3179,25 @@ const Codegen = struct {
             if (td != null and td.?.is_buffer_reference) {
                 // PhysicalStorageBuffer pointer is 8 bytes, 8-byte aligned
                 const stride = std.mem.alignForward(u32, 8, 8);
-                if (is_std430) return stride;
+                if (kind == .std430 or kind == .scalar) return stride;
                 return std.mem.alignForward(u32, stride, 16); // std140
             }
         }
-        const elem_size = self.layoutSize(arr.base.*, is_std430);
-        const elem_align = self.layoutAlignment(arr.base.*, is_std430);
+        const elem_size = self.layoutSize(arr.base.*, kind);
+        const elem_align = self.layoutAlignment(arr.base.*, kind);
         const rounded_elem = std.mem.alignForward(u32, elem_size, elem_align);
-        if (is_std430) {
-            return rounded_elem; // std430: no extra rounding to 16
+        if (kind == .std430 or kind == .scalar) {
+            return rounded_elem; // std430 / scalar: no extra rounding to 16
         }
         return std.mem.alignForward(u32, rounded_elem, 16); // std140: round up to vec4
     }
 
     /// Emit Offset/ColMajor/MatrixStride/ArrayStride for struct members, recursing into nested structs
-    fn emitNestedStructLayout(self: *Codegen, struct_type_id: u32, members: []const ast.StructMember, is_std430: bool) !void {
-        try self.emitNestedStructLayoutInner(struct_type_id, members, is_std430, self.default_row_major);
+    fn emitNestedStructLayout(self: *Codegen, struct_type_id: u32, members: []const ast.StructMember, kind: LayoutKind) !void {
+        try self.emitNestedStructLayoutInner(struct_type_id, members, kind, self.default_row_major);
     }
 
-    fn emitNestedStructLayoutInner(self: *Codegen, struct_type_id: u32, members: []const ast.StructMember, is_std430: bool, parent_row_major: bool) !void {
+    fn emitNestedStructLayoutInner(self: *Codegen, struct_type_id: u32, members: []const ast.StructMember, kind: LayoutKind, parent_row_major: bool) !void {
         // Prevent decorating the same struct twice
         if (self.emitted_struct_layout.contains(struct_type_id)) return;
         try self.emitted_struct_layout.put(self.alloc, struct_type_id, {});
@@ -3150,10 +3208,10 @@ const Codegen = struct {
             const saved_row_major = self.default_row_major;
             self.default_row_major = member_is_row_major;
             defer self.default_row_major = saved_row_major;
-            const alignment = self.layoutAlignment(member.ty, is_std430);
+            const alignment = self.layoutAlignment(member.ty, kind);
             offset = std.mem.alignForward(u32, offset, alignment);
             try self.emitDecorationSectionMemberDecorate(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.offset), offset);
-            const size = self.layoutSize(member.ty, is_std430);
+            const size = self.layoutSize(member.ty, kind);
             offset += size;
             // RowMajor/ColMajor + MatrixStride for matrix members (direct or element of array)
             var effective_ty = member.ty;
@@ -3168,33 +3226,41 @@ const Codegen = struct {
                 const mat_stride: u32 = if (member_is_row_major) blk: {
                     // RowMajor: stride = alignment of vec<column_count>
                     const cols = self.matrixColumnCount(effective_ty);
-                    break :blk if (is_std430) switch (cols) {
-                        2 => 8,
-                        3 => 16,
-                        4 => 16,
-                        else => 16,
-                    } else 16; // std140 always vec4-aligned
+                    break :blk switch (kind) {
+                        .scalar => cols * 4, // scalar: tight, component-aligned
+                        .std430 => switch (cols) {
+                            2 => 8,
+                            3 => 16,
+                            4 => 16,
+                            else => 16,
+                        },
+                        .std140 => 16, // std140 always vec4-aligned
+                    };
                 } else blk: {
                     // ColMajor: stride = alignment of vec<row_count>
                     const rows = self.matrixRowCount(effective_ty);
-                    break :blk if (is_std430) switch (rows) {
-                        2 => 8,
-                        3 => 16,
-                        4 => 16,
-                        else => 16,
-                    } else 16; // std140 always vec4-aligned
+                    break :blk switch (kind) {
+                        .scalar => rows * 4, // scalar: tight, component-aligned
+                        .std430 => switch (rows) {
+                            2 => 8,
+                            3 => 16,
+                            4 => 16,
+                            else => 16,
+                        },
+                        .std140 => 16, // std140 always vec4-aligned
+                    };
                 };
                 try self.emitDecorationSectionMemberDecorate(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.matrix_stride), mat_stride);
             }
             // ArrayStride for array members (all nesting levels)
             if (member.ty == .array) {
-                try self.emitArrayStrideRecursive(member.ty, is_std430);
+                try self.emitArrayStrideRecursive(member.ty, kind);
                 // Recurse into nested struct arrays: emit Offset for the element struct members
                 if (effective_ty == .named) {
                     const elem_td = self.module.types.get(effective_ty.named) orelse continue;
                     const elem_type_id = self.emitted_interface_named_types.get(effective_ty.named) orelse
                         self.emitted_named_types.get(effective_ty.named) orelse continue;
-                    try self.emitNestedStructLayoutInner(elem_type_id, elem_td.members, is_std430, member_is_row_major);
+                    try self.emitNestedStructLayoutInner(elem_type_id, elem_td.members, kind, member_is_row_major);
                 }
             }
             // Recurse into direct nested struct members
@@ -3202,7 +3268,7 @@ const Codegen = struct {
                 const nested_td = self.module.types.get(member.ty.named) orelse continue;
                 const nested_type_id = self.emitted_interface_named_types.get(member.ty.named) orelse
                     self.emitted_named_types.get(member.ty.named) orelse continue;
-                try self.emitNestedStructLayoutInner(nested_type_id, nested_td.members, is_std430, member_is_row_major);
+                try self.emitNestedStructLayoutInner(nested_type_id, nested_td.members, kind, member_is_row_major);
             }
         }
     }
@@ -3218,7 +3284,7 @@ const Codegen = struct {
     }
 
     /// Emit ArrayStride for array types at all nesting levels
-    fn emitArrayStrideRecursive(self: *Codegen, ty: ast.Type, is_std430: bool) !void {
+    fn emitArrayStrideRecursive(self: *Codegen, ty: ast.Type, kind: LayoutKind) !void {
         if (ty != .array) return;
         const arr = ty.array;
         // Must use same base_id logic as ensureType for arrays (buffer_reference → pointer)
@@ -3237,14 +3303,14 @@ const Codegen = struct {
         const cache_key = (@as(u64, base_type_id) << 32) | @as(u64, arr.size);
         if (self.emitted_array_types.get(cache_key)) |array_type_id| {
             if (!self.emitted_array_stride.contains(array_type_id)) {
-                const stride = self.layoutArrayStride(ty, is_std430);
+                const stride = self.layoutArrayStride(ty, kind);
                 try self.emitDecorationSectionDecorate(array_type_id, @intFromEnum(spirv.Decoration.array_stride), stride);
                 try self.emitted_array_stride.put(self.alloc, array_type_id, {});
             }
         }
         // Recurse into nested arrays
         if (arr.base.* == .array) {
-            try self.emitArrayStrideRecursive(arr.base.*, is_std430);
+            try self.emitArrayStrideRecursive(arr.base.*, kind);
         }
     }
 
@@ -5409,7 +5475,7 @@ test "codegen: header encoding" {
     var module = try semantic.analyze(alloc, &root);
     defer module.deinit();
 
-    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false);
+    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false, .std140);
     defer alloc.free(result);
 
     try std.testing.expectEqual(@as(u32, spirv.MAGIC), result[0]);
@@ -5429,7 +5495,7 @@ test "codegen: capabilities emitted" {
     var module = try semantic.analyze(alloc, &root);
     defer module.deinit();
 
-    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false);
+    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false, .std140);
     defer alloc.free(result);
 
     // Word 5 should be OpCapability header (word_count=2, opcode=17)
@@ -5452,7 +5518,7 @@ test "codegen: shader with arithmetic produces instructions" {
     try std.testing.expect(module.functions[0].body.len > 0);
 
     // Generate SPIR-V binary
-    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false);
+    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false, .std140);
     defer alloc.free(result);
 
     // Verify header
@@ -5469,7 +5535,7 @@ test "codegen: if/else produces OpSelectionMerge and OpBranchConditional" {
     defer parser.freeTree(alloc, &root);
     var module = try semantic.analyze(alloc, &root);
     defer module.deinit();
-    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false);
+    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false, .std140);
     defer alloc.free(result);
     var has_sel_merge = false;
     var has_br_cond = false;
@@ -5515,7 +5581,7 @@ test "codegen: for loop produces OpLoopMerge" {
         return err;
     };
     defer module.deinit();
-    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false);
+    const result = try generate(alloc, &module, .fragment, .@"1.5", 450, false, .std140);
     defer alloc.free(result);
     var has_loop_merge = false;
     var i: usize = 5;

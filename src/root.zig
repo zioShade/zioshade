@@ -372,7 +372,8 @@ pub fn compileToSPIRV(
         .@"1.5" => .@"1.5",
         .@"1.6" => .@"1.6",
     };
-    return codegen.generate(alloc, &module, stage, spirv_ver, pp.version, pp.is_essl) catch {
+    const default_layout: codegen.LayoutKind = if (pp.has_ext_scalar_block_layout) .scalar else .std140;
+    return codegen.generate(alloc, &module, stage, spirv_ver, pp.version, pp.is_essl, default_layout) catch {
         last_compile_detail = .codegen_failed;
         return error.CodegenFailed;
     };
@@ -538,7 +539,8 @@ pub fn compileToSPIRVNoOpt(
         .@"1.5" => .@"1.5",
         .@"1.6" => .@"1.6",
     };
-    return codegen.generateNoOpt(alloc, &module, stage, spirv_ver, pp.version, pp.is_essl) catch {
+    const default_layout: codegen.LayoutKind = if (pp.has_ext_scalar_block_layout) .scalar else .std140;
+    return codegen.generateNoOpt(alloc, &module, stage, spirv_ver, pp.version, pp.is_essl, default_layout) catch {
         last_compile_detail = .codegen_failed;
         return error.CodegenFailed;
     };
