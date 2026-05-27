@@ -31,6 +31,19 @@ fn countOpStores(spirv: []const u32) usize {
     return count;
 }
 
+fn hasOpcode(spirv: []const u32, target: u32) bool {
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const word = spirv[i];
+        const opcode = word & 0xFFFF;
+        const word_count = word >> 16;
+        if (word_count == 0) break;
+        if (opcode == target) return true;
+        i += word_count;
+    }
+    return false;
+}
+
 test "mesh shader emits OpStore for per-vertex, per-primitive and user-location outputs" {
     const source =
         \\#version 450
@@ -56,4 +69,31 @@ test "mesh shader emits OpStore for per-vertex, per-primitive and user-location 
     // We expect at least 5 OpStores: 3 gl_Position, 1 v_color, 1 indices.
     const stores = countOpStores(spirv);
     try std.testing.expect(stores >= 5);
+}
+
+test "mesh shader user per-vertex output arrays are sized (no OpTypeRuntimeArray)" {
+    // `out vec4 v_color[]` in a mesh shader needs to be a sized array of
+    // length `max_vertices`. OpTypeRuntimeArray fails Vulkan validation:
+    //   VUID-StandaloneSpirv-OpTypeRuntimeArray-04680 — OpTypeRuntimeArray
+    //   may only appear as the final member of an OpTypeStruct.
+    const source =
+        \\#version 450
+        \\#extension GL_EXT_mesh_shader : require
+        \\layout(local_size_x=1) in;
+        \\layout(triangles, max_vertices=3, max_primitives=1) out;
+        \\layout(location=0) out vec4 v_color[];
+        \\void main() {
+        \\    SetMeshOutputsEXT(3, 1);
+        \\    v_color[0] = vec4(1.0, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{
+        .stage = .mesh,
+        .spirv_version = .@"1.4",
+    });
+    defer alloc.free(spirv);
+
+    // OpTypeRuntimeArray = 30, OpTypeArray = 28
+    try std.testing.expect(!hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.TypeRuntimeArray)));
+    try std.testing.expect(hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.TypeArray)));
 }
