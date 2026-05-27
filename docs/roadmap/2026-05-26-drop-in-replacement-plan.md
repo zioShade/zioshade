@@ -831,6 +831,33 @@ Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default va
 
 - [ ] **Step 3: Verify, commit**
 
+### Task 5.2 v2 — Mesh shader output binding (DEFERRED from M5.2 v1)
+
+M5.2 v1 shipped (`6a0e5982` + `e732055f`) with the `[OutputTopology("...")]` attribute and a placeholder mesh signature (`out vertices float4 verts[N]`, `out indices uintK prims[M]`) that's syntactically valid HLSL but **not DXC-validation-clean for non-trivial mesh shaders**. The full mesh output pipeline needs four follow-up items:
+
+- [ ] **Task 5.2.v2.a — Per-vertex `struct VertexOut` aggregation**
+  In `src/spirv_to_hlsl.zig`, when emitting the mesh signature, walk the SPIR-V Output storage class variables that are NOT decorated `PerPrimitiveEXT`, build a `struct VertexOut { float4 pos : SV_Position; <user vars with their semantics>; }`, and emit `out vertices VertexOut verts[max_vertices]` instead of the current placeholder `float4 verts[N]`. Today's v1 emits a single-output stub; this task makes it real.
+
+- [ ] **Task 5.2.v2.b — `PerPrimitiveEXT` aggregation into `struct PrimOut`**
+  Similar to v2.a but for `out` variables marked with the `perprimitiveEXT` GLSL qualifier (SPIR-V `PerPrimitiveEXT` decoration). Build `struct PrimOut { <per-primitive user vars>; }` and emit `out primitives PrimOut prims_data[max_primitives]` as a separate signature parameter (sibling to the indices array).
+
+- [ ] **Task 5.2.v2.c — Body store routing to verts[]/prims[]**
+  After v2.a and v2.b land, the mesh entry-point *body* still emits SPIR-V Output-storage-class stores as generic global writes. Re-route them to write into the `verts[i].field` / `prims_data[i].field` slots so the per-thread mesh-shader writes correctly populate the output arrays. This is the load-bearing piece — without it the mesh output is structurally correct but semantically empty.
+
+- [x] **Task 5.2.v2.d — CLI `--stage mesh|task|raygen|...`**
+  Shipped as part of finishing M5.2 v1 follow-ups. `src/cli.zig` now accepts every stage in the `glslpp.Stage` enum.
+
+**Acceptance for v2:** the mesh shader fixture from M5.2's test:
+```glsl
+#version 450
+#extension GL_EXT_mesh_shader : require
+layout(local_size_x=1) in;
+layout(triangles, max_vertices=3, max_primitives=1) out;
+layout(location=0) out vec4 v_color[];
+void main() { SetMeshOutputsEXT(3, 1); }
+```
+should round-trip through `glslpp hlsl --stage mesh` and then pass `dxc -T ms_6_5 -E main` without errors. Today it doesn't because of v2.a/b/c.
+
 ### Task 5.3: Validate via DXC on Windows
 
 **Files:**
