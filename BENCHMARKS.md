@@ -82,12 +82,21 @@ geometry, tess, etc.) are reported as **SKIP** with a roadmap reference.
 | `compute`  |  0 | 1 | 0 | `compute_minimal.spv`, fails on SSBO subscript |
 | **Total**  | **47** | **5** | **0** | 52 fixtures processed |
 
-The corpus is **51 fragment + 1 compute** — no vertex/mesh/raytracing
-fixtures yet, so the per-stage SKIP buckets are empty. The infrastructure
-is in place; when M5.0 (vertex), M5.2 v2 (mesh), and ray-tracing
-fixtures are added, the tool will pick them up automatically.
+**Snapshot — commit `1c3b3d70`, 2026-05-28, SM 6.5, DXC 1.10 (5180):**
 
-**Top failure reasons (DXC stderr, first 80 chars):**
+| Stage | PASS | FAIL | SKIP | Notes |
+|---|---:|---:|---:|---|
+| `fragment` | 48 | 3 | 0 | spirv-cross corpus; `complex-expression-in-access-chain.spv` still hits an internal DXC validator |
+| `compute`  |  1 | 0 | 0 | `compute_minimal.spv` now passes at SM 6.5 |
+| `vertex`   |  1 | 0 | 0 | `vertex_minimal.spv` validates after M5.0/M5.1 |
+| `mesh`     |  1 | 1 | 0 | `mesh_v2c_triangle.spv` validates end-to-end (M5.2 v2.c); `mesh_minimal.spv` lacks a `gl_Position` write and is intentionally incomplete |
+| **Total**  | **51** | **4** | **0** | 55 fixtures processed |
+
+When M5.0 (vertex), M5.2 v2 (mesh), and ray-tracing fixtures are added,
+the tool picks them up automatically — the bottleneck has shifted from
+HLSL backend coverage to fixture coverage.
+
+**Top failure reasons at SM 6.0 (DXC stderr, first 80 chars):**
 
 | Count | Error |
 |---:|---|
@@ -100,10 +109,7 @@ fixtures are added, the tool will pick them up automatically.
   intentional dialect failures, not glslpp bugs.
 - `complex-expression-in-access-chain.spv` hits DXC's internal validator
   (likely a row/column-major access-chain emit corner case).
-- `compute_minimal.spv` exposes an SSBO emit issue in the compute path —
-  glslpp's HLSL output writes `b.data[0]` against a struct without the
-  expected indexable representation. Filed for follow-up.
+- `compute_minimal.spv` exposed an SSBO emit issue in the compute path at
+  SM 6.0; resolved at SM 6.5.
 
-Fragment pass rate: **47/51 = 92.2%**. The infrastructure is the
-deliverable; the four DXC-reported errors are real follow-ups (one
-glslpp emit bug, three "wrong target SM" sanity-check failures).
+Fragment pass rate: **48/51 = 94.1%** at SM 6.5 (was 47/51 = 92.2% at SM 6.0).
