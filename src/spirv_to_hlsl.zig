@@ -1667,6 +1667,18 @@ fn emitFunction(
             const vid = inst.words[2];
             // Skip built-ins (Position etc.) — gl_Position is injected explicitly.
             if (getDecorationValue(decorations, vid, .built_in) != null) continue;
+            // Skip the synthetic mesh-builtin arrays: they don't go into
+            // VertexOut/PrimOut as user fields. v2.c routes their stores
+            // through the signature parameters directly (see name-rewrite
+            // pass below).
+            //  - gl_MeshPerVertexEXT       → verts[i].gl_Position (the
+            //    VertexOut seed field). Adding it again would duplicate
+            //    the gl_Position element with a redundant COLOR<N> field.
+            //  - gl_Primitive{Triangle,Line,Point}IndicesEXT → flat
+            //    `out indices` signature parameter; never a VertexOut /
+            //    PrimOut struct member.
+            const orig = names.get(vid) orelse "var";
+            if (isMeshBuiltinName(orig)) continue;
             // Mesh outputs are GLSL arrays implicitly sized to max_vertices /
             // max_primitives — they materialise in SPIR-V as either
             // TypeArray (sized) or TypeRuntimeArray (unsized).
@@ -1680,7 +1692,6 @@ fn emitFunction(
             } else {
                 continue;
             }
-            const orig = names.get(vid) orelse "var";
             const loc = getDecorationValue(decorations, vid, .location);
             const fld = MeshField{
                 .id = vid,
@@ -1726,6 +1737,51 @@ fn emitFunction(
                 try w.print("    {s} {s} : COLOR{d};\n", .{ tname, fld.orig_name, i });
             }
             try w.writeAll("};\n\n");
+        }
+
+        // -------------------------------------------------------------------
+        // M5.2 v2.c — body store routing.
+        //
+        // The mesh body emits stores against access chains whose base is
+        // one of:
+        //   - gl_MeshPerVertexEXT[i]            (synthetic per-vertex array
+        //                                        of vec4 — the gl_Position
+        //                                        element of VertexOut)
+        //   - gl_Primitive*IndicesEXT[i]        (flat per-primitive index
+        //                                        array — uint/uint2/uint3)
+        //   - <user>[i]                          (per-vertex output, location N)
+        //   - <user>[i]                          (perprimitiveEXT, location N)
+        //
+        // None of those names are HLSL identifiers in scope inside the
+        // entry point. Rewrite the corresponding `names` entries to a
+        // sentinel `__mesh_route__<base>[.<member>]` so writeAccessExpr /
+        // buildAccessExpr can route the store through the signature
+        // parameter (verts / prims / prims_data).
+        // -------------------------------------------------------------------
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc != .Output) continue;
+            const vid = inst.words[2];
+            if (getDecorationValue(decorations, vid, .built_in) != null) continue;
+            const orig = names.get(vid) orelse continue;
+            const route_name: []const u8 = blk: {
+                if (std.mem.eql(u8, orig, "gl_MeshPerVertexEXT")) {
+                    break :blk try alloc.dupe(u8, "__mesh_route__verts.gl_Position");
+                }
+                if (std.mem.eql(u8, orig, "gl_PrimitiveTriangleIndicesEXT") or
+                    std.mem.eql(u8, orig, "gl_PrimitiveLineIndicesEXT") or
+                    std.mem.eql(u8, orig, "gl_PrimitivePointIndicesEXT"))
+                {
+                    break :blk try alloc.dupe(u8, "__mesh_route__prims");
+                }
+                if (hasDecoration(decorations, vid, .per_primitive_ext)) {
+                    break :blk try std.fmt.allocPrint(alloc, "__mesh_route__prims_data.{s}", .{orig});
+                }
+                // User per-vertex output → verts[i].<orig>
+                break :blk try std.fmt.allocPrint(alloc, "__mesh_route__verts.{s}", .{orig});
+            };
+            if (try names.fetchPut(vid, route_name)) |old| alloc.free(old.value);
         }
 
         try w.print("[numthreads({d}, {d}, {d})]\n", .{
@@ -3991,9 +4047,67 @@ fn writeResolvePointer(module: *const ParsedModule, names: *std.AutoHashMap(u32,
     try w.writeAll(names.get(ptr_id) orelse "var");
 }
 
+/// True for the two GLSL mesh-shader builtin names whose stores must be
+/// routed through the entry-point signature parameters rather than emitted
+/// as struct fields or bare l-values.
+fn isMeshBuiltinName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "gl_MeshPerVertexEXT") or
+        std.mem.eql(u8, name, "gl_PrimitiveTriangleIndicesEXT") or
+        std.mem.eql(u8, name, "gl_PrimitiveLineIndicesEXT") or
+        std.mem.eql(u8, name, "gl_PrimitivePointIndicesEXT");
+}
+
+/// Parse a `__mesh_route__<base>[.<member>]` sentinel name set by the mesh
+/// entry-point preamble (see spirvToHLSL, "M5.2 v2.c — body store routing").
+/// Returns {base, member?} on a hit, null otherwise. `member` includes no
+/// leading dot — the caller writes it back literally.
+fn parseMeshRoute(name: []const u8) ?struct { base: []const u8, member: ?[]const u8 } {
+    const prefix = "__mesh_route__";
+    if (!std.mem.startsWith(u8, name, prefix)) return null;
+    const rest = name[prefix.len..];
+    if (std.mem.indexOfScalar(u8, rest, '.')) |dot| {
+        return .{ .base = rest[0..dot], .member = rest[dot + 1 ..] };
+    }
+    return .{ .base = rest, .member = null };
+}
+
 fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
     const base_name_raw = names.get(base_id) orelse "base";
     if (indices.len == 0) { try w.writeAll(base_name_raw); return; }
+    // Mesh-output routing (set by spirvToHLSL): rewrite `<base>[idx]` →
+    // `verts[idx].<member>` / `prims[idx]` / `prims_data[idx].<member>`.
+    if (parseMeshRoute(base_name_raw)) |route| {
+        try w.writeAll(route.base);
+        // First index → array subscript (the per-vertex / per-primitive slot).
+        const idx0 = indices[0];
+        const idx0_inst = getDef(module, idx0);
+        if (idx0_inst) |def| {
+            if (def.op == .Constant and def.words.len > 3) {
+                try w.print("[{d}]", .{def.words[3]});
+            } else {
+                try w.print("[{s}]", .{names.get(idx0) orelse "i"});
+            }
+        } else {
+            try w.print("[{s}]", .{names.get(idx0) orelse "i"});
+        }
+        if (route.member) |m| try w.print(".{s}", .{m});
+        // Walk any remaining indices (e.g. `verts[i].v_color[j]` for a
+        // user `out vec4 v_color[][N]`) using simple constant/symbolic
+        // formatting — the deeper type chain follows the element type.
+        for (indices[1..]) |index_id| {
+            const idx_inst = getDef(module, index_id);
+            if (idx_inst) |def| {
+                if (def.op == .Constant and def.words.len > 3) {
+                    try w.print("[{d}]", .{def.words[3]});
+                } else {
+                    try w.print("[{s}]", .{names.get(index_id) orelse "i"});
+                }
+            } else {
+                try w.print("[{s}]", .{names.get(index_id) orelse "i"});
+            }
+        }
+        return;
+    }
     // Check if base is an SSBO (tagged with __ssbo_buf__ prefix)
     const is_ssbo = std.mem.startsWith(u8, base_name_raw, "__ssbo_buf__");
     const base_name = if (is_ssbo) base_name_raw["__ssbo_buf__".len..] else base_name_raw;
@@ -4166,6 +4280,40 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     const base_name_raw = names.get(base_id) orelse "base";
 
     if (indices.len == 0) return try alloc.dupe(u8, base_name_raw);
+
+    // Mesh-output routing (set by spirvToHLSL): rewrite `<base>[idx]` →
+    // `verts[idx].<member>` / `prims[idx]` / `prims_data[idx].<member>`.
+    // Mirrors writeAccessExpr — see that function for rationale.
+    if (parseMeshRoute(base_name_raw)) |route| {
+        var buf = std.ArrayList(u8).initCapacity(alloc, 64) catch return error.OutOfMemory;
+        defer buf.deinit(alloc);
+        try buf.appendSlice(alloc, route.base);
+        const idx0 = indices[0];
+        const idx0_inst = getDef(module, idx0);
+        if (idx0_inst) |def| {
+            if (def.op == .Constant and def.words.len > 3) {
+                try buf.print(alloc, "[{d}]", .{def.words[3]});
+            } else {
+                try buf.print(alloc, "[{s}]", .{names.get(idx0) orelse "i"});
+            }
+        } else {
+            try buf.print(alloc, "[{s}]", .{names.get(idx0) orelse "i"});
+        }
+        if (route.member) |m| try buf.print(alloc, ".{s}", .{m});
+        for (indices[1..]) |index_id| {
+            const idx_inst = getDef(module, index_id);
+            if (idx_inst) |def| {
+                if (def.op == .Constant and def.words.len > 3) {
+                    try buf.print(alloc, "[{d}]", .{def.words[3]});
+                } else {
+                    try buf.print(alloc, "[{s}]", .{names.get(index_id) orelse "i"});
+                }
+            } else {
+                try buf.print(alloc, "[{s}]", .{names.get(index_id) orelse "i"});
+            }
+        }
+        return buf.toOwnedSlice(alloc);
+    }
 
     // Check if base is an SSBO (tagged with __ssbo_buf__ prefix)
     const is_ssbo = std.mem.startsWith(u8, base_name_raw, "__ssbo_buf__");
