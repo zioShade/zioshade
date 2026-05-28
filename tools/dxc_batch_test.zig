@@ -281,7 +281,7 @@ pub fn main() !void {
         if (b.pass == 0 and b.fail == 0 and b.skip == 0) continue;
         const suffix: []const u8 = switch (s) {
             .vertex => "",
-            .mesh => "  (signature OK, body routing deferred — M5.2 v2.c)",
+            .mesh => "  (signature + body routing OK — M5.2 v2.c)",
             .task => "  (not implemented)",
             .geometry, .tess_control, .tess_eval => "  (not implemented)",
             .raygen, .intersection, .anyhit, .closesthit, .miss, .callable => "  (not implemented)",
