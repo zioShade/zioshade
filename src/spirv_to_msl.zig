@@ -10,8 +10,8 @@ const common = @import("spirv_cross_common.zig");
 const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
-const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32 };
-const TextureDecl = struct { name: []const u8, binding: u32 };
+const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32, descriptor_set: u32 = 0 };
+const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0 };
 const MemberKey = struct { struct_id: u32, member_index: u32 };
 
 // ---- Helpers ----
@@ -348,6 +348,13 @@ fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id:
     return false;
 }
 
+/// Append `set` to `list` only if it's not already present. Used to gather
+/// the unique set indices in use by an argument-buffer-mode entry point.
+fn addUniqueSet(list: *std.ArrayList(u32), set: u32, alloc: std.mem.Allocator) !void {
+    for (list.items) |existing| { if (existing == set) return; }
+    try list.append(alloc, set);
+}
+
 // ---- Public API ----
 /// Options for SPIR-V → MSL cross-compilation.
 pub const MslCompileOptions = struct {
@@ -459,11 +466,12 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             const is_ssbo = sc == .StorageBuffer or (sc == .Uniform and hasDec(&decs, rid, .buffer_block));
             if (!is_ssbo) continue;
             const binding = getDecVal(&decs, rid, .binding) orelse continue;
+            const set = getDecVal(&decs, rid, .descriptor_set) orelse 0;
             const name = names.get(rid) orelse continue;
             const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
             if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
                 const ptid = ptr_inst.words[3];
-                storage_buffers.append(aa, .{ .name = name, .type_id = ptid, .binding = binding }) catch {};
+                storage_buffers.append(aa, .{ .name = name, .type_id = ptid, .binding = binding, .descriptor_set = set }) catch {};
             }
         }
     }
@@ -480,34 +488,50 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         }
     }
 
-    // M6 v1: argument-buffer descriptor-set struct emission.
+    // M6 v2: argument-buffer descriptor-set struct emission.
     //
-    // When options.argument_buffers is true, group all resources used by the
-    // entry point into a single `spvDescriptorSetBuffer0` struct with
-    // sequential `[[id(N)]]` slots. v1 assumes everything lives in set 0
-    // (matches SPIRV-Cross's behavior for the canonical fixture and the
-    // current resource-tracking shape, which doesn't yet store per-resource
-    // set indices). Multi-set support is deferred to M6 v2.
+    // When options.argument_buffers is true, emit one
+    // `spvDescriptorSetBufferN` struct per descriptor set actually used by
+    // the entry point. Each struct contains only its own set's resources
+    // with `[[id(K)]]` slots restarting at 0 inside each set (this matches
+    // SPIRV-Cross). `binding_shift` is applied to the outer `[[buffer(N)]]`
+    // of the set parameter itself (see entry-point emission below), NOT to
+    // the inner `[[id(K)]]` slots.
     //
-    // Storage buffers are NOT yet emitted into the argument buffer (v1 scope:
-    // UBO + sampled image only). When a shader has both an SSBO and argbuf
-    // is requested, the SSBO continues to bind via the legacy per-resource
-    // path. v2 acceptance: SSBOs participate in the set struct as
-    // `device Buf* sb [[id(N)]];`.
-    if (options.argument_buffers and (cbuffers.items.len > 0 or textures.items.len > 0)) {
-        try w.writeAll("struct spvDescriptorSetBuffer0\n{\n");
-        var id_slot: u32 = 0;
-        for (cbuffers.items) |cb| {
-            try w.print("    constant {s}& {s} [[id({d})]];\n", .{ cb.name, cb.name, id_slot });
-            id_slot += 1;
+    // v2.b: storage buffers participate in the set struct as
+    // `device Buf* sb [[id(K)]]`. When `argument_buffers` is false, SSBOs
+    // continue to bind via the legacy per-resource path.
+    if (options.argument_buffers and (cbuffers.items.len > 0 or textures.items.len > 0 or storage_buffers.items.len > 0)) {
+        // Gather the unique set indices used across all resource kinds, in
+        // ascending order. Skip empty sets (don't emit unused structs).
+        var set_indices = std.ArrayList(u32).initCapacity(aa, 4) catch return error.OutOfMemory;
+        for (cbuffers.items) |cb| try addUniqueSet(&set_indices, cb.descriptor_set, aa);
+        for (textures.items) |t| try addUniqueSet(&set_indices, t.descriptor_set, aa);
+        for (storage_buffers.items) |sb| try addUniqueSet(&set_indices, sb.descriptor_set, aa);
+        std.mem.sort(u32, set_indices.items, {}, std.sort.asc(u32));
+
+        for (set_indices.items) |set_idx| {
+            try w.print("struct spvDescriptorSetBuffer{d}\n{{\n", .{set_idx});
+            var id_slot: u32 = 0;
+            for (cbuffers.items) |cb| {
+                if (cb.descriptor_set != set_idx) continue;
+                try w.print("    constant {s}& {s} [[id({d})]];\n", .{ cb.name, cb.name, id_slot });
+                id_slot += 1;
+            }
+            for (textures.items) |tex| {
+                if (tex.descriptor_set != set_idx) continue;
+                try w.print("    texture2d<float> {s} [[id({d})]];\n", .{ tex.name, id_slot });
+                id_slot += 1;
+                try w.print("    sampler {s}Smplr [[id({d})]];\n", .{ tex.name, id_slot });
+                id_slot += 1;
+            }
+            for (storage_buffers.items) |sb| {
+                if (sb.descriptor_set != set_idx) continue;
+                try w.print("    device {s}* {s} [[id({d})]];\n", .{ sb.name, sb.name, id_slot });
+                id_slot += 1;
+            }
+            try w.writeAll("};\n\n");
         }
-        for (textures.items) |tex| {
-            try w.print("    texture2d<float> {s} [[id({d})]];\n", .{ tex.name, id_slot });
-            id_slot += 1;
-            try w.print("    sampler {s}Smplr [[id({d})]];\n", .{ tex.name, id_slot });
-            id_slot += 1;
-        }
-        try w.writeAll("};\n\n");
     }
 
     // Output struct for fragment
@@ -787,8 +811,8 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pi = getDef(m, rt) orelse continue; if (pi.op != .TypePointer or pi.words.len < 4) continue;
         const pt = pi.words[3];
         switch (sc) {
-            .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding}) catch {}; },
-            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const name = names.get(rid) orelse "tex"; switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding}) catch {};}, else=>{}} },
+            .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding, .descriptor_set=set}) catch {}; },
+            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; const name = names.get(rid) orelse "tex"; switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set}) catch {};}, else=>{}} },
             else => {},
         }
     }
@@ -1119,14 +1143,23 @@ fn emitFunction(
         try w.writeAll("(");
 
         first_param = true;
-        const has_set0 = argument_buffers and (cbuffers.items.len > 0 or textures.items.len > 0);
-        if (has_set0) {
-            // M6 v1: one argument-buffer param per descriptor set (set 0 only).
-            // The struct fields supply the [[id(N)]] slots; binding_shift still
-            // applies to the outer [[buffer(N)]] of the set itself.
-            const set0_b = common.applyBindingShift(0, binding_shift);
-            try w.print("constant spvDescriptorSetBuffer0& set0 [[buffer({d})]]", .{set0_b});
-            first_param = false;
+        // M6 v2: argbuf mode → emit one [[buffer(N)]] set param per used
+        // descriptor set. `binding_shift` is applied to the outer
+        // [[buffer(N)]] (the slot of the set struct itself), NOT to the
+        // inner [[id(K)]] fields of the struct.
+        const has_argbuf = argument_buffers and (cbuffers.items.len > 0 or textures.items.len > 0);
+        var argbuf_sets = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;
+        defer argbuf_sets.deinit(alloc);
+        if (has_argbuf) {
+            for (cbuffers.items) |cb| try addUniqueSet(&argbuf_sets, cb.descriptor_set, alloc);
+            for (textures.items) |tex| try addUniqueSet(&argbuf_sets, tex.descriptor_set, alloc);
+            std.mem.sort(u32, argbuf_sets.items, {}, std.sort.asc(u32));
+            for (argbuf_sets.items) |set_idx| {
+                if (!first_param) try w.writeAll(", ");
+                const set_b = common.applyBindingShift(set_idx, binding_shift);
+                try w.print("constant spvDescriptorSetBuffer{d}& set{d} [[buffer({d})]]", .{ set_idx, set_idx, set_b });
+                first_param = false;
+            }
         } else {
             for (cbuffers.items) |cb| {
                 if (!first_param) try w.writeAll(", ");
@@ -1147,12 +1180,12 @@ fn emitFunction(
 
         try w.writeAll("\n{\n    main0_out out = {};\n    ");
         try w.print("{s}_impl(out._fragColor, gl_FragCoord.xy", .{func_name});
-        if (has_set0) {
+        if (has_argbuf) {
             for (cbuffers.items) |cb| {
-                try w.print(", set0.{s}", .{cb.name});
+                try w.print(", set{d}.{s}", .{ cb.descriptor_set, cb.name });
             }
             for (textures.items) |tex| {
-                try w.print(", set0.{s}, set0.{s}Smplr", .{tex.name, tex.name});
+                try w.print(", set{d}.{s}, set{d}.{s}Smplr", .{ tex.descriptor_set, tex.name, tex.descriptor_set, tex.name });
             }
         } else {
             for (cbuffers.items) |cb| {
@@ -1174,27 +1207,41 @@ fn emitFunction(
 
         var first_param = true;
 
-        // M6 v1: compute argbuf scope — only UBO + sampled images go into the
-        // set struct. Storage buffers continue to bind per-resource (deferred
-        // to v2). The struct itself only exists when cbuffers/textures are
-        // non-empty (see spirvToMSL emission gate).
-        const has_set0 = argument_buffers and (cbuffers.items.len > 0 or textures.items.len > 0);
+        // M6 v2: in argbuf mode, UBOs / sampled images / SSBOs are all
+        // routed through per-set spvDescriptorSetBufferN structs. The
+        // struct exists when there's at least one resource that belongs
+        // to the entry point.
+        const has_argbuf = argument_buffers and
+            (cbuffers.items.len > 0 or textures.items.len > 0 or storage_buffers.items.len > 0);
 
-        // Emit storage buffers as device pointers (always per-resource in v1)
-        for (storage_buffers.items) |sb| {
-            if (!first_param) try w.writeAll(", ");
-            const sb_b = common.applyBindingShift(sb.binding, binding_shift);
-            try w.print("device {s}* {s} [[buffer({d})]]", .{sb.name, sb.name, sb_b});
-            first_param = false;
+        var argbuf_sets = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;
+        defer argbuf_sets.deinit(alloc);
+        if (has_argbuf) {
+            for (cbuffers.items) |cb| try addUniqueSet(&argbuf_sets, cb.descriptor_set, alloc);
+            for (textures.items) |tex| try addUniqueSet(&argbuf_sets, tex.descriptor_set, alloc);
+            for (storage_buffers.items) |sb| try addUniqueSet(&argbuf_sets, sb.descriptor_set, alloc);
+            std.mem.sort(u32, argbuf_sets.items, {}, std.sort.asc(u32));
         }
 
-        if (has_set0) {
-            if (!first_param) try w.writeAll(", ");
-            const set0_b = common.applyBindingShift(0, binding_shift);
-            try w.print("constant spvDescriptorSetBuffer0& set0 [[buffer({d})]]", .{set0_b});
-            first_param = false;
+        if (has_argbuf) {
+            // M6 v2.b: SSBOs participate in the set struct; emit ONE [[buffer(N)]]
+            // per used descriptor set instead of legacy per-resource params.
+            // `binding_shift` is applied to the outer slot of the set itself,
+            // NOT to the inner [[id(K)]] fields.
+            for (argbuf_sets.items) |set_idx| {
+                if (!first_param) try w.writeAll(", ");
+                const set_b = common.applyBindingShift(set_idx, binding_shift);
+                try w.print("constant spvDescriptorSetBuffer{d}& set{d} [[buffer({d})]]", .{ set_idx, set_idx, set_b });
+                first_param = false;
+            }
         } else {
-            // Emit uniform buffers
+            // Legacy per-resource binding: storage buffers + uniform buffers.
+            for (storage_buffers.items) |sb| {
+                if (!first_param) try w.writeAll(", ");
+                const sb_b = common.applyBindingShift(sb.binding, binding_shift);
+                try w.print("device {s}* {s} [[buffer({d})]]", .{sb.name, sb.name, sb_b});
+                first_param = false;
+            }
             for (cbuffers.items) |cb| {
                 if (!first_param) try w.writeAll(", ");
                 const cb_b = common.applyBindingShift(cb.binding, binding_shift);
@@ -1209,17 +1256,22 @@ fn emitFunction(
 
         try w.writeAll(")\n{\n");
 
-        // M6 v1: kernel body still references `Name_1` / `Name` from the body
-        // emitter. With argbuf mode, we materialise references to those names
-        // as local aliases of the set-struct fields so emitBody output keeps
-        // working without per-instruction rewrite.
-        if (has_set0) {
+        // M6 v2: kernel body still references `Name_1` / `Name` / `Name` (SSBO)
+        // from the body emitter. With argbuf mode, we materialise local
+        // aliases of the set-struct fields so emitBody output keeps working
+        // without per-instruction rewrite.
+        if (has_argbuf) {
             for (cbuffers.items) |cb| {
-                try w.print("    constant {s}& {s}_1 = set0.{s};\n", .{cb.name, cb.name, cb.name});
+                try w.print("    constant {s}& {s}_1 = set{d}.{s};\n", .{ cb.name, cb.name, cb.descriptor_set, cb.name });
             }
             for (textures.items) |tex| {
-                try w.print("    texture2d<float> {s} = set0.{s};\n", .{tex.name, tex.name});
-                try w.print("    sampler {s}Smplr = set0.{s}Smplr;\n", .{tex.name, tex.name});
+                try w.print("    texture2d<float> {s} = set{d}.{s};\n", .{ tex.name, tex.descriptor_set, tex.name });
+                try w.print("    sampler {s}Smplr = set{d}.{s}Smplr;\n", .{ tex.name, tex.descriptor_set, tex.name });
+            }
+            // SSBO: body emitter expects `Name` as a `device Buf*` (deref'd
+            // via `Name->_mK`). Mirror the same pointer shape from the set.
+            for (storage_buffers.items) |sb| {
+                try w.print("    device {s}* {s} = set{d}.{s};\n", .{ sb.name, sb.name, sb.descriptor_set, sb.name });
             }
         }
 
