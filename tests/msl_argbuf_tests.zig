@@ -106,13 +106,15 @@ test "msl argbuf v2.b: SSBO emits inside set struct, no standalone param" {
     defer alloc.free(spirv);
     const msl = try glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
     defer alloc.free(msl);
-    // SSBO appears as device pointer inside the set struct.
+    // SSBO appears as `device <Name>* <Name>` inside the set struct at [[id(0)]].
+    // (The struct type name and variable name are both derived from the SSBO
+    // instance name in the current MSL emitter; this matches the v1 idiom.)
     try std.testing.expect(std.mem.indexOf(u8, msl, "struct spvDescriptorSetBuffer0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msl, "device Buf* sb [[id(0)]]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "device sb* sb [[id(0)]]") != null);
     // The set struct is bound as the entry-point param.
     try std.testing.expect(std.mem.indexOf(u8, msl, "constant spvDescriptorSetBuffer0& set0 [[buffer(0)]]") != null);
     // No standalone SSBO parameter on the kernel signature.
-    try std.testing.expect(std.mem.indexOf(u8, msl, "device Buf* sb [[buffer(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "device sb* sb [[buffer(") == null);
 }
 
 // ---- M6 v2.a + v2.b combined: SSBO in set 0, UBO in set 1 ----
@@ -135,11 +137,13 @@ test "msl argbuf v2.a+v2.b: SSBO in set 0, UBO in set 1" {
     try std.testing.expect(std.mem.indexOf(u8, msl, "struct spvDescriptorSetBuffer0") != null);
     try std.testing.expect(std.mem.indexOf(u8, msl, "struct spvDescriptorSetBuffer1") != null);
     // SSBO sits in set 0 at [[id(0)]].
-    try std.testing.expect(std.mem.indexOf(u8, msl, "device Buf* sb [[id(0)]]") != null);
-    // UBO sits in set 1 at [[id(0)]] (numbering restarts per set).
-    try std.testing.expect(std.mem.indexOf(u8, msl, "constant U& u [[id(0)]]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "device sb* sb [[id(0)]]") != null);
+    // UBO sits in set 1 at [[id(0)]] (numbering restarts per set). The
+    // emitter derives the struct type name from the variable name in the
+    // current MSL path (lowercase `u` from `U u;`), so we match that.
+    try std.testing.expect(std.mem.indexOf(u8, msl, "constant u& u [[id(0)]]") != null);
     // No standalone SSBO parameter.
-    try std.testing.expect(std.mem.indexOf(u8, msl, "device Buf* sb [[buffer(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "device sb* sb [[buffer(") == null);
     // Both set params on kernel signature.
     try std.testing.expect(std.mem.indexOf(u8, msl, "constant spvDescriptorSetBuffer0& set0") != null);
     try std.testing.expect(std.mem.indexOf(u8, msl, "constant spvDescriptorSetBuffer1& set1") != null);
