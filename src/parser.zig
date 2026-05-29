@@ -1835,7 +1835,21 @@ const Parser = struct {
                 if (num_text.len > 0 and (num_text[num_text.len - 1] == 'u' or num_text[num_text.len - 1] == 'U')) {
                     num_text = num_text[0 .. num_text.len - 1];
                 }
-                const val = std.fmt.parseInt(i64, num_text, 0) catch 0;
+                // num_text is the literal's NON-NEGATIVE magnitude (a leading `-`
+                // is a separate unary_op) with the u/U suffix stripped. Parse it as
+                // u64 to cover the full range a literal can spell — including the
+                // 2^63..2^64-1 band that overflows i64 (e.g. 18446744073709551615u).
+                // @bitCast to i64 for storage in int_val is a lossless reinterpret;
+                // the semantic layer's literalWord @bitCasts back to u64 and rejects
+                // magnitudes > 0xFFFFFFFF, since glslpp has no 64-bit integer type.
+                // Parsing as i64 with `catch 0` instead would silently turn such a
+                // literal into the constant 0 before literalWord ever saw the real
+                // value — a silent-wrong constant. A literal that overflows even u64
+                // (or is otherwise malformed) falls back to the sentinel i64 -1,
+                // whose u64 reinterpret (0xFFFFFFFFFFFFFFFF) literalWord likewise
+                // rejects, so it errors honestly via the same channel rather than
+                // becoming a silent 0.
+                const val: i64 = @bitCast(std.fmt.parseInt(u64, num_text, 0) catch @as(u64, std.math.maxInt(u64)));
                 return .{
                     .tag = if (tok.tag == .uint_literal) .uint_literal else .int_literal,
                     .loc = self.nodeLoc(tok),
