@@ -976,13 +976,8 @@ pub fn compileToSPIRVWithDiagnostics(
     var sink: std.ArrayListUnmanaged(semantic.RecordedDiag) = .empty;
     defer sink.deinit(alloc);
     const prev_sink = semantic.diag_sink;
-    const prev_sink_alloc = semantic.diag_sink_alloc;
-    semantic.diag_sink = &sink;
-    semantic.diag_sink_alloc = alloc;
-    defer {
-        semantic.diag_sink = prev_sink;
-        semantic.diag_sink_alloc = prev_sink_alloc;
-    }
+    semantic.diag_sink = .{ .list = &sink, .alloc = alloc };
+    defer semantic.diag_sink = prev_sink;
 
     const result = compileToSPIRV(alloc, source, options);
 

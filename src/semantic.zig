@@ -23,8 +23,22 @@ pub threadlocal var last_error_column: u32 = 0;
 /// `compileToSPIRV` path leaves it null, so that path is unchanged (zero new
 /// allocations, identical behavior).
 pub const RecordedDiag = struct { message: []const u8, line: u32, column: u32 };
-pub threadlocal var diag_sink: ?*std.ArrayListUnmanaged(RecordedDiag) = null;
-pub threadlocal var diag_sink_alloc: ?std.mem.Allocator = null;
+
+/// Bundles the sink list with the allocator that owns its records. Bundling
+/// makes the invariant "a sink always carries its allocator" unrepresentable
+/// otherwise, so the record site has no defensive `orelse self.alloc` fallback.
+pub const DiagSink = struct {
+    list: *std.ArrayListUnmanaged(RecordedDiag),
+    alloc: std.mem.Allocator,
+};
+pub threadlocal var diag_sink: ?DiagSink = null;
+
+/// Hard cap on the number of structured diagnostics recorded into the sink for
+/// a single compile, guarding against pathological blow-up on a degenerate
+/// shader (e.g. thousands of bad statements). When reached, exactly one
+/// synthetic marker diagnostic is appended so the cap is never silently hit —
+/// see the record site in `analyzeFunctionBody`.
+pub const MAX_RECORDED_DIAGS = 100;
 
 /// Format a human-readable error message from the last compile error.
 /// Caller must free the returned slice with `alloc.free`.
@@ -2036,10 +2050,10 @@ const Analyzer = struct {
                     // captures its own location independently. The sink stays
                     // null for the plain compileToSPIRV path → no behavior change.
                     if (diag_sink) |sink| {
-                        const da = diag_sink_alloc orelse self.alloc;
+                        const da = sink.alloc;
                         // Cap the sink to avoid pathological blow-up on a
                         // degenerate shader (still `continue` so analysis proceeds).
-                        if (sink.items.len < 100) {
+                        if (sink.list.items.len < MAX_RECORDED_DIAGS) {
                             const line = if (last_error_line != 0) last_error_line else child.loc.line;
                             const column = if (last_error_column != 0) last_error_column else child.loc.column;
                             const inner = if (last_error_inner.len > 0) last_error_inner else last_error_ctx;
@@ -2048,7 +2062,24 @@ const Analyzer = struct {
                             // or an AST node name that is freed after analysis.
                             const dmsg = std.fmt.allocPrint(da, "{s}: {s}", .{ @errorName(err), inner }) catch null;
                             if (dmsg) |m| {
-                                sink.append(da, .{ .message = m, .line = line, .column = column }) catch da.free(m);
+                                sink.list.append(da, .{ .message = m, .line = line, .column = column }) catch da.free(m);
+                            }
+                        } else if (sink.list.items.len == MAX_RECORDED_DIAGS) {
+                            // Cap reached: append ONE synthetic marker so coverage
+                            // truncation is never silent (Mitchell: no silent failure).
+                            // The `== MAX` guard fires exactly once — once the marker
+                            // lands, items.len becomes MAX+1 and this branch is skipped
+                            // for every later error; if the marker dup/append fails we
+                            // stay at MAX and may retry, which is fine (still bounded).
+                            // Kept `.@"error"` kind so a truncated-but-broken shader
+                            // still trips root.zig's fail-loud contract.
+                            const mmsg = std.fmt.allocPrint(
+                                da,
+                                "diagnostic limit reached ({d} max); further errors suppressed",
+                                .{MAX_RECORDED_DIAGS},
+                            ) catch null;
+                            if (mmsg) |m| {
+                                sink.list.append(da, .{ .message = m, .line = child.loc.line, .column = child.loc.column }) catch da.free(m);
                             }
                         }
                         // Reset per-error capture so the next statement's errdefer
