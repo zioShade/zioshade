@@ -7743,3 +7743,37 @@ test "semantic: continue emits branch to continue label" {
     // At least the continue + the loop back-edge branch to continue label
     try testing.expect(continue_branches >= 1);
 }
+
+// Regression test for Bug #3: tolerate_errors mode used to `break` out of the
+// per-statement loop on the FIRST error, silently dropping every subsequent
+// statement. The fix is to `continue` so that later statements still get
+// analyzed and any further errors are recorded. We observe the fix by
+// declaring two valid local variables AFTER an undeclared-identifier
+// reference; both must lower to `.store` instructions in the resulting IR.
+test "semantic: tolerate mode continues past first statement error" {
+    const source =
+        \\void main() {
+        \\    vec4 a = undef_var;
+        \\    float x = 1.5;
+        \\    float y = 2.5;
+        \\}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyzeWithOptions(testing.allocator, &root, .{ .tolerate_errors = true });
+    defer module.deinit();
+
+    try testing.expect(module.functions.len >= 1);
+    const body = module.functions[0].body;
+    var store_count: u32 = 0;
+    for (body) |inst| {
+        if (inst.tag == .store) store_count += 1;
+    }
+    // With the bug (`break`), the loop bails after the first failing statement
+    // and zero stores are emitted for the two valid var_decls that follow.
+    // With the fix (`continue`), each valid var_decl emits its initializer
+    // store, so we expect at least 2 stores.
+    try testing.expect(store_count >= 2);
+}
