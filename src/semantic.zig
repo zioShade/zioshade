@@ -2970,6 +2970,45 @@ const Analyzer = struct {
         }
     }
 
+    /// Storage class of the global at the root of an l-value access chain, or
+    /// null if the chain does not root in a declared global (e.g. it roots in a
+    /// function-local variable or parameter, which live in Function storage).
+    ///
+    /// Used by the interpolateAt* lowering to enforce that the interpolant is a
+    /// fragment Input: GLSL only allows interpolating an `in` variable, and
+    /// SPIR-V GLSL.std.450 requires the Interpolant pointer to be Input-storage.
+    /// We resolve the chain root (`a.b.c[i]` → `a`) to its identifier, look the
+    /// name up, and match the resolved symbol's `ir_id` against `self.globals`
+    /// (whose `result_id`s are exactly the IDs analyzeLValue threads through
+    /// access chains). A member of an Input interface block roots in the block's
+    /// Input global, so this correctly accepts valid block-member interpolants
+    /// without over-rejecting them.
+    fn lvalueRootStorageClass(self: *Analyzer, node: ast.Node) ?ir.SPIRVStorageClass {
+        // Walk down the access chain to the root identifier.
+        var cur = node;
+        while (true) {
+            switch (cur.tag) {
+                .member_access, .index_access => {
+                    if (cur.data.children.len < 1) return null;
+                    cur = cur.data.children[0];
+                },
+                .group => {
+                    if (cur.data.children.len != 1) return null;
+                    cur = cur.data.children[0];
+                },
+                .identifier => break,
+                else => return null,
+            }
+        }
+        const sym = self.lookup(cur.data.name) orelse return null;
+        // A param's symbol ir_id never matches a global; locals likewise. Only a
+        // var_sym/block_member rooted in a global will match a globals entry.
+        for (self.globals.items) |g| {
+            if (g.result_id == sym.ir_id) return g.storage_class;
+        }
+        return null;
+    }
+
     fn evalConstInt(self: *Analyzer, node: ast.Node) Error!i64 {
         switch (node.tag) {
             .int_literal => {
@@ -5059,6 +5098,24 @@ const Analyzer = struct {
                         // this is an invalid use — fail honestly rather than emit
                         // spirv-val-invalid SPIR-V with a loaded r-value operand.
                         const interpolant = try self.analyzeLValue(node.data.children[0]);
+                        // BLOCKER: GLSL only permits interpolating a fragment
+                        // INPUT, and SPIR-V GLSL.std.450 InterpolateAt* requires
+                        // the Interpolant pointer to be in Input storage class. A
+                        // function-local var is addressable (so it passes the
+                        // l-value check above) but lives in Function storage —
+                        // feeding it here yields spirv-val-invalid SPIR-V
+                        // ("expected Interpolant storage class to be Input"). We
+                        // resolve the access-chain root global and require it to
+                        // be Input; otherwise reject honestly. A member of an
+                        // Input interface block roots in the block's Input global,
+                        // so valid block-member interpolants are accepted.
+                        const root_sc = self.lvalueRootStorageClass(node.data.children[0]);
+                        if (root_sc != .input) {
+                            last_error_ctx = "interpolateAt-interpolant-not-input";
+                            last_error_line = node.loc.line;
+                            last_error_column = node.loc.column;
+                            return error.SemanticFailed;
+                        }
                         const ext_id: u32 = if (std.mem.eql(u8, node.data.name, "interpolateAtCentroid"))
                             76
                         else if (std.mem.eql(u8, node.data.name, "interpolateAtSample"))
