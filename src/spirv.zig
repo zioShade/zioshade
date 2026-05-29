@@ -258,6 +258,7 @@ pub const Capability = enum(u32) {
     sampled_image_array_dynamic_indexing = 29,
     image_cube_array = 34,
     sample_rate_shading = 35,
+    interpolation_function = 52,
     image_query = 50,
     sampled_buffer = 46,
     image_buffer = 47,

@@ -493,6 +493,14 @@ const Codegen = struct {
             try self.emitWord(@intFromEnum(spirv.Capability.sample_rate_shading));
         }
 
+        // interpolateAtCentroid/Sample/Offset (GLSL.std.450 76/77/78) require the
+        // InterpolationFunction capability. The semantic analyzer sets this flag
+        // when any of them is lowered.
+        if (self.module.uses_interpolation_function) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.interpolation_function));
+        }
+
         // Mesh/Task shader capabilities
         if (self.stage == .mesh or self.stage == .task) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));

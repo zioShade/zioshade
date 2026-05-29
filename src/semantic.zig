@@ -138,6 +138,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .uses_ray_query = analyzer.uses_ray_query,
         .uses_ray_query_position_fetch = analyzer.uses_ray_query_position_fetch,
         .uses_arm_tensors = analyzer.uses_arm_tensors,
+        .uses_interpolation_function = analyzer.uses_interpolation_function,
         .uses_ext_mesh_shader = analyzer.uses_ext_mesh_shader,
         .mesh_max_vertices = analyzer.mesh_max_vertices,
         .mesh_max_primitives = analyzer.mesh_max_primitives,
@@ -411,6 +412,9 @@ const Analyzer = struct {
     uses_ray_query: bool = false,
     uses_ray_query_position_fetch: bool = false,
     uses_arm_tensors: bool = false,
+    // interpolateAtCentroid/Sample/Offset require the InterpolationFunction
+    // SPIR-V capability whenever any of them is used.
+    uses_interpolation_function: bool = false,
 
     fn deinit(self: *Analyzer) void {
         // Free heap-allocated AST types (if not transferred to Module)
@@ -4014,12 +4018,18 @@ const Analyzer = struct {
                     std.mem.eql(u8, node.data.name, "imageAtomicMax") or
                     std.mem.eql(u8, node.data.name, "imageAtomicExchange") or
                     std.mem.eql(u8, node.data.name, "imageAtomicCompSwap");
+                // interpolateAt* need a POINTER to the Input interpolant (arg 0),
+                // not a loaded r-value — the dedicated lowering below obtains it
+                // via analyzeLValue, so skip the auto-load for arg 0 here.
+                const is_interpolate_at_fn = std.mem.eql(u8, node.data.name, "interpolateAtCentroid") or
+                    std.mem.eql(u8, node.data.name, "interpolateAtSample") or
+                    std.mem.eql(u8, node.data.name, "interpolateAtOffset");
                 for (node.data.children, 0..) |arg, i| {
                     var tid = try self.analyzeExpression(arg);
                     // Atomic functions need pointer arg, don't auto-load first arg
                     // Image atomics also need the image pointer (not loaded value)
                     const is_emit_mesh_tasks = std.mem.eql(u8, node.data.name, "EmitMeshTasksEXT");
-                    const skip_load = (is_atomic_fn and i == 0) or (is_image_atomic_fn and i == 0) or (is_emit_mesh_tasks and i == 3);
+                    const skip_load = (is_atomic_fn and i == 0) or (is_image_atomic_fn and i == 0) or (is_emit_mesh_tasks and i == 3) or (is_interpolate_at_fn and i == 0);
                     if (tid.is_ptr and !skip_load) {
                         const ld = try self.emitLoadCached(tid.id, tid.ty);
                         tid = .{ .ty = tid.ty, .id = ld };
@@ -5025,6 +5035,60 @@ const Analyzer = struct {
                             });
                             return .{ .ty = mat_ty, .id = result_id };
                         }
+                    }
+                    // interpolateAtCentroid(interpolant)         → GLSL.std.450 76
+                    // interpolateAtSample(interpolant, int)      → GLSL.std.450 77
+                    // interpolateAtOffset(interpolant, vec2)     → GLSL.std.450 78
+                    //
+                    // These are NOT plain ext_inst lowerings: the `interpolant`
+                    // operand MUST be a POINTER to an Input variable (or a member
+                    // access chain into one) — NOT a loaded r-value. We obtain the
+                    // pointer via analyzeLValue (same approach rayQuery* uses for
+                    // its query pointer); the arg-collection loop skips loading
+                    // arg 0 for these builtins (see is_interpolate_at_fn). The
+                    // remaining operand (int sample / vec2 offset) is a normal
+                    // r-value. Using any of these requires the InterpolationFunction
+                    // capability, emitted on demand in codegen.
+                    if (std.mem.eql(u8, node.data.name, "interpolateAtCentroid") or
+                        std.mem.eql(u8, node.data.name, "interpolateAtSample") or
+                        std.mem.eql(u8, node.data.name, "interpolateAtOffset"))
+                    {
+                        if (node.data.children.len < 1) return error.SemanticFailed;
+                        // The interpolant must be an l-value (an Input variable or a
+                        // member access chain into one). If it is not addressable,
+                        // this is an invalid use — fail honestly rather than emit
+                        // spirv-val-invalid SPIR-V with a loaded r-value operand.
+                        const interpolant = try self.analyzeLValue(node.data.children[0]);
+                        const ext_id: u32 = if (std.mem.eql(u8, node.data.name, "interpolateAtCentroid"))
+                            76
+                        else if (std.mem.eql(u8, node.data.name, "interpolateAtSample"))
+                            77
+                        else
+                            78;
+                        // Result type matches the interpolant value type.
+                        const interp_ty = interpolant.ty;
+                        // Sample/Offset forms require a 2nd argument (the int
+                        // sample index / vec2 offset). Reject the malformed
+                        // 1-arg form honestly rather than emit invalid SPIR-V.
+                        if (ext_id != 76 and arg_tids.items.len < 2) return error.SemanticFailed;
+                        // Operand count: ext-inst number + interpolant (+ sample/offset).
+                        const num_ops: usize = if (ext_id == 76) 2 else 3;
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, num_ops);
+                        operands[0] = .{ .literal_int = ext_id };
+                        operands[1] = .{ .id = interpolant.id }; // POINTER, not loaded
+                        if (ext_id != 76) {
+                            // arg_tids.items[1] is the already-loaded r-value sample/offset.
+                            operands[2] = .{ .id = arg_tids.items[1].id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .ext_inst,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = interp_ty,
+                        });
+                        self.uses_interpolation_function = true;
+                        return .{ .ty = interp_ty, .id = result_id };
                     }
                     // matrixCompMult(x, y) → component-wise matrix multiply.
                     // SPIR-V has no single op for this; decompose per column:
@@ -7316,6 +7380,8 @@ const Analyzer = struct {
             "isnan", "isinf",
             // Additional GLSL builtins
             "inverse", "outerProduct", "matrixCompMult",
+            // Fragment interpolation builtins (GLSL.std.450 76/77/78, pointer interpolant)
+            "interpolateAtCentroid", "interpolateAtSample", "interpolateAtOffset",
             "lessThan", "greaterThan", "lessThanEqual", "greaterThanEqual",
             "equal", "notEqual", "any", "all",
             "floatBitsToInt", "floatBitsToUint", "intBitsToFloat", "uintBitsToFloat",
@@ -7528,6 +7594,14 @@ const Analyzer = struct {
         // NOT GLSL.std.450 — handled as core SPIR-V ops or specially
         if (std.mem.eql(u8, name, "transpose") or std.mem.eql(u8, name, "outerProduct") or
             std.mem.eql(u8, name, "matrixCompMult"))
+            return null;
+        // interpolateAt* ARE GLSL.std.450 (76/77/78) but require a POINTER
+        // interpolant operand, so they are emitted by a dedicated lowering block
+        // (not the generic load-all-args ext_inst path). Return null here so the
+        // generic path can never mishandle them if the dedicated block is bypassed.
+        if (std.mem.eql(u8, name, "interpolateAtCentroid") or
+            std.mem.eql(u8, name, "interpolateAtSample") or
+            std.mem.eql(u8, name, "interpolateAtOffset"))
             return null;
         if (std.mem.eql(u8, name, "imageLoad") or std.mem.eql(u8, name, "imageStore"))
             return null;

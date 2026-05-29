@@ -99,6 +99,8 @@ pub const Module = struct {
     uses_ray_query_position_fetch: bool = false,
     uses_arm_tensors: bool = false,
     uses_ext_mesh_shader: bool = false,
+    // interpolateAtCentroid/Sample/Offset → OpCapability InterpolationFunction.
+    uses_interpolation_function: bool = false,
     qcom_block_match_textures: []const u32 = &.{},
     qcom_weight_textures: []const u32 = &.{},
     // Mesh shader layout parameters
