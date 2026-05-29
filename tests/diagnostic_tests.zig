@@ -324,6 +324,55 @@ test "diagnostics: multiple undeclared identifiers each get their own diagnostic
     try std.testing.expect(saw3 and saw4 and saw5);
 }
 
+test "diagnostics: exceeding the cap appends one truncation marker and fails loudly" {
+    const alloc = std.testing.allocator;
+    var diags = std.ArrayListUnmanaged(diagnostic.Diagnostic).empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+
+    // Build a shader whose body has far more than MAX_RECORDED_DIAGS bad
+    // statements so the sink cap is exceeded and the synthetic marker fires.
+    const n_bad = semantic.MAX_RECORDED_DIAGS + 30;
+    var src = std.ArrayListUnmanaged(u8).empty;
+    defer src.deinit(alloc);
+    try src.appendSlice(alloc, "#version 430\nvoid main() {\n");
+    for (0..n_bad) |i| {
+        // Each line references a distinct undeclared identifier.
+        try src.print(alloc, "    vec4 v{d} = undef{d};\n", .{ i, i });
+    }
+    try src.appendSlice(alloc, "}\n");
+    const src_z = try src.toOwnedSliceSentinel(alloc, 0);
+    defer alloc.free(src_z);
+
+    const result = glslpp.compileToSPIRVWithDiagnostics(
+        alloc,
+        src_z,
+        .{ .stage = .fragment },
+        &diags,
+    );
+
+    // Fail-loud contract still holds: error-kind diagnostics were recorded.
+    try std.testing.expectError(error.SemanticFailed, result);
+
+    // The sink is capped, so we never get more than MAX + 1 (the marker).
+    try std.testing.expect(diags.items.len <= semantic.MAX_RECORDED_DIAGS + 1);
+    // We did hit the cap (otherwise the marker test would be vacuous).
+    try std.testing.expectEqual(@as(usize, semantic.MAX_RECORDED_DIAGS + 1), diags.items.len);
+
+    // Exactly one truncation marker, and it is the last entry.
+    var marker_count: usize = 0;
+    for (diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "diagnostic limit reached") != null) marker_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), marker_count);
+    const last = diags.items[diags.items.len - 1];
+    try std.testing.expect(std.mem.indexOf(u8, last.message, "diagnostic limit reached") != null);
+    // Marker is error-kind so it participates in the fail-loud contract.
+    try std.testing.expectEqual(diagnostic.Diagnostic.Kind.@"error", last.kind);
+}
+
 test "diagnostics: valid shader produces no diagnostics and compiles" {
     const alloc = std.testing.allocator;
     var diags = std.ArrayListUnmanaged(diagnostic.Diagnostic).empty;
