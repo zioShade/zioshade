@@ -2008,10 +2008,15 @@ const Analyzer = struct {
         for (node.data.children) |child| {
             self.analyzeStatement(child) catch |err| {
                 if (self.tolerate_errors) {
-                    // In tolerate mode: record the error but continue with partial IR
+                    // In tolerate mode: record the error but continue with partial IR.
+                    // Using `continue` (not `break`) is critical: a single failing
+                    // statement must not silently drop every subsequent statement in
+                    // the function body. Downstream consumers (HLSL/MSL/WGSL backends,
+                    // DXC validation) otherwise see a structurally-valid SPIR-V module
+                    // whose body is missing whole writes. See Bug #3.
                     const msg = std.fmt.allocPrint(self.alloc, "{s} in {s}", .{@errorName(err), @tagName(child.tag)}) catch "error";
                     self.errors.append(self.alloc, msg) catch {};
-                    break;
+                    continue;
                 } else {
                     return err;
                 }
@@ -7747,15 +7752,21 @@ test "semantic: continue emits branch to continue label" {
 // Regression test for Bug #3: tolerate_errors mode used to `break` out of the
 // per-statement loop on the FIRST error, silently dropping every subsequent
 // statement. The fix is to `continue` so that later statements still get
-// analyzed and any further errors are recorded. We observe the fix by
-// declaring two valid local variables AFTER an undeclared-identifier
-// reference; both must lower to `.store` instructions in the resulting IR.
+// analyzed.
+//
+// Observation strategy: the source below has three trailing scalar var_decls
+// with distinct literal initializers (1.5, 2.5, 3.5). Each initializer lowers
+// to a `.constant_float` instruction iff the parent var_decl is analyzed. The
+// first statement references an undeclared identifier and therefore errors;
+// with the buggy `break` only `return_void` ends up in the body, with the
+// fixed `continue` we see all three constants.
 test "semantic: tolerate mode continues past first statement error" {
     const source =
         \\void main() {
         \\    vec4 a = undef_var;
         \\    float x = 1.5;
         \\    float y = 2.5;
+        \\    float z = 3.5;
         \\}
     ;
     const tokens = try lexer.tokenize(testing.allocator, source);
@@ -7767,13 +7778,12 @@ test "semantic: tolerate mode continues past first statement error" {
 
     try testing.expect(module.functions.len >= 1);
     const body = module.functions[0].body;
-    var store_count: u32 = 0;
+    var const_float_count: u32 = 0;
     for (body) |inst| {
-        if (inst.tag == .store) store_count += 1;
+        if (inst.tag == .constant_float) const_float_count += 1;
     }
-    // With the bug (`break`), the loop bails after the first failing statement
-    // and zero stores are emitted for the two valid var_decls that follow.
-    // With the fix (`continue`), each valid var_decl emits its initializer
-    // store, so we expect at least 2 stores.
-    try testing.expect(store_count >= 2);
+    // With the bug (`break`) only the prelude/terminator end up in the body
+    // and zero constants are emitted. With the fix (`continue`) we see at
+    // least the three trailing literal initializers.
+    try testing.expect(const_float_count >= 3);
 }
