@@ -288,3 +288,129 @@ test "interpolateAt*: compileToSPIRVWithDiagnostics succeeds with zero diagnosti
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
     try std.testing.expect(countOpcode(words, OP_STORE) >= 1);
 }
+
+// ---------------------------------------------------------------------------
+// BLOCKER: the interpolant MUST live in Input storage class.
+//
+// GLSL only permits interpolating a fragment *input*; SPIR-V GLSL.std.450
+// requires the Interpolant operand to be a pointer in Input storage class.
+// A function-local variable is addressable (so the old addressability-only
+// guard let it through), but it lives in Function storage — feeding it to
+// OpExtInst InterpolateAt* produces SPIR-V that spirv-val REJECTS:
+//   "expected Interpolant storage class to be Input"
+// That is silently-wrong invalid SPIR-V. The analyzer must reject the misuse
+// honestly with error.SemanticFailed instead of emitting it.
+//
+// compileToSPIRVWithDiagnostics enforces the Mitchell contract: any
+// error-kind diagnostic recorded during (tolerate-mode) analysis turns into
+// error.SemanticFailed rather than a misleading partial module.
+// ---------------------------------------------------------------------------
+
+test "interpolateAtCentroid: rejects a function-local (Function-storage) interpolant" {
+    // `local` is addressable but lives in Function storage, not Input.
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main() {
+        \\    vec4 local = vec4(1.0);
+        \\    o = interpolateAtCentroid(local);
+        \\}
+    ;
+    var diags: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
+    );
+}
+
+test "interpolateAtSample: rejects a function-local (Function-storage) interpolant" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main() {
+        \\    vec4 local = vec4(1.0);
+        \\    o = interpolateAtSample(local, 0);
+        \\}
+    ;
+    var diags: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
+    );
+}
+
+test "interpolateAtOffset: rejects a function-local (Function-storage) interpolant" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main() {
+        \\    vec4 local = vec4(1.0);
+        \\    o = interpolateAtOffset(local, vec2(0.25, 0.25));
+        \\}
+    ;
+    var diags: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
+    );
+}
+
+test "interpolateAtCentroid: rejects an r-value (non-addressable) interpolant" {
+    // `a + b` is not an l-value at all — the existing addressability guard
+    // must keep rejecting it. (Confirms the new Input check did not weaken it.)
+    const source =
+        \\#version 450
+        \\layout(location=0) in vec4 a;
+        \\layout(location=1) in vec4 b;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = interpolateAtCentroid(a + b); }
+    ;
+    var diags: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
+    );
+}
+
+test "interpolateAtOffset: accepts an Input interface-block member (no over-rejection)" {
+    // The interpolant is a member access into an Input block; the access chain
+    // root is an Input global, so the resulting pointer is Input-storage and
+    // the call is valid. Must compile cleanly with zero diagnostics.
+    const source =
+        \\#version 450
+        \\in VertexData { vec2 uv; } v_in;
+        \\layout(location=0) out vec4 o;
+        \\void main() {
+        \\    vec2 f = interpolateAtOffset(v_in.uv, vec2(0.1, 0.1));
+        \\    o = vec4(f, 0.0, 1.0);
+        \\}
+    ;
+    var diags: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    const words = try glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags);
+    defer alloc.free(words);
+
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    // The lowered OpExtInst (78) must survive and its interpolant operand must
+    // be an Input-storage pointer (the access chain into the Input block).
+    try std.testing.expect(extInstFirstOperand(words, EXT_INTERPOLATE_AT_OFFSET) != null);
+}
