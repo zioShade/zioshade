@@ -3477,7 +3477,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             72 => "refract",
                             73 => "findILsb",
                             74 => "findSMsb",
-                            else => "unknown",
+                            // Honest failure: emitting `unknown(...)` produces
+                            // invalid WGSL that silently passes as success. Fail
+                            // loudly so callers (and naga) see a real error.
+                            else => return error.UnsupportedExtInst,
                         };
                         // Build args
                         var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
@@ -4252,7 +4255,8 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                     46 => "mix", 48 => "step", 49 => "smoothstep", 50 => "fma", 51 => "frexp",
                     66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
                     70 => "faceForward", 71 => "reflect", 72 => "refract",
-                    else => "unknown",
+                    // Honest failure (loop-replay path): see emitBody above.
+                    else => return error.UnsupportedExtInst,
                 };
                 var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
                 defer args.deinit(arena);
