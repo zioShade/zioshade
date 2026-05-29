@@ -2982,6 +2982,33 @@ const Analyzer = struct {
         }
     }
 
+    /// Lower a GLSL int/uint literal's value to its 32-bit SPIR-V constant word.
+    ///
+    /// `node.data.int_val` is an i64 holding the literal's non-negative magnitude
+    /// (a leading `-` is parsed as a separate unary_op, so this is always >= 0 for
+    /// well-formed literals). The SPIR-V operand is the raw 32-bit word, which for
+    /// any valid i32/u32 literal is the low 32 bits of its two's-complement form.
+    ///
+    /// `@bitCast` i64->u64 is a lossless reinterpret; `@truncate` then takes the low
+    /// 32 bits and never panics. We refuse values whose magnitude does not fit in a
+    /// 32-bit word (> 0xFFFFFFFF): glslpp has no 64-bit integer type, so a literal
+    /// like `999999999999999999u` (from a u64vec4 constructor) is genuinely out of
+    /// range. Truncating it would emit a silently-wrong constant; instead we record
+    /// a semantic error. The `<= 0xFFFFFFFF` bound is the largest losslessly-
+    /// representable 32-bit word and covers the full uint range and the
+    /// `-2147483648` int edge case without over-rejecting.
+    fn literalWord(node: ast.Node) Error!u32 {
+        const raw: u64 = @bitCast(node.data.int_val);
+        if (raw > 0xFFFFFFFF) {
+            last_error_ctx = "integer-literal-out-of-32-bit-range";
+            last_error_inner = @tagName(node.tag);
+            last_error_line = node.loc.line;
+            last_error_column = node.loc.column;
+            return error.SemanticFailed;
+        }
+        return @truncate(raw);
+    }
+
     fn analyzeExpression(self: *Analyzer, node: ast.Node) Error!TypedId {
         errdefer {
             if (last_error_inner.len == 0) {
@@ -3002,7 +3029,7 @@ const Analyzer = struct {
         }
         switch (node.tag) {
             .int_literal => {
-                const val: u32 = @intCast(node.data.int_val);
+                const val: u32 = try literalWord(node);
                 const key = (@as(u64, @intFromEnum(ast.Type.int)) << 32) | @as(u64, val);
                 if (self.const_cache.get(key)) |cached| return .{ .ty = .int, .id = cached };
                 const id = self.allocId();
@@ -3019,7 +3046,7 @@ const Analyzer = struct {
                 return .{ .ty = .int, .id = id };
             },
             .uint_literal => {
-                const val: u32 = @intCast(node.data.int_val);
+                const val: u32 = try literalWord(node);
                 const key = (@as(u64, @intFromEnum(ast.Type.uint)) << 32) | @as(u64, val);
                 if (self.const_cache.get(key)) |cached| return .{ .ty = .uint, .id = cached };
                 const id = self.allocId();
