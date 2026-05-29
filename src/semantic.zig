@@ -2427,7 +2427,23 @@ const Analyzer = struct {
                 // Case targets: [literal, target] pairs
                 for (case_infos.items) |ci| {
                     if (ci.value) |v| {
-                        try switch_ops.append(self.alloc, .{ .literal_int = @intCast(v) });
+                        // `v` is the i64 from evalConstInt (the literal's magnitude;
+                        // u64-max parses to the sentinel -1). The OpSwitch literal is
+                        // a 32-bit word, so mirror literalWord: reinterpret as u64 and
+                        // reject magnitudes that don't fit a 32-bit word rather than
+                        // @intCast-panicking. glslpp has no 64-bit integer type, so a
+                        // case label > 0xFFFFFFFF is genuinely out of range; truncating
+                        // it could silently alias two distinct labels (Mitchell silent-
+                        // wrong), so we error honestly instead.
+                        const raw: u64 = @bitCast(v);
+                        if (raw > 0xFFFFFFFF) {
+                            last_error_ctx = "switch-case-out-of-32-bit-range";
+                            last_error_inner = "case";
+                            last_error_line = node.loc.line;
+                            last_error_column = node.loc.column;
+                            return error.SemanticFailed;
+                        }
+                        try switch_ops.append(self.alloc, .{ .literal_int = @truncate(raw) });
                         try switch_ops.append(self.alloc, .{ .id = ci.label });
                     }
                 }
