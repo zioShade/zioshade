@@ -199,3 +199,31 @@ test "wgsl type conversions" {
         ,
     });
 }
+
+// An unmapped GLSL.std.450 extended instruction (interpolateAtCentroid →
+// glslpp opcode 76) must make the WGSL backend FAIL LOUDLY, not silently emit
+// invalid `unknown(...)` text. interpolateAt* are frontend-supported but
+// unmapped in the WGSL ext-inst dispatch, so they exercise the fallback path.
+//
+// Compiled through glslpp's own frontend (not glslang) so the internal
+// GLSL.std.450 numbering (76/77/78) is what reaches spirvToWGSL.
+test "wgsl unmapped ext-inst errors honestly instead of emitting unknown()" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\#extension GL_ARB_gpu_shader5 : enable
+        \\layout(location = 0) in vec2 vUv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 c = interpolateAtCentroid(vUv);
+        \\    fragColor = vec4(c, 0.0, 1.0);
+        \\}
+    ;
+
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+
+    try std.testing.expectError(
+        error.UnsupportedExtInst,
+        glslpp.spirvToWGSL(alloc, spirv, .{}),
+    );
+}
