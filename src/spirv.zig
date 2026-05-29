@@ -325,6 +325,7 @@ pub const BuiltIn = enum(u32) {
     layer = 9,
     view_index = 10,
     frag_coord = 15,
+    point_coord = 16,
     front_facing = 17,
     sample_id = 18,
     sample_position = 19,
