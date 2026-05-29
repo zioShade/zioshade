@@ -1749,19 +1749,27 @@ test "self-recursion prevention" {
 test "#include with string literal" {
     const alloc = std.testing.allocator;
 
+    // Use a per-process-unique filename so parallel test binaries (several import
+    // preprocessor.zig and run this same test concurrently) cannot race on a shared
+    // path: one process's `defer deleteFile` removing the file mid-read in another.
+    const token = std.crypto.random.int(u64);
+    const inc_name = try std.fmt.allocPrint(alloc, "test_include_helper_{x}.glsl", .{token});
+    defer alloc.free(inc_name);
+
     // Create a temp include file
     const cwd = std.fs.cwd();
-    cwd.writeFile(.{ .sub_path = "test_include_helper.glsl", .data = "float helper_func() { return 1.0; }" }) catch |err| {
+    cwd.writeFile(.{ .sub_path = inc_name, .data = "float helper_func() { return 1.0; }" }) catch |err| {
         std.debug.print("SKIP: could not create include file: {}\n", .{err});
         return;
     };
-    defer cwd.deleteFile("test_include_helper.glsl") catch {};
+    defer cwd.deleteFile(inc_name) catch {};
 
     var pp = Preprocessor.init(alloc);
     defer pp.deinit();
     pp.source_file_path = "test_main.glsl";
 
-    const source = "#include \"test_include_helper.glsl\"\nvoid main() { float x = helper_func(); }";
+    const source = try std.fmt.allocPrintSentinel(alloc, "#include \"{s}\"\nvoid main() {{ float x = helper_func(); }}", .{inc_name}, 0);
+    defer alloc.free(source);
     const tokens = try lexer.tokenize(alloc, source);
     defer alloc.free(tokens);
 
@@ -1781,16 +1789,25 @@ test "#include with string literal" {
 test "#include cycle detection" {
     const alloc = std.testing.allocator;
 
-    // Create a file that includes itself
+    // Per-process-unique filename: parallel test binaries run this same test
+    // concurrently and would otherwise race on a shared on-disk path.
+    const token = std.crypto.random.int(u64);
+    const inc_name = try std.fmt.allocPrint(alloc, "test_cycle_{x}.glsl", .{token});
+    defer alloc.free(inc_name);
+
+    // Create a file that includes itself (self-reference uses the same unique name)
+    const file_data = try std.fmt.allocPrint(alloc, "#include \"{s}\"\nvoid main() {{}}", .{inc_name});
+    defer alloc.free(file_data);
     const cwd = std.fs.cwd();
-    cwd.writeFile(.{ .sub_path = "test_cycle.glsl", .data = "#include \"test_cycle.glsl\"\nvoid main() {}" }) catch return;
-    defer cwd.deleteFile("test_cycle.glsl") catch {};
+    cwd.writeFile(.{ .sub_path = inc_name, .data = file_data }) catch return;
+    defer cwd.deleteFile(inc_name) catch {};
 
     var pp = Preprocessor.init(alloc);
     defer pp.deinit();
     pp.source_file_path = "test_main.glsl";
 
-    const source = "#include \"test_cycle.glsl\"\nvoid main() {}";
+    const source = try std.fmt.allocPrintSentinel(alloc, "#include \"{s}\"\nvoid main() {{}}", .{inc_name}, 0);
+    defer alloc.free(source);
     const tokens = try lexer.tokenize(alloc, source);
     defer alloc.free(tokens);
 
@@ -1802,20 +1819,24 @@ test "#include cycle detection" {
 test "#pragma once prevents re-inclusion" {
     const alloc = std.testing.allocator;
 
+    // Per-process-unique filename: parallel test binaries run this same test
+    // concurrently and would otherwise race on a shared on-disk path (this is the
+    // "pragma_once flake" that intermittently produced 1827/1829).
+    const token = std.crypto.random.int(u64);
+    const inc_name = try std.fmt.allocPrint(alloc, "test_pragma_once_{x}.h", .{token});
+    defer alloc.free(inc_name);
+
     // Create a header file with #pragma once
     const cwd = std.fs.cwd();
-    cwd.writeFile(.{ .sub_path = "test_pragma_once.h", .data = "#pragma once\nfloat ONCE_VAR = 1.0;\n" }) catch return;
-    defer cwd.deleteFile("test_pragma_once.h") catch {};
+    cwd.writeFile(.{ .sub_path = inc_name, .data = "#pragma once\nfloat ONCE_VAR = 1.0;\n" }) catch return;
+    defer cwd.deleteFile(inc_name) catch {};
 
     var pp = Preprocessor.init(alloc);
     defer pp.deinit();
     pp.source_file_path = "test_main.glsl";
 
-    const source =
-        \\#include "test_pragma_once.h"
-        \\#include "test_pragma_once.h"
-        \\void main() {}
-    ;
+    const source = try std.fmt.allocPrintSentinel(alloc, "#include \"{s}\"\n#include \"{s}\"\nvoid main() {{}}", .{ inc_name, inc_name }, 0);
+    defer alloc.free(source);
     const tokens = try lexer.tokenize(alloc, source);
     defer alloc.free(tokens);
 
