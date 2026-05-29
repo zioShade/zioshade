@@ -6721,6 +6721,11 @@ test "T250.1: gl_PointCoord in fragment" {
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
+    // Correctness (not false-green): gl_PointCoord must reach the body. An
+    // unknown builtin would drop the statement (empty body). Assert the
+    // gl_PointCoord input parameter and the distance() call both survive.
+    try assertContains(hlsl, "gl_PointCoord");
+    try assertContains(hlsl, "distance(gl_PointCoord");
 }
 
 test "T251.1: dFdxCoarse and dFdxFine" {
@@ -7329,6 +7334,13 @@ test "T287.1: matrixCompMult" {
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
+    // Correctness (not false-green): matrixCompMult must actually be lowered.
+    // A swallowed statement leaves an empty body with no matrix type and no
+    // component-wise multiply. Assert the mat3 type and a per-column FMul
+    // ("vN * vM") both appear, and the assignment to fragColor survives.
+    try assertContains(hlsl, "float3x3");
+    try assertContains(hlsl, " * ");
+    try assertContains(hlsl, "fragColor");
 }
 
 test "T288.1: outerProduct vec3 x vec3" {
@@ -7890,6 +7902,11 @@ test "T320.1: matrixCompMult" {
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
+    // Correctness (not false-green): matrixCompMult(m, m) lowered to a mat4
+    // built from per-column FMuls. Empty body would have none of these.
+    try assertContains(hlsl, "float4x4");
+    try assertContains(hlsl, " * ");
+    try assertContains(hlsl, "fragColor");
 }
 
 
@@ -11469,6 +11486,10 @@ test "T507.1: gl_PointCoord in fragment" {
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
+    // Correctness (not false-green): gl_PointCoord input and the distance()
+    // call must survive — a dropped statement would yield an empty body.
+    try assertContains(hlsl, "gl_PointCoord");
+    try assertContains(hlsl, "distance(gl_PointCoord");
 }
 
 test "T508.1: matrix construction from vectors" {
@@ -12055,6 +12076,11 @@ test "T538.1: matrixCompMult" {
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
+    // Correctness (not false-green): matrixCompMult produces a mat4 (float4x4)
+    // from per-column FMuls; a dropped statement would leave none of these.
+    try assertContains(hlsl, "float4x4");
+    try assertContains(hlsl, " * ");
+    try assertContains(hlsl, "fragColor");
 }
 
 test "T539.1: inverse mat4" {

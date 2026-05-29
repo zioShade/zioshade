@@ -10,6 +10,7 @@
 //! body fails loudly.
 const std = @import("std");
 const glslpp = @import("glslpp");
+const diagnostic = glslpp.diagnostic;
 
 const alloc = std.testing.allocator;
 
@@ -104,4 +105,33 @@ test "matrixCompMult: lowers to per-column FMul + matrix CompositeConstruct" {
     try std.testing.expect(countOpcode(spv, OP_FMUL) >= 3);
     try std.testing.expect(countOpcode(spv, OP_COMPOSITE_EXTRACT) >= 3);
     try std.testing.expect(countOpcode(spv, OP_COMPOSITE_CONSTRUCT) >= 1);
+}
+
+// ---------------------------------------------------------------------------
+// Regression oracle (Bug #3.B false-positive): a shader using ONLY these two
+// now-modeled builtins must compile with ZERO diagnostics. Before the fix the
+// analyzer threw on each, tolerate mode recorded the errors, and
+// compileToSPIRVWithDiagnostics fail-loud'd. Now it must succeed cleanly.
+// ---------------------------------------------------------------------------
+
+test "matrixCompMult + gl_PointCoord: compileToSPIRVWithDiagnostics succeeds with zero diagnostics" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main() {
+        \\    mat3 c = matrixCompMult(mat3(1.0), mat3(2.0));
+        \\    o = vec4(c[0] * gl_PointCoord.x, 1.0);
+        \\}
+    ;
+    var diags: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    const words = try glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags);
+    defer alloc.free(words);
+
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    // And the body actually survives (non-empty).
+    try std.testing.expect(countOpcode(words, OP_STORE) >= 1);
 }
