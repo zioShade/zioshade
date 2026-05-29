@@ -7657,6 +7657,59 @@ test "semantic: vec4 constructor lowers to composite_construct" {
     try testing.expect(has_composite);
 }
 
+test "semantic: uint literal at u32 boundary lowers to correct constant word" {
+    // Regression guard for the @intCast literal-lowering panic (semantic.zig
+    // uint_literal/int_literal sites). 4294967295u == 0xFFFFFFFF is the largest
+    // valid GLSL uint. Its SPIR-V constant word must be exactly 0xFFFFFFFF.
+    // This value is > i32 max but fits u32, so it exercises the high-bit path.
+    const source = "void main() { uint x = 4294967295u; }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    var found_word: ?u32 = null;
+    for (body) |inst| {
+        if (inst.tag == .constant_int and inst.ty == .uint and inst.operands.len == 1) {
+            found_word = inst.operands[0].literal_int;
+        }
+    }
+    try testing.expect(found_word != null);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), found_word.?);
+}
+
+test "semantic: out-of-range uint literal errors instead of panicking" {
+    // RED for the @intCast(i64 -> u32) panic at the uint_literal lowering site.
+    // 999999999999999999 (from int64.desktop.comp's u64vec4 literal) fits in i64
+    // but is ~8 orders of magnitude beyond u32 max, so @intCast panicked with
+    // "integer does not fit in destination type". glslpp has no 64-bit integer
+    // type, so silently truncating to the low 32 bits would emit a garbage
+    // constant word — the Mitchell silent-wrong failure mode. Correct behavior:
+    // record a semantic error (no panic, no silent-wrong output).
+    const source = "void main() { uint x = 999999999999999999u; }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: out-of-range int literal errors instead of panicking" {
+    // Companion RED for the int_literal lowering site. 9999999999 fits i64 but
+    // exceeds the 32-bit word range, so it must error rather than panic/truncate.
+    const source = "void main() { int x = 9999999999; }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
 test "semantic: complex shader full pipeline" {
     const source =
         \\void main() {
