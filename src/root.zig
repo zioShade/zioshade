@@ -1024,6 +1024,26 @@ pub fn compileToSPIRVWithDiagnostics(
         }
         return result;
     };
+
+    // Mitchell-philosophy contract (this WithDiagnostics API only): an
+    // error-kind diagnostic must never ride on a "success" return. Tolerate
+    // mode can swallow every broken statement and hand back a valid-but-empty
+    // module; a caller doing `if (result) |words|` would then silently ignore
+    // the recorded errors. So if analysis recorded ANY `.error`-kind diagnostic,
+    // fail loudly and do NOT return the misleading partial/empty module.
+    //
+    // We check error-kind specifically (not items.len) to leave room for future
+    // warning-/note-kind diagnostics that must NOT fail the compile. The plain
+    // `compileToSPIRV` API is intentionally unchanged — its silent-empty-module
+    // behavior on broken shaders is a separate, larger decision.
+    for (diagnostics.items) |d| {
+        if (d.kind == .@"error") {
+            // We return an error, so the caller never receives `words` and its
+            // `defer alloc.free(words)` never runs. Free it here exactly once.
+            alloc.free(words);
+            return error.SemanticFailed;
+        }
+    }
     return words;
 }
 
