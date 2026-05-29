@@ -283,6 +283,68 @@ test "expectDiagnostic helper matches glslang-style format" {
     });
 }
 
+test "diagnostics: multiple undeclared identifiers each get their own diagnostic" {
+    const alloc = std.testing.allocator;
+    var diags = std.ArrayListUnmanaged(diagnostic.Diagnostic).empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    const result = glslpp.compileToSPIRVWithDiagnostics(
+        alloc,
+        \\#version 430
+        \\void main() {
+        \\    vec4 a = undef1;
+        \\    vec4 b = undef2;
+        \\    vec4 c = undef3;
+        \\}
+    ,
+        .{ .stage = .fragment },
+        &diags,
+    );
+    // Whether codegen ultimately succeeds (tolerate mode can yield a valid,
+    // empty-body module) or fails is incidental — the contract under test is
+    // that EACH tolerated statement error is surfaced as its own diagnostic.
+    if (result) |words| alloc.free(words) else |_| {}
+    // At least 2 distinct errors (was 1 before 3.B)
+    try std.testing.expect(diags.items.len >= 2);
+    // Distinct lines: 3, 4, 5
+    var saw3 = false;
+    var saw4 = false;
+    var saw5 = false;
+    for (diags.items) |d| {
+        if (d.line == 3) saw3 = true;
+        if (d.line == 4) saw4 = true;
+        if (d.line == 5) saw5 = true;
+        try std.testing.expectEqual(diagnostic.Diagnostic.Kind.@"error", d.kind);
+        try std.testing.expect(d.message.len > 0);
+    }
+    try std.testing.expect(saw3 and saw4 and saw5);
+}
+
+test "diagnostics: valid shader produces no diagnostics and compiles" {
+    const alloc = std.testing.allocator;
+    var diags = std.ArrayListUnmanaged(diagnostic.Diagnostic).empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    const result = glslpp.compileToSPIRVWithDiagnostics(
+        alloc,
+        \\#version 430
+        \\void main() {
+        \\    vec4 a = vec4(1.0);
+        \\}
+    ,
+        .{ .stage = .fragment },
+        &diags,
+    );
+    const words = try result;
+    defer alloc.free(words);
+    try std.testing.expect(words.len > 0);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
 test "multiple errors accumulate line/column correctly" {
     const alloc = std.testing.allocator;
 
