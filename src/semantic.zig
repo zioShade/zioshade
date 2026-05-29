@@ -7939,6 +7939,104 @@ test "semantic: literal exceeding u64 range errors honestly" {
     try testing.expectError(error.SemanticFailed, result);
 }
 
+test "semantic: out-of-32-bit switch-case literal errors instead of panicking" {
+    // RED for the THIRD @intCast(i64 -> u32) crash site (switch-case lowering at
+    // semantic.zig:2430), fed by evalConstInt (:2397) rather than literalWord.
+    // 18446744073709551615u (u64 max) is parsed to the sentinel i64 -1; the case
+    // path then did `.literal_int = @intCast(v)` with v == -1, which PANICS with
+    // "integer does not fit in destination type" (a u32 cannot hold -1). glslpp
+    // has no 64-bit integer type, so this case label is genuinely out of range.
+    // Correct behavior: an honest semantic error (no panic, no silent-wrong
+    // aliasing of two distinct labels via truncation).
+    const source =
+        \\void main() {
+        \\    uint s = 0u;
+        \\    switch (s) { case 18446744073709551615u: break; }
+        \\}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: positive over-u32 switch-case literal errors instead of panicking" {
+    // Companion RED for the switch-case site with a value that fits i64 and is
+    // POSITIVE but exceeds u32 max (9999999999 ~= 2.3 * u32 max). @intCast(i64 ->
+    // u32) panics on this too; truncating would alias it with a smaller label.
+    const source =
+        \\void main() {
+        \\    uint s = 0u;
+        \\    switch (s) { case 9999999999u: break; }
+        \\}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: u32-max switch-case literal still lowers to 0xFFFFFFFF" {
+    // GREEN-side regression guard: case 4294967295u (u32 max) is in range and must
+    // STILL compile, emitting an OpSwitch whose case literal word is exactly
+    // 0xFFFFFFFF. The bounds check must not over-reject the largest valid uint.
+    const source =
+        \\void main() {
+        \\    uint s = 0u;
+        \\    switch (s) { case 4294967295u: break; }
+        \\}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    var case_word: ?u32 = null;
+    for (body) |inst| {
+        if (inst.tag == .switch_inst) {
+            // OpSwitch operands: [default_target, (literal, target)...]. The first
+            // case literal is at index 1.
+            if (inst.operands.len >= 2) case_word = inst.operands[1].literal_int;
+        }
+    }
+    try testing.expect(case_word != null);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), case_word.?);
+}
+
+test "semantic: small in-range switch-case literal lowers correctly" {
+    // GREEN-side regression guard: an ordinary case 42 must keep working and emit
+    // its literal word unchanged.
+    const source =
+        \\void main() {
+        \\    int s = 0;
+        \\    switch (s) { case 42: break; }
+        \\}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    var case_word: ?u32 = null;
+    for (body) |inst| {
+        if (inst.tag == .switch_inst) {
+            if (inst.operands.len >= 2) case_word = inst.operands[1].literal_int;
+        }
+    }
+    try testing.expect(case_word != null);
+    try testing.expectEqual(@as(u32, 42), case_word.?);
+}
+
 test "semantic: complex shader full pipeline" {
     const source =
         \\void main() {
