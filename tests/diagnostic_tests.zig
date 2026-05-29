@@ -302,10 +302,12 @@ test "diagnostics: multiple undeclared identifiers each get their own diagnostic
         .{ .stage = .fragment },
         &diags,
     );
-    // Whether codegen ultimately succeeds (tolerate mode can yield a valid,
-    // empty-body module) or fails is incidental — the contract under test is
-    // that EACH tolerated statement error is surfaced as its own diagnostic.
-    if (result) |words| alloc.free(words) else |_| {}
+    // Mitchell-philosophy contract: a "success" return must never carry
+    // error-kind diagnostics. Because each tolerated statement recorded an
+    // `.error` diagnostic, compileToSPIRVWithDiagnostics MUST fail loudly with
+    // error.SemanticFailed (and free the misleading partial module internally —
+    // we never receive `words`, so there is nothing to free here).
+    try std.testing.expectError(error.SemanticFailed, result);
     // At least 2 distinct errors (was 1 before 3.B)
     try std.testing.expect(diags.items.len >= 2);
     // Distinct lines: 3, 4, 5
