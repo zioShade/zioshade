@@ -555,6 +555,22 @@ pub fn build(b: *std.Build) void {
     scalar_layout_test_step.dependOn(&run_scalar_layout_tests.step);
     test_step.dependOn(&run_scalar_layout_tests.step);
 
+    // Builtin-registration correctness tests (matrixCompMult, gl_PointCoord).
+    // Assert real SPIR-V structure so tolerate-mode empty bodies fail loudly.
+    const builtin_reg_test_step = b.step("test-builtin-reg", "Run semantic builtin-registration correctness tests");
+    const builtin_reg_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/builtin_registration_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    builtin_reg_test_mod.addImport("glslpp", glslpp_mod);
+    const run_builtin_reg_tests = b.addRunArtifact(b.addTest(.{
+        .name = "builtin-reg-tests",
+        .root_module = builtin_reg_test_mod,
+    }));
+    builtin_reg_test_step.dependOn(&run_builtin_reg_tests.step);
+    test_step.dependOn(&run_builtin_reg_tests.step);
+
     // Ray tracing pipeline tests
     const ray_tracing_test_step = b.step("test-ray-tracing", "Run ray tracing pipeline tests");
     const ray_tracing_test_mod = b.createModule(.{
