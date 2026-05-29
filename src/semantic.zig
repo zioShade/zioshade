@@ -7868,6 +7868,77 @@ test "semantic: out-of-range int literal errors instead of panicking" {
     try testing.expectError(error.SemanticFailed, result);
 }
 
+test "semantic: u64-range uint literal errors instead of silently becoming 0" {
+    // RED for the parser's `parseInt(i64, ...) catch 0` at parser.zig:1838.
+    // 18446744073709551615u (u64 max) overflows i64, so the parser's catch
+    // fell back to int_val = 0 — a silently-wrong constant that literalWord
+    // happily accepted as a valid zero, BEFORE its >0xFFFFFFFF honest-error
+    // check ever saw the real magnitude. glslpp has no 64-bit integer type,
+    // so this literal is genuinely out of range and MUST error, not compile
+    // to a bogus 0.
+    const source = "void main() { uint x = 18446744073709551615u; }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: 2^63 int literal errors instead of silently becoming 0" {
+    // Companion RED for the int_literal path. 9223372036854775808 == 2^63
+    // overflows i64's positive range (i64 max is 2^63-1) but fits u64, so the
+    // parser's `parseInt(i64, ...) catch 0` silently produced 0. After parsing
+    // the magnitude as u64 and @bitCast'ing to i64, literalWord sees the real
+    // magnitude (> 0xFFFFFFFF) and rejects honestly.
+    const source = "void main() { int x = 9223372036854775808; }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: u32-max uint literal still lowers to 0xFFFFFFFF after u64 parse" {
+    // Regression guard for the parser u64-parse fix: 4294967295u (u32 max) must
+    // STILL compile to the correct 0xFFFFFFFF constant word. u64 parse -> 4294967295
+    // -> bitcast i64 (positive, == 4294967295) -> literalWord bitcasts back,
+    // <= 0xFFFFFFFF, ACCEPTED, truncates to 0xFFFFFFFF. No regression.
+    const source = "void main() { uint x = 4294967295u; }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    var found_word: ?u32 = null;
+    for (body) |inst| {
+        if (inst.tag == .constant_int and inst.ty == .uint and inst.operands.len == 1) {
+            found_word = inst.operands[0].literal_int;
+        }
+    }
+    try testing.expect(found_word != null);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), found_word.?);
+}
+
+test "semantic: literal exceeding u64 range errors honestly" {
+    // RED for the residual `catch` after switching the parser to parseInt(u64).
+    // A 30-digit magnitude exceeds u64 max, so parseInt(u64) still errors. The
+    // fallback must NOT yield a silently-valid 0; it must route to an honest
+    // error. (See parser.zig parsePrimary: catch falls back to a sentinel that
+    // literalWord rejects.)
+    const source = "void main() { uint x = 999999999999999999999999999999u; }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
 test "semantic: complex shader full pipeline" {
     const source =
         \\void main() {
