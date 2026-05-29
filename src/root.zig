@@ -969,24 +969,59 @@ pub fn compileToSPIRVWithDiagnostics(
     options: CompileOptions,
     diagnostics: *std.ArrayListUnmanaged(diagnostic.Diagnostic),
 ) Error![]const u32 {
+    // Bug #3.B: register a threadlocal sink so tolerate-mode semantic statement
+    // errors are recorded as structured diagnostics DURING analysis (while the
+    // AST/source are alive). Save/restore the previous sink for re-entrancy
+    // safety (nested compiles on the same thread).
+    var sink: std.ArrayListUnmanaged(semantic.RecordedDiag) = .empty;
+    defer sink.deinit(alloc);
+    const prev_sink = semantic.diag_sink;
+    const prev_sink_alloc = semantic.diag_sink_alloc;
+    semantic.diag_sink = &sink;
+    semantic.diag_sink_alloc = alloc;
+    defer {
+        semantic.diag_sink = prev_sink;
+        semantic.diag_sink_alloc = prev_sink_alloc;
+    }
+
     const result = compileToSPIRV(alloc, source, options);
-    const words = result catch {
-        // Compilation failed — record a diagnostic
-        const detail = last_compile_detail orelse return result;
-        const line = semantic.last_error_line;
-        const column = semantic.last_error_column;
 
-        const msg = std.fmt.allocPrint(alloc, "{s}: {s}", .{
-            @tagName(detail),
-            if (semantic.last_error_inner.len > 0) semantic.last_error_inner else semantic.last_error_ctx,
-        }) catch "unknown error";
-
-        try diagnostics.append(alloc, .{
+    // Drain structured errors recorded during analysis into the caller's list.
+    // Each `rd.message` was dup'd onto `alloc` at record time → ownership
+    // transfers to the Diagnostic (the caller frees `d.message`). `sink.deinit`
+    // frees only the backing array, NOT the message strings, so we must NOT free
+    // `rd.message` on the normal drain path. If `append` itself OOMs, free the
+    // orphaned message to avoid a leak.
+    for (sink.items) |rd| {
+        diagnostics.append(alloc, .{
             .kind = .@"error",
-            .line = line,
-            .column = column,
-            .message = msg,
-        });
+            .line = rd.line,
+            .column = rd.column,
+            .message = rd.message,
+        }) catch {
+            alloc.free(rd.message);
+        };
+    }
+
+    const words = result catch {
+        // Fall back to the single last-error bridge ONLY if no structured
+        // diagnostics were produced (e.g. a lexer/parser/codegen-stage error, or
+        // a non-tolerated path). This avoids double-reporting the same failure
+        // that the sink already surfaced per-statement.
+        if (diagnostics.items.len == 0) {
+            const detail = last_compile_detail orelse return result;
+            const msg = std.fmt.allocPrint(alloc, "{s}: {s}", .{
+                @tagName(detail),
+                if (semantic.last_error_inner.len > 0) semantic.last_error_inner else semantic.last_error_ctx,
+            }) catch "unknown error";
+
+            try diagnostics.append(alloc, .{
+                .kind = .@"error",
+                .line = semantic.last_error_line,
+                .column = semantic.last_error_column,
+                .message = msg,
+            });
+        }
         return result;
     };
     return words;

@@ -17,6 +17,15 @@ pub threadlocal var last_error_inner: []const u8 = "";
 pub threadlocal var last_error_line: u32 = 0;
 pub threadlocal var last_error_column: u32 = 0;
 
+/// When non-null, tolerate-mode statement errors are recorded here as
+/// structured (message, line, column) snapshots DURING analysis (while the
+/// AST is still alive). `compileToSPIRVWithDiagnostics` sets this; the plain
+/// `compileToSPIRV` path leaves it null, so that path is unchanged (zero new
+/// allocations, identical behavior).
+pub const RecordedDiag = struct { message: []const u8, line: u32, column: u32 };
+pub threadlocal var diag_sink: ?*std.ArrayListUnmanaged(RecordedDiag) = null;
+pub threadlocal var diag_sink_alloc: ?std.mem.Allocator = null;
+
 /// Format a human-readable error message from the last compile error.
 /// Caller must free the returned slice with `alloc.free`.
 pub fn formatLastError(alloc: std.mem.Allocator) error{OutOfMemory}!?[]const u8 {
@@ -2016,6 +2025,39 @@ const Analyzer = struct {
                     // whose body is missing whole writes. See Bug #3.
                     const msg = std.fmt.allocPrint(self.alloc, "{s} in {s}", .{@errorName(err), @tagName(child.tag)}) catch "error";
                     self.errors.append(self.alloc, msg) catch {};
+
+                    // Bug #3.B: when a structured diagnostic sink is registered
+                    // (compileToSPIRVWithDiagnostics), snapshot THIS statement's
+                    // error as a (message, line, column) record while the AST and
+                    // source buffer are still alive. The errdefer chain in
+                    // analyzeStatement/analyzeExpression has just populated
+                    // last_error_* with the innermost location/context for this
+                    // failure; harvest it, then reset so the NEXT statement
+                    // captures its own location independently. The sink stays
+                    // null for the plain compileToSPIRV path → no behavior change.
+                    if (diag_sink) |sink| {
+                        const da = diag_sink_alloc orelse self.alloc;
+                        // Cap the sink to avoid pathological blow-up on a
+                        // degenerate shader (still `continue` so analysis proceeds).
+                        if (sink.items.len < 100) {
+                            const line = if (last_error_line != 0) last_error_line else child.loc.line;
+                            const column = if (last_error_column != 0) last_error_column else child.loc.column;
+                            const inner = if (last_error_inner.len > 0) last_error_inner else last_error_ctx;
+                            // allocPrint copies the bytes NOW, so the dup is safe
+                            // even though `inner` may point into the source buffer
+                            // or an AST node name that is freed after analysis.
+                            const dmsg = std.fmt.allocPrint(da, "{s}: {s}", .{ @errorName(err), inner }) catch null;
+                            if (dmsg) |m| {
+                                sink.append(da, .{ .message = m, .line = line, .column = column }) catch da.free(m);
+                            }
+                        }
+                        // Reset per-error capture so the next statement's errdefer
+                        // re-records its own precise location/context.
+                        last_error_line = 0;
+                        last_error_column = 0;
+                        last_error_ctx = "";
+                        last_error_inner = "";
+                    }
                     continue;
                 } else {
                     return err;
