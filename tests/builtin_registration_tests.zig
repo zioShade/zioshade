@@ -77,3 +77,31 @@ test "gl_PointCoord: fragment shader emits BuiltIn PointCoord and non-empty body
     // gl_PointCoord must be decorated as BuiltIn PointCoord (16).
     try std.testing.expect(hasBuiltInDecoration(spv, BUILTIN_POINT_COORD));
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2: matrixCompMult
+// ---------------------------------------------------------------------------
+
+test "matrixCompMult: lowers to per-column FMul + matrix CompositeConstruct" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main() {
+        \\    mat3 a = mat3(1.0); mat3 b = mat3(2.0);
+        \\    mat3 c = matrixCompMult(a, b);
+        \\    o = vec4(c[0], 1.0);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // Body must survive — tolerate mode would otherwise drop the statements
+    // (empty body) when matrixCompMult was unknown.
+    try std.testing.expect(countOpcode(spv, OP_STORE) >= 1);
+
+    // Column decomposition: one OpFMul per column (3 for mat3) of vector
+    // operands, then an OpCompositeConstruct that rebuilds the result matrix.
+    try std.testing.expect(countOpcode(spv, OP_FMUL) >= 3);
+    try std.testing.expect(countOpcode(spv, OP_COMPOSITE_EXTRACT) >= 3);
+    try std.testing.expect(countOpcode(spv, OP_COMPOSITE_CONSTRUCT) >= 1);
+}

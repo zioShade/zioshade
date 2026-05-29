@@ -4999,6 +4999,48 @@ const Analyzer = struct {
                             return .{ .ty = mat_ty, .id = result_id };
                         }
                     }
+                    // matrixCompMult(x, y) → component-wise matrix multiply.
+                    // SPIR-V has no single op for this; decompose per column:
+                    //   for each column c: FMul(extract(x,c), extract(y,c))
+                    //   then CompositeConstruct the result matrix from the
+                    //   per-column products. All ops are core/widely-supported.
+                    if (std.mem.eql(u8, node.data.name, "matrixCompMult")) {
+                        if (arg_tids.items.len >= 2 and arg_tids.items[0].ty.isMatrix()) {
+                            const mat_ty = arg_tids.items[0].ty;
+                            const num_cols = mat_ty.numColumns();
+                            const col_ty = mat_ty.columnType();
+                            const x_id = arg_tids.items[0].id;
+                            const y_id = arg_tids.items[1].id;
+                            const col_ids = try self.alloc.alloc(u32, num_cols);
+                            defer self.alloc.free(col_ids);
+                            for (0..num_cols) |c| {
+                                const xc_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                xc_ops[0] = .{ .id = x_id };
+                                xc_ops[1] = .{ .literal_int = @intCast(c) };
+                                const xc = try self.emitPureOp(.composite_extract, xc_ops, col_ty);
+                                const yc_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                yc_ops[0] = .{ .id = y_id };
+                                yc_ops[1] = .{ .literal_int = @intCast(c) };
+                                const yc = try self.emitPureOp(.composite_extract, yc_ops, col_ty);
+                                const mul_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                mul_ops[0] = .{ .id = xc };
+                                mul_ops[1] = .{ .id = yc };
+                                col_ids[c] = try self.emitPureOp(.fmul, mul_ops, col_ty);
+                            }
+                            const construct_ops = try self.alloc.alloc(ir.Instruction.Operand, num_cols);
+                            for (col_ids, 0..) |cid, i| {
+                                construct_ops[i] = .{ .id = cid };
+                            }
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .composite_construct,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = construct_ops,
+                                .ty = mat_ty,
+                            });
+                            return .{ .ty = mat_ty, .id = result_id };
+                        }
+                    }
                     // Texture functions use different SPIR-V ops, not GLSL.std.450
                     if (self.isTextureBuiltin(node.data.name)) {
                         if (self.isImageSampleBuiltin(node.data.name) and !self.isTexelFetchBuiltin(node.data.name)) {
@@ -7246,7 +7288,7 @@ const Analyzer = struct {
             "dFdx", "dFdy", "fwidth", "dFdxFine", "dFdyFine", "fwidthFine", "dFdxCoarse", "dFdyCoarse", "fwidthCoarse",
             "isnan", "isinf",
             // Additional GLSL builtins
-            "inverse", "outerProduct",
+            "inverse", "outerProduct", "matrixCompMult",
             "lessThan", "greaterThan", "lessThanEqual", "greaterThanEqual",
             "equal", "notEqual", "any", "all",
             "floatBitsToInt", "floatBitsToUint", "intBitsToFloat", "uintBitsToFloat",
@@ -7457,7 +7499,8 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "findLSB")) return 73;      // FindILsb
         if (std.mem.eql(u8, name, "findMSB")) return 74;      // FindSMsb (signed, GLSL spec says this is correct for both signed/unsigned)
         // NOT GLSL.std.450 — handled as core SPIR-V ops or specially
-        if (std.mem.eql(u8, name, "transpose") or std.mem.eql(u8, name, "outerProduct"))
+        if (std.mem.eql(u8, name, "transpose") or std.mem.eql(u8, name, "outerProduct") or
+            std.mem.eql(u8, name, "matrixCompMult"))
             return null;
         if (std.mem.eql(u8, name, "imageLoad") or std.mem.eql(u8, name, "imageStore"))
             return null;

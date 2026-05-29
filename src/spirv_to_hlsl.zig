@@ -3143,7 +3143,7 @@ fn emitInstruction(
                         0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
                     });
                 } else {
-                    // Use named member for structs
+                    // Use named member for structs; matrices index a column via [n].
                     var used_name = false;
                     if (current_parent) |pt| {
                         const pt_inst = getDef(module, pt);
@@ -3152,6 +3152,14 @@ fn emitInstruction(
                                 var mname_buf: [32]u8 = undefined;
                                 const mname = hlslGetMemberName(module, pt, @intCast(index), &mname_buf);
                                 try w.print(".{s}", .{mname});
+                                used_name = true;
+                            } else if (pi.op == .TypeMatrix) {
+                                // SPIR-V OpCompositeExtract/Insert on a matrix
+                                // selects a column (column-major). glslpp emits
+                                // matrices column-by-column, so HLSL `m[n]` yields
+                                // that same stored column vector. `._mN` is invalid
+                                // HLSL matrix syntax and DXC rejects it.
+                                try w.print("[{d}]", .{index});
                                 used_name = true;
                             }
                         }
@@ -3198,7 +3206,7 @@ fn emitInstruction(
                         0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
                     });
                 } else {
-                    // Use named member for structs
+                    // Use named member for structs; matrices index a column via [n].
                     var used_name = false;
                     if (current_parent) |pt| {
                         const pt_inst = getDef(module, pt);
@@ -3207,6 +3215,14 @@ fn emitInstruction(
                                 var mname_buf: [32]u8 = undefined;
                                 const mname = hlslGetMemberName(module, pt, @intCast(index), &mname_buf);
                                 try w.print(".{s}", .{mname});
+                                used_name = true;
+                            } else if (pi.op == .TypeMatrix) {
+                                // SPIR-V OpCompositeExtract/Insert on a matrix
+                                // selects a column (column-major). glslpp emits
+                                // matrices column-by-column, so HLSL `m[n]` yields
+                                // that same stored column vector. `._mN` is invalid
+                                // HLSL matrix syntax and DXC rejects it.
+                                try w.print("[{d}]", .{index});
                                 used_name = true;
                             }
                         }
