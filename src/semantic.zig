@@ -1175,6 +1175,7 @@ const Analyzer = struct {
             .{ .name = "gl_FragColor", .ty = .vec4, .is_in = false, .is_out = true, .sc = .output },
             .{ .name = "gl_FragDepth", .ty = .float, .is_in = false, .is_out = true, .sc = .output },
             .{ .name = "gl_FrontFacing", .ty = .bool, .is_in = true, .is_out = false, .sc = .input },
+            .{ .name = "gl_PointCoord", .ty = .vec2, .is_in = true, .is_out = false, .sc = .input },
             .{ .name = "gl_Position", .ty = .vec4, .is_in = false, .is_out = true, .sc = .output },
             .{ .name = "gl_PointSize", .ty = .float, .is_in = false, .is_out = true, .sc = .output },
             .{ .name = "gl_VertexID", .ty = .int, .is_in = true, .is_out = false, .sc = .input },

@@ -2843,6 +2843,9 @@ const Codegen = struct {
             } else if (std.mem.eql(u8, global.name, "gl_HelperInvocation")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.helper_invocation));
             }
+            if (std.mem.eql(u8, global.name, "gl_PointCoord")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.point_coord));
+            }
             // Geometry shader gl_in array (array of vec4 with Position)
             if (std.mem.eql(u8, global.name, "gl_in")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.position));
