@@ -744,3 +744,26 @@ test "MSL: nested struct member access in AccessChain" {
     try assertContains(msl, ".a");
 }
 
+// textureGatherOffsets lowers (correctly, for the SPIR-V target) to
+// OpImageGather carrying the ConstOffsets image operand — a per-texel
+// 4-offset array. MSL's `tex.gather(...)` cannot take a 4-offset array, so the
+// MSL backend must FAIL LOUDLY rather than silently emit a plain `.gather`
+// that drops the offsets (silent-wrong cross-compile).
+test "msl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent plain gather" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  const ivec2 offs[4]=ivec2[4](ivec2(0,0),ivec2(1,0),ivec2(1,1),ivec2(0,1));
+        \\  o = textureGatherOffsets(s, vec2(0.5), offs, 1);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(
+        error.UnsupportedImageOperands,
+        glslpp.spirvToMSL(alloc, spirv, .{}),
+    );
+}
+

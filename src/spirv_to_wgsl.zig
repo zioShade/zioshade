@@ -3876,6 +3876,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // ImageGather
             .ImageGather => {
+                // textureGatherOffsets lowers to OpImageGather with the
+                // ConstOffsets image operand (mask bit 0x20 at word[6], the
+                // 4-offset array id at word[7]). WGSL's textureGather takes no
+                // per-texel offset array, so emitting a plain textureGather here
+                // would SILENTLY DROP the offsets (silent-wrong). Fail loudly
+                // instead; per-texel emulation (4 gathers) is a follow-up.
+                if (inst.words.len > 6 and (inst.words[6] & 0x20) != 0) {
+                    return error.UnsupportedImageOperands;
+                }
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const si_inst = getDef(module, inst.words[3]);
