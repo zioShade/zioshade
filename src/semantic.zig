@@ -6582,7 +6582,7 @@ const Analyzer = struct {
                             // returns the faithful 32-bit word for both int and uint
                             // (matching the scalar `int x = ...;` path), instead of
                             // the old `@as(i32, @intCast(...))` that panicked on the
-                            // signed band (2^31, 2^32]. > 0xFFFFFFFF args are already
+                            // signed band [2^31, 2^32). > 0xFFFFFFFF args are already
                             // rejected upstream when arg_tids was built, but routing
                             // through literalWord keeps the guard local and honest.
                             const val: u32 = try literalWord(arg_node);
@@ -6890,7 +6890,13 @@ const Analyzer = struct {
                         if (result_scalar == .float and (arg_scalar == .int or arg_scalar == .uint)) {
                             const child = node.data.children[i];
                             if (child.tag == .int_literal or child.tag == .uint_literal) {
-                                const val: u32 = @intCast(child.data.int_val);
+                                // Route through literalWord for parity with the
+                                // integer-vector folders: same faithful 32-bit word
+                                // for valid input, honest error beyond 0xFFFFFFFF. (No
+                                // live panic here — args are pre-validated upstream and
+                                // this casts to u32 — but keeping the guard local stops
+                                // a future edit from reintroducing a raw @intCast.)
+                                const val: u32 = try literalWord(child);
                                 const fval: f32 = @floatFromInt(val);
                                 arg_id = try self.getConstFloat(fval);
                                 flat_ids.append(self.alloc, arg_id) catch return error.OutOfMemory;
@@ -7001,7 +7007,7 @@ const Analyzer = struct {
                             // literalWord yields the faithful 32-bit word for int
                             // and uint alike, bounds-checking magnitude <=
                             // 0xFFFFFFFF — no @as(i32, @intCast(...)) panic on the
-                            // signed band (2^31, 2^32]. For -literal, negate the
+                            // signed band [2^31, 2^32). For -literal, negate the
                             // word with wrapping subtraction so it stays a faithful
                             // 32-bit reinterpret (0 -% word) rather than panicking
                             // when the magnitude exceeds i32 range.
@@ -7040,7 +7046,13 @@ const Analyzer = struct {
                                 // Same literalWord reroute as the vector composite
                                 // folder above: faithful 32-bit word, honest error
                                 // beyond 0xFFFFFFFF, no signed-band @intCast panic.
+                                // The all-const-int scan also admits unary_op(-lit),
+                                // so mirror the composite folder's negation here too
+                                // (wrapping 0 -% word) — otherwise int[2](-5, 1) would
+                                // silently fold the negated element to 0.
                                 if (arg.tag == .int_literal or arg.tag == .uint_literal) break :blk try literalWord(arg);
+                                if (arg.tag == .unary_op and arg.data.children.len > 0 and arg.data.children[0].tag == .int_literal)
+                                    break :blk 0 -% (try literalWord(arg.data.children[0]));
                                 break :blk 0;
                             };
                             const comp_id = try self.getConstInt(val, base_ty);
@@ -8335,7 +8347,7 @@ test "semantic: small in-range switch-case literal lowers correctly" {
 //   * The constructor const-folding paths only run AFTER each arg is analyzed
 //     via analyzeExpression (semantic.zig:4126), so a > 0xFFFFFFFF arg is
 //     already rejected upstream by literalWord. What slips through is the
-//     SIGNED BAND (2^31, 2^32]: literalWord accepts it (it fits a 32-bit word),
+//     SIGNED BAND [2^31, 2^32): literalWord accepts it (it fits a 32-bit word),
 //     but the folding code's `@as(i32, @intCast(...))` cannot hold it and
 //     panics. The Mitchell-correct outcome is the faithful 32-bit reinterpret
 //     — identical to the scalar `int x = 3000000000;` path — NOT an error and
@@ -8550,6 +8562,33 @@ test "semantic: in-range ivec composite still folds after literalWord reroute" {
     }
     try testing.expect(found_7);
     try testing.expect(found_8);
+}
+
+test "semantic: negated literal in int array constructor folds to faithful word, not silent 0" {
+    // The all-const-int scan (semantic.zig:~6981) accepts `unary_op(-int_literal)`,
+    // but the ARRAY folder only handled bare int/uint literals and fell through to
+    // `break :blk 0` for the negated case — silently folding int[2](-5, 1) to {0, 1}
+    // (Mitchell silent-wrong). The vector composite folder one block up already
+    // negates via `0 -% literalWord(...)`; the array folder must do the same. The
+    // faithful 32-bit word of -5 is 0 -% 5 == 0xFFFFFFFB == 4294967291.
+    const source = "layout(location=0) out int o; void main() { int a[2] = int[2](-5, 1); o = a[0]; }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    var found_neg = false;
+    var found_one = false;
+    for (module.functions[0].body) |inst| {
+        if (inst.tag == .constant_int and inst.ty == .int and inst.operands.len == 1) {
+            if (inst.operands[0].literal_int == 4294967291) found_neg = true;
+            if (inst.operands[0].literal_int == 1) found_one = true;
+        }
+    }
+    try testing.expect(found_neg);
+    try testing.expect(found_one);
 }
 
 test "semantic: complex shader full pipeline" {
