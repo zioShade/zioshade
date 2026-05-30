@@ -215,6 +215,54 @@ fn writeResolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []co
     try w.writeAll(names.get(ptr_id) orelse "var");
 }
 
+/// Look up the SPIR-V `ArrayStride` decoration (bytes between consecutive
+/// elements) on an array type id, scanning OpDecorate directly. Returns null if
+/// absent. Mirrors memberMatrixStride but for the array-type decoration.
+fn arrayStrideOf(m: *const ParsedModule, array_type_id: u32) ?u32 {
+    for (m.instructions) |inst| {
+        if (inst.op == .Decorate and inst.words.len >= 4 and inst.words[1] == array_type_id) {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[2]);
+            if (dec == .array_stride) return inst.words[3];
+        }
+    }
+    return null;
+}
+
+/// When a std140 UBO array element is widened to a *wider* 4-component MSL type
+/// (e.g. `float arr[N]` stored as `float4 arr[N]` so the natural stride hits
+/// 16), an `arr[i]` index yields the wide type while the GLSL element is
+/// narrower. Return the trailing swizzle (".x"/".xy") that narrows the widened
+/// element back to its component count — matching spirv-cross's `u.arr[0].x`.
+/// Returns null when no narrowing applies: not an array, no ArrayStride, stride
+/// already natural (std430 tight packing), or the element is a matrix/struct
+/// (handled elsewhere). Crucially, this MUST mirror mslWidenedElementType, which
+/// only widens 1- and 2-component elements to a 4-wide type; a 3-component
+/// element stays `float3` (already 16-byte aligned) and a 4-component element
+/// stays `float4`, so BOTH index cleanly with NO swizzle — appending `.xyz` to
+/// a `float3` would diverge from the oracle even though it compiles.
+fn widenedArrayElementSwizzle(m: *const ParsedModule, array_type_id: u32) ?[]const u8 {
+    const arr = getDef(m, array_type_id) orelse return null;
+    if (arr.op != .TypeArray and arr.op != .TypeRuntimeArray) return null;
+    const elem_id = arr.words[2];
+    const stride = arrayStrideOf(m, array_type_id) orelse return null;
+    const nat = typeNatSize(m, elem_id);
+    if (nat == 0 or stride <= nat) return null; // not widened (tight packing)
+    const elem = getDef(m, elem_id) orelse return null;
+    const comp_count: u32 = switch (elem.op) {
+        .TypeFloat, .TypeInt => 1,
+        .TypeVector => elem.words[3],
+        else => return null, // matrices/structs: not a scalar-narrowing case
+    };
+    // Only 1- and 2-component elements are widened to a wider 4-wide MSL type by
+    // mslWidenedElementType, so only those need narrowing. A 3-component element
+    // stays float3 and a 4-component element stays float4 — both indexed bare.
+    return switch (comp_count) {
+        1 => ".x",
+        2 => ".xy",
+        else => null, // 3- or 4-wide element: not widened, no narrowing needed
+    };
+}
+
 fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) { try w.writeAll(base_name); return; }
@@ -223,7 +271,8 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     if (!base_is_cb) try w.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
     var first_member = true;
-    for (indices) |index_id| {
+    for (indices, 0..) |index_id, ix| {
+        const is_last = ix + 1 == indices.len;
         const idx_inst = getDef(m, index_id);
         if (idx_inst) |def| {
             if (def.op == .Constant and def.words.len > 3) {
@@ -251,7 +300,9 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     }
                     first_member = false;
                 } else if (base_is_cb) {
-                    // Use member name for structs, _mN for arrays/matrices
+                    // Use member name for structs, [index] for arrays (with a
+                    // trailing swizzle to narrow std140-widened elements, e.g.
+                    // `arr[0].x`), _mN otherwise.
                     if (cur_type) |tid| {
                         const ti = getDef(m, tid);
                         if (ti) |tinst| {
@@ -259,6 +310,17 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                                 var mname_buf: [32]u8 = undefined;
                                 const mname = getMemberName(m, tid, val, &mname_buf);
                                 try w.print(".{s}", .{mname});
+                            } else if (tinst.op == .TypeArray or tinst.op == .TypeRuntimeArray) {
+                                try w.print("[{d}]", .{val});
+                                // std140 rounds each array element up to 16 bytes,
+                                // so a narrow element (float/vecN/int) is stored as
+                                // a 4-wide MSL type. When this index is terminal,
+                                // narrow back to the element width — matching
+                                // spirv-cross's `u.arr[0].x`. A following component
+                                // index narrows on its own, so only do this last.
+                                if (is_last) {
+                                    if (widenedArrayElementSwizzle(m, tid)) |sw| try w.writeAll(sw);
+                                }
                             } else {
                                 try w.print("._m{d}", .{val});
                             }
