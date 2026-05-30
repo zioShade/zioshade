@@ -565,12 +565,18 @@ const Analyzer = struct {
     fn tryBuildSpecConstOp(self: *Analyzer, node: ast.Node) Error!?SpecOpBuild {
         switch (node.tag) {
             .int_literal => {
-                const val: u32 = @intCast(node.data.int_val);
+                // Route through literalWord: lossless i64->u64 reinterpret +
+                // 32-bit-range check. A raw @intCast(i64->u32) here PANICS on a
+                // literal whose magnitude exceeds the 32-bit word range (this is
+                // a *top-level* const initializer walked before analyzeExpression
+                // ever vets it). literalWord yields the identical word for any
+                // valid int literal and an honest error otherwise.
+                const val: u32 = try literalWord(node);
                 const id = try self.ensureSpecOpLiteral(.int, val);
                 return .{ .id = id, .ty = .int, .is_spec_derived = false };
             },
             .uint_literal => {
-                const val: u32 = @intCast(node.data.int_val);
+                const val: u32 = try literalWord(node);
                 const id = try self.ensureSpecOpLiteral(.uint, val);
                 return .{ .id = id, .ty = .uint, .is_spec_derived = false };
             },
@@ -1762,9 +1768,19 @@ const Analyzer = struct {
                                 return; // No global variable / no IR instruction.
                             }
                         }
-                    } else |_| {
-                        // On error (alloc failure etc.), let the normal path
-                        // try -- it will surface a meaningful error if any.
+                    } else |err| {
+                        // tryBuildSpecConstOp only ever returns `null` (not an
+                        // error) for unsupported / non-spec expressions; the
+                        // ONLY errors it can produce are OutOfMemory and the
+                        // SemanticFailed that literalWord raises for an out-of-
+                        // 32-bit-range int/uint literal in the initializer. The
+                        // normal const-global fallback below does NOT re-validate
+                        // the initializer, so swallowing here would silently emit
+                        // a bogus global for `const uint y = 4294967296u;` —
+                        // exactly the silent-wrong outcome the Mitchell bar
+                        // forbids. Propagate the honest error instead of crashing
+                        // (pre-fix) or silently compiling.
+                        return err;
                     }
                 }
                 const ir_id = self.allocId();
@@ -6562,7 +6578,14 @@ const Analyzer = struct {
                     {
                         const arg_node = node.data.children[0];
                         if (arg_node.tag == .int_literal or arg_node.tag == .uint_literal) {
-                            const val: u32 = if (arg_node.tag == .uint_literal) @intCast(@as(u64, @bitCast(arg_node.data.int_val))) else @bitCast(@as(i32, @intCast(arg_node.data.int_val)));
+                            // Route through literalWord (lossless i64->u64 +
+                            // 32-bit-range check) instead of a raw @intCast that
+                            // panics out-of-range. Defensive: arg_node was already
+                            // vetted by analyzeExpression->literalWord above, so an
+                            // out-of-range literal can never reach here, but we keep
+                            // the cast panic-free. For an in-range int/uint literal
+                            // literalWord yields the identical 32-bit word.
+                            const val: u32 = try literalWord(arg_node);
                             const comp_ty: ast.Type = switch (result_ty) {
                                 .ivec2, .ivec3, .ivec4 => .int,
                                 .uvec2, .uvec3, .uvec4 => .uint,
@@ -6867,7 +6890,10 @@ const Analyzer = struct {
                         if (result_scalar == .float and (arg_scalar == .int or arg_scalar == .uint)) {
                             const child = node.data.children[i];
                             if (child.tag == .int_literal or child.tag == .uint_literal) {
-                                const val: u32 = @intCast(child.data.int_val);
+                                // literalWord instead of a raw @intCast that
+                                // panics out-of-range. Defensive (child was vetted
+                                // upstream); identical word for in-range literals.
+                                const val: u32 = try literalWord(child);
                                 const fval: f32 = @floatFromInt(val);
                                 arg_id = try self.getConstFloat(fval);
                                 flat_ids.append(self.alloc, arg_id) catch return error.OutOfMemory;
@@ -6974,11 +7000,23 @@ const Analyzer = struct {
                         else => .int,
                     };
                     for (node.data.children, 0..) |arg, i| {
+                        // Route every literal through literalWord (lossless
+                        // i64->u64 + 32-bit-range check) instead of raw @intCast
+                        // narrowings that panic out-of-range. Defensive: each arg
+                        // was already vetted by analyzeExpression->literalWord, so
+                        // an out-of-range literal cannot reach here, but we keep
+                        // the casts panic-free regardless. For in-range literals
+                        // the word is identical. The negated case computes the
+                        // 32-bit two's-complement of the (non-negative) magnitude
+                        // word — `0 -% w` — which matches @bitCast(-@as(i32, m))
+                        // for every valid i32 magnitude AND additionally handles
+                        // the -2147483648 edge that the old @as(i32, ...) panicked
+                        // on.
                         const val: u32 = blk: {
-                            if (arg.tag == .int_literal) break :blk @bitCast(@as(i32, @intCast(arg.data.int_val)));
-                            if (arg.tag == .uint_literal) break :blk @intCast(@as(u64, @bitCast(arg.data.int_val)));
+                            if (arg.tag == .int_literal) break :blk try literalWord(arg);
+                            if (arg.tag == .uint_literal) break :blk try literalWord(arg);
                             if (arg.tag == .unary_op and arg.data.children.len > 0 and arg.data.children[0].tag == .int_literal)
-                                break :blk @bitCast(-@as(i32, @intCast(arg.data.children[0].data.int_val)));
+                                break :blk 0 -% try literalWord(arg.data.children[0]);
                             break :blk 0;
                         };
                         const comp_id = try self.getConstInt(val, comp_ty);
@@ -7007,9 +7045,14 @@ const Analyzer = struct {
                     if (base_ty == .uint or base_ty == .int or base_ty == .float) {
                         const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, node.data.children.len);
                         for (node.data.children, 0..) |arg, i| {
+                            // literalWord (lossless + 32-bit-range check) instead
+                            // of raw @intCast narrowings that panic out-of-range.
+                            // Defensive: each arg was vetted upstream by
+                            // analyzeExpression->literalWord; identical word for
+                            // in-range int/uint literals.
                             const val: u32 = blk: {
-                                if (arg.tag == .int_literal) break :blk @bitCast(@as(i32, @intCast(arg.data.int_val)));
-                                if (arg.tag == .uint_literal) break :blk @intCast(@as(u64, @bitCast(arg.data.int_val)));
+                                if (arg.tag == .int_literal) break :blk try literalWord(arg);
+                                if (arg.tag == .uint_literal) break :blk try literalWord(arg);
                                 break :blk 0;
                             };
                             const comp_id = try self.getConstInt(val, base_ty);
