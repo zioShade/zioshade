@@ -305,47 +305,131 @@ test "wgsl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent
 // That is a silent-wrong cross-compile. The resource TYPES must follow the
 // depth/comparison nature of the image.
 test "wgsl: sampler2DShadow gather emits texture_depth_2d + sampler_comparison" {
-    try runShadowTypeTest(
-        "shadow_gather",
+    try runShadowValidTest(.{
+        .name = "shadow_gather",
+        .source =
         \\#version 450
         \\layout(binding=0) uniform sampler2DShadow shadowTex;
         \\layout(location=0) in vec2 vUV;
         \\layout(location=1) in float vRef;
         \\layout(location=0) out vec4 fragColor;
         \\void main(){ fragColor = textureGather(shadowTex, vUV, vRef); }
-    ,
-        "textureGatherCompare",
-    );
+        ,
+        .tex_decl = "var shadowTex: texture_depth_2d;",
+        .builtin = "textureGatherCompare",
+        // gather keeps the coordinate (vUV) and reference separate — no slice.
+        .coord_swizzle = null,
+    });
 }
 
 test "wgsl: sampler2DShadow compare-sample emits texture_depth_2d + sampler_comparison" {
-    try runShadowTypeTest(
-        "shadow_sample",
+    try runShadowValidTest(.{
+        .name = "shadow_sample",
+        .source =
         \\#version 450
         \\layout(binding=0) uniform sampler2DShadow shadowTex;
         \\layout(location=0) in vec2 vUV;
         \\layout(location=1) in float vRef;
         \\layout(location=0) out vec4 fragColor;
         \\void main(){ fragColor = vec4(texture(shadowTex, vec3(vUV, vRef))); }
-    ,
-        "textureSampleCompare",
+        ,
+        .tex_decl = "var shadowTex: texture_depth_2d;",
+        .builtin = "textureSampleCompare",
+        // glslang packs the ref into the coordinate (vec3); it must be sliced
+        // to vec2. This `.xy` guard catches the coordinate-dimension bug even
+        // when naga is unavailable (string assertions alone would not).
+        .coord_swizzle = ".xy",
+    });
+}
+
+// samplerCubeShadow → texture_depth_cube; the packed vec4(dir, ref) coordinate
+// must be sliced to the 3-component cube coordinate (.xyz).
+test "wgsl: samplerCubeShadow emits texture_depth_cube + sampler_comparison" {
+    try runShadowValidTest(.{
+        .name = "shadow_cube",
+        .source =
+        \\#version 450
+        \\layout(binding=0) uniform samplerCubeShadow shadowCube;
+        \\layout(location=0) in vec3 vDir;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(texture(shadowCube, vec4(vDir, vRef))); }
+        ,
+        .tex_decl = "var shadowCube: texture_depth_cube;",
+        .builtin = "textureSampleCompare",
+        .coord_swizzle = ".xyz",
+    });
+}
+
+// textureLod on a shadow sampler lowers to OpImageSampleDrefExplicitLod →
+// textureSampleCompareLevel, which (a) needs the same coordinate slice and
+// (b) takes NO explicit level argument (it always samples mip 0). Emitting the
+// raw coordinate + a trailing float level is rejected by naga.
+test "wgsl: textureLod(sampler2DShadow) emits valid textureSampleCompareLevel" {
+    try runShadowValidTest(.{
+        .name = "shadow_lod",
+        .source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(textureLod(shadowTex, vec3(vUV, vRef), 0.0)); }
+        ,
+        .tex_decl = "var shadowTex: texture_depth_2d;",
+        .builtin = "textureSampleCompareLevel",
+        .coord_swizzle = ".xy",
+    });
+}
+
+// Arrayed depth textures (sampler2DArrayShadow) would need a separate WGSL
+// array_index argument; emitting texture_depth_2d + a 2-component coordinate
+// VALIDATES in naga but silently samples the wrong layer. The backend must
+// fail loudly rather than trade one silent-wrong for another.
+test "wgsl: sampler2DArrayShadow is an honest error, not a silent dropped layer" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArrayShadow shadowArr;
+        \\layout(location=0) in vec4 vC;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(texture(shadowArr, vC)); }
+    ;
+    const spirv = try compileToSpirv("shadow_array", source);
+    defer alloc.free(spirv);
+    try std.testing.expectError(
+        error.UnsupportedDepthArrayTexture,
+        glslpp.spirvToWGSL(alloc, spirv, .{}),
     );
 }
 
-fn runShadowTypeTest(name: []const u8, source: [:0]const u8, expect_builtin: []const u8) !void {
-    const spirv = try compileToSpirv(name, source);
+const ShadowCase = struct {
+    name: []const u8,
+    source: [:0]const u8,
+    tex_decl: []const u8,
+    builtin: []const u8,
+    /// Expected coordinate swizzle proving the packed coordinate was sliced to
+    /// the texture dimension; null when the form keeps the coordinate as-is
+    /// (e.g. gather). A naga-independent regression guard.
+    coord_swizzle: ?[]const u8,
+};
+
+fn runShadowValidTest(c: ShadowCase) !void {
+    const spirv = try compileToSpirv(c.name, c.source);
     defer alloc.free(spirv);
     const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
 
-    // The companion sampler must be a comparison sampler...
+    // The depth texture must be emitted with its exact comparison type (the
+    // exact decl also rules out the silent-wrong `texture_2d<f32>` for it)...
+    try assertContains(wgsl, c.tex_decl);
+    // ...the companion sampler must be a comparison sampler...
     try assertContains(wgsl, "sampler_comparison");
-    // ...the texture must be a depth texture (no <f32> sampled-type param)...
-    try assertContains(wgsl, "texture_depth_2d");
     // ...the compare builtin must still be emitted (regression guard)...
-    try assertContains(wgsl, expect_builtin);
-    // ...and the shadow texture must NOT be emitted as a plain sampled texture.
+    try assertContains(wgsl, c.builtin);
+    // ...the coordinate must be sliced to the texture dimension (naga-free guard)...
+    if (c.coord_swizzle) |swz| try assertContains(wgsl, swz);
+    // ...and (single-texture fixture) no plain sampled texture must appear.
     try assertNotContains(wgsl, "texture_2d<f32>");
     // Ground truth: the emitted WGSL must actually validate.
-    try nagaValidateOrSkip(wgsl, name);
+    try nagaValidateOrSkip(wgsl, c.name);
 }

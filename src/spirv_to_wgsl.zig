@@ -83,8 +83,22 @@ fn depthCompareCoordComps(module: *const ParsedModule, sampled_image_value_id: u
     if (inst.op != .TypeImage or inst.words.len <= 3) return 2;
     return switch (inst.words[3]) {
         3 => 3, // Cube → vec3 coordinate
-        else => 2, // 2D family → vec2 coordinate
+        else => 2, // 2D family → vec2 coordinate (array layer is a separate arg)
     };
+}
+
+/// True when `image_type_id` resolves to an arrayed OpTypeImage — the Arrayed
+/// operand (word[5]) equals 1, e.g. GLSL sampler2DArrayShadow. Accepts either
+/// an OpTypeImage id or an OpTypeSampledImage id.
+///
+/// OpTypeImage layout: [op, result_id, sampled_type, dim, depth, ARRAYED, ms, sampled, format]
+fn imageTypeIsArrayed(module: *const ParsedModule, image_type_id: u32) bool {
+    var inst = getDef(module, image_type_id) orelse return false;
+    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
+        inst = getDef(module, inst.words[2]) orelse return false;
+    }
+    if (inst.op != .TypeImage) return false;
+    return inst.words.len > 5 and inst.words[5] == 1;
 }
 
 // Strict WGSL keywords + reserved words from https://www.w3.org/TR/WGSL/#reserved-words
@@ -1198,6 +1212,16 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         const shifted_sampler = common.applyBindingShift(tex_binding + 1, options.binding_shift);
         const group = @divFloor(shifted_tex, 2);
         const binding = shifted_tex;
+        // Arrayed depth textures (sampler2DArrayShadow / samplerCubeArrayShadow)
+        // need a separate WGSL array_index argument on every compare call AND
+        // the array-layer coordinate component preserved. Emitting
+        // texture_depth_2d with a 2-component coordinate (as the non-arrayed
+        // path does) would VALIDATE in naga but silently sample the wrong layer
+        // — trading one silent-wrong for another. Fail loudly until proper
+        // array-shadow support lands.
+        if (imageTypeIsDepth(&module, tex.image_type_id) and imageTypeIsArrayed(&module, tex.image_type_id)) {
+            return error.UnsupportedDepthArrayTexture;
+        }
         const tex_type = try wgslType(&module, tex.image_type_id, &names, arena);
         if (tex.is_storage) {
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, binding, tex.name, tex_type });
@@ -3432,9 +3456,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                const lod = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompareLevel({s}, {s}_sampler, {s}, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref, lod });
+                // WGSL textureSampleCompareLevel always samples mip level 0 and
+                // takes NO explicit level argument — the SPIR-V Lod operand is
+                // dropped (it is 0 for the common textureLod(shadow, …, 0.0)).
+                // Slice the packed coordinate to the texture dimension like the
+                // implicit form (see depthCompareCoordComps); passing the raw
+                // packed vec3/vec4 is rejected by naga.
+                const swz: []const u8 = if (depthCompareCoordComps(module, inst.words[3]) == 3) ".xyz" else ".xy";
+                const sample_coord = try std.fmt.allocPrint(arena, "{s}{s}", .{ coord, swz });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompareLevel({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, sample_coord, dref });
             },
 
             .ImageFetch => {
