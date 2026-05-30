@@ -5221,6 +5221,26 @@ const Analyzer = struct {
                             if (is_gather) {
                                 // textureGather: non-shadow → image_gather, shadow → image_dref_gather
                                 const gather_tag: ir.Instruction.Tag = if (is_shadow_sample) .image_dref_gather else .image_gather;
+                                // Non-shadow textureGather's optional 3rd arg is the
+                                // component selector (0=R..3=A). GLSL requires it to be
+                                // an integral constant expression and SPIR-V requires the
+                                // OpImageGather Component operand to be a 32-bit int
+                                // scalar. Passing a float/vec component through unchecked
+                                // emitted `OpImageGather … %float_x` — invalid SPIR-V that
+                                // spirv-val rejects while glslpp reported success
+                                // (silent-wrong). glslangValidator -V rejects such shaders,
+                                // so fail loudly here instead of emitting garbage. (Shadow
+                                // gather's 3rd arg is the float refz — not a component — so
+                                // this check is scoped to the non-shadow form.)
+                                if (!is_shadow_sample and arg_tids.items.len >= 3) {
+                                    const comp_ty = arg_tids.items[2].ty;
+                                    if (comp_ty != .int and comp_ty != .uint) {
+                                        last_error_ctx = "textureGather-component-not-integral";
+                                        last_error_line = node.loc.line;
+                                        last_error_column = node.loc.column;
+                                        return error.SemanticFailed;
+                                    }
+                                }
                                 const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                                 for (arg_tids.items, 0..) |tid, i| {
                                     operands[i] = .{ .id = tid.id };
