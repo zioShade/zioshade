@@ -554,8 +554,13 @@ test "textureGatherOffsets: NON-const offsets array is an honest error (not sile
         error.SemanticFailed,
         glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
     );
-    try std.testing.expectEqualStrings(
-        "textureGatherOffsets-offsets-not-constant",
-        glslpp.semantic.last_error_ctx,
-    );
+    // The recorded diagnostic message carries the specific reason
+    // (last_error_inner) so the failure is named, not generic.
+    var found_reason = false;
+    for (diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "textureGatherOffsets-offsets-not-constant") != null) {
+            found_reason = true;
+        }
+    }
+    try std.testing.expect(found_reason);
 }

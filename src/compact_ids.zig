@@ -103,7 +103,7 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         93 => rt(2, "iiii"),       // OpImageSampleProjDrefImplicitLod
         94 => rt(2, "iiiiM"),      // OpImageSampleProjDrefExplicitLod
         95 => rt(2, "iiM"),        // OpImageFetch: image, coord, [img-ops]
-        96 => rt(2, "iii"),        // OpImageGather: sampled, coord, component
+        96 => rt(2, "iiiM"),       // OpImageGather: sampled, coord, component, [img-ops] (ConstOffsets for textureGatherOffsets)
         97 => rt(2, "iiii"),       // OpImageDrefGather
         98 => rt(2, "iiM"),        // OpImageRead: image, coord, [img-ops]
         99 => rt(0, "iiiM"),       // OpImageWrite: image, coord, texel, [img-ops]
