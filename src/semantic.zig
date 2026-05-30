@@ -4127,7 +4127,15 @@ const Analyzer = struct {
                 // Exception: texture functions return vec4
                 const is_shadow_sample = self.isImageSampleBuiltin(node.data.name) and arg_tids.items.len > 0 and self.isShadowSamplerType(arg_tids.items[0].ty);
                 const result_ty: ast.Type = if (is_shadow_sample)
-                    .float
+                    // Shadow SAMPLE ops (texture/textureLod/textureProj on a
+                    // shadow sampler) return a single compared depth → float.
+                    // Shadow textureGather is the exception: it gathers the
+                    // depth-comparison results of the 2x2 footprint and returns
+                    // a vec4 (matches glslang's OpImageDrefGather %v4float). Using
+                    // .float here mistyped the call expression and caused valid
+                    // GLSL like `vec4 g = textureGather(sampler2DShadow, …)` to be
+                    // rejected (TypeMismatch) or silently dropped in tolerate mode.
+                    (if (std.mem.eql(u8, node.data.name, "textureGather")) ast.Type.vec4 else ast.Type.float)
                 else if (self.isImageSampleBuiltin(node.data.name))
                     if (arg_tids.items.len > 0) arg_tids.items[0].ty.samplerResultType() else .vec4
                 else if (std.mem.eql(u8, node.data.name, "texelFetch"))
@@ -5222,7 +5230,13 @@ const Analyzer = struct {
                                     .result_type = null,
                                     .result_id = result_id,
                                     .operands = operands,
-                                    .ty = if (is_shadow_sample) arg_tids.items[0].ty else result_ty,
+                                    // Both gather forms produce a vec4 (now reflected in
+                                    // result_ty for the shadow form too). Previously the
+                                    // shadow branch stored the SAMPLER type here, leaving
+                                    // the IR result type inconsistent with the emitted
+                                    // OpImageDrefGather %v4float — codegen forced vec4
+                                    // anyway, but the IR is now self-consistent.
+                                    .ty = result_ty,
                                 });
                             } else {
                             // texture(sampler, coord) → image_sample (implicit or explicit lod)
