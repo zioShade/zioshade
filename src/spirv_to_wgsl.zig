@@ -9,6 +9,53 @@ const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
 const DecorationEntry = common.DecorationEntry;
 
+/// Human-readable detail for the most recent `error.UnsupportedExtInst`. Zig
+/// errors carry no payload, so the failing GLSL.std.450 instruction is recorded
+/// here for the CLI/tests to surface (e.g. "GLSL.std.450 InterpolateAtCentroid
+/// (76) has no WGSL equivalent"). Backed by a threadlocal buffer; valid until
+/// the next `spirvToWGSL` call on the same thread. Reset at `spirvToWGSL` entry.
+pub threadlocal var last_error_detail: ?[]const u8 = null;
+threadlocal var last_error_detail_buf: [192]u8 = undefined;
+
+/// Canonical GLSL.std.450 instruction name, for diagnostics only.
+fn glslStd450Name(op: u32) []const u8 {
+    return switch (op) {
+        1 => "Round", 2 => "RoundEven", 3 => "Trunc", 4 => "FAbs", 5 => "SAbs",
+        6 => "FSign", 7 => "SSign", 8 => "Floor", 9 => "Ceil", 10 => "Fract",
+        11 => "Radians", 12 => "Degrees", 13 => "Sin", 14 => "Cos", 15 => "Tan",
+        16 => "Asin", 17 => "Acos", 18 => "Atan", 19 => "Sinh", 20 => "Cosh",
+        21 => "Tanh", 22 => "Asinh", 23 => "Acosh", 24 => "Atanh", 25 => "Atan2",
+        26 => "Pow", 27 => "Exp", 28 => "Log", 29 => "Exp2", 30 => "Log2",
+        31 => "Sqrt", 32 => "InverseSqrt", 33 => "Determinant", 34 => "MatrixInverse",
+        35 => "Modf", 36 => "ModfStruct", 37 => "FMin", 38 => "UMin", 39 => "SMin",
+        40 => "FMax", 41 => "UMax", 42 => "SMax", 43 => "FClamp", 44 => "UClamp",
+        45 => "SClamp", 46 => "FMix", 47 => "IMix", 48 => "Step", 49 => "SmoothStep",
+        50 => "Fma", 51 => "Frexp", 52 => "FrexpStruct", 53 => "Ldexp",
+        54 => "PackSnorm4x8", 55 => "PackUnorm4x8", 56 => "PackSnorm2x16",
+        57 => "PackUnorm2x16", 58 => "PackHalf2x16", 59 => "PackDouble2x32",
+        60 => "UnpackSnorm2x16", 61 => "UnpackUnorm2x16", 62 => "UnpackHalf2x16",
+        63 => "UnpackSnorm4x8", 64 => "UnpackUnorm4x8", 65 => "UnpackDouble2x32",
+        66 => "Length", 67 => "Distance", 68 => "Cross", 69 => "Normalize",
+        70 => "FaceForward", 71 => "Reflect", 72 => "Refract", 73 => "FindILsb",
+        74 => "FindSMsb", 75 => "FindUMsb", 76 => "InterpolateAtCentroid",
+        77 => "InterpolateAtSample", 78 => "InterpolateAtOffset", 79 => "NMin",
+        80 => "NMax", 81 => "NClamp",
+        else => "Unknown",
+    };
+}
+
+/// Record which GLSL.std.450 instruction had no WGSL mapping (into the
+/// threadlocal detail), then return the honest error. Use at every
+/// `UnsupportedExtInst` site: `return recordUnsupportedExtInst(op);`.
+fn recordUnsupportedExtInst(op: u32) error{UnsupportedExtInst} {
+    last_error_detail = std.fmt.bufPrint(
+        &last_error_detail_buf,
+        "GLSL.std.450 {s} ({d}) has no WGSL equivalent",
+        .{ glslStd450Name(op), op },
+    ) catch null;
+    return error.UnsupportedExtInst;
+}
+
 /// Options for SPIR-V → WGSL cross-compilation.
 pub const WgslCompileOptions = struct {
     /// Entry point name to compile (default: "main").
@@ -41,6 +88,64 @@ fn isStructType(module: *const ParsedModule, type_id: u32) bool {
         if (inst.op == .TypePointer and inst.words.len > 3) return isStructType(module, inst.words[3]);
     }
     return false;
+}
+
+/// True when `image_type_id` resolves to an OpTypeImage flagged as a depth
+/// (comparison) image — the Depth operand (word[4]) equals 1. GLSL's
+/// `sampler2DShadow` and friends lower to such images. WGSL requires these to
+/// be a `texture_depth_*` texture paired with a `sampler_comparison`, so both
+/// resource types must follow this flag; emitting the default
+/// `texture_2d<f32>` + plain `sampler` is silent-wrong (glslpp exits 0 but
+/// naga rejects with "Comparison sampling mismatch"). Accepts either an
+/// OpTypeImage id or an OpTypeSampledImage id (the latter is unwrapped to its
+/// underlying image).
+///
+/// OpTypeImage layout: [op, result_id, sampled_type, dim, DEPTH, arrayed, ms, sampled, format]
+fn imageTypeIsDepth(module: *const ParsedModule, image_type_id: u32) bool {
+    var inst = getDef(module, image_type_id) orelse return false;
+    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
+        inst = getDef(module, inst.words[2]) orelse return false;
+    }
+    if (inst.op != .TypeImage) return false;
+    return inst.words.len > 4 and inst.words[4] == 1;
+}
+
+/// Spatial coordinate component count WGSL's depth-compare builtins expect for
+/// the texture behind a sampled-image value: 2 for 2D, 3 for cube. glslang
+/// packs the depth reference as a trailing coordinate component for the
+/// `texture(sampler2DShadow, vec3(uv, ref))` form (and passes it again as the
+/// separate Dref operand), but WGSL's textureSampleCompare* require the
+/// coordinate to be EXACTLY the texture's dimension — so the coordinate has to
+/// be sliced down to this many components or naga rejects it ("Image
+/// coordinate type does not match dimension").
+fn depthCompareCoordComps(module: *const ParsedModule, sampled_image_value_id: u32) u32 {
+    const type_id = getTypeOf(module, sampled_image_value_id) orelse return 2;
+    var inst = getDef(module, type_id) orelse return 2;
+    if (inst.op == .TypePointer and inst.words.len > 3) {
+        inst = getDef(module, inst.words[3]) orelse return 2;
+    }
+    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
+        inst = getDef(module, inst.words[2]) orelse return 2;
+    }
+    if (inst.op != .TypeImage or inst.words.len <= 3) return 2;
+    return switch (inst.words[3]) {
+        3 => 3, // Cube → vec3 coordinate
+        else => 2, // 2D family → vec2 coordinate (array layer is a separate arg)
+    };
+}
+
+/// True when `image_type_id` resolves to an arrayed OpTypeImage — the Arrayed
+/// operand (word[5]) equals 1, e.g. GLSL sampler2DArrayShadow. Accepts either
+/// an OpTypeImage id or an OpTypeSampledImage id.
+///
+/// OpTypeImage layout: [op, result_id, sampled_type, dim, depth, ARRAYED, ms, sampled, format]
+fn imageTypeIsArrayed(module: *const ParsedModule, image_type_id: u32) bool {
+    var inst = getDef(module, image_type_id) orelse return false;
+    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
+        inst = getDef(module, inst.words[2]) orelse return false;
+    }
+    if (inst.op != .TypeImage) return false;
+    return inst.words.len > 5 and inst.words[5] == 1;
 }
 
 // Strict WGSL keywords + reserved words from https://www.w3.org/TR/WGSL/#reserved-words
@@ -330,7 +435,21 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
             const access_qualifier: u32 = if (inst.words.len > 7) inst.words[7] else 0;
             const is_storage = access_qualifier == 2; // Only ReadWrite is storage with both load+store
             // WriteOnly (1) images are also storage but we handle them with regular textures
-            if (is_storage) {
+            // Depth (comparison) image — the Depth operand (word[4]) is 1, e.g.
+            // GLSL sampler2DShadow. WGSL depth textures take NO <T> sampled-type
+            // parameter (they are implicitly f32) and must pair with a
+            // sampler_comparison; see imageTypeIsDepth for why this matters.
+            const is_depth = inst.words.len > 4 and inst.words[4] == 1;
+            if (is_depth) {
+                // Array-ness comes from the Arrayed operand, not `dim`; arrayed
+                // depth textures are gated as an honest error before they reach
+                // here (see spirvToWGSL), so `dim` only selects cube vs 2D.
+                if (is_ms) break :blk "texture_depth_multisampled_2d";
+                break :blk switch (dim) {
+                    3 => "texture_depth_cube",
+                    else => "texture_depth_2d",
+                };
+            } else if (is_storage) {
                 const access_mode: []const u8 = switch (access_qualifier) {
                     1 => "write",
                     2 => "read_write",
@@ -683,6 +802,7 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
 // ---------------------------------------------------------------------------
 
 pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: WgslCompileOptions) ![]const u8 {
+    last_error_detail = null; // clear any detail from a prior compile on this thread
     var module = try common.parseModule(alloc, spirv_words);
     defer module.deinit(alloc);
 
@@ -1142,15 +1262,28 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         const shifted_sampler = common.applyBindingShift(tex_binding + 1, options.binding_shift);
         const group = @divFloor(shifted_tex, 2);
         const binding = shifted_tex;
+        // Arrayed depth textures (sampler2DArrayShadow / samplerCubeArrayShadow)
+        // need a separate WGSL array_index argument on every compare call AND
+        // the array-layer coordinate component preserved. Emitting
+        // texture_depth_2d with a 2-component coordinate (as the non-arrayed
+        // path does) would VALIDATE in naga but silently sample the wrong layer
+        // — trading one silent-wrong for another. Fail loudly until proper
+        // array-shadow support lands.
+        if (imageTypeIsDepth(&module, tex.image_type_id) and imageTypeIsArrayed(&module, tex.image_type_id)) {
+            return error.UnsupportedDepthArrayTexture;
+        }
         const tex_type = try wgslType(&module, tex.image_type_id, &names, arena);
         if (tex.is_storage) {
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, binding, tex.name, tex_type });
         } else {
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n", .{ group, binding, tex.name, tex_type });
-            // Emit paired sampler
+            // Emit paired sampler. A depth/comparison image (sampler2DShadow)
+            // requires a sampler_comparison so textureSampleCompare /
+            // textureGatherCompare typecheck; a plain `sampler` is silent-wrong.
             const sampler_name = try std.fmt.allocPrint(arena, "{s}_sampler", .{tex.name});
+            const sampler_kind: []const u8 = if (imageTypeIsDepth(&module, tex.image_type_id)) "sampler_comparison" else "sampler";
             try sampler_names.append(arena, .{ .name = sampler_name, .binding = tex.binding + 1 });
-            try w.print("@group({d}) @binding({d})\nvar {s}: sampler;\n\n", .{ group, shifted_sampler, sampler_name });
+            try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, shifted_sampler, sampler_name, sampler_kind });
         }
     }
 
@@ -3361,7 +3494,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
+                // Slice the packed coordinate down to the texture's dimension
+                // (.xy for 2D, .xyz for cube); see depthCompareCoordComps.
+                const swz: []const u8 = if (depthCompareCoordComps(module, inst.words[3]) == 3) ".xyz" else ".xy";
+                const sample_coord = try std.fmt.allocPrint(arena, "{s}{s}", .{ coord, swz });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, sample_coord, dref });
             },
 
             .ImageSampleDrefExplicitLod => {
@@ -3369,9 +3506,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                const lod = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompareLevel({s}, {s}_sampler, {s}, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref, lod });
+                // WGSL textureSampleCompareLevel always samples mip level 0 and
+                // takes NO explicit level argument — the SPIR-V Lod operand is
+                // dropped (it is 0 for the common textureLod(shadow, …, 0.0)).
+                // Slice the packed coordinate to the texture dimension like the
+                // implicit form (see depthCompareCoordComps); passing the raw
+                // packed vec3/vec4 is rejected by naga.
+                const swz: []const u8 = if (depthCompareCoordComps(module, inst.words[3]) == 3) ".xyz" else ".xy";
+                const sample_coord = try std.fmt.allocPrint(arena, "{s}{s}", .{ coord, swz });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompareLevel({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, sample_coord, dref });
             },
 
             .ImageFetch => {
@@ -3479,8 +3623,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             74 => "findSMsb",
                             // Honest failure: emitting `unknown(...)` produces
                             // invalid WGSL that silently passes as success. Fail
-                            // loudly so callers (and naga) see a real error.
-                            else => return error.UnsupportedExtInst,
+                            // loudly (naming the instruction) so callers (and
+                            // naga) see a real, actionable error.
+                            else => return recordUnsupportedExtInst(instruction),
                         };
                         // Build args
                         var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
@@ -4265,7 +4410,7 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                     66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
                     70 => "faceForward", 71 => "reflect", 72 => "refract",
                     // Honest failure (loop-replay path): see emitBody above.
-                    else => return error.UnsupportedExtInst,
+                    else => return recordUnsupportedExtInst(instruction),
                 };
                 var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
                 defer args.deinit(arena);

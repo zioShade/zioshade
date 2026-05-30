@@ -1625,3 +1625,150 @@ test "T18.20: mat3x2 array — float3x4 a[2] (non-square, rows widened via Matri
     try assertNotContains(msl, "[[offset(");
 }
 
+// ---------------------------------------------------------------------------
+// T17: Depth/comparison sampler texture type (depth2d<float>, not
+// texture2d<float>). A `sampler2DShadow` lowers to an OpTypeImage whose Depth
+// field is 1; its MSL methods `.sample_compare` / `.gather_compare` are members
+// of `depth2d<float>`, NOT `texture2d<float>`. Emitting `texture2d<float>` for
+// such a sampler produces MSL that does not compile (silent-wrong cross-compile).
+//
+// Scope: only the 2D depth case (Dim==2D) is modelled — this whole backend
+// hardcodes 2D textures, so a non-2D depth sampler (samplerCubeShadow etc.) is
+// deliberately NOT promoted to depth2d (that would be a different mis-type, see
+// T17.4); it stays on the pre-existing texture2d path until non-2D textures are
+// supported backend-wide.
+//
+// Oracle (spirv-cross 1.4.341.1) for `textureGather(sampler2DShadow, uv, ref)`:
+//   fragment main0_out main0(main0_in in [[stage_in]],
+//       depth2d<float> shadowTex [[texture(0)]], sampler shadowTexSmplr [[sampler(0)]])
+//   { ... shadowTex.gather_compare(shadowTexSmplr, in.vUV, in.vRef); ... }
+// and for `texture(sampler2DShadow, vec3(uv, ref))` the same `depth2d<float>`
+// with `.sample_compare`.
+// ---------------------------------------------------------------------------
+
+test "T17.1: sampler2DShadow + textureGather → depth2d<float> (gather_compare)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = textureGather(shadowTex, vUV, vRef); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The comparison sampler must be declared depth2d<float> (matches oracle).
+    try assertContains(msl, "depth2d<float> shadowTex [[texture(0)]]");
+    // No texture2d<float> may survive for this sampler anywhere (entry param,
+    // impl param, …) — that would be non-compiling MSL.
+    try assertNotContains(msl, "texture2d<float> shadowTex");
+    // The gather_compare method itself is unchanged.
+    try assertContains(msl, ".gather_compare(");
+}
+
+test "T17.2: sampler2DShadow + texture() compare → depth2d<float> (sample_compare)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(texture(shadowTex, vec3(vUV, vRef))); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "depth2d<float> shadowTex [[texture(0)]]");
+    try assertNotContains(msl, "texture2d<float> shadowTex");
+    try assertContains(msl, ".sample_compare(");
+}
+
+test "T17.3: plain sampler2D stays texture2d<float> (no depth2d regression)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = texture(tex, vUV); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // A non-comparison sampler must remain texture2d<float>.
+    try assertContains(msl, "texture2d<float> tex");
+    try assertNotContains(msl, "depth2d");
+}
+
+test "T17.4: samplerCubeShadow is NOT promoted to depth2d (2D-scoped)" {
+    // glslpp marks ALL shadow samplers (2D/Cube/Array) with OpTypeImage Depth=1,
+    // but only the 2D form maps to MSL `depth2d<float>`; a cube shadow's correct
+    // type is `depthcube<float>`. Since this backend has no non-2D texture support
+    // (every texture is hardcoded 2D), mis-typing a cube shadow as `depth2d` would
+    // just trade one non-compiling type for another. The depth promotion is gated
+    // on Dim==2D, so a samplerCubeShadow must NOT acquire a depth2d type; it stays
+    // on the pre-existing (separately-tracked) non-2D path.
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform samplerCubeShadow shadowCube;
+        \\layout(location=0) in vec3 vDir;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(texture(shadowCube, vec4(vDir, vRef))); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The 2D-only depth promotion must not mis-fire on a cube shadow sampler.
+    try assertNotContains(msl, "depth2d");
+}
+
+test "T18.21: std140 float array element — body indexes + narrows widened element (oracle u.arr[0].x)" {
+    // ORACLE spirv-cross: struct U { float4 arr[4]; float4 tail; }; ... u.arr[0].x
+    // std140 widens the scalar element to `float4 arr[4]`, so the body must index
+    // the array AND narrow back with `.x`, never the leftover synthesized member
+    // access `arr._m0`.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { float arr[4]; vec4 tail; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.arr[0]) + u.tail; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4 arr[4]");
+    try assertContains(msl, "u_1.arr[0].x");
+    try assertNotContains(msl, "arr._m0");
+}
+
+test "T18.22: std140 vec3 array element — float3 a[N], body indexes WITHOUT a swizzle" {
+    // ORACLE spirv-cross: struct U { float3 a[3]; float4 tail; }; ... u.a[0]
+    // A vec3 array element is NOT widened to float4 (float3 already fills a
+    // 16-byte slot), so the decl stays `float3 a[3]` and the body accesses it
+    // BARE — appending a `.xyz` would diverge from spirv-cross.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { vec3 a[3]; vec4 tail; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a[0], 1.0) + u.tail; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float3 a[3];");
+    try assertContains(msl, "u_1.a[0]");
+    try assertNotContains(msl, "u_1.a[0].xyz");
+    try assertNotContains(msl, "a._m0");
+}
+
+test "T18.23: std140 vec2 array element — float4 a[N], body narrows with .xy (oracle u.a[0].xy)" {
+    // ORACLE spirv-cross: struct U { float4 a[3]; }; ... u.a[0].xy
+    // std140 widens a vec2 element to float4, so the body indexes AND narrows
+    // back to the 2 live components with `.xy`.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { vec2 a[3]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a[0], 0.0, 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4 a[3];");
+    try assertContains(msl, "u_1.a[0].xy");
+    try assertNotContains(msl, "a._m0");
+}
