@@ -5804,7 +5804,43 @@ const Analyzer = struct {
                         self.pure_op_cache.put(self.alloc, bc_key, result_id) catch {};
                         return .{ .ty = bitcast_ty, .id = result_id };
                     } else {
-                        var glsl_id = self.glslExtInstruction(node.data.name) orelse 1;
+                        // Honest-error guard for the whole class of recognized-but-
+                        // unlowerable builtins. A name reaches this generic
+                        // GLSL.std.450 ext-inst fallthrough only if it is in
+                        // `isGLSLBuiltin` but matched no dedicated lowering branch
+                        // above. If `glslExtInstruction` does not yield a real
+                        // GLSL.std.450 opcode for it, the old code defaulted to
+                        // opcode 1 (Round) via `orelse 1` and emitted an OpExtInst
+                        // with the call's full argument list — malformed SPIR-V
+                        // (spirv-val: "expected no more operands after 6 words…")
+                        // while still reporting exit 0. That is the Mitchell
+                        // silent-wrong failure mode. Instead, fail loud: record a
+                        // diagnostic and return error.SemanticFailed. In tolerate
+                        // mode the statement is skipped (valid-but-incomplete
+                        // output); in the diagnostics API it surfaces as an honest
+                        // error. Both strictly beat malformed SPIR-V.
+                        //
+                        // This guard fires ONLY when the opcode is genuinely null:
+                        // every builtin that uses this path with a real opcode
+                        // (sin/cos/pow/clamp/min/max/abs/sign/atan/findMSB/…) is
+                        // unaffected, because each returns a non-null base opcode
+                        // from `glslExtInstruction` (the type-based dispatch below
+                        // only refines an already-valid opcode).
+                        //
+                        // Known affected builtins (valid GLSL per glslangValidator,
+                        // but not yet lowered): textureGatherOffsets,
+                        // textureGradOffset, textureProjLod, textureProjGrad.
+                        // Correctly lowering these (OpImageGather + ConstOffsets,
+                        // OpImageSample{Proj,}{Explicit,}Lod/Grad) is a separate
+                        // feature milestone; this change only removes the
+                        // silent-wrong emission.
+                        var glsl_id = self.glslExtInstruction(node.data.name) orelse {
+                            last_error_ctx = "builtin-not-lowerable";
+                            last_error_inner = node.data.name;
+                            last_error_line = node.loc.line;
+                            last_error_column = node.loc.column;
+                            return error.SemanticFailed;
+                        };
                         // Argument-count dispatch for atan(y,x) -> Atan2
                         if (std.mem.eql(u8, node.data.name, "atan") and arg_tids.items.len >= 2) {
                             glsl_id = 25; // Atan2 (2-argument form)
