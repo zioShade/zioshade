@@ -81,6 +81,65 @@ fn countOp(words: []const u32, op: spirv.Op) usize {
     return n;
 }
 
+/// Return the result-type ID of the first instruction with the given opcode,
+/// or null if no such instruction exists. Assumes the opcode is a type-producing
+/// instruction whose layout is `[header | result_type_id | result_id | ...]`
+/// (e.g. OpImageGather / OpImageDrefGather), so the result-type ID is the first
+/// operand word.
+fn firstResultTypeId(words: []const u32, op: spirv.Op) ?u32 {
+    var i: usize = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        if (opcode == @intFromEnum(op) and word_count >= 3 and i + 1 < words.len) {
+            return words[i + 1];
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    return null;
+}
+
+/// Verify that the given type ID is defined by `OpTypeVector <float> 4`, i.e. a
+/// vec4 of 32-bit floats. Walks the type section to resolve the component type
+/// ID against an `OpTypeFloat 32`.
+fn typeIsVec4Float(words: []const u32, type_id: u32) bool {
+    // First pass: find the OpTypeVector defining `type_id`, capture its
+    // component type ID and component count.
+    var component_type: ?u32 = null;
+    var component_count: u32 = 0;
+    var i: usize = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        // OpTypeVector: [header | result_id | component_type_id | count]
+        if (opcode == @intFromEnum(spirv.Op.TypeVector) and word_count >= 4 and words[i + 1] == type_id) {
+            component_type = words[i + 2];
+            component_count = words[i + 3];
+            break;
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    if (component_type == null or component_count != 4) return false;
+    // Second pass: confirm the component type is OpTypeFloat with width 32.
+    i = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        // OpTypeFloat: [header | result_id | width]
+        if (opcode == @intFromEnum(spirv.Op.TypeFloat) and word_count >= 3 and words[i + 1] == component_type.?) {
+            return words[i + 2] == 32;
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    return false;
+}
+
 /// Check that a SPIR-V binary contains a specific capability.
 fn hasCapability(words: []const u32, cap: spirv.Capability) bool {
     var i: usize = 5;
@@ -598,7 +657,14 @@ test "gap: textureLodOffset emits ExplicitLod with ConstOffset" {
 
 // ─── Gap 19: textureGather ────────────────────────────────────────────────
 
-test "gap: textureGather(sampler2DShadow, vec2, ref) emits OpImageDrefGather" {
+test "gap: textureGather(sampler2DShadow, vec2, ref) emits OpImageDrefGather with vec4 result" {
+    // Shadow textureGather is VALID GLSL (glslangValidator -V accepts it) and
+    // returns a vec4 of 4 depth-comparison results. The reference toolchain emits
+    //   OpImageDrefGather %v4float %sampledImage %coord %dref
+    // with NO int component operand (unlike non-shadow gather). This test pins
+    // BOTH that the op is the Dref form AND that its result type is vec4 — the
+    // previous version only asserted `words.len > 0`, a false-green that passed
+    // even when the analyzer mistyped the result as float.
     const source: [:0]const u8 =
         \\#version 450
         \\layout(binding = 0) uniform sampler2DShadow tex;
@@ -611,7 +677,63 @@ test "gap: textureGather(sampler2DShadow, vec2, ref) emits OpImageDrefGather" {
     const words = try compileToWords(testing.allocator, source, .fragment);
     defer testing.allocator.free(words);
 
-    try testing.expect(words.len > 0);
+    // Must use OpImageDrefGather (the depth-comparison gather), NOT plain gather.
+    try testing.expectEqual(@as(usize, 1), countOp(words, .ImageDrefGather));
+    try testing.expectEqual(@as(usize, 0), countOp(words, .ImageGather));
+    // Result type must be vec4 (4 gathered comparison results), not float.
+    const rt = firstResultTypeId(words, .ImageDrefGather) orelse return error.NoDrefGather;
+    try testing.expect(typeIsVec4Float(words, rt));
+}
+
+test "gap: shadow textureGather result is vec4 (not over-rejected when bound to vec4)" {
+    // ROOT-CAUSE REGRESSION GUARD. The analyzer computed the result type of any
+    // shadow-sampler image builtin as `.float` (correct for shadow SAMPLE, which
+    // returns a single compared depth). But shadow textureGather returns a vec4.
+    // Binding the call to a `vec4` local forces the assignment type-check to
+    // observe the static type: with the bug it sees `float`, raising
+    // error.TypeMismatch and rejecting valid GLSL. glslangValidator -V accepts
+    // this shader. The direct-store form (o = textureGather(...)) accidentally
+    // hid the bug because codegen forces a vec4 result type regardless.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DShadow tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 1) in float refz;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec4 g = textureGather(tex, uv, refz);
+        \\    o = vec4(g.x, g.y, g.z, g.w);
+        \\}
+    ;
+    const words = try compileToWords(testing.allocator, source, .fragment);
+    defer testing.allocator.free(words);
+
+    try testing.expectEqual(@as(usize, 1), countOp(words, .ImageDrefGather));
+    const rt = firstResultTypeId(words, .ImageDrefGather) orelse return error.NoDrefGather;
+    try testing.expect(typeIsVec4Float(words, rt));
+}
+
+test "gap: non-shadow textureGather still emits OpImageGather (not Dref), with vec4 result" {
+    // Regression guard for the OTHER direction: a non-shadow sampler with an int
+    // component arg must keep emitting OpImageGather, NOT the Dref form. The fix
+    // for shadow gather must not over-broaden and reroute the non-shadow form.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec4 g = textureGather(tex, uv, 0);
+        \\    o = g;
+        \\}
+    ;
+    const words = try compileToWords(testing.allocator, source, .fragment);
+    defer testing.allocator.free(words);
+
+    try testing.expectEqual(@as(usize, 1), countOp(words, .ImageGather));
+    try testing.expectEqual(@as(usize, 0), countOp(words, .ImageDrefGather));
+    const rt = firstResultTypeId(words, .ImageGather) orelse return error.NoGather;
+    try testing.expect(typeIsVec4Float(words, rt));
 }
 
 // ─── Gap 20: matrix operations ─────────────────────────────────────────────
