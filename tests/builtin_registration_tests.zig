@@ -564,3 +564,93 @@ test "textureGatherOffsets: NON-const offsets array is an honest error (not sile
     }
     try std.testing.expect(found_reason);
 }
+
+/// Compile and assert the offsets argument is rejected with the named reason.
+/// Shared by the const-init-then-mutate and non-const-init (un-mutated) cases,
+/// both of which glslang -V rejects as "must be a compile-time constant".
+fn expectOffsetsNotConstant(source: [:0]const u8) !void {
+    var diags: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
+    );
+    var found_reason = false;
+    for (diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "textureGatherOffsets-offsets-not-constant") != null) {
+            found_reason = true;
+        }
+    }
+    try std.testing.expect(found_reason);
+}
+
+test "textureGatherOffsets: const-init-then-MUTATED offsets is an honest error (BLOCKER, no silent-drop)" {
+    // glslang -V rejects this ("must be a compile-time constant: offsets
+    // argument", exit 2): `offs` is NOT const-qualified and is mutated at
+    // runtime, so it is not a compile-time constant. Before the const-qualifier
+    // gate, glslpp recovered the FIRST (constant) store to `offs` and emitted
+    // OpImageGather + ConstOffsets using the STALE original constant array,
+    // SILENTLY DROPPING the `offs[0] = ivec2(k,k)` mutation (exit 0) —
+    // silent-wrong. It must honest-error with the named reason.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) flat in int k;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  ivec2 offs[4]=ivec2[4](ivec2(0,0),ivec2(1,0),ivec2(1,1),ivec2(0,1));
+        \\  offs[0] = ivec2(k, k);
+        \\  o = textureGatherOffsets(s, vec2(0.5), offs);
+        \\}
+    ;
+    try expectOffsetsNotConstant(source);
+}
+
+test "textureGatherOffsets: NON-const-qualified (constant-init, unmutated) offsets is an honest error (glslang parity)" {
+    // glslang -V requires `const` qualification specifically: a non-const array
+    // with a constant initializer that is never mutated is STILL rejected
+    // ("must be a compile-time constant: offsets argument", exit 2) because the
+    // declaration itself is mutable. glslpp must match — the const-qualifier
+    // gate rejects the un-const-qualified declaration even though the value
+    // would constant-fold identically.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  ivec2 offs[4]=ivec2[4](ivec2(0,0),ivec2(1,0),ivec2(1,1),ivec2(0,1));
+        \\  o = textureGatherOffsets(s, vec2(0.5), offs);
+        \\}
+    ;
+    try expectOffsetsNotConstant(source);
+}
+
+test "textureGatherOffsets: valid const offsets still lowers to OpImageGather+ConstOffsets (no over-reject)" {
+    // GREEN-guard: the valid `const ivec2 offs[4]` form that glslang -V accepts
+    // (exit 0) MUST keep compiling to a single OpImageGather carrying the
+    // ConstOffsets image operand (0x20) + the constant array id. The const-
+    // qualifier gate must not over-reject it.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  const ivec2 offs[4]=ivec2[4](ivec2(0,0),ivec2(1,0),ivec2(1,1),ivec2(0,1));
+        \\  o = textureGatherOffsets(s, vec2(0.5), offs);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(spv, OP_IMAGE_GATHER));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(spv, OP_IMAGE_DREF_GATHER));
+    const gi = firstInst(spv, OP_IMAGE_GATHER) orelse return error.NoGather;
+    try std.testing.expectEqual(@as(usize, 8), gi.len);
+    try std.testing.expectEqual(CONST_OFFSETS_MASK, gi[6]);
+    try std.testing.expect(gi[7] != 0);
+    try std.testing.expect(countOpcode(spv, OP_CONSTANT_COMPOSITE) >= 1);
+    try std.testing.expect(hasCapability(spv, CAP_IMAGE_GATHER_EXTENDED));
+}
