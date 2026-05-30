@@ -179,6 +179,7 @@ const Symbol = struct {
     member_index: u32 = 0, // For block_member: index into the parent block
     init_value: ?u32 = null, // For var_sym: if set, use this SSA value instead of load
     is_ssa: bool = false, // true if this var can be used as SSA (never reassigned)
+    is_const: bool = false, // true if declared `const` (immutable compile-time constant)
 };
 
 const LoopContext = struct {
@@ -2285,6 +2286,11 @@ const Analyzer = struct {
                         .ir_id = ir_id,
                         .init_value = if (can_ssa) init_id else null,
                         .is_ssa = can_ssa,
+                        // Record `const` qualification so consumers that require a
+                        // provable compile-time constant (e.g. the ConstOffsets
+                        // operand of textureGatherOffsets) can gate on it. A
+                        // non-const array is mutable even when constant-initialized.
+                        .is_const = node.data.qualifier != null and node.data.qualifier.?.is_const,
                     });
                 } else {
                     // No initializer — must use OpVariable
@@ -2293,6 +2299,7 @@ const Analyzer = struct {
                         .kind = .var_sym,
                         .ty = ty,
                         .ir_id = ir_id,
+                        .is_const = node.data.qualifier != null and node.data.qualifier.?.is_const,
                     });
                     // Emit local variable declaration (function storage class = 7)
                     const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
@@ -5286,21 +5293,46 @@ const Analyzer = struct {
                                 }
                                 // The offsets argument (arg 2) must be a constant
                                 // ivec2[4] array. glslang requires a constant
-                                // expression for ConstOffsets; a non-const array
-                                // would otherwise be silently dropped to a plain
-                                // gather (silent-wrong). Reject honestly.
+                                // expression for ConstOffsets and rejects anything
+                                // that is not — including a non-`const`-qualified
+                                // array, even one with a constant initializer:
+                                //   "must be a compile-time constant: offsets
+                                //   argument". A non-const array is MUTABLE, so its
+                                //   constant initializer is not a reliable value:
+                                //   `offs[0] = ivec2(k,k)` after a constant init
+                                //   would otherwise be SILENTLY DROPPED, emitting
+                                //   OpImageGather with the stale init array
+                                //   (silent-wrong). Gate on const-qualification to
+                                //   reject both the mutation case and the benign
+                                //   non-const-init over-accept, matching glslang.
                                 //
-                                // Arrays are never SSA-ified, so the offsets arg
-                                // resolves to an OpVariable POINTER (auto-load was
-                                // skipped for this position). Recover the constant
-                                // composite from the variable's initializing store;
-                                // a non-const array has no constant store source.
+                                // Arrays are never SSA-ified, so an array-variable
+                                // offsets arg resolves to an OpVariable POINTER
+                                // (auto-load was skipped for this position). For
+                                // that pointer form we additionally require the
+                                // referenced declaration to be `const`-qualified
+                                // (provably immutable) before recovering its
+                                // constant initializer via constStoreSource. The
+                                // inline-rvalue form (a constant-composite passed
+                                // directly, is_ptr == false) is already a genuine
+                                // compile-time constant and needs no qualifier.
                                 const offsets = arg_tids.items[2];
                                 const is_ivec2_arr4 = offsets.ty == .array and
                                     offsets.ty.array.size == 4 and
                                     offsets.ty.array.base.* == .ivec2;
+                                // Resolve const-qualification of the offsets-arg
+                                // declaration when it is a bare identifier (the
+                                // only form whose mutability we can prove). Any
+                                // other pointer form is treated as non-const →
+                                // honest error rather than silent-wrong.
+                                const offsets_arg_node = node.data.children[2];
+                                const offsets_is_const_decl = offsets_arg_node.tag == .identifier and
+                                    if (self.lookup(offsets_arg_node.data.name)) |offsets_sym|
+                                        offsets_sym.is_const
+                                    else
+                                        false;
                                 const const_offsets_id: ?u32 = if (offsets.is_ptr)
-                                    self.constStoreSource(offsets.id)
+                                    (if (offsets_is_const_decl) self.constStoreSource(offsets.id) else null)
                                 else if (self.isConstantId(offsets.id))
                                     offsets.id
                                 else
