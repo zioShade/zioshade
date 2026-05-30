@@ -8503,3 +8503,126 @@ test "semantic: non-shadow textureGather stays image_gather (no over-broadening 
     }
     try testing.expect(found_gather);
 }
+
+// ─── Non-shadow textureGather component must be an integral constant ───────────
+//
+// `textureGather(sampler2D, vec2, comp)` — the optional 3rd arg `comp` selects
+// the channel (0=R..3=A) and MUST be an integral constant expression (GLSL spec).
+// The SPIR-V `OpImageGather` Component operand is required to be a 32-bit int
+// scalar. The analyzer's non-shadow gather lowering used to copy every argument
+// id straight into the operands with no type check, so a FLOAT component
+// (`textureGather(s, uv, 0.5)`) produced `OpImageGather %v4float %img %coord
+// %float_0_5` — invalid SPIR-V that `spirv-val` rejects ("Expected Component to
+// be 32-bit int scalar") while glslpp reported exit 0. That is the Mitchell
+// silent-wrong failure mode: success + invalid output. glslangValidator -V
+// REJECTS the float-component shader ("no matching overloaded function found"),
+// so glslpp must fail loudly too, never emit garbage SPIR-V.
+
+test "semantic: non-shadow textureGather with float component errors (no float Component in OpImageGather)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGather(s, vec2(0.5), 0.5); }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: non-shadow textureGather with vec component errors" {
+    // A vector (non-scalar) component is equally invalid as a Component operand.
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGather(s, vec2(0.5), vec2(1.0)); }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: tolerate mode never emits image_gather with a float component" {
+    // In tolerate mode the analyzer records the error and continues; the guarded
+    // gather statement must be SKIPPED entirely, so NO `.image_gather` may appear
+    // in the body. (The emitted operand would otherwise be a float Component.)
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGather(s, vec2(0.5), 0.5); }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyzeWithOptions(testing.allocator, &root, .{ .tolerate_errors = true });
+    defer module.deinit();
+
+    for (module.functions) |func| {
+        for (func.body) |inst| {
+            try testing.expect(inst.tag != .image_gather);
+        }
+    }
+}
+
+test "semantic: non-shadow textureGather with int component 1 still lowers to image_gather (no over-reject)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ vec4 g = textureGather(s, uv, 1); o = g; }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    var found_gather = false;
+    for (module.functions) |func| {
+        for (func.body) |inst| {
+            if (inst.tag == .image_gather) {
+                found_gather = true;
+                try testing.expectEqual(ast.Type.vec4, inst.ty);
+            }
+        }
+    }
+    try testing.expect(found_gather);
+}
+
+test "semantic: non-shadow textureGather 2-arg form (default component) still lowers to image_gather" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ vec4 g = textureGather(s, uv); o = g; }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    var found_gather = false;
+    for (module.functions) |func| {
+        for (func.body) |inst| {
+            if (inst.tag == .image_gather) {
+                found_gather = true;
+                try testing.expectEqual(ast.Type.vec4, inst.ty);
+            }
+        }
+    }
+    try testing.expect(found_gather);
+}
