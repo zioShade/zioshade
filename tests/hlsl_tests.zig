@@ -13914,3 +13914,27 @@ test "HLSL: compute SSBO with runtime array drops struct wrapper" {
     try assertNotContains(hlsl, ".data[");
 }
 
+// textureGatherOffsets lowers (correctly, for the SPIR-V target) to
+// OpImageGather carrying the ConstOffsets image operand — a per-texel
+// 4-offset array that HLSL's `.Gather*` intrinsics cannot represent. The HLSL
+// backend must FAIL LOUDLY rather than silently emit a plain `.GatherGreen`
+// that drops the offsets (silent-wrong cross-compile). Emulation via four
+// offset gathers is a follow-up.
+test "hlsl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent plain gather" {
+    const src =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  const ivec2 offs[4]=ivec2[4](ivec2(0,0),ivec2(1,0),ivec2(1,1),ivec2(0,1));
+        \\  o = textureGatherOffsets(s, vec2(0.5), offs, 1);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expectError(
+        error.UnsupportedImageOperands,
+        glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 }),
+    );
+}
+

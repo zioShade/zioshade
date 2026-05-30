@@ -3536,6 +3536,15 @@ fn emitInstruction(
             }
         },
         .ImageGather => {
+            // textureGatherOffsets lowers to OpImageGather with the ConstOffsets
+            // image operand (mask bit 0x20 at word[6], the 4-offset array id at
+            // word[7]). HLSL's `.Gather*` intrinsics take no per-texel offset
+            // array, so emitting a plain `.GatherGreen` here would SILENTLY DROP
+            // the offsets (silent-wrong). Fail loudly instead; per-texel
+            // emulation (4 offset gathers) is a follow-up.
+            if (inst.words.len > 6 and (inst.words[6] & 0x20) != 0) {
+                return error.UnsupportedImageOperands;
+            }
             const rt = try hlslType(module, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";

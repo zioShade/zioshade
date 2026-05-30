@@ -501,6 +501,14 @@ const Codegen = struct {
             try self.emitWord(@intFromEnum(spirv.Capability.interpolation_function));
         }
 
+        // textureGatherOffsets emits OpImageGather with the ConstOffsets image
+        // operand, which requires the ImageGatherExtended capability. The
+        // semantic analyzer sets this flag when any such gather is lowered.
+        if (self.module.uses_image_gather_extended) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.image_gather_extended));
+        }
+
         // Mesh/Task shader capabilities
         if (self.stage == .mesh or self.stage == .task) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
@@ -4938,6 +4946,30 @@ const Codegen = struct {
                 try self.emitWord(sampled_image_id);
                 try self.emitWord(coord_id);
                 try self.emitWord(component_id);
+            },
+            .image_gather_offsets => {
+                // textureGatherOffsets → OpImageGather with the ConstOffsets
+                // image operand (mask bit 0x20), matching glslang -V:
+                //   OpImageGather %v4float %si %coord %Component ConstOffsets %arr
+                // Fixed IR operand layout from semantic:
+                //   [sampled_image, coord, component, offsets_array].
+                // The Component operand is ALWAYS present; the ConstOffsets mask
+                // word + the constant ivec2[4] array id are appended after it
+                // (+2 words over the plain 6-word gather → word count 8).
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const component_id = self.operandId(resolved, 2);
+                const offsets_id = self.operandId(resolved, 3);
+                try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageGather)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(component_id);
+                try self.emitWord(0x20); // Image Operand mask: ConstOffsets (bit 5)
+                try self.emitWord(offsets_id);
             },
             .image_dref_gather => {
                 // OpImageDrefGather: result_type(vec4), result, sampled_image, coordinate, dref

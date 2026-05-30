@@ -139,6 +139,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .uses_ray_query_position_fetch = analyzer.uses_ray_query_position_fetch,
         .uses_arm_tensors = analyzer.uses_arm_tensors,
         .uses_interpolation_function = analyzer.uses_interpolation_function,
+        .uses_image_gather_extended = analyzer.uses_image_gather_extended,
         .uses_ext_mesh_shader = analyzer.uses_ext_mesh_shader,
         .mesh_max_vertices = analyzer.mesh_max_vertices,
         .mesh_max_primitives = analyzer.mesh_max_primitives,
@@ -415,6 +416,9 @@ const Analyzer = struct {
     // interpolateAtCentroid/Sample/Offset require the InterpolationFunction
     // SPIR-V capability whenever any of them is used.
     uses_interpolation_function: bool = false,
+    // textureGatherOffsets emits OpImageGather with the ConstOffsets image
+    // operand, which requires the ImageGatherExtended capability.
+    uses_image_gather_extended: bool = false,
 
     fn deinit(self: *Analyzer) void {
         // Free heap-allocated AST types (if not transferred to Module)
@@ -722,6 +726,31 @@ const Analyzer = struct {
             }
         }
         return false;
+    }
+
+    /// Resolve the constant-composite id that initializes a local array variable.
+    /// `const ivec2 offs[4] = …` is lowered to an OpVariable plus a single
+    /// `store(var_id, init_id)` (arrays are never SSA-ified). When `init_id`
+    /// references a constant_composite, return it — this is the id usable as the
+    /// ConstOffsets image operand of textureGatherOffsets. Returns null if the
+    /// pointer has no constant store (e.g. a non-const / runtime-built array).
+    fn constStoreSource(self: *Analyzer, ptr_id: u32) ?u32 {
+        for (self.instructions.items) |inst| {
+            if (inst.tag == .store and inst.operands.len >= 2) {
+                const dst = switch (inst.operands[0]) {
+                    .id => |id| id,
+                    else => continue,
+                };
+                if (dst != ptr_id) continue;
+                const src = switch (inst.operands[1]) {
+                    .id => |id| id,
+                    else => continue,
+                };
+                if (self.isConstantId(src)) return src;
+                return null; // stored, but not a constant → not usable
+            }
+        }
+        return null;
     }
 
     /// Try to upgrade the last instruction from composite_construct to constant_composite
@@ -4079,12 +4108,19 @@ const Analyzer = struct {
                 const is_interpolate_at_fn = std.mem.eql(u8, node.data.name, "interpolateAtCentroid") or
                     std.mem.eql(u8, node.data.name, "interpolateAtSample") or
                     std.mem.eql(u8, node.data.name, "interpolateAtOffset");
+                // textureGatherOffsets' 3rd arg (index 2) is a `const ivec2[4]`
+                // offsets array. It lowers to the ConstOffsets image operand,
+                // which references the constant-composite directly — never a
+                // loaded r-value. Arrays are never SSA-ified, so the identifier
+                // resolves to an OpVariable pointer; skip the auto-load and let
+                // the dedicated lowering recover the constant initializer.
+                const is_gather_offsets_fn = std.mem.eql(u8, node.data.name, "textureGatherOffsets");
                 for (node.data.children, 0..) |arg, i| {
                     var tid = try self.analyzeExpression(arg);
                     // Atomic functions need pointer arg, don't auto-load first arg
                     // Image atomics also need the image pointer (not loaded value)
                     const is_emit_mesh_tasks = std.mem.eql(u8, node.data.name, "EmitMeshTasksEXT");
-                    const skip_load = (is_atomic_fn and i == 0) or (is_image_atomic_fn and i == 0) or (is_emit_mesh_tasks and i == 3) or (is_interpolate_at_fn and i == 0);
+                    const skip_load = (is_atomic_fn and i == 0) or (is_image_atomic_fn and i == 0) or (is_emit_mesh_tasks and i == 3) or (is_interpolate_at_fn and i == 0) or (is_gather_offsets_fn and i == 2);
                     if (tid.is_ptr and !skip_load) {
                         const ld = try self.emitLoadCached(tid.id, tid.ty);
                         tid = .{ .ty = tid.ty, .id = ld };
@@ -5216,6 +5252,102 @@ const Analyzer = struct {
                     // Texture functions use different SPIR-V ops, not GLSL.std.450
                     if (self.isTextureBuiltin(node.data.name)) {
                         if (self.isImageSampleBuiltin(node.data.name) and !self.isTexelFetchBuiltin(node.data.name)) {
+                            // textureGatherOffsets(s, coord, const ivec2[4][, comp])
+                            //   → OpImageGather %v4float %si %coord %Component
+                            //        ConstOffsets %constArray
+                            // matching glslang -V. The offsets array MUST be a
+                            // constant ivec2[4]; the Component operand is ALWAYS
+                            // present (defaulting to const int 0 when omitted).
+                            // This is a NON-shadow-only feature in this milestone:
+                            // the shadow variant (OpImageDrefGather + ConstOffsets)
+                            // is a follow-up, so reject it honestly here.
+                            const is_gather_offsets = std.mem.eql(u8, node.data.name, "textureGatherOffsets");
+                            if (is_gather_offsets) {
+                                if (is_shadow_sample) {
+                                    // Shadow textureGatherOffsets is valid GLSL but
+                                    // not yet lowered — fail loud, never silent-wrong.
+                                    // last_error_inner carries the specific reason
+                                    // (last_error_ctx is later clobbered to the
+                                    // enclosing expression's name by the errdefer
+                                    // chain; inner survives — set only when empty).
+                                    last_error_ctx = "textureGatherOffsets-shadow-unsupported";
+                                    last_error_inner = "textureGatherOffsets-shadow-unsupported";
+                                    last_error_line = node.loc.line;
+                                    last_error_column = node.loc.column;
+                                    return error.SemanticFailed;
+                                }
+                                // Positional args: [sampler, coord, offsets[, comp]].
+                                if (arg_tids.items.len < 3) {
+                                    last_error_ctx = "textureGatherOffsets-missing-offsets";
+                                    last_error_inner = "textureGatherOffsets-missing-offsets";
+                                    last_error_line = node.loc.line;
+                                    last_error_column = node.loc.column;
+                                    return error.SemanticFailed;
+                                }
+                                // The offsets argument (arg 2) must be a constant
+                                // ivec2[4] array. glslang requires a constant
+                                // expression for ConstOffsets; a non-const array
+                                // would otherwise be silently dropped to a plain
+                                // gather (silent-wrong). Reject honestly.
+                                //
+                                // Arrays are never SSA-ified, so the offsets arg
+                                // resolves to an OpVariable POINTER (auto-load was
+                                // skipped for this position). Recover the constant
+                                // composite from the variable's initializing store;
+                                // a non-const array has no constant store source.
+                                const offsets = arg_tids.items[2];
+                                const is_ivec2_arr4 = offsets.ty == .array and
+                                    offsets.ty.array.size == 4 and
+                                    offsets.ty.array.base.* == .ivec2;
+                                const const_offsets_id: ?u32 = if (offsets.is_ptr)
+                                    self.constStoreSource(offsets.id)
+                                else if (self.isConstantId(offsets.id))
+                                    offsets.id
+                                else
+                                    null;
+                                if (!is_ivec2_arr4 or const_offsets_id == null) {
+                                    last_error_ctx = "textureGatherOffsets-offsets-not-constant";
+                                    last_error_inner = "textureGatherOffsets-offsets-not-constant";
+                                    last_error_line = node.loc.line;
+                                    last_error_column = node.loc.column;
+                                    return error.SemanticFailed;
+                                }
+                                // The optional component (arg 3) must be integral
+                                // (same rule as textureGather). Default to const
+                                // int 0 when omitted — the Component operand is
+                                // always emitted.
+                                var component_id: u32 = undefined;
+                                if (arg_tids.items.len >= 4) {
+                                    const comp_ty = arg_tids.items[3].ty;
+                                    if (comp_ty != .int and comp_ty != .uint) {
+                                        last_error_ctx = "textureGatherOffsets-component-not-integral";
+                                        last_error_inner = "textureGatherOffsets-component-not-integral";
+                                        last_error_line = node.loc.line;
+                                        last_error_column = node.loc.column;
+                                        return error.SemanticFailed;
+                                    }
+                                    component_id = arg_tids.items[3].id;
+                                } else {
+                                    component_id = try self.getConstInt(0, .int);
+                                }
+                                // Fixed IR operand layout for image_gather_offsets:
+                                // [sampled_image, coord, component, offsets_array].
+                                const operands = try self.alloc.alloc(ir.Instruction.Operand, 4);
+                                operands[0] = .{ .id = arg_tids.items[0].id };
+                                operands[1] = .{ .id = arg_tids.items[1].id };
+                                operands[2] = .{ .id = component_id };
+                                operands[3] = .{ .id = const_offsets_id.? };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .image_gather_offsets,
+                                    .result_type = null,
+                                    .result_id = result_id,
+                                    .operands = operands,
+                                    .ty = result_ty, // vec4
+                                });
+                                // ConstOffsets requires ImageGatherExtended.
+                                self.uses_image_gather_extended = true;
+                                return .{ .ty = result_ty, .id = result_id };
+                            }
                             // textureGather has its own IR tags
                             const is_gather = std.mem.eql(u8, node.data.name, "textureGather");
                             if (is_gather) {
@@ -7593,7 +7725,8 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "texelFetchOffset") or
             std.mem.eql(u8, name, "textureOffset") or
             std.mem.eql(u8, name, "textureGrad") or
-            std.mem.eql(u8, name, "textureGather");
+            std.mem.eql(u8, name, "textureGather") or
+            std.mem.eql(u8, name, "textureGatherOffsets");
     }
 
     fn isBarrierBuiltin(self: *Analyzer, name: []const u8) bool {
@@ -7659,6 +7792,7 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "textureOffset") or
             std.mem.eql(u8, name, "textureGrad") or
             std.mem.eql(u8, name, "textureGather") or
+            std.mem.eql(u8, name, "textureGatherOffsets") or
             std.mem.eql(u8, name, "texelFetchOffset") or
             std.mem.eql(u8, name, "textureProjLod") or
             std.mem.eql(u8, name, "textureProjGrad") or
@@ -8371,42 +8505,27 @@ test "semantic: tolerate mode continues past first statement error" {
     try testing.expect(const_float_count >= 3);
 }
 
-// ── RED: recognized-but-unlowerable builtins must not emit malformed OpExtInst ──
+// ── recognized-but-unlowerable builtins must not emit malformed OpExtInst ──
 //
-// `textureGatherOffsets`, `textureGradOffset`, `textureProjLod`, and
-// `textureProjGrad` are all in `isGLSLBuiltin` (so they parse + type-check),
-// but NONE of them are in `isTextureBuiltin`, so the func_call lowering never
-// takes the dedicated image-instruction path. They fall through to the generic
-// GLSL.std.450 ext-inst branch where `glslExtInstruction(name)` returns null.
-// The buggy `orelse 1` there defaulted the opcode to 1 (Round) and emitted an
-// `OpExtInst` with the call's full argument list — a malformed instruction that
-// `spirv-val` rejects ("expected no more operands after 6 words, but stated
-// word count is 8") while glslpp reported exit 0. That is the Mitchell
-// silent-wrong failure mode: success + invalid output.
+// `textureGradOffset`, `textureProjLod`, and `textureProjGrad` are all in
+// `isGLSLBuiltin` (so they parse + type-check) but NOT yet lowered to a
+// dedicated image instruction. They fall through to the generic GLSL.std.450
+// ext-inst branch where `glslExtInstruction(name)` returns null. The buggy
+// `orelse 1` there defaulted the opcode to 1 (Round) and emitted an `OpExtInst`
+// with the call's full argument list — a malformed instruction that `spirv-val`
+// rejects while glslpp reported exit 0 (the Mitchell silent-wrong failure mode).
 //
 // Correct behavior (honest error): in the strict (non-tolerate) analyze path
 // these must return error.SemanticFailed, never a module containing a bogus
-// ext_inst. glslangValidator -V accepts all four shaders, so they ARE valid
-// GLSL — glslpp must either lower them correctly or fail loudly, never emit
-// garbage SPIR-V.
-
-test "semantic: textureGatherOffsets errors instead of emitting malformed OpExtInst" {
-    const source =
-        \\#version 450
-        \\layout(binding=0) uniform sampler2D s;
-        \\layout(location=0) out vec4 o;
-        \\void main(){ const ivec2 offs[4]=ivec2[4](ivec2(0),ivec2(1),ivec2(2),ivec2(3)); o = textureGatherOffsets(s, vec2(0.5), offs); }
-    ;
-    const tokens = try lexer.tokenize(testing.allocator, source);
-    defer testing.allocator.free(tokens);
-    var root = try parser.parse(testing.allocator, source, tokens);
-    defer parser.freeTree(testing.allocator, &root);
-    const result = analyze(testing.allocator, &root);
-    try testing.expectError(error.SemanticFailed, result);
-}
+// ext_inst. glslangValidator -V accepts these shaders, so they ARE valid GLSL —
+// glslpp must either lower them correctly or fail loudly, never emit garbage.
+//
+// NOTE: textureGatherOffsets USED to be in this unlowerable class but is now
+// correctly lowered to OpImageGather + ConstOffsets (see the gap/builtin-reg
+// tests). Its lowering is verified there; the remaining siblings stay guarded.
 
 test "semantic: textureProjLod errors instead of emitting malformed OpExtInst" {
-    // Sibling of the textureGatherOffsets bug: same fallthrough class.
+    // Still-unlowerable sibling of the former textureGatherOffsets bug class.
     const source =
         \\#version 450
         \\layout(binding=0) uniform sampler2D s;
@@ -8424,16 +8543,17 @@ test "semantic: textureProjLod errors instead of emitting malformed OpExtInst" {
 test "semantic: tolerate mode never emits a defaulted GLSL.std.450 ext_inst for an unlowerable builtin" {
     // The malformed SPIR-V is, concretely, an `.ext_inst` IR instruction whose
     // first operand is the GLSL.std.450 opcode literal. The buggy `orelse 1`
-    // emitted one with opcode 1 (Round) for textureGatherOffsets. In tolerate
-    // mode the analyzer records the error and continues; the guarded statement
-    // must be SKIPPED entirely, so NO `.ext_inst` instruction may appear in the
-    // body. (A correct GLSL.std.450 call like sin() would still emit one — this
-    // shader contains no such call, so any `.ext_inst` here is the bug.)
+    // emitted one with opcode 1 (Round) for an unlowerable texture builtin. In
+    // tolerate mode the analyzer records the error and continues; the guarded
+    // statement must be SKIPPED entirely, so NO `.ext_inst` instruction may
+    // appear in the body. (A correct GLSL.std.450 call like sin() would still
+    // emit one — this shader contains no such call, so any `.ext_inst` is the
+    // bug.) Uses textureProjLod, which is still unlowerable.
     const source =
         \\#version 450
         \\layout(binding=0) uniform sampler2D s;
         \\layout(location=0) out vec4 o;
-        \\void main(){ const ivec2 offs[4]=ivec2[4](ivec2(0),ivec2(1),ivec2(2),ivec2(3)); o = textureGatherOffsets(s, vec2(0.5), offs); }
+        \\void main(){ o = textureProjLod(s, vec3(0.5), 0.0); }
     ;
     const tokens = try lexer.tokenize(testing.allocator, source);
     defer testing.allocator.free(tokens);

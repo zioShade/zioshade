@@ -2149,6 +2149,15 @@ fn emitInstruction(
             try w.print("    {s} {s} = {s}.read({s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, names.get(inst.words[4]) orelse "0"});
         },
         .ImageGather => {
+            // textureGatherOffsets lowers to OpImageGather with the ConstOffsets
+            // image operand (mask bit 0x20 at word[6], the 4-offset array id at
+            // word[7]). MSL's `tex.gather(...)` takes no per-texel offset array,
+            // so emitting a plain `.gather` here would SILENTLY DROP the offsets
+            // (silent-wrong). Fail loudly instead; per-texel emulation (4 offset
+            // gathers) is a follow-up.
+            if (inst.words.len > 6 and (inst.words[6] & 0x20) != 0) {
+                return error.UnsupportedImageOperands;
+            }
             // MSL: tex.gather(samp, coord, component)
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";

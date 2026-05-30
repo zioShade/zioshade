@@ -1737,6 +1737,8 @@ test "gap: textureGatherOffsets with NON-const offsets array is an honest error 
     ;
     const words = try glslpp.compileToSPIRV(testing.allocator, source, .{ .stage = .fragment });
     defer testing.allocator.free(words);
-    try testing.expectEqualStrings("textureGatherOffsets-offsets-not-constant", semantic.last_error_ctx);
+    // The specific reason is carried in last_error_inner (last_error_ctx is
+    // clobbered to the enclosing expression name by the errdefer chain).
+    try testing.expectEqualStrings("textureGatherOffsets-offsets-not-constant", semantic.last_error_inner);
     try testing.expectEqual(@as(usize, 0), countOp(words, .ImageGather));
 }

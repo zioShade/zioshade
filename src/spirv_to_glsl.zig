@@ -2146,6 +2146,16 @@ fn emitInstruction(
         },
         .ImageGather => {
             // OpImageGather: result_type, result, sampled_image, coordinate, component [, image_operands]
+            // textureGatherOffsets lowers to OpImageGather with the ConstOffsets
+            // image operand (mask bit 0x20 at word[6], the 4-offset array id at
+            // word[7]). GLSL *can* express textureGatherOffsets, but
+            // reconstructing the offsets-array expression from the constant id is
+            // out of scope for this round-trip backend; emitting a plain
+            // textureGather would SILENTLY DROP the offsets (silent-wrong). Fail
+            // loudly instead; textureGatherOffsets round-trip is a follow-up.
+            if (inst.words.len > 6 and (inst.words[6] & 0x20) != 0) {
+                return error.UnsupportedImageOperands;
+            }
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";

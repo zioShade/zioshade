@@ -101,6 +101,9 @@ pub const Module = struct {
     uses_ext_mesh_shader: bool = false,
     // interpolateAtCentroid/Sample/Offset → OpCapability InterpolationFunction.
     uses_interpolation_function: bool = false,
+    // textureGatherOffsets (ConstOffsets image operand) → OpCapability
+    // ImageGatherExtended.
+    uses_image_gather_extended: bool = false,
     qcom_block_match_textures: []const u32 = &.{},
     qcom_weight_textures: []const u32 = &.{},
     // Mesh shader layout parameters
@@ -276,6 +279,14 @@ pub const Instruction = struct {
         image_sample_dref_explicit_lod,
         image_sample_dref_proj,
         image_gather,
+        // textureGatherOffsets: like image_gather but carries a 4-element
+        // constant ivec2 offsets array, emitted as the ConstOffsets image
+        // operand. Fixed operand layout: [sampled_image, coord, component,
+        // offsets_array] (component is always present, defaulted to const int 0
+        // in semantic when GLSL omits it). A dedicated tag keeps plain
+        // image_gather codegen byte-identical and lets the cross-compile
+        // backends honest-error on the unrepresentable per-texel offsets.
+        image_gather_offsets,
         image_dref_gather,
         image_fetch,
         image_fetch_ms,
