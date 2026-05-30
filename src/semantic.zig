@@ -8300,3 +8300,81 @@ test "semantic: tolerate mode continues past first statement error" {
     // least the three trailing literal initializers.
     try testing.expect(const_float_count >= 3);
 }
+
+// ── RED: recognized-but-unlowerable builtins must not emit malformed OpExtInst ──
+//
+// `textureGatherOffsets`, `textureGradOffset`, `textureProjLod`, and
+// `textureProjGrad` are all in `isGLSLBuiltin` (so they parse + type-check),
+// but NONE of them are in `isTextureBuiltin`, so the func_call lowering never
+// takes the dedicated image-instruction path. They fall through to the generic
+// GLSL.std.450 ext-inst branch where `glslExtInstruction(name)` returns null.
+// The buggy `orelse 1` there defaulted the opcode to 1 (Round) and emitted an
+// `OpExtInst` with the call's full argument list — a malformed instruction that
+// `spirv-val` rejects ("expected no more operands after 6 words, but stated
+// word count is 8") while glslpp reported exit 0. That is the Mitchell
+// silent-wrong failure mode: success + invalid output.
+//
+// Correct behavior (honest error): in the strict (non-tolerate) analyze path
+// these must return error.SemanticFailed, never a module containing a bogus
+// ext_inst. glslangValidator -V accepts all four shaders, so they ARE valid
+// GLSL — glslpp must either lower them correctly or fail loudly, never emit
+// garbage SPIR-V.
+
+test "semantic: textureGatherOffsets errors instead of emitting malformed OpExtInst" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ const ivec2 offs[4]=ivec2[4](ivec2(0),ivec2(1),ivec2(2),ivec2(3)); o = textureGatherOffsets(s, vec2(0.5), offs); }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: textureProjLod errors instead of emitting malformed OpExtInst" {
+    // Sibling of the textureGatherOffsets bug: same fallthrough class.
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjLod(s, vec3(0.5), 0.0); }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: tolerate mode never emits a defaulted GLSL.std.450 ext_inst for an unlowerable builtin" {
+    // The malformed SPIR-V is, concretely, an `.ext_inst` IR instruction whose
+    // first operand is the GLSL.std.450 opcode literal. The buggy `orelse 1`
+    // emitted one with opcode 1 (Round) for textureGatherOffsets. In tolerate
+    // mode the analyzer records the error and continues; the guarded statement
+    // must be SKIPPED entirely, so NO `.ext_inst` instruction may appear in the
+    // body. (A correct GLSL.std.450 call like sin() would still emit one — this
+    // shader contains no such call, so any `.ext_inst` here is the bug.)
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ const ivec2 offs[4]=ivec2[4](ivec2(0),ivec2(1),ivec2(2),ivec2(3)); o = textureGatherOffsets(s, vec2(0.5), offs); }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyzeWithOptions(testing.allocator, &root, .{ .tolerate_errors = true });
+    defer module.deinit();
+
+    for (module.functions) |func| {
+        for (func.body) |inst| {
+            try testing.expect(inst.tag != .ext_inst);
+        }
+    }
+}
