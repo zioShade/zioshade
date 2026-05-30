@@ -685,6 +685,11 @@ test "msl: frexp (FrexpStruct std450 #52)" {
     try assertContains(msl, "frexp(");
     try assertNotContains(msl, "ResType");
     try assertNotContains(msl, "unhandled");
+    // The location input `v0` must be plumbed through the stage-in struct,
+    // not referenced bare (was false-green: only checked for `frexp(`).
+    try assertContains(msl, "float v0 [[user(locn0)]];");
+    try assertContains(msl, "main0_in in [[stage_in]]");
+    try assertContains(msl, "frexp(in.v0");
 }
 
 test "msl: modf (ModfStruct std450 #36)" {
@@ -703,6 +708,11 @@ test "msl: modf (ModfStruct std450 #36)" {
     try assertContains(msl, "modf(");
     try assertNotContains(msl, "ResType");
     try assertNotContains(msl, "unhandled");
+    // The location input `v0` must be plumbed through the stage-in struct,
+    // not referenced bare (was false-green: only checked for `modf(`).
+    try assertContains(msl, "float v0 [[user(locn0)]];");
+    try assertContains(msl, "main0_in in [[stage_in]]");
+    try assertContains(msl, "modf(in.v0");
 }
 
 test "MSL: local array variable declaration" {
@@ -824,22 +834,29 @@ test "T15.2: multiple location inputs ordered by location" {
     try std.testing.expect(i_uv < i_color);
 }
 
-test "T15.3: swizzle on a location input becomes in.<name>.<swizzle>" {
+test "T15.3: access-chain/swizzle on a location input resolves off in.<name>" {
+    // Two forms exercised together:
+    //   - color.x/.y/.z  → AccessChain + swizzleChar → `in.color.x` etc.
+    //   - color.xyz      → VectorShuffle → `in.color[0]` etc. (array-index form)
+    // Both must resolve through the stage-in struct member; neither may leave a
+    // bare, undeclared `color` reference behind.
     const source =
         \\#version 450
         \\layout(location = 0) in vec4 color;
         \\layout(location = 0) out vec4 o;
-        \\void main() { o = vec4(color.xyz, 1.0); }
+        \\void main() { o = vec4(color.x, color.y, color.z, 1.0) + vec4(color.xyz, 0.0); }
     ;
     const msl = try compileToMsl(source);
     defer alloc.free(msl);
     try assertContains(msl, "struct main0_in");
     try assertContains(msl, "float4 color [[user(locn0)]];");
     try assertContains(msl, "main0_in in [[stage_in]]");
-    // Swizzle/access-chain must resolve off the struct member.
+    // Swizzle/access-chain must resolve off the struct member (both forms).
     try assertContains(msl, "in.color.x");
-    // Never a bare swizzle on an undeclared input.
+    try assertContains(msl, "in.color[0]");
+    // Never a bare swizzle/index on an undeclared input.
     try assertNotContains(msl, " = color.x");
+    try assertNotContains(msl, "float3(color[0]");
 }
 
 test "T15.4: gl_FragCoord and a location input coexist" {
