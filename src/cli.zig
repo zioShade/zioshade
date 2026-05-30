@@ -498,6 +498,14 @@ fn compileWithDiagsOrExit(
 }
 
 fn crossErr(err: anyerror) noreturn {
+    // WGSL records which GLSL.std.450 instruction was unsupported (errors carry
+    // no payload) — surface it so the message is actionable, not just the name.
+    if (err == error.UnsupportedExtInst) {
+        if (glslpp.wgslLastErrorDetail()) |detail| {
+            std.debug.print("error: cross-compilation failed: {s}: {s}\n", .{ @errorName(err), detail });
+            std.process.exit(1);
+        }
+    }
     std.debug.print("error: cross-compilation failed: {s}\n", .{@errorName(err)});
     std.process.exit(1);
 }
