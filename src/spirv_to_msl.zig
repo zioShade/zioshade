@@ -11,7 +11,12 @@ const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
 const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32, descriptor_set: u32 = 0 };
-const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0 };
+/// `is_depth` marks a comparison/shadow sampler (its OpTypeImage Depth operand
+/// is 1, e.g. `sampler2DShadow`). Such a texture's MSL `.sample_compare` /
+/// `.gather_compare` methods are members of `depth2d<float>`, NOT
+/// `texture2d<float>` — see mslTextureType. Emitting `texture2d<float>` for one
+/// yields MSL that does not compile.
+const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0, is_depth: bool = false };
 const MemberKey = struct { struct_id: u32, member_index: u32 };
 /// A stage input that becomes a `main0_in` field and is referenced in the body
 /// as `in.<name>`. For fragment the field is `T name [[user(locnN)]]`; for
@@ -40,6 +45,39 @@ fn swizzleChar(i: u32) []const u8 { return switch(i){ 0=>".x",1=>".y",2=>".z",3=
 fn parseLitStr(alloc: std.mem.Allocator, words: []const u32) ![]const u8 { var buf = try std.ArrayList(u8).initCapacity(alloc, words.len*4); for(words)|word|{const bytes:[4]u8=@bitCast(word);for(bytes)|c|{if(c==0)break;buf.appendAssumeCapacity(c);}} return buf.toOwnedSlice(alloc); }
 fn sanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 { var buf = try std.ArrayList(u8).initCapacity(alloc, name.len); for(name)|c|{switch(c){'a'...'z','A'...'Z','0'...'9','_'=>buf.appendAssumeCapacity(c),else=>buf.appendAssumeCapacity('_'),}} return buf.toOwnedSlice(alloc); }
 fn isUniformVar(m: *const ParsedModule, id: u32) bool { const inst = getDef(m, id) orelse return false; if (inst.op == .Variable and inst.words.len >= 4) { const sc: spirv.StorageClass = @enumFromInt(inst.words[3]); return sc == .Uniform; } return false; }
+
+/// True when the resource's image type is a 2D depth/comparison image (the
+/// OpTypeImage `Depth` operand is 1 AND `Dim` is 2D), e.g. a `sampler2DShadow`.
+/// `pointee` is the type behind the UniformConstant pointer: either an
+/// OpTypeSampledImage (wrapping the OpTypeImage) or an OpTypeImage directly.
+/// OpTypeImage layout: `[op, result_id, sampled_type, DIM, DEPTH, arrayed, ms,
+/// sampled, format]` — so `words[3]` is Dim and `words[4]` is Depth.
+///
+/// Only 2D is gated on purpose: this whole backend hardcodes 2D textures, so a
+/// non-2D depth sampler (samplerCubeShadow → depthcube, sampler2DArrayShadow →
+/// depth2d_array, etc.) must NOT be promoted to `depth2d` — that would swap one
+/// non-compiling type for another. glslpp marks ALL shadow samplers with
+/// Depth=1 regardless of dimension, so the Dim check is what keeps the depth2d
+/// promotion scoped to the case it actually models. Non-2D textures (shadow or
+/// not) are a separate, backend-wide gap.
+fn imageTypeIsDepth(m: *const ParsedModule, pointee: Instruction) bool {
+    var img = pointee;
+    if (img.op == .TypeSampledImage and img.words.len > 2) {
+        img = getDef(m, img.words[2]) orelse return false;
+    }
+    if (img.op != .TypeImage or img.words.len <= 4) return false;
+    const dim = img.words[3]; // SPIR-V Dim: 1 == 2D
+    const depth = img.words[4]; // 0 = non-depth, 1 = depth, 2 = no indication
+    return depth == 1 and dim == 1;
+}
+
+/// MSL texture type for a sampled texture parameter. Comparison/shadow samplers
+/// must be `depth2d<float>` (the home of `.sample_compare`/`.gather_compare`);
+/// everything else stays `texture2d<float>`. Only the 2D float case is modelled
+/// here, matching the rest of this backend.
+fn mslTextureType(tex: TextureDecl) []const u8 {
+    return if (tex.is_depth) "depth2d<float>" else "texture2d<float>";
+}
 
 fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(m, id) orelse return null;
@@ -612,7 +650,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             }
             for (textures.items) |tex| {
                 if (tex.descriptor_set != set_idx) continue;
-                try w.print("    texture2d<float> {s} [[id({d})]];\n", .{ tex.name, id_slot });
+                try w.print("    {s} {s} [[id({d})]];\n", .{ mslTextureType(tex), tex.name, id_slot });
                 id_slot += 1;
                 try w.print("    sampler {s}Smplr [[id({d})]];\n", .{ tex.name, id_slot });
                 id_slot += 1;
@@ -938,7 +976,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pt = pi.words[3];
         switch (sc) {
             .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding, .descriptor_set=set}) catch {}; },
-            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; const name = names.get(rid) orelse "tex"; switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set}) catch {};}, else=>{}} },
+            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; const name = names.get(rid) orelse "tex"; const is_depth = imageTypeIsDepth(m, pei); switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth}) catch {};}, else=>{}} },
             else => {},
         }
     }
@@ -1441,7 +1479,7 @@ fn emitFunction(
         // Add texture + sampler params
         for (textures.items) |tex| {
             if (!first_param) try w.writeAll(", ");
-            try w.print("texture2d<float> {s}", .{tex.name});
+            try w.print("{s} {s}", .{ mslTextureType(tex), tex.name });
             try w.print(", sampler {s}Smplr", .{tex.name});
             first_param = false;
         }
@@ -1497,7 +1535,7 @@ fn emitFunction(
             for (textures.items) |tex| {
                 if (!first_param) try w.writeAll(", ");
                 const tex_b = common.applyBindingShift(tex.binding, binding_shift);
-                try w.print("texture2d<float> {s} [[texture({d})]]", .{tex.name, tex_b});
+                try w.print("{s} {s} [[texture({d})]]", .{ mslTextureType(tex), tex.name, tex_b});
                 try w.print(", sampler {s}Smplr [[sampler({d})]]", .{tex.name, tex_b});
                 first_param = false;
             }
@@ -1594,7 +1632,7 @@ fn emitFunction(
                 try w.print("    constant {s}& {s}_1 = set{d}.{s};\n", .{ cb.name, cb.name, cb.descriptor_set, cb.name });
             }
             for (textures.items) |tex| {
-                try w.print("    texture2d<float> {s} = set{d}.{s};\n", .{ tex.name, tex.descriptor_set, tex.name });
+                try w.print("    {s} {s} = set{d}.{s};\n", .{ mslTextureType(tex), tex.name, tex.descriptor_set, tex.name });
                 try w.print("    sampler {s}Smplr = set{d}.{s}Smplr;\n", .{ tex.name, tex.descriptor_set, tex.name });
             }
             // SSBO: body emitter expects `Name` as a `device Buf*` (deref'd
@@ -1672,7 +1710,7 @@ fn emitFunction(
         // Textures + samplers (stage-agnostic).
         for (textures.items) |tex| {
             if (!first_param) try w.writeAll(", ");
-            try w.print("texture2d<float> {s}, sampler {s}Smplr", .{ tex.name, tex.name });
+            try w.print("{s} {s}, sampler {s}Smplr", .{ mslTextureType(tex), tex.name, tex.name });
             first_param = false;
         }
         try w.writeAll(")\n{\n");
@@ -1698,7 +1736,7 @@ fn emitFunction(
         for (textures.items) |tex| {
             if (!first_param) try w.writeAll(", ");
             const tex_b = common.applyBindingShift(tex.binding, binding_shift);
-            try w.print("texture2d<float> {s} [[texture({d})]], sampler {s}Smplr [[sampler({d})]]", .{ tex.name, tex_b, tex.name, tex_b });
+            try w.print("{s} {s} [[texture({d})]], sampler {s}Smplr [[sampler({d})]]", .{ mslTextureType(tex), tex.name, tex_b, tex.name, tex_b });
             first_param = false;
         }
         try w.writeAll(")\n{\n    main0_out out = {};\n    ");
@@ -1777,7 +1815,7 @@ fn emitFunction(
     for (textures.items) |tex| {
         if (!first_param) try w.writeAll(", ");
         first_param = false;
-        try w.print("texture2d<float> {s}", .{tex.name});
+        try w.print("{s} {s}", .{ mslTextureType(tex), tex.name });
         try w.print(", sampler {s}Smplr", .{tex.name});
     }
 

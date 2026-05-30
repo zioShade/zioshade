@@ -586,6 +586,14 @@ pub fn spirvToWGSL(
     return spirv_to_wgsl.spirvToWGSL(alloc, spirv_words, options);
 }
 
+/// Detail for the most recent WGSL `error.UnsupportedExtInst` (which
+/// GLSL.std.450 instruction had no WGSL mapping), or null. Valid until the next
+/// `spirvToWGSL` call on the same thread. Lets the CLI/callers report a useful
+/// message instead of the bare error name.
+pub fn wgslLastErrorDetail() ?[]const u8 {
+    return spirv_to_wgsl.last_error_detail;
+}
+
 /// One-shot: compile Shadertoy-style GLSL to HLSL.
 /// Chains preprocess -> parse -> SPIR-V -> HLSL.
 pub fn compileShadertoyToHlsl(

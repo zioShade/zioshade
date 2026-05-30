@@ -433,3 +433,26 @@ fn runShadowValidTest(c: ShadowCase) !void {
     // Ground truth: the emitted WGSL must actually validate.
     try nagaValidateOrSkip(wgsl, c.name);
 }
+
+test "WGSL: unmapped ext-inst error names the GLSL.std.450 instruction" {
+    // interpolateAtCentroid lowers to GLSL.std.450 InterpolateAtCentroid (76),
+    // which has no WGSL equivalent. The honest error must NAME the instruction
+    // (+ opcode) so the user knows what was unsupported — not a bare error name.
+    const source =
+        \\#version 450
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = interpolateAtCentroid(c); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+
+    try std.testing.expectError(
+        error.UnsupportedExtInst,
+        glslpp.spirvToWGSL(alloc, spirv, .{}),
+    );
+
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "InterpolateAtCentroid") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "76") != null);
+}
