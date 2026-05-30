@@ -1625,3 +1625,70 @@ test "T18.20: mat3x2 array — float3x4 a[2] (non-square, rows widened via Matri
     try assertNotContains(msl, "[[offset(");
 }
 
+
+// ---------------------------------------------------------------------------
+// T17: Depth/comparison sampler texture type (depth2d<float>, not
+// texture2d<float>). A `sampler2DShadow` lowers to an OpTypeImage whose Depth
+// field is 1; its MSL methods `.sample_compare` / `.gather_compare` are members
+// of `depth2d<float>`, NOT `texture2d<float>`. Emitting `texture2d<float>` for
+// such a sampler produces MSL that does not compile (silent-wrong cross-compile).
+//
+// Oracle (spirv-cross 1.4.341.1) for `textureGather(sampler2DShadow, uv, ref)`:
+//   fragment main0_out main0(main0_in in [[stage_in]],
+//       depth2d<float> shadowTex [[texture(0)]], sampler shadowTexSmplr [[sampler(0)]])
+//   { ... shadowTex.gather_compare(shadowTexSmplr, in.vUV, in.vRef); ... }
+// and for `texture(sampler2DShadow, vec3(uv, ref))` the same `depth2d<float>`
+// with `.sample_compare`.
+// ---------------------------------------------------------------------------
+
+test "T17.1: sampler2DShadow + textureGather → depth2d<float> (gather_compare)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = textureGather(shadowTex, vUV, vRef); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The comparison sampler must be declared depth2d<float> (matches oracle).
+    try assertContains(msl, "depth2d<float> shadowTex [[texture(0)]]");
+    try assertContains(msl, "depth2d<float> shadowTex");
+    // No texture2d<float> may survive for this sampler (non-compiling MSL).
+    try assertNotContains(msl, "texture2d<float> shadowTex");
+    // The gather_compare method itself is unchanged.
+    try assertContains(msl, ".gather_compare(");
+}
+
+test "T17.2: sampler2DShadow + texture() compare → depth2d<float> (sample_compare)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(texture(shadowTex, vec3(vUV, vRef))); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "depth2d<float> shadowTex [[texture(0)]]");
+    try assertContains(msl, "depth2d<float> shadowTex");
+    try assertNotContains(msl, "texture2d<float> shadowTex");
+    try assertContains(msl, ".sample_compare(");
+}
+
+test "T17.3: plain sampler2D stays texture2d<float> (no depth2d regression)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = texture(tex, vUV); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // A non-comparison sampler must remain texture2d<float>.
+    try assertContains(msl, "texture2d<float> tex");
+    try assertNotContains(msl, "depth2d");
+}
