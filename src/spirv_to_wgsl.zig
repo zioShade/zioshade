@@ -17,6 +17,45 @@ const DecorationEntry = common.DecorationEntry;
 pub threadlocal var last_error_detail: ?[]const u8 = null;
 threadlocal var last_error_detail_buf: [192]u8 = undefined;
 
+/// Canonical GLSL.std.450 instruction name, for diagnostics only.
+fn glslStd450Name(op: u32) []const u8 {
+    return switch (op) {
+        1 => "Round", 2 => "RoundEven", 3 => "Trunc", 4 => "FAbs", 5 => "SAbs",
+        6 => "FSign", 7 => "SSign", 8 => "Floor", 9 => "Ceil", 10 => "Fract",
+        11 => "Radians", 12 => "Degrees", 13 => "Sin", 14 => "Cos", 15 => "Tan",
+        16 => "Asin", 17 => "Acos", 18 => "Atan", 19 => "Sinh", 20 => "Cosh",
+        21 => "Tanh", 22 => "Asinh", 23 => "Acosh", 24 => "Atanh", 25 => "Atan2",
+        26 => "Pow", 27 => "Exp", 28 => "Log", 29 => "Exp2", 30 => "Log2",
+        31 => "Sqrt", 32 => "InverseSqrt", 33 => "Determinant", 34 => "MatrixInverse",
+        35 => "Modf", 36 => "ModfStruct", 37 => "FMin", 38 => "UMin", 39 => "SMin",
+        40 => "FMax", 41 => "UMax", 42 => "SMax", 43 => "FClamp", 44 => "UClamp",
+        45 => "SClamp", 46 => "FMix", 47 => "IMix", 48 => "Step", 49 => "SmoothStep",
+        50 => "Fma", 51 => "Frexp", 52 => "FrexpStruct", 53 => "Ldexp",
+        54 => "PackSnorm4x8", 55 => "PackUnorm4x8", 56 => "PackSnorm2x16",
+        57 => "PackUnorm2x16", 58 => "PackHalf2x16", 59 => "PackDouble2x32",
+        60 => "UnpackSnorm2x16", 61 => "UnpackUnorm2x16", 62 => "UnpackHalf2x16",
+        63 => "UnpackSnorm4x8", 64 => "UnpackUnorm4x8", 65 => "UnpackDouble2x32",
+        66 => "Length", 67 => "Distance", 68 => "Cross", 69 => "Normalize",
+        70 => "FaceForward", 71 => "Reflect", 72 => "Refract", 73 => "FindILsb",
+        74 => "FindSMsb", 75 => "FindUMsb", 76 => "InterpolateAtCentroid",
+        77 => "InterpolateAtSample", 78 => "InterpolateAtOffset", 79 => "NMin",
+        80 => "NMax", 81 => "NClamp",
+        else => "Unknown",
+    };
+}
+
+/// Record which GLSL.std.450 instruction had no WGSL mapping (into the
+/// threadlocal detail), then return the honest error. Use at every
+/// `UnsupportedExtInst` site: `return recordUnsupportedExtInst(op);`.
+fn recordUnsupportedExtInst(op: u32) error{UnsupportedExtInst} {
+    last_error_detail = std.fmt.bufPrint(
+        &last_error_detail_buf,
+        "GLSL.std.450 {s} ({d}) has no WGSL equivalent",
+        .{ glslStd450Name(op), op },
+    ) catch null;
+    return error.UnsupportedExtInst;
+}
+
 /// Options for SPIR-V → WGSL cross-compilation.
 pub const WgslCompileOptions = struct {
     /// Entry point name to compile (default: "main").
@@ -691,6 +730,7 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
 // ---------------------------------------------------------------------------
 
 pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: WgslCompileOptions) ![]const u8 {
+    last_error_detail = null; // clear any detail from a prior compile on this thread
     var module = try common.parseModule(alloc, spirv_words);
     defer module.deinit(alloc);
 
@@ -3487,8 +3527,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             74 => "findSMsb",
                             // Honest failure: emitting `unknown(...)` produces
                             // invalid WGSL that silently passes as success. Fail
-                            // loudly so callers (and naga) see a real error.
-                            else => return error.UnsupportedExtInst,
+                            // loudly (naming the instruction) so callers (and
+                            // naga) see a real, actionable error.
+                            else => return recordUnsupportedExtInst(instruction),
                         };
                         // Build args
                         var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
@@ -4273,7 +4314,7 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                     66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
                     70 => "faceForward", 71 => "reflect", 72 => "refract",
                     // Honest failure (loop-replay path): see emitBody above.
-                    else => return error.UnsupportedExtInst,
+                    else => return recordUnsupportedExtInst(instruction),
                 };
                 var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
                 defer args.deinit(arena);
