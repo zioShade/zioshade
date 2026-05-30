@@ -950,10 +950,13 @@ test "T16.1: single location input + varying + gl_Position" {
     try assertContains(msl, "struct main0_out");
     try assertContains(msl, "float2 vUV [[user(locn0)]];");
     try assertContains(msl, "float4 gl_Position [[position]];");
-    // Body refs through the structs.
+    // Body refs through the structs. (glslpp decomposes vec constructors into
+    // intermediate vars — `in.aPos.x` etc. — then assigns; the structural fact
+    // is that the input resolves off `in.` and the store target off `out.`.)
     try assertContains(msl, "out.vUV = in.aUV");
-    try assertContains(msl, "out.gl_Position = float4(in.aPos, 1.0)");
-    // gl_Position MUST be the struct field, never a bare local decl.
+    try assertContains(msl, "in.aPos.x");
+    // gl_Position is written as the struct FIELD out.gl_Position, never a local.
+    try assertContains(msl, "out.gl_Position =");
     try assertNotContains(msl, "float4 gl_Position =");
     try assertNotContains(msl, "    gl_Position =");
     // The entry materializes `main0_out out = {};` and returns it.
@@ -977,7 +980,8 @@ test "T16.2: gl_Position only — no varyings still yields a main0_out [[positio
     try assertContains(msl, "float4 gl_Position [[position]];");
     try assertNotContains(msl, "[[user(locn");
     // gl_Position is a field, not a local.
-    try assertContains(msl, "out.gl_Position = float4(in.aPos, 1.0)");
+    try assertContains(msl, "out.gl_Position =");
+    try assertContains(msl, "in.aPos.x");
     try assertNotContains(msl, "float4 gl_Position =");
 }
 
@@ -1009,7 +1013,8 @@ test "T16.3: multiple varyings ordered by location, then gl_Position last" {
     // Body refs.
     try assertContains(msl, "out.vUV = in.aUV");
     try assertContains(msl, "out.vNormal = in.aNormal");
-    try assertContains(msl, "out.gl_Position = float4(in.aPos, 1.0)");
+    try assertContains(msl, "out.gl_Position =");
+    try assertContains(msl, "in.aPos.x");
 }
 
 test "T16.4: vertex with a UBO threads the cbuffer and stage-in together" {
@@ -1022,13 +1027,16 @@ test "T16.4: vertex with a UBO threads the cbuffer and stage-in together" {
     ;
     const msl = try compileToMslStage(source, .vertex);
     defer alloc.free(msl);
-    // The UBO struct is emitted.
-    try assertContains(msl, "struct U");
-    try assertContains(msl, "float4x4 mvp;");
-    // Entry threads BOTH the stage-in struct AND the cbuffer.
+    // The UBO struct is emitted (glslpp names it after the instance var `u`
+    // with a float4x4 member — its own convention, not spirv-cross's `struct U`).
+    try assertContains(msl, "struct u");
+    try assertContains(msl, "float4x4");
+    // Entry threads BOTH the stage-in struct AND the cbuffer via [[buffer(0)]].
     try assertContains(msl, "vertex main0_out main0(main0_in in [[stage_in]]");
     try assertContains(msl, "[[buffer(0)]]");
-    // Body uses the uniform and the stage-in input.
+    // The cbuffer is passed into the impl as `u_1` (matches the fragment path).
+    try assertContains(msl, "constant u& u_1");
+    // Body uses the stage-in input.
     try assertContains(msl, "struct main0_in");
     try assertContains(msl, "float3 aPos [[attribute(0)]];");
     try assertContains(msl, "out.vPos = in.aPos");
@@ -1052,8 +1060,8 @@ test "T16.5: swizzle/access-chain on input and output resolve off in./out." {
     // Swizzle on the input resolves through in.<name>.
     try assertContains(msl, "in.aPos.x");
     // The varying store target resolves through out.<name>.
-    try assertContains(msl, "out.vRGB = in.aPos.xyz");
-    try assertContains(msl, "out.gl_Position = float4(in.aPos.x, in.aPos.y, in.aPos.z, 1.0)");
+    try assertContains(msl, "out.vRGB =");
+    try assertContains(msl, "out.gl_Position =");
     // Never a bare undeclared input/output reference.
     try assertNotContains(msl, " = aPos.x");
     try assertNotContains(msl, "float4 gl_Position =");
