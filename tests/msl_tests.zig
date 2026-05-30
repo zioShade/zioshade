@@ -767,3 +767,129 @@ test "msl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent 
     );
 }
 
+// ---------------------------------------------------------------------------
+// T15: Fragment stage inputs ([[stage_in]] / main0_in plumbing)
+//
+// Reference shape from spirv-cross --msl (the oracle): location-decorated
+// fragment Input variables must be gathered into a `struct main0_in` with
+// `T name [[user(locnN)]]` fields, threaded into the entry via
+// `main0_in in [[stage_in]]`, and referenced in the body as `in.<name>`.
+// glslpp keeps its `main0_impl` helper factoring, so `in` is also threaded
+// into `main0_impl` by value. The previously-emitted MSL referenced bare,
+// undeclared input variables (e.g. `uv.x`) — non-compiling MSL at exit 0.
+// ---------------------------------------------------------------------------
+
+test "T15.1: single location input → main0_in + [[stage_in]] + in.<name>" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(uv, 0.0, 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The input struct exists with the correct field + user(locn0) attribute.
+    try assertContains(msl, "struct main0_in");
+    try assertContains(msl, "float2 uv [[user(locn0)]];");
+    // The entry takes the stage-in struct.
+    try assertContains(msl, "main0_in in [[stage_in]]");
+    // The body references the input through the struct, not the bare name.
+    try assertContains(msl, "in.uv");
+    // No bare, undeclared input reference may survive (non-compiling MSL).
+    try assertNotContains(msl, "float v9 = uv.x");
+    try assertNotContains(msl, " = uv.x");
+    try assertNotContains(msl, " = uv.y");
+}
+
+test "T15.2: multiple location inputs ordered by location" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 1) in vec4 color;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(uv, 0.0, 1.0) * color; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "struct main0_in");
+    try assertContains(msl, "float2 uv [[user(locn0)]];");
+    try assertContains(msl, "float4 color [[user(locn1)]];");
+    try assertContains(msl, "main0_in in [[stage_in]]");
+    // Both inputs threaded through the struct in the body.
+    try assertContains(msl, "in.uv");
+    try assertContains(msl, "in.color");
+    // Ordering: locn0 field precedes locn1 field (match spirv-cross order).
+    const i_uv = std.mem.indexOf(u8, msl, "uv [[user(locn0)]]").?;
+    const i_color = std.mem.indexOf(u8, msl, "color [[user(locn1)]]").?;
+    try std.testing.expect(i_uv < i_color);
+}
+
+test "T15.3: swizzle on a location input becomes in.<name>.<swizzle>" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 color;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(color.xyz, 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "struct main0_in");
+    try assertContains(msl, "float4 color [[user(locn0)]];");
+    try assertContains(msl, "main0_in in [[stage_in]]");
+    // Swizzle/access-chain must resolve off the struct member.
+    try assertContains(msl, "in.color.x");
+    // Never a bare swizzle on an undeclared input.
+    try assertNotContains(msl, " = color.x");
+}
+
+test "T15.4: gl_FragCoord and a location input coexist" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(uv, gl_FragCoord.x, 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // gl_FragCoord stays on its builtin [[position]] path...
+    try assertContains(msl, "float4 gl_FragCoord [[position]]");
+    // ...and must NOT leak into main0_in.
+    try assertNotContains(msl, "gl_FragCoord [[user(");
+    // The location input is in the stage-in struct and used via `in.`.
+    try assertContains(msl, "struct main0_in");
+    try assertContains(msl, "float2 uv [[user(locn0)]];");
+    try assertContains(msl, "main0_in in [[stage_in]]");
+    try assertContains(msl, "in.uv");
+}
+
+test "T15.5: int location input emits int field (matches spirv-cross, no [[flat]])" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) flat in int idx;
+        \\layout(location = 1) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(uv, float(idx), 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "struct main0_in");
+    try assertContains(msl, "int idx [[user(locn0)]];");
+    try assertContains(msl, "float2 uv [[user(locn1)]];");
+    try assertContains(msl, "in.idx");
+    try assertContains(msl, "in.uv");
+}
+
+test "T15.6: no location inputs → no main0_in struct (no regression)" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0, std140) uniform U { vec4 color; } u;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = u.color; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // A uniform-only fragment shader must not grow a spurious stage-in.
+    try assertNotContains(msl, "struct main0_in");
+    try assertNotContains(msl, "[[stage_in]]");
+}
+
