@@ -13,11 +13,23 @@ const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u3
 const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32, descriptor_set: u32 = 0 };
 const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0 };
 const MemberKey = struct { struct_id: u32, member_index: u32 };
-/// A location-decorated fragment stage input (becomes a `main0_in` field
-/// `T name [[user(locnN)]]` and is referenced in the body as `in.<name>`).
-/// Built-in inputs (gl_FragCoord etc.) are NOT collected here — they keep
-/// their existing `[[position]]`/builtin path.
+/// A stage input that becomes a `main0_in` field and is referenced in the body
+/// as `in.<name>`. For fragment the field is `T name [[user(locnN)]]`; for
+/// vertex it is `T name [[attribute(N)]]` (N = the Location decoration). The
+/// `location` field carries N in both cases; only the attribute spelling
+/// differs at emit time. Built-in inputs (gl_FragCoord etc.) are NOT collected
+/// here — they keep their existing `[[position]]`/builtin path.
 const StageInputDecl = struct { var_id: u32, name: []const u8, type_id: u32, location: u32 };
+/// A vertex stage output that becomes a `main0_out` field and is referenced in
+/// the body as `out.<name>`. Two kinds:
+///   - user varyings (`is_position == false`): `T name [[user(locnN)]]`,
+///     emitted in ascending Location order.
+///   - gl_Position (`is_position == true`): `float4 gl_Position [[position]]`,
+///     emitted LAST (matching spirv-cross --msl). It is made a struct field so
+///     a body `gl_Position = ...` store resolves to `out.gl_Position = ...`,
+///     never a bare local. Other output built-ins (gl_PointSize,
+///     gl_ClipDistance) are NOT collected here — see collectStageOutputs.
+const StageOutputDecl = struct { var_id: u32, name: []const u8, type_id: u32, location: u32, is_position: bool };
 
 // ---- Helpers ----
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction { if (id >= m.id_defs.len) return null; const i = m.id_defs[id] orelse return null; if (i >= m.instructions.len) return null; return m.instructions[i]; }
@@ -429,14 +441,24 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     defer textures.deinit(aa);
     collectResources(&module, &names, &decs, &cbuffers, &textures, aa);
 
-    // Fragment stage inputs (layout(location) in ...). Collected with their
-    // ORIGINAL names BEFORE any body-emit rename, so the `main0_in` struct
-    // fields use the source name while body references are rewritten to
-    // `in.<name>` later. Only meaningful for fragment entry points.
+    // Stage inputs (layout(location) in ...). Collected with their ORIGINAL
+    // names BEFORE any body-emit rename, so the `main0_in` struct fields use
+    // the source name while body references are rewritten to `in.<name>` later.
+    // Collected for fragment ([[user(locnN)]]) and vertex ([[attribute(N)]]);
+    // the attribute spelling is gated at emit time.
     var stage_inputs = std.ArrayList(StageInputDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
     defer stage_inputs.deinit(aa);
-    if (module.execution_model == .Fragment) {
+    if (module.execution_model == .Fragment or module.execution_model == .Vertex) {
         collectStageInputs(&module, &names, &decs, &stage_inputs, aa);
+    }
+
+    // Vertex stage outputs (layout(location) out ... + gl_Position). Collected
+    // with ORIGINAL names so `main0_out` fields use the source name while body
+    // stores are rewritten to `out.<name>` (incl. `out.gl_Position`) later.
+    var stage_outputs = std.ArrayList(StageOutputDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
+    defer stage_outputs.deinit(aa);
+    if (module.execution_model == .Vertex) {
+        collectStageOutputs(&module, &names, &decs, &stage_outputs, aa);
     }
 
     var output = std.ArrayList(u8).initCapacity(alloc, 4096) catch return error.OutOfMemory;
@@ -449,6 +471,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     const is_task = module.execution_model == .TaskEXT;
     const is_compute_like = is_compute or is_mesh or is_task;
     const is_frag = module.execution_model == .Fragment;
+    const is_vertex = module.execution_model == .Vertex;
 
     // MSL header
     try w.writeAll("#include <metal_stdlib>\n#include <simd/simd.h>\n\nusing namespace metal;\n\n");
@@ -549,20 +572,41 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         }
     }
 
-    // Output struct for fragment
+    // Output struct for fragment (single hardcoded color attachment).
     if (is_frag) {
         try w.writeAll("struct main0_out\n{\n    float4 _fragColor [[color(0)]];\n};\n\n");
     }
 
-    // Stage-in struct for fragment location inputs (mirrors spirv-cross --msl
-    // `struct main0_in { T name [[user(locnN)]]; }`). Emitted only when there
-    // is at least one location input; gl_FragCoord and other built-ins are
-    // excluded by collectStageInputs and stay on their builtin path.
-    if (is_frag and stage_inputs.items.len > 0) {
+    // Output struct for vertex (mirrors spirv-cross --msl): user varyings
+    // `T name [[user(locnN)]]` in ascending Location order, then `gl_Position
+    // [[position]]` LAST. collectStageOutputs already orders the list this way
+    // (varyings sorted by location, gl_Position appended last).
+    if (is_vertex and stage_outputs.items.len > 0) {
+        try w.writeAll("struct main0_out\n{\n");
+        for (stage_outputs.items) |so| {
+            if (so.is_position) {
+                try w.print("    {s} {s} [[position]];\n", .{ try mslType(&module, so.type_id, &names, aa), so.name });
+            } else {
+                try w.print("    {s} {s} [[user(locn{d})]];\n", .{ try mslType(&module, so.type_id, &names, aa), so.name, so.location });
+            }
+        }
+        try w.writeAll("};\n\n");
+    }
+
+    // Stage-in struct for location inputs (mirrors spirv-cross --msl
+    // `struct main0_in { T name [[attr]]; }`). Emitted only when there is at
+    // least one location input. Built-ins (gl_FragCoord etc.) are excluded by
+    // collectStageInputs and stay on their builtin path. The attribute spelling
+    // is stage-gated: fragment → `[[user(locnN)]]`, vertex → `[[attribute(N)]]`.
+    if ((is_frag or is_vertex) and stage_inputs.items.len > 0) {
         try w.writeAll("struct main0_in\n{\n");
         for (stage_inputs.items) |si| {
             const tn = try mslType(&module, si.type_id, &names, aa);
-            try w.print("    {s} {s} [[user(locn{d})]];\n", .{ tn, si.name, si.location });
+            if (is_vertex) {
+                try w.print("    {s} {s} [[attribute({d})]];\n", .{ tn, si.name, si.location });
+            } else {
+                try w.print("    {s} {s} [[user(locn{d})]];\n", .{ tn, si.name, si.location });
+            }
         }
         try w.writeAll("};\n\n");
     }
@@ -676,9 +720,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     if (local_structs_msl.count() > 0) try w.writeAll("\n");
 
     // Emit non-entry functions first
-    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, is_compute_like, options.binding_shift, options.argument_buffers); }
+    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers); }
     // Emit entry function last
-    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, is_compute_like, options.binding_shift, options.argument_buffers);
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -880,6 +924,68 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
     std.sort.insertion(StageInputDecl, inputs.items, {}, SortCtx.lessThan);
 }
 
+/// Collect vertex Output variables into `outputs`, ordered to match
+/// spirv-cross --msl `main0_out` field order: user varyings sorted ascending
+/// by Location FIRST, then `gl_Position` (BuiltIn Position) appended LAST.
+///
+/// Excluded (NOT placed in `main0_out`):
+///   - Built-in outputs other than Position (gl_PointSize → PointSize,
+///     gl_ClipDistance → ClipDistance, gl_CullDistance, gl_Layer, ...). These
+///     need their own MSL attributes ([[point_size]], [[clip_distance]], ...)
+///     and threading; emitting them as plain user fields would be silent-wrong,
+///     so this pass leaves them out entirely (documented follow-up).
+///   - Struct-typed outputs (gl_PerVertex interface blocks decomposed by
+///     glslang into separate vars — handled per-member, not as a struct here).
+///   - Non-position outputs without a Location decoration.
+fn collectStageOutputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), outputs: *std.ArrayList(StageOutputDecl), alloc: std.mem.Allocator) void {
+    var position: ?StageOutputDecl = null;
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc != .Output) continue;
+        const rid = inst.words[2];
+        const pi = getDef(m, inst.words[1]) orelse continue;
+        if (pi.op != .TypePointer or pi.words.len < 4) continue;
+        const pt = pi.words[3];
+        // Struct-typed outputs (interface blocks) are out of scope for this pass.
+        const pti = getDef(m, pt) orelse continue;
+        if (pti.op == .TypeStruct) continue;
+        const name = names.get(rid) orelse continue;
+
+        // gl_Position is the ONLY built-in output we map (→ [[position]]).
+        // Other built-in outputs are intentionally skipped (see doc comment).
+        if (builtinOf(decs, rid)) |bi| {
+            if (bi == @intFromEnum(spirv.BuiltIn.position)) {
+                position = .{ .var_id = rid, .name = name, .type_id = pt, .location = 0, .is_position = true };
+            }
+            continue;
+        }
+
+        // User varyings must have an explicit Location to map to [[user(locnN)]].
+        const loc = getDecVal(decs, rid, .location) orelse continue;
+        outputs.append(alloc, .{ .var_id = rid, .name = name, .type_id = pt, .location = loc, .is_position = false }) catch {};
+    }
+    const SortCtx = struct {
+        fn lessThan(_: void, a: StageOutputDecl, b: StageOutputDecl) bool {
+            return a.location < b.location;
+        }
+    };
+    std.sort.insertion(StageOutputDecl, outputs.items, {}, SortCtx.lessThan);
+    // gl_Position goes LAST (matches spirv-cross --msl).
+    if (position) |p| outputs.append(alloc, p) catch {};
+}
+
+/// Return the BuiltIn enum value (as a u32) decorated on `id`, or null if `id`
+/// has no BuiltIn decoration. Mirrors the FragCoord check in the fragment entry
+/// path (extra[0] carries the BuiltIn literal).
+fn builtinOf(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32) ?u32 {
+    const dlist = decs.get(id) orelse return null;
+    for (dlist.items) |de| {
+        if (de.decoration == .built_in and de.extra.len > 0) return de.extra[0];
+    }
+    return null;
+}
+
 /// Compute natural byte size of a SPIR-V scalar/vector type.
 fn typeNatSize(m: *const ParsedModule, type_id: u32) u32 {
     const inst = getDef(m, type_id) orelse return 4;
@@ -1035,6 +1141,7 @@ fn emitFunction(
     textures: *const std.ArrayList(TextureDecl),
     storage_buffers: *const std.ArrayList(CbufferDecl),
     stage_inputs: *const std.ArrayList(StageInputDecl),
+    stage_outputs: *const std.ArrayList(StageOutputDecl),
     is_compute: bool,
     binding_shift: i32,
     argument_buffers: bool,
@@ -1045,6 +1152,7 @@ fn emitFunction(
     const rtid = fti.words[2];
     const rt = try mslType(m, rtid, names, alloc);
     const is_frag = is_entry and m.execution_model == .Fragment;
+    const is_vertex = is_entry and m.execution_model == .Vertex;
 
     const func_idx = if (func_id < m.id_defs.len) m.id_defs[func_id] orelse return else return;
     const func_name = if (is_entry) "main0" else (names.get(func_id) orelse "func");
@@ -1383,6 +1491,109 @@ fn emitFunction(
 
         try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures);
         try w.writeAll("}\n");
+        return;
+    }
+
+    // Vertex entry point. Mirrors the fragment wrapper structure (impl factoring):
+    // a helper `main0_impl(thread main0_out& out, main0_in in, <resources>)`
+    // holds the body, and a `vertex main0_out main0(...)` wrapper materialises
+    // `main0_out out = {};`, calls the helper, and `return out;`.
+    //
+    // Outputs are threaded as the `main0_out` struct: each Output variable
+    // (user varyings + gl_Position) is renamed to `out.<name>` in `names`
+    // BEFORE body emit, exactly like the input `in.<name>` rename. A body store
+    // `gl_Position = X` then resolves (via writeResolvePointer/names.get) to
+    // `out.gl_Position = X` — gl_Position becomes a struct FIELD, never a local.
+    if (is_entry and is_vertex) {
+        // Rename location inputs to `in.<name>` (body refs resolve through the
+        // stage-in struct; struct fields above already captured original names).
+        for (stage_inputs.items) |si| {
+            const aliased = std.fmt.allocPrint(alloc, "in.{s}", .{si.name}) catch continue;
+            if (names.fetchPut(si.var_id, aliased) catch null) |old| alloc.free(old.value);
+        }
+        // Rename outputs (user varyings AND gl_Position) to `out.<name>`.
+        for (stage_outputs.items) |so| {
+            const aliased = std.fmt.allocPrint(alloc, "out.{s}", .{so.name}) catch continue;
+            if (names.fetchPut(so.var_id, aliased) catch null) |old| alloc.free(old.value);
+        }
+
+        // ---- Helper: void main0_impl(thread main0_out& out, main0_in in, ...) ----
+        try w.writeAll("static inline __attribute__((always_inline))\n");
+        try w.print("void {s}_impl(", .{func_name});
+        var first_param = true;
+        // Output struct by reference (always present for a vertex stage — at
+        // minimum gl_Position). Guard the empty case defensively.
+        if (stage_outputs.items.len > 0) {
+            try w.writeAll("thread main0_out& out");
+            first_param = false;
+        }
+        // Stage-in struct by value (only when there are location inputs).
+        if (stage_inputs.items.len > 0) {
+            if (!first_param) try w.writeAll(", ");
+            try w.writeAll("main0_in in");
+            first_param = false;
+        }
+        // Uniform buffers (same threading as fragment: `Name_1`).
+        for (cbuffers.items) |cb| {
+            if (!first_param) try w.writeAll(", ");
+            try w.print("constant {s}& {s}_1", .{ cb.name, cb.name });
+            first_param = false;
+        }
+        // Textures + samplers (stage-agnostic).
+        for (textures.items) |tex| {
+            if (!first_param) try w.writeAll(", ");
+            try w.print("texture2d<float> {s}, sampler {s}Smplr", .{ tex.name, tex.name });
+            first_param = false;
+        }
+        try w.writeAll(")\n{\n");
+        try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures);
+        try w.writeAll("}\n\n");
+
+        // ---- Wrapper: vertex main0_out main0(main0_in in [[stage_in]], ...) ----
+        try w.print("vertex main0_out {s}(", .{func_name});
+        first_param = true;
+        if (stage_inputs.items.len > 0) {
+            try w.writeAll("main0_in in [[stage_in]]");
+            first_param = false;
+        }
+        // Uniform buffers bound via [[buffer(N)]] (with binding shift), matching
+        // the fragment path. (Argument-buffer mode is fragment/compute only for
+        // now; vertex uses the legacy per-resource binding.)
+        for (cbuffers.items) |cb| {
+            if (!first_param) try w.writeAll(", ");
+            const cb_b = common.applyBindingShift(cb.binding, binding_shift);
+            try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{ cb.name, cb.name, cb_b });
+            first_param = false;
+        }
+        for (textures.items) |tex| {
+            if (!first_param) try w.writeAll(", ");
+            const tex_b = common.applyBindingShift(tex.binding, binding_shift);
+            try w.print("texture2d<float> {s} [[texture({d})]], sampler {s}Smplr [[sampler({d})]]", .{ tex.name, tex_b, tex.name, tex_b });
+            first_param = false;
+        }
+        try w.writeAll(")\n{\n    main0_out out = {};\n    ");
+        try w.print("{s}_impl(", .{func_name});
+        var first_arg = true;
+        if (stage_outputs.items.len > 0) {
+            try w.writeAll("out");
+            first_arg = false;
+        }
+        if (stage_inputs.items.len > 0) {
+            if (!first_arg) try w.writeAll(", ");
+            try w.writeAll("in");
+            first_arg = false;
+        }
+        for (cbuffers.items) |cb| {
+            if (!first_arg) try w.writeAll(", ");
+            try w.print("{s}_1", .{cb.name});
+            first_arg = false;
+        }
+        for (textures.items) |tex| {
+            if (!first_arg) try w.writeAll(", ");
+            try w.print("{s}, {s}Smplr", .{ tex.name, tex.name });
+            first_arg = false;
+        }
+        try w.writeAll(");\n    return out;\n}\n");
         return;
     }
 
