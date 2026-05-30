@@ -1270,3 +1270,311 @@ test "T17.8: single trailing vec3 — float3 (matches spirv-cross), no offset at
     try assertNotContains(msl, "[[offset(");
 }
 
+// ---------------------------------------------------------------------------
+// T18: UBO matrix + array std140 layout must MATCH spirv-cross.
+//
+// Dropping [[offset]] (T17) exposed a pre-existing wrong type-mapping that
+// produced SILENT-WRONG std140 layout (compiles at exit 0, reads wrong data —
+// undetectable without a Metal compiler). Each member type below was diffed
+// against the spirv-cross --msl oracle (Step-0 truth table); these tests pin
+// glslpp's emitted MSL type to EXACTLY what spirv-cross emits.
+//
+// std140 facts that drive the oracle's choices (all verified via spirv-dis):
+//   * Matrices always carry MatrixStride 16 (each column is vec4-aligned).
+//     spirv-cross emits float{cols}x{rows'} where a 2-row matrix is widened to
+//     4 rows (float2x2's 8-byte columns would break std140); 3-row stays 3
+//     (MSL float3 column is already 16-byte aligned). So:
+//       mat2→float2x4  mat3→float3x3  mat4→float4x4
+//       mat2x3→float2x3 mat2x4→float2x4
+//       mat3x2→float3x4 mat3x4→float3x4
+//       mat4x2→float4x4 mat4x3→float4x3
+//   * std140 scalar/small-vector arrays carry ArrayStride 16, so the element is
+//     widened to its 16-byte form: float→float4, int→int4, uint→uint4,
+//     vec2→float4, vec3→float3 (already 16), vec4→float4. Matrix arrays reuse
+//     the matrix rule (mat3[]→float3x3[], mat4[]→float4x4[]).
+// ---------------------------------------------------------------------------
+
+test "T18.1: mat2 member — float2x4 (col stride 16), NOT float2x2" {
+    // ORACLE spirv-cross: struct U { float2x4 m; };
+    // float2x2 (8-byte columns) is SILENT-WRONG std140 layout.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat2 m; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.m[0], u.m[1]); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float2x4 m;");
+    try assertNotContains(msl, "float2x2");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.2: mat3 member — float3x3 (col stride 16), NOT packed_float3x3" {
+    // ORACLE spirv-cross: struct U { float3x3 m; };
+    // packed_float3x3 (12-byte columns) is SILENT-WRONG std140 layout.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat3 m; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.m[0], 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float3x3 m;");
+    try assertNotContains(msl, "packed_float3x3");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.3: mat4 member — float4x4 (already correct, regression guard)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat4 m; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = u.m[0]; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4x4 m;");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.4: mat3x4 member — float3x4 (rows NOT dropped), NOT packed_float3x3" {
+    // ORACLE spirv-cross: struct U { float3x4 m; };
+    // packed_float3x3 drops the 4th row entirely — SILENT-WRONG (wrong TYPE).
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat3x4 m; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = u.m[0]; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float3x4 m;");
+    try assertNotContains(msl, "packed_float3x3");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.5: mat3x2 member — float3x4 (rows widened 2->4)" {
+    // ORACLE spirv-cross: struct U { float3x4 m; };
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat3x2 m; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.m[0], u.m[1]); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float3x4 m;");
+    try assertNotContains(msl, "packed_float3x3");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.6: mat4x2 member — float4x4 (rows widened 2->4), NOT float4x2" {
+    // ORACLE spirv-cross: struct U { float4x4 m; };
+    // float4x2 (8-byte columns) is SILENT-WRONG std140 layout.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat4x2 m; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.m[0], u.m[1]); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4x4 m;");
+    try assertNotContains(msl, "float4x2");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.7: mat2x3 member — float2x3 (3 rows kept, regression guard)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat2x3 m; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.m[0], 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float2x3 m;");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.8: mat4x3 member — float4x3 (3 rows kept, regression guard)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat4x3 m; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.m[0], 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4x3 m;");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.9: vec2 array — float4 a[3] (stride 16), NOT float2 a[3]" {
+    // ORACLE spirv-cross: struct U { float4 a[3]; };
+    // float2 a[3] (stride 8) is SILENT-WRONG std140 array layout.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { vec2 a[3]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a[0], u.a[1]); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4 a[3];");
+    try assertNotContains(msl, "float2 a[3]");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.10: int array — int4 a[3] (stride 16), NOT float4/int a[3]" {
+    // ORACLE spirv-cross: struct U { int4 a[3]; };
+    // float4 a[3] is SILENT-WRONG (wrong element TYPE: int read as float).
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { int a[3]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(float(u.a[0]), float(u.a[1]), float(u.a[2]), 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "int4 a[3];");
+    try assertNotContains(msl, "float4 a[3]");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.11: float array — float4 a[3] (already correct, regression guard)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { float a[3]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a[0], u.a[1], u.a[2], 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4 a[3];");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.12: vec3 array — float3 a[3] (already correct, regression guard)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { vec3 a[3]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a[0], 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float3 a[3];");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.13: vec4 array — float4 a[3] (already correct, regression guard)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { vec4 a[3]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = u.a[0] + u.a[1] + u.a[2]; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4 a[3];");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.14: uint array — uint4 a[3] (already correct, regression guard)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { uint a[3]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(float(u.a[0]), float(u.a[1]), float(u.a[2]), 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "uint4 a[3];");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.15: mat3 array — float3x3 a[2], NOT packed_float3x3 a[2]" {
+    // ORACLE spirv-cross: struct U { float3x3 a[2]; };
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat3 a[2]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a[0][0], 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float3x3 a[2];");
+    try assertNotContains(msl, "packed_float3x3");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.16: mat4 array — float4x4 a[2] (already correct, regression guard)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat4 a[2]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = u.a[0][0]; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4x4 a[2];");
+    try assertNotContains(msl, "[[offset(");
+}
+
+// Following-member offset: a fixed-size matrix member must occupy its FULL
+// std140 size so the next member lands at the std140 offset spirv-cross uses.
+// Asserting the type SEQUENCE pins the layout (the offset is implied by the
+// preceding member's MSL size matching std140).
+
+test "T18.17: mat3 m; vec3 v; — float3x3 then float3 (v at std140 offset 48)" {
+    // ORACLE spirv-cross: struct U { float3x3 m; float3 v; };
+    // packed_float3x3 (36 B) would lay v at 36 — SILENT-WRONG (oracle: 48).
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat3 m; vec3 v; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.m[0] + u.v, 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float3x3 m;");
+    try assertContains(msl, "float3 v;");
+    try assertNotContains(msl, "packed_float3x3");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.18: mat2 m; vec4 v; — float2x4 then float4 (v at std140 offset 32)" {
+    // ORACLE spirv-cross: struct U { float2x4 m; float4 v; };
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat2 m; vec4 v; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.m[0], u.m[1]) + u.v; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float2x4 m;");
+    try assertContains(msl, "float4 v;");
+    try assertNotContains(msl, "float2x2");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.19: vec2 a[2]; float b; — float4 a[2] then float b (b at std140 offset 32)" {
+    // ORACLE spirv-cross: struct U { float4 a[2]; float b; };
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { vec2 a[2]; float b; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a[0], u.a[1]) * u.b; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4 a[2];");
+    try assertContains(msl, "float b;");
+    try assertNotContains(msl, "float2 a[2]");
+    try assertNotContains(msl, "[[offset(");
+}
+
