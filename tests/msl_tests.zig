@@ -555,7 +555,12 @@ test "float16_t compiles through the pipeline" {
     try assertContains(msl, "metal_stdlib");
 }
 
-test "CBUFFER_ACCESS: MSL struct member access uses _mN suffix not array index" {
+test "CBUFFER_ACCESS: MSL struct member access uses source member name not array index" {
+    // De-false-greened: previously asserted the BROKEN synthesized `_m0`/`_m1`
+    // names appeared in the struct decl while the body used the SOURCE names
+    // (Globals_1.iTime) — a decl<->body mismatch that produced non-compiling
+    // MSL. spirv-cross --msl uses the SOURCE OpMemberName (`iResolution`,
+    // `iTime`) in BOTH the decl and the body. Assert that here.
     const source =
         \\#version 430
         \\layout(binding = 0, std140) uniform Globals {
@@ -575,9 +580,14 @@ test "CBUFFER_ACCESS: MSL struct member access uses _mN suffix not array index" 
     // Must NOT use array indexing for struct member access
     try assertNotContains(msl, "Globals[0]");
     try assertNotContains(msl, "Globals[1]");
-    // Must use _mN member access
-    try assertContains(msl, "_m0");
-    try assertContains(msl, "_m1");
+    // Decl must use the SOURCE member names (matching the body refs).
+    try assertContains(msl, "packed_float3 iResolution;");
+    try assertContains(msl, "float iTime;");
+    // No synthesized index names anywhere.
+    try assertNotContains(msl, "_m0");
+    try assertNotContains(msl, "_m1");
+    // Body references the same source name.
+    try assertContains(msl, "Globals_1.iTime");
 }
 
 test "msl: bitfieldReverse -> reverse_bits" {
@@ -1081,5 +1091,169 @@ test "T16.6: NOT a bare void main0 — vertex must have the entry wrapper" {
     defer alloc.free(msl);
     try assertNotContains(msl, "void main0()");
     try assertContains(msl, "vertex main0_out main0(");
+}
+
+// ---------------------------------------------------------------------------
+// T17: UBO struct member names must match body refs (no synthesized _mN in the
+// struct DECL while the body uses .mvp/.tint). Mirrors spirv-cross --msl, which
+// emits the SOURCE member name (OpMemberName) in BOTH the struct decl and the
+// body, with NO [[offset(N)]] attribute (relies on natural MSL layout matching
+// std140).
+//
+// The pre-fix bug: emitStructMembers synthesized `_m{i} [[offset(N)]]` for the
+// DECL while writeAccessExpr emitted `.mvp`/`.tint` for the BODY → mismatch →
+// non-compiling MSL for ANY UBO with named members.
+// ---------------------------------------------------------------------------
+
+test "T17.1: UBO mat4+vec4 — struct decl member names match body refs" {
+    // The exact repro. spirv-cross oracle:
+    //   struct U { float4x4 mvp; float4 tint; };
+    //   ... (u.mvp * float4(in.uv, 0.0, 1.0)) + u.tint;
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat4 mvp; vec4 tint; } u;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = u.mvp*vec4(uv,0,1)+u.tint; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // DECL uses the SOURCE member names (matches the body's u_1.mvp/.tint).
+    try assertContains(msl, "float4x4 mvp;");
+    try assertContains(msl, "float4 tint;");
+    // No synthesized index names in the struct decl.
+    try assertNotContains(msl, "_m0");
+    try assertNotContains(msl, "_m1");
+    // spirv-cross emits no [[offset]] on a constant buffer struct member.
+    try assertNotContains(msl, "[[offset(");
+    // Body still references the same names (consistency decl<->body).
+    try assertContains(msl, "u_1.mvp");
+    try assertContains(msl, "u_1.tint");
+}
+
+test "T17.2: UBO vec2+scalar — source names, no offset, natural layout" {
+    // spirv-cross: struct U { float2 a; float b; };
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { vec2 a; float b; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a, u.b, 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float2 a;");
+    try assertContains(msl, "float b;");
+    try assertNotContains(msl, "_m0");
+    try assertNotContains(msl, "_m1");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T17.3: multiple scalars tightly packed — source names, natural layout" {
+    // spirv-cross: struct U { float a; float b; float2 c; int d; };
+    // std140 offsets 0,4,8,16 == natural MSL offsets.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { float a; float b; vec2 c; int d; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a, u.b, u.c) * float(u.d); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float a;");
+    try assertContains(msl, "float b;");
+    try assertContains(msl, "float2 c;");
+    try assertContains(msl, "int d;");
+    try assertNotContains(msl, "_m");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T17.4: two UBOs — both use source member names" {
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform A { vec4 ca; } a;
+        \\layout(binding=1,std140) uniform B { vec4 cb; } b;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.ca + b.cb; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4 ca;");
+    try assertContains(msl, "float4 cb;");
+    try assertNotContains(msl, "_m0");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T17.5: vertex-stage UBO — struct decl matches body refs" {
+    // The same bug afflicts the vertex path. spirv-cross oracle decl: float4x4 mvp;
+    const source =
+        \\#version 450
+        \\layout(binding = 0, std140) uniform U { mat4 mvp; } u;
+        \\layout(location = 0) in vec3 aPos;
+        \\layout(location = 0) out vec3 vPos;
+        \\void main() { vPos = aPos; gl_Position = u.mvp * vec4(aPos, 1.0); }
+    ;
+    const msl = try compileToMslStage(source, .vertex);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4x4 mvp;");
+    try assertNotContains(msl, "_m0");
+    try assertNotContains(msl, "[[offset(");
+    try assertContains(msl, "u_1.mvp");
+}
+
+test "T17.6: vec3 followed by scalar — packed_float3 (b at offset 12), no offset attr" {
+    // std140: a at 0 (size 12), b at 12. MSL packed_float3 (12 bytes) + float
+    // gives b at 12 naturally, matching std140. spirv-cross:
+    //   struct U { packed_float3 a; float b; };
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { vec3 a; float b; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a, u.b); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "packed_float3 a;");
+    try assertContains(msl, "float b;");
+    try assertNotContains(msl, "_m0");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T17.7: vec3 followed by 16-aligned member — float3 (16-byte), no offset attr" {
+    // DIVERGENT layout case: std140 puts b at offset 16, but packed_float3 (12
+    // bytes) would place b at 12 naturally — WRONG. spirv-cross promotes the
+    // vec3 to float3 (16-byte aligned) so b lands at 16 without an [[offset]]:
+    //   struct U { float3 a; float3 b; };
+    // Dropping [[offset]] with packed_float3 here would be silent-wrong layout.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { vec3 a; vec3 b; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a + u.b, 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // Must promote to float3 (16-byte) so natural layout == std140 (b at 16).
+    try assertContains(msl, "float3 a;");
+    try assertContains(msl, "float3 b;");
+    try assertNotContains(msl, "packed_float3");
+    try assertNotContains(msl, "_m0");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T17.8: single trailing vec3 — float3 (matches spirv-cross), no offset attr" {
+    // spirv-cross uses float3 (not packed) for a lone/trailing vec3:
+    //   struct U { float3 pos; };
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { vec3 pos; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.pos, 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float3 pos;");
+    try assertNotContains(msl, "packed_float3");
+    try assertNotContains(msl, "_m0");
+    try assertNotContains(msl, "[[offset(");
 }
 
