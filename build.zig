@@ -555,6 +555,22 @@ pub fn build(b: *std.Build) void {
     scalar_layout_test_step.dependOn(&run_scalar_layout_tests.step);
     test_step.dependOn(&run_scalar_layout_tests.step);
 
+    // std430/std140 matrix layout tests: MatrixStride consistent with reserved
+    // offsets, verified against glslangValidator -V.
+    const std430_matrix_test_step = b.step("test-std430-matrix-layout", "Run std430/std140 matrix layout tests");
+    const std430_matrix_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/std430_matrix_layout_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    std430_matrix_test_mod.addImport("glslpp", glslpp_mod);
+    const run_std430_matrix_tests = b.addRunArtifact(b.addTest(.{
+        .name = "std430-matrix-layout-tests",
+        .root_module = std430_matrix_test_mod,
+    }));
+    std430_matrix_test_step.dependOn(&run_std430_matrix_tests.step);
+    test_step.dependOn(&run_std430_matrix_tests.step);
+
     // Builtin-registration correctness tests (matrixCompMult, gl_PointCoord).
     // Assert real SPIR-V structure so tolerate-mode empty bodies fail loudly.
     const builtin_reg_test_step = b.step("test-builtin-reg", "Run semantic builtin-registration correctness tests");
