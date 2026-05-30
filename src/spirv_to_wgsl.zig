@@ -394,10 +394,12 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
             // sampler_comparison; see imageTypeIsDepth for why this matters.
             const is_depth = inst.words.len > 4 and inst.words[4] == 1;
             if (is_depth) {
+                // Array-ness comes from the Arrayed operand, not `dim`; arrayed
+                // depth textures are gated as an honest error before they reach
+                // here (see spirvToWGSL), so `dim` only selects cube vs 2D.
                 if (is_ms) break :blk "texture_depth_multisampled_2d";
                 break :blk switch (dim) {
                     3 => "texture_depth_cube",
-                    4 => "texture_depth_2d_array",
                     else => "texture_depth_2d",
                 };
             } else if (is_storage) {
