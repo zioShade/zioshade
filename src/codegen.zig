@@ -3205,16 +3205,16 @@ const Codegen = struct {
                 .float, .int, .uint, .bool => 4,
                 .vec2, .ivec2, .uvec2 => 8,
                 .vec3, .vec4, .ivec3, .ivec4, .uvec3, .uvec4 => 16,
-            // Matrix alignment = stride of its stored vector (column for col_major,
-            // row for row_major). std430 2-component vectors align to 8, not 16.
-            .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
-            .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => blk: {
-                const span = if (self.default_row_major)
-                    self.matrixColumnCount(ty)
-                else
-                    self.matrixRowCount(ty);
-                break :blk self.matrixMemberStride(span, .std430);
-            },
+                // Matrix alignment = stride of its stored vector (column for col_major,
+                // row for row_major). std430 2-component vectors align to 8, not 16.
+                .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
+                .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => blk: {
+                    const span = if (self.default_row_major)
+                        self.matrixColumnCount(ty)
+                    else
+                        self.matrixRowCount(ty);
+                    break :blk self.matrixMemberStride(span, .std430);
+                },
             .array => |arr| self.layoutAlignmentStd430(arr.base.*), // std430: array alignment = element alignment
             .named => |name| blk: {
                 // Struct alignment = max alignment of its members
@@ -3459,12 +3459,13 @@ const Codegen = struct {
     /// rounds the vector up to 16; scalar packs tightly at 4-byte components.
     /// This single source of truth keeps MatrixStride, layoutSize, and matrix
     /// alignment consistent (stride * vectorCount == reserved size).
+    /// `span` is the vector length and is always 2, 3, or 4 for a real matrix.
     fn matrixMemberStride(self: *Codegen, span: u32, kind: LayoutKind) u32 {
         _ = self;
         return switch (kind) {
-            .scalar => span * 4,
-            .std430 => if (span <= 2) 8 else 16,
-            .std140 => 16,
+            .scalar => span * 4, // tight, component-aligned
+            .std430 => if (span == 2) 8 else 16, // vec2 -> 8, vec3/vec4 -> 16
+            .std140 => 16, // always vec4-aligned
         };
     }
 

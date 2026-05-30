@@ -12,7 +12,9 @@
 const std = @import("std");
 const glslpp = @import("glslpp");
 
+const OpDecorate: u32 = 71;
 const OpMemberDecorate: u32 = 72;
+const DecorationArrayStride: u32 = 6;
 const DecorationMatrixStride: u32 = 7;
 const DecorationOffset: u32 = 35;
 
@@ -44,6 +46,22 @@ fn findMemberOffset(spv: []const u32, member_index: u32) ?u32 {
             spv[i + 2] == member_index and spv[i + 3] == DecorationOffset)
         {
             return spv[i + 4];
+        }
+        i += wc;
+    }
+    return null;
+}
+
+/// Return the first OpDecorate ... ArrayStride literal, or null. Assumes the
+/// shader contains exactly one decorated array.
+fn findFirstArrayStride(spv: []const u32) ?u32 {
+    var i: usize = 5;
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const op = spv[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == OpDecorate and wc >= 4 and i + 3 < spv.len and spv[i + 2] == DecorationArrayStride) {
+            return spv[i + 3];
         }
         i += wc;
     }
@@ -160,6 +178,129 @@ test "std430 matrix member alignment matches glslang (2-row matrices align to 8)
                 "FAIL std430 {s}: mat_off={d} (want {d}), next_off={d} (want {d})\n",
                 .{ c.mt, mat_off.?, c.mat_off, next_off.?, c.next_off },
             );
+            any_fail = true;
+        }
+    }
+    try std.testing.expect(!any_fail);
+}
+
+// glslang-verified table for std430 row_major `buffer B { <mt> m; float t; }`.
+// In row_major the stored vectors are rows: stride keys off the COLUMN count
+// (rows span the columns). Exercises the col/row span swap in matrixMemberStride.
+const row_major_cases = [_]Case{
+    .{ .mt = "mat2x4", .layout = "std430", .stride = 8, .next_off = 32 }, // rows span 2 cols (vec2) -> 8; 4 rows * 8
+    .{ .mt = "mat4x2", .layout = "std430", .stride = 16, .next_off = 32 }, // rows span 4 cols (vec4) -> 16; 2 rows * 16
+    .{ .mt = "mat3", .layout = "std430", .stride = 16, .next_off = 48 }, // 3 rows * 16
+    .{ .mt = "mat4", .layout = "std430", .stride = 16, .next_off = 64 }, // 4 rows * 16
+};
+
+test "std430 row_major matrix MatrixStride/size matches glslang (row span keys off columns)" {
+    const alloc = std.testing.allocator;
+    var any_fail = false;
+    for (row_major_cases) |c| {
+        const src = try std.fmt.allocPrintSentinel(alloc,
+            \\#version 450
+            \\layout(set=0,binding=0,{s},row_major) buffer B {{ {s} m; float t; }} x;
+            \\layout(location=0) out vec4 o;
+            \\void main() {{ o = vec4(x.m[0][0]*x.t); }}
+        , .{ c.layout, c.mt }, 0);
+        defer alloc.free(src);
+
+        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        defer alloc.free(spv);
+
+        const stride = findMemberMatrixStride(spv, 0);
+        const next_off = findMemberOffset(spv, 1);
+        if (stride == null or next_off == null or
+            stride.? != c.stride or next_off.? != c.next_off)
+        {
+            std.debug.print(
+                "FAIL row_major {s}: stride={?d} (want {d}), next_off={?d} (want {d})\n",
+                .{ c.mt, stride, c.stride, next_off, c.next_off },
+            );
+            any_fail = true;
+        }
+    }
+    try std.testing.expect(!any_fail);
+}
+
+const ArrayCase = struct {
+    mt: []const u8,
+    array_stride: u32,
+    mat_stride: u32,
+    /// offset of the trailing float (== array_stride * element_count == 2 * array_stride)
+    next_off: u32,
+};
+
+// glslang-verified table for std430 `buffer B { <mt> m[2]; float t; }`.
+// ArrayStride must stay consistent with the (now corrected) element matrix size.
+const array_cases = [_]ArrayCase{
+    .{ .mt = "mat4x2", .array_stride = 32, .mat_stride = 8, .next_off = 64 }, // 4 cols * 8 stride = 32 elem
+    .{ .mt = "mat2", .array_stride = 16, .mat_stride = 8, .next_off = 32 }, // 2 cols * 8 = 16 elem
+    .{ .mt = "mat4", .array_stride = 64, .mat_stride = 16, .next_off = 128 }, // 4 cols * 16 = 64 elem
+};
+
+test "std430 matrix-array ArrayStride stays consistent with element MatrixStride (matches glslang)" {
+    const alloc = std.testing.allocator;
+    var any_fail = false;
+    for (array_cases) |c| {
+        const src = try std.fmt.allocPrintSentinel(alloc,
+            \\#version 450
+            \\layout(set=0,binding=0,std430) buffer B {{ {s} m[2]; float t; }} x;
+            \\layout(location=0) out vec4 o;
+            \\void main() {{ o = vec4(x.m[0][0][0]*x.t); }}
+        , .{c.mt}, 0);
+        defer alloc.free(src);
+
+        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        defer alloc.free(spv);
+
+        const arr_stride = findFirstArrayStride(spv);
+        const mat_stride = findMemberMatrixStride(spv, 0);
+        const next_off = findMemberOffset(spv, 1);
+        if (arr_stride == null or mat_stride == null or next_off == null or
+            arr_stride.? != c.array_stride or mat_stride.? != c.mat_stride or next_off.? != c.next_off)
+        {
+            std.debug.print(
+                "FAIL array {s}[2]: arrStride={?d} (want {d}), matStride={?d} (want {d}), next_off={?d} (want {d})\n",
+                .{ c.mt, arr_stride, c.array_stride, mat_stride, c.mat_stride, next_off, c.next_off },
+            );
+            any_fail = true;
+        }
+    }
+    try std.testing.expect(!any_fail);
+}
+
+const MslCase = struct { mt: []const u8, msl_type: []const u8 };
+
+// The std430 MatrixStride this fix corrects is a direct input to MSL matrix-type
+// selection (spirv_to_msl maps stride -> rows). Guard that coupling so a future
+// change to matrixMemberStride can't silently corrupt MSL output.
+const msl_cases = [_]MslCase{
+    .{ .mt = "mat4", .msl_type = "float4x4" }, // pre-fix this was float4x2 (stride 8 bug)
+    .{ .mt = "mat3x2", .msl_type = "float3x2" }, // 2-row -> stride 8, must not widen to float3x4
+    .{ .mt = "mat2", .msl_type = "float2x2" },
+};
+
+test "std430 matrix maps to correct MSL matrix type (downstream of MatrixStride)" {
+    const alloc = std.testing.allocator;
+    var any_fail = false;
+    for (msl_cases) |c| {
+        const src = try std.fmt.allocPrintSentinel(alloc,
+            \\#version 450
+            \\layout(set=0,binding=0,std430) buffer B {{ {s} m; float t; }} x;
+            \\layout(location=0) out vec4 o;
+            \\void main() {{ o = vec4(x.m[0][0]*x.t); }}
+        , .{c.mt}, 0);
+        defer alloc.free(src);
+
+        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        defer alloc.free(spv);
+        const msl = try glslpp.spirvToMSL(alloc, spv, .{});
+        defer alloc.free(msl);
+
+        if (std.mem.indexOf(u8, msl, c.msl_type) == null) {
+            std.debug.print("FAIL msl {s}: expected MSL type \"{s}\" not found\n", .{ c.mt, c.msl_type });
             any_fail = true;
         }
     }
