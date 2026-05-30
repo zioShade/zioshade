@@ -1625,3 +1625,21 @@ test "T18.20: mat3x2 array — float3x4 a[2] (non-square, rows widened via Matri
     try assertNotContains(msl, "[[offset(");
 }
 
+
+test "msl: std140 ubo array element access indexes and narrows (oracle u.arr[0].x)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { float arr[4]; vec4 tail; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.arr[0]) + u.tail; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // std140 widens the scalar element to `float4 arr[4]` (matches spirv-cross).
+    try assertContains(msl, "float4 arr[4]");
+    // Body must index the array and narrow the widened element: `u_1.arr[0].x`
+    // (spirv-cross emits `u.arr[0].x`), never the leftover synthesized member
+    // access `arr._m0`.
+    try assertContains(msl, "u_1.arr[0].x");
+    try assertNotContains(msl, "arr._m0");
+}
