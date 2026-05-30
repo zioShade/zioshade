@@ -414,3 +414,148 @@ test "interpolateAtOffset: accepts an Input interface-block member (no over-reje
     // be an Input-storage pointer (the access chain into the Input block).
     try std.testing.expect(extInstFirstOperand(words, EXT_INTERPOLATE_AT_OFFSET) != null);
 }
+
+// ─── textureGatherOffsets → OpImageGather + ConstOffsets ───────────────────
+//
+// `textureGatherOffsets(sampler2D, vec2, const ivec2[4] [, int comp])` lowers to
+//   OpImageGather %v4float %si %coord %Component ConstOffsets %constArray
+// matching glslang -V exactly. ConstOffsets is image-operands mask bit 0x20;
+// the 4-element constant ivec2 array id immediately follows the mask word. The
+// Component operand is ALWAYS present (a const int, default 0 when GLSL omits
+// `comp`). The op additionally requires the ImageGatherExtended capability.
+//
+// These are SPIR-V byte-level tests (suite-counted). The companion
+// spirv-val-backed assertions live in src/gap_tests.zig.
+
+const OP_IMAGE_GATHER: u32 = 96;
+const OP_IMAGE_DREF_GATHER: u32 = 97;
+const OP_CONSTANT: u32 = 43;
+const OP_CONSTANT_COMPOSITE: u32 = 44;
+const CAP_IMAGE_GATHER_EXTENDED: u32 = 25;
+const CONST_OFFSETS_MASK: u32 = 0x20;
+
+/// Return the full word slice (header included) of the first instruction with
+/// the given opcode, or null. Lets a test inspect the trailing image-operands.
+fn firstInst(spv: []const u32, opcode: u32) ?[]const u32 {
+    var i: usize = 5;
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const op = spv[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == opcode and i + wc <= spv.len) return spv[i .. i + wc];
+        i += wc;
+    }
+    return null;
+}
+
+/// Resolve the literal value of an `OpConstant` (32-bit) with the given id.
+fn constValue(spv: []const u32, id: u32) ?u32 {
+    var i: usize = 5;
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const op = spv[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == OP_CONSTANT and wc >= 4 and spv[i + 2] == id) return spv[i + 3];
+        i += wc;
+    }
+    return null;
+}
+
+test "textureGatherOffsets: OpImageGather carries ConstOffsets (0x20) + const-array id + explicit component" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  const ivec2 offs[4]=ivec2[4](ivec2(0,0),ivec2(1,0),ivec2(1,1),ivec2(0,1));
+        \\  o = textureGatherOffsets(s, vec2(0.5), offs, 1);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // Exactly one OpImageGather, no Dref form.
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(spv, OP_IMAGE_GATHER));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(spv, OP_IMAGE_DREF_GATHER));
+
+    // Instruction shape: [hdr|rt|res|si|coord|component|mask|array] = 8 words.
+    const gi = firstInst(spv, OP_IMAGE_GATHER) orelse return error.NoGather;
+    try std.testing.expectEqual(@as(usize, 8), gi.len);
+    try std.testing.expectEqual(CONST_OFFSETS_MASK, gi[6]);
+    try std.testing.expect(gi[7] != 0); // the offsets array id
+
+    // Component is the explicit `1`.
+    try std.testing.expectEqual(@as(?u32, 1), constValue(spv, gi[5]));
+
+    // The trailing array id references an OpConstantComposite.
+    try std.testing.expect(countOpcode(spv, OP_CONSTANT_COMPOSITE) >= 1);
+
+    // ImageGatherExtended capability is declared.
+    try std.testing.expect(hasCapability(spv, CAP_IMAGE_GATHER_EXTENDED));
+}
+
+test "textureGatherOffsets: omitted component defaults to const int 0 (Component always emitted)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  const ivec2 offs[4]=ivec2[4](ivec2(0,0),ivec2(1,0),ivec2(1,1),ivec2(0,1));
+        \\  o = textureGatherOffsets(s, vec2(0.5), offs);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(spv, OP_IMAGE_GATHER));
+    const gi = firstInst(spv, OP_IMAGE_GATHER) orelse return error.NoGather;
+    try std.testing.expectEqual(@as(usize, 8), gi.len);
+    try std.testing.expectEqual(CONST_OFFSETS_MASK, gi[6]);
+    // Component operand present and equal to const int 0.
+    try std.testing.expectEqual(@as(?u32, 0), constValue(spv, gi[5]));
+}
+
+test "textureGather (non-offset) stays a plain 6-word OpImageGather, no regression" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGather(s, uv, 1); }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(spv, OP_IMAGE_GATHER));
+    const gi = firstInst(spv, OP_IMAGE_GATHER) orelse return error.NoGather;
+    // 6 words: header, result_type, result, sampled_image, coord, component.
+    try std.testing.expectEqual(@as(usize, 6), gi.len);
+    // No ImageGatherExtended capability forced for a plain gather.
+    try std.testing.expect(!hasCapability(spv, CAP_IMAGE_GATHER_EXTENDED));
+}
+
+test "textureGatherOffsets: NON-const offsets array is an honest error (not silent-drop)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(binding=1) uniform U { int k; };
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  ivec2 offs[4]=ivec2[4](ivec2(k,0),ivec2(1,0),ivec2(1,1),ivec2(0,1));
+        \\  o = textureGatherOffsets(s, vec2(0.5), offs, 1);
+        \\}
+    ;
+    var diags: std.ArrayListUnmanaged(diagnostic.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
+    );
+    try std.testing.expectEqualStrings(
+        "textureGatherOffsets-offsets-not-constant",
+        glslpp.semantic.last_error_ctx,
+    );
+}

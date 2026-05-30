@@ -1583,3 +1583,160 @@ test "gap: layout(depth_unchanged) emits DepthUnchanged execution mode" {
 
     try testing.expect(words.len > 0);
 }
+
+// ─── Gap: textureGatherOffsets ─────────────────────────────────────────────
+// textureGatherOffsets(sampler2D, vec2, const ivec2[4] [, int comp]) lowers to
+//   OpImageGather %v4float %si %coord %Component ConstOffsets %constArray
+// matching glslang -V. ConstOffsets is image-operands mask bit 0x20; the const
+// array id immediately follows the mask word. The Component operand is ALWAYS
+// present (defaults to const int 0 when the GLSL omits `comp`). The instruction
+// also requires the ImageGatherExtended capability.
+
+/// Return the full word-slice of the first instruction with the given opcode
+/// (header word included), or null. Lets a test inspect trailing operands such
+/// as the image-operands mask + ConstOffsets array id on an OpImageGather.
+fn firstInstWords(words: []const u32, op: spirv.Op) ?[]const u32 {
+    var i: usize = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        if (opcode == @intFromEnum(op) and word_count > 0 and i + word_count <= words.len) {
+            return words[i .. i + word_count];
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    return null;
+}
+
+/// Resolve the value of an OpConstant (32-bit int/uint) with the given result id.
+fn constIntValue(words: []const u32, id: u32) ?u32 {
+    var i: usize = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        // OpConstant: [header | result_type | result_id | value...]
+        if (opcode == @intFromEnum(spirv.Op.Constant) and word_count >= 4 and words[i + 2] == id) {
+            return words[i + 3];
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    return null;
+}
+
+const ConstOffsetsMask: u32 = 0x20; // SPIR-V image-operands ConstOffsets bit
+
+test "gap: textureGatherOffsets(s, coord, const ivec2[4], comp) emits OpImageGather with ConstOffsets" {
+    // Matches the glslang -V oracle:
+    //   %30 = OpImageGather %v4float %si %coord %int_1 ConstOffsets %29
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  const ivec2 offs[4]=ivec2[4](ivec2(0,0),ivec2(1,0),ivec2(1,1),ivec2(0,1));
+        \\  o = textureGatherOffsets(s, vec2(0.5), offs, 1);
+        \\}
+    ;
+    const words = try compileToWords(testing.allocator, source, .fragment);
+    defer testing.allocator.free(words);
+
+    // (a) compiles + spirv-val PASS
+    try testing.expect(try glslpp.validateSPIRV(testing.allocator, words));
+
+    // (b) exactly one OpImageGather, vec4 result, no Dref form.
+    try testing.expectEqual(@as(usize, 1), countOp(words, .ImageGather));
+    try testing.expectEqual(@as(usize, 0), countOp(words, .ImageDrefGather));
+    const rt = firstResultTypeId(words, .ImageGather) orelse return error.NoGather;
+    try testing.expect(typeIsVec4Float(words, rt));
+
+    // (c) the OpImageGather carries the ConstOffsets image operand (0x20) plus a
+    //     trailing array id. Layout: [hdr|rt|res|si|coord|component|mask|array].
+    const gi = firstInstWords(words, .ImageGather) orelse return error.NoGather;
+    try testing.expectEqual(@as(usize, 8), gi.len);
+    const mask = gi[6];
+    try testing.expectEqual(ConstOffsetsMask, mask);
+    const array_id = gi[7];
+    try testing.expect(array_id != 0);
+    // The array id must reference an OpConstantComposite (the 4-offset array).
+    try testing.expect(firstInstWords(words, .ConstantComposite) != null);
+
+    // Component (gi[5]) is the explicit `1` from the GLSL.
+    try testing.expectEqual(@as(?u32, 1), constIntValue(words, gi[5]));
+
+    // (d) ImageGatherExtended capability is declared (required by spirv-val).
+    try testing.expect(hasCapability(words, .image_gather_extended));
+}
+
+test "gap: textureGatherOffsets default component (no comp arg) emits Component 0 + ConstOffsets" {
+    // glslang emits the Component operand even when GLSL omits it, defaulting to
+    // const int 0. The ConstOffsets operand follows.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  const ivec2 offs[4]=ivec2[4](ivec2(0,0),ivec2(1,0),ivec2(1,1),ivec2(0,1));
+        \\  o = textureGatherOffsets(s, vec2(0.5), offs);
+        \\}
+    ;
+    const words = try compileToWords(testing.allocator, source, .fragment);
+    defer testing.allocator.free(words);
+
+    try testing.expect(try glslpp.validateSPIRV(testing.allocator, words));
+    try testing.expectEqual(@as(usize, 1), countOp(words, .ImageGather));
+
+    const gi = firstInstWords(words, .ImageGather) orelse return error.NoGather;
+    try testing.expectEqual(@as(usize, 8), gi.len);
+    try testing.expectEqual(ConstOffsetsMask, gi[6]);
+    // Default component is a constant int 0.
+    try testing.expectEqual(@as(?u32, 0), constIntValue(words, gi[5]));
+}
+
+test "gap: non-offset textureGather stays plain OpImageGather (no ConstOffsets, no regression)" {
+    // The plain gather must remain byte-shape-identical: a 6-word OpImageGather
+    // with NO image-operands mask. This guards against the offsets lowering
+    // leaking the ConstOffsets word into the non-offset path.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGather(s, uv, 1); }
+    ;
+    const words = try compileToWords(testing.allocator, source, .fragment);
+    defer testing.allocator.free(words);
+
+    try testing.expect(try glslpp.validateSPIRV(testing.allocator, words));
+    try testing.expectEqual(@as(usize, 1), countOp(words, .ImageGather));
+    const gi = firstInstWords(words, .ImageGather) orelse return error.NoGather;
+    // 6 words: header, result_type, result, sampled_image, coord, component.
+    try testing.expectEqual(@as(usize, 6), gi.len);
+    // ImageGatherExtended must NOT be forced on for a plain gather.
+    try testing.expect(!hasCapability(words, .image_gather_extended));
+}
+
+test "gap: textureGatherOffsets with NON-const offsets array is an honest error (no silent-drop)" {
+    // glslang requires the offsets to be a constant expression. A non-const
+    // ivec2[4] (here built from a runtime uniform) must fail honestly, NOT
+    // silently drop to a plain gather that ignores the offsets. In tolerate mode
+    // the offending statement is SKIPPED entirely, so NO OpImageGather may
+    // appear in the body (a silently-wrong gather would leave one behind).
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(binding=1) uniform U { int k; };
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  ivec2 offs[4]=ivec2[4](ivec2(k,0),ivec2(1,0),ivec2(1,1),ivec2(0,1));
+        \\  o = textureGatherOffsets(s, vec2(0.5), offs, 1);
+        \\}
+    ;
+    const words = try glslpp.compileToSPIRV(testing.allocator, source, .{ .stage = .fragment });
+    defer testing.allocator.free(words);
+    try testing.expectEqualStrings("textureGatherOffsets-offsets-not-constant", semantic.last_error_ctx);
+    try testing.expectEqual(@as(usize, 0), countOp(words, .ImageGather));
+}
