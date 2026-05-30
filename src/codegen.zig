@@ -2458,10 +2458,19 @@ const Codegen = struct {
                     }
                     try member_ids.append(self.alloc, try self.ensureType(member_ty));
                 }
-                // Check if a struct with the same member layout was already emitted
+                // Check if a struct with the same member layout was already emitted.
+                // The key folds in member NAMES as well as member types: two blocks
+                // with byte-identical layouts but different member names (e.g.
+                // `A { vec4 ca }` vs `B { vec4 cb }`) are distinct types and must NOT
+                // be merged — reusing one id would alias the other block's member
+                // names (and decorations) onto it, so `b.cb` would resolve to `ca`.
                 var layout_key: u64 = @as(u64, member_ids.items.len);
                 for (member_ids.items) |mid| {
                     layout_key = layout_key *% 33 +% @as(u64, mid);
+                }
+                for (td.members) |member| {
+                    for (member.name) |c| layout_key = layout_key *% 33 +% @as(u64, c);
+                    layout_key = layout_key *% 33 +% 0xFF; // member-name boundary
                 }
                 if (self.emitted_struct_layouts.get(layout_key)) |cached_id| {
                     // Reuse existing struct type — update name mapping too

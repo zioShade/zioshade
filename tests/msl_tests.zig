@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! MSL backend tests — end-to-end GLSL → SPIR-V → MSL pipeline.
 //!
-//! All tests use `discard` as a side effect to prevent DCE.
+//! Tests use an observable side effect — `discard` or a write to a
+//! `location` output — to keep the body alive through dead-code elimination.
 
 const std = @import("std");
 const glslpp = @import("glslpp");
@@ -1623,5 +1624,31 @@ test "T18.20: mat3x2 array — float3x4 a[2] (non-square, rows widened via Matri
     try assertContains(msl, "float3x4 a[2];");
     try assertNotContains(msl, "packed_float3x3");
     try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.21: byte-identical UBO blocks keep distinct member names" {
+    // ORACLE spirv-cross --msl: struct A { float4 ca; }; struct B { float4 cb; };
+    // and body `... = u.ca + ...; ... = u_1.cb`. Two uniform blocks with
+    // byte-identical layouts (both `{ vec4 }`) but DIFFERENT member names must
+    // NOT be merged by the struct-dedup pass: dedup keyed only on member types
+    // aliased B's member onto A's, so b's struct declared `float4 ca` and the
+    // body emitted `b_1.ca` instead of `b_1.cb`.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform A { vec4 ca; } a;
+        \\layout(binding=1,std140) uniform B { vec4 cb; } b;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.ca + b.cb; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // Each block keeps its own source member name in its struct decl.
+    try assertContains(msl, "float4 ca;");
+    try assertContains(msl, "float4 cb;");
+    // Body access expressions reference the correct, distinct members.
+    try assertContains(msl, "a_1.ca");
+    try assertContains(msl, "b_1.cb");
+    // The collision aliased b's member onto a's — `b_1.ca` must never appear.
+    try assertNotContains(msl, "b_1.ca");
 }
 
