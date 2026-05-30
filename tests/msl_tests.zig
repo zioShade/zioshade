@@ -910,3 +910,168 @@ test "T15.6: no location inputs → no main0_in struct (no regression)" {
     try assertNotContains(msl, "[[stage_in]]");
 }
 
+// ---------------------------------------------------------------------------
+// T16: VERTEX stage I/O (mirrors T15 fragment, structurally matched to
+// spirv-cross --msl). Vertex inputs use `[[attribute(N)]]` (NOT
+// `[[user(locnN)]]`); a `main0_out` struct carries user varyings
+// `[[user(locnN)]]` followed by `gl_Position [[position]]`; the entry keyword
+// is `vertex` and returns `main0_out`; body refs are `in.<name>`/`out.<name>`
+// and gl_Position becomes the struct field `out.gl_Position`, never a local.
+//
+// Oracle (spirv-cross 1.4.341.1) for the single in+out shape:
+//   struct main0_out { float2 vUV [[user(locn0)]]; float4 gl_Position [[position]]; };
+//   struct main0_in  { float3 aPos [[attribute(0)]]; float2 aUV [[attribute(1)]]; };
+//   vertex main0_out main0(main0_in in [[stage_in]]) {
+//       main0_out out = {};
+//       out.vUV = in.aUV;
+//       out.gl_Position = float4(in.aPos, 1.0);
+//       return out;
+//   }
+// ---------------------------------------------------------------------------
+
+test "T16.1: single location input + varying + gl_Position" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 aPos;
+        \\layout(location = 1) in vec2 aUV;
+        \\layout(location = 0) out vec2 vUV;
+        \\void main() { vUV = aUV; gl_Position = vec4(aPos, 1.0); }
+    ;
+    const msl = try compileToMslStage(source, .vertex);
+    defer alloc.free(msl);
+    // Entry wrapper: vertex keyword, returns main0_out, takes stage-in struct.
+    try assertContains(msl, "vertex main0_out main0(main0_in in [[stage_in]]");
+    // Inputs use [[attribute(N)]], NOT [[user(locnN)]].
+    try assertContains(msl, "struct main0_in");
+    try assertContains(msl, "float3 aPos [[attribute(0)]];");
+    try assertContains(msl, "float2 aUV [[attribute(1)]];");
+    try assertNotContains(msl, "aPos [[user(");
+    // Outputs: user varying via [[user(locnN)]], gl_Position via [[position]].
+    try assertContains(msl, "struct main0_out");
+    try assertContains(msl, "float2 vUV [[user(locn0)]];");
+    try assertContains(msl, "float4 gl_Position [[position]];");
+    // Body refs through the structs.
+    try assertContains(msl, "out.vUV = in.aUV");
+    try assertContains(msl, "out.gl_Position = float4(in.aPos, 1.0)");
+    // gl_Position MUST be the struct field, never a bare local decl.
+    try assertNotContains(msl, "float4 gl_Position =");
+    try assertNotContains(msl, "    gl_Position =");
+    // The entry materializes `main0_out out = {};` and returns it.
+    try assertContains(msl, "main0_out out = {};");
+    try assertContains(msl, "return out;");
+}
+
+test "T16.2: gl_Position only — no varyings still yields a main0_out [[position]]" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 aPos;
+        \\void main() { gl_Position = vec4(aPos, 1.0); }
+    ;
+    const msl = try compileToMslStage(source, .vertex);
+    defer alloc.free(msl);
+    try assertContains(msl, "vertex main0_out main0(main0_in in [[stage_in]]");
+    try assertContains(msl, "struct main0_in");
+    try assertContains(msl, "float3 aPos [[attribute(0)]];");
+    // main0_out carries ONLY gl_Position (no user varyings).
+    try assertContains(msl, "struct main0_out");
+    try assertContains(msl, "float4 gl_Position [[position]];");
+    try assertNotContains(msl, "[[user(locn");
+    // gl_Position is a field, not a local.
+    try assertContains(msl, "out.gl_Position = float4(in.aPos, 1.0)");
+    try assertNotContains(msl, "float4 gl_Position =");
+}
+
+test "T16.3: multiple varyings ordered by location, then gl_Position last" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 aPos;
+        \\layout(location = 1) in vec2 aUV;
+        \\layout(location = 2) in vec3 aNormal;
+        \\layout(location = 0) out vec2 vUV;
+        \\layout(location = 1) out vec3 vNormal;
+        \\void main() { vUV = aUV; vNormal = aNormal; gl_Position = vec4(aPos, 1.0); }
+    ;
+    const msl = try compileToMslStage(source, .vertex);
+    defer alloc.free(msl);
+    // Inputs in attribute order.
+    try assertContains(msl, "float3 aPos [[attribute(0)]];");
+    try assertContains(msl, "float2 aUV [[attribute(1)]];");
+    try assertContains(msl, "float3 aNormal [[attribute(2)]];");
+    // Outputs ordered: varyings by location, gl_Position LAST.
+    try assertContains(msl, "float2 vUV [[user(locn0)]];");
+    try assertContains(msl, "float3 vNormal [[user(locn1)]];");
+    try assertContains(msl, "float4 gl_Position [[position]];");
+    const i_vuv = std.mem.indexOf(u8, msl, "vUV [[user(locn0)]]").?;
+    const i_vnorm = std.mem.indexOf(u8, msl, "vNormal [[user(locn1)]]").?;
+    const i_glpos = std.mem.indexOf(u8, msl, "gl_Position [[position]]").?;
+    try std.testing.expect(i_vuv < i_vnorm);
+    try std.testing.expect(i_vnorm < i_glpos);
+    // Body refs.
+    try assertContains(msl, "out.vUV = in.aUV");
+    try assertContains(msl, "out.vNormal = in.aNormal");
+    try assertContains(msl, "out.gl_Position = float4(in.aPos, 1.0)");
+}
+
+test "T16.4: vertex with a UBO threads the cbuffer and stage-in together" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0, std140) uniform U { mat4 mvp; } u;
+        \\layout(location = 0) in vec3 aPos;
+        \\layout(location = 0) out vec3 vPos;
+        \\void main() { vPos = aPos; gl_Position = u.mvp * vec4(aPos, 1.0); }
+    ;
+    const msl = try compileToMslStage(source, .vertex);
+    defer alloc.free(msl);
+    // The UBO struct is emitted.
+    try assertContains(msl, "struct U");
+    try assertContains(msl, "float4x4 mvp;");
+    // Entry threads BOTH the stage-in struct AND the cbuffer.
+    try assertContains(msl, "vertex main0_out main0(main0_in in [[stage_in]]");
+    try assertContains(msl, "[[buffer(0)]]");
+    // Body uses the uniform and the stage-in input.
+    try assertContains(msl, "struct main0_in");
+    try assertContains(msl, "float3 aPos [[attribute(0)]];");
+    try assertContains(msl, "out.vPos = in.aPos");
+    // gl_Position written as struct field (multiplied by the matrix).
+    try assertContains(msl, "out.gl_Position =");
+    try assertNotContains(msl, "float4 gl_Position =");
+}
+
+test "T16.5: swizzle/access-chain on input and output resolve off in./out." {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 aPos;
+        \\layout(location = 0) out vec3 vRGB;
+        \\void main() { vRGB = aPos.xyz; gl_Position = vec4(aPos.x, aPos.y, aPos.z, 1.0); }
+    ;
+    const msl = try compileToMslStage(source, .vertex);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4 aPos [[attribute(0)]];");
+    try assertContains(msl, "float3 vRGB [[user(locn0)]];");
+    try assertContains(msl, "float4 gl_Position [[position]];");
+    // Swizzle on the input resolves through in.<name>.
+    try assertContains(msl, "in.aPos.x");
+    // The varying store target resolves through out.<name>.
+    try assertContains(msl, "out.vRGB = in.aPos.xyz");
+    try assertContains(msl, "out.gl_Position = float4(in.aPos.x, in.aPos.y, in.aPos.z, 1.0)");
+    // Never a bare undeclared input/output reference.
+    try assertNotContains(msl, " = aPos.x");
+    try assertNotContains(msl, "float4 gl_Position =");
+}
+
+test "T16.6: NOT a bare void main0 — vertex must have the entry wrapper" {
+    // Direct regression guard for the original bug: glslpp used to emit
+    // `void main0()` referencing undeclared aPos/aUV/vUV/gl_Position.
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 aPos;
+        \\layout(location = 1) in vec2 aUV;
+        \\layout(location = 0) out vec2 vUV;
+        \\void main() { vUV = aUV; gl_Position = vec4(aPos, 1.0); }
+    ;
+    const msl = try compileToMslStage(source, .vertex);
+    defer alloc.free(msl);
+    try assertNotContains(msl, "void main0()");
+    try assertContains(msl, "vertex main0_out main0(");
+}
+
