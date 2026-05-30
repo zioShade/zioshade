@@ -8414,3 +8414,78 @@ test "semantic: tolerate mode never emits a defaulted GLSL.std.450 ext_inst for 
         }
     }
 }
+
+// ─── Shadow textureGather result type ─────────────────────────────────────────
+//
+// `textureGather(sampler2DShadow, vec2, float refz)` is VALID GLSL
+// (glslangValidator -V accepts it) and returns a vec4 of the four
+// depth-comparison results. The analyzer used to compute the result type of any
+// shadow-sampler image builtin as `.float` (correct for shadow SAMPLE ops, which
+// return a single compared depth). For textureGather that mistyped the call
+// expression: binding it to a `vec4` raised error.TypeMismatch in the strict
+// path, and in tolerate mode the statement was silently dropped — so the user's
+// gather vanished from the output. The reference lowering is
+//   OpImageDrefGather %v4float %sampledImage %coord %dref
+// i.e. a vec4 result. The fix makes result_ty vec4 for shadow textureGather while
+// leaving shadow SAMPLE ops at float and non-shadow gather unchanged.
+
+test "semantic: shadow textureGather bound to vec4 is accepted (not over-rejected)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow tex;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=1) in float refz;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ vec4 g = textureGather(tex, uv, refz); o = g; }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    // Strict path must NOT reject: this is valid GLSL.
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    // The lowering must be the depth-comparison gather, carrying a vec4 IR type.
+    var found_dref_gather = false;
+    for (module.functions) |func| {
+        for (func.body) |inst| {
+            if (inst.tag == .image_dref_gather) {
+                found_dref_gather = true;
+                try testing.expectEqual(ast.Type.vec4, inst.ty);
+            }
+            // Must never be the non-shadow gather for a shadow sampler.
+            try testing.expect(inst.tag != .image_gather);
+        }
+    }
+    try testing.expect(found_dref_gather);
+}
+
+test "semantic: non-shadow textureGather stays image_gather (no over-broadening to Dref)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ vec4 g = textureGather(tex, uv, 0); o = g; }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    var found_gather = false;
+    for (module.functions) |func| {
+        for (func.body) |inst| {
+            if (inst.tag == .image_gather) {
+                found_gather = true;
+                try testing.expectEqual(ast.Type.vec4, inst.ty);
+            }
+            // A non-shadow sampler must not produce the Dref gather.
+            try testing.expect(inst.tag != .image_dref_gather);
+        }
+    }
+    try testing.expect(found_gather);
+}
