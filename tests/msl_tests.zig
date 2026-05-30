@@ -1625,8 +1625,11 @@ test "T18.20: mat3x2 array — float3x4 a[2] (non-square, rows widened via Matri
     try assertNotContains(msl, "[[offset(");
 }
 
-
-test "msl: std140 ubo array element access indexes and narrows (oracle u.arr[0].x)" {
+test "T18.21: std140 float array element — body indexes + narrows widened element (oracle u.arr[0].x)" {
+    // ORACLE spirv-cross: struct U { float4 arr[4]; float4 tail; }; ... u.arr[0].x
+    // std140 widens the scalar element to `float4 arr[4]`, so the body must index
+    // the array AND narrow back with `.x`, never the leftover synthesized member
+    // access `arr._m0`.
     const source =
         \\#version 450
         \\layout(binding=0,std140) uniform U { float arr[4]; vec4 tail; } u;
@@ -1635,11 +1638,43 @@ test "msl: std140 ubo array element access indexes and narrows (oracle u.arr[0].
     ;
     const msl = try compileToMsl(source);
     defer alloc.free(msl);
-    // std140 widens the scalar element to `float4 arr[4]` (matches spirv-cross).
     try assertContains(msl, "float4 arr[4]");
-    // Body must index the array and narrow the widened element: `u_1.arr[0].x`
-    // (spirv-cross emits `u.arr[0].x`), never the leftover synthesized member
-    // access `arr._m0`.
     try assertContains(msl, "u_1.arr[0].x");
     try assertNotContains(msl, "arr._m0");
+}
+
+test "T18.22: std140 vec3 array element — float3 a[N], body indexes WITHOUT a swizzle" {
+    // ORACLE spirv-cross: struct U { float3 a[3]; float4 tail; }; ... u.a[0]
+    // A vec3 array element is NOT widened to float4 (float3 already fills a
+    // 16-byte slot), so the decl stays `float3 a[3]` and the body accesses it
+    // BARE — appending a `.xyz` would diverge from spirv-cross.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { vec3 a[3]; vec4 tail; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a[0], 1.0) + u.tail; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float3 a[3];");
+    try assertContains(msl, "u_1.a[0]");
+    try assertNotContains(msl, "u_1.a[0].xyz");
+    try assertNotContains(msl, "a._m0");
+}
+
+test "T18.23: std140 vec2 array element — float4 a[N], body narrows with .xy (oracle u.a[0].xy)" {
+    // ORACLE spirv-cross: struct U { float4 a[3]; }; ... u.a[0].xy
+    // std140 widens a vec2 element to float4, so the body indexes AND narrows
+    // back to the 2 live components with `.xy`.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { vec2 a[3]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a[0], 0.0, 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float4 a[3];");
+    try assertContains(msl, "u_1.a[0].xy");
+    try assertNotContains(msl, "a._m0");
 }

@@ -190,15 +190,18 @@ fn arrayStrideOf(m: *const ParsedModule, array_type_id: u32) ?u32 {
     return null;
 }
 
-/// When a std140 UBO array element is widened to a 4-component MSL type (e.g.
-/// `float arr[N]` stored as `float4 arr[N]` so the natural stride hits 16), an
-/// `arr[i]` index yields the wide type while the GLSL element is narrower.
-/// Return the trailing swizzle (".x"/".xy"/".xyz") that narrows the widened
+/// When a std140 UBO array element is widened to a *wider* 4-component MSL type
+/// (e.g. `float arr[N]` stored as `float4 arr[N]` so the natural stride hits
+/// 16), an `arr[i]` index yields the wide type while the GLSL element is
+/// narrower. Return the trailing swizzle (".x"/".xy") that narrows the widened
 /// element back to its component count — matching spirv-cross's `u.arr[0].x`.
 /// Returns null when no narrowing applies: not an array, no ArrayStride, stride
-/// already natural (std430 tight packing), the element already 4-wide, or the
-/// element is a matrix/struct (handled elsewhere). Mirrors the widening decision
-/// in mslWidenedElementType so the body access matches the emitted decl.
+/// already natural (std430 tight packing), or the element is a matrix/struct
+/// (handled elsewhere). Crucially, this MUST mirror mslWidenedElementType, which
+/// only widens 1- and 2-component elements to a 4-wide type; a 3-component
+/// element stays `float3` (already 16-byte aligned) and a 4-component element
+/// stays `float4`, so BOTH index cleanly with NO swizzle — appending `.xyz` to
+/// a `float3` would diverge from the oracle even though it compiles.
 fn widenedArrayElementSwizzle(m: *const ParsedModule, array_type_id: u32) ?[]const u8 {
     const arr = getDef(m, array_type_id) orelse return null;
     if (arr.op != .TypeArray and arr.op != .TypeRuntimeArray) return null;
@@ -212,11 +215,13 @@ fn widenedArrayElementSwizzle(m: *const ParsedModule, array_type_id: u32) ?[]con
         .TypeVector => elem.words[3],
         else => return null, // matrices/structs: not a scalar-narrowing case
     };
+    // Only 1- and 2-component elements are widened to a wider 4-wide MSL type by
+    // mslWidenedElementType, so only those need narrowing. A 3-component element
+    // stays float3 and a 4-component element stays float4 — both indexed bare.
     return switch (comp_count) {
         1 => ".x",
         2 => ".xy",
-        3 => ".xyz",
-        else => null, // already 4-wide: no narrowing needed
+        else => null, // 3- or 4-wide element: not widened, no narrowing needed
     };
 }
 
