@@ -46,17 +46,29 @@ fn parseLitStr(alloc: std.mem.Allocator, words: []const u32) ![]const u8 { var b
 fn sanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 { var buf = try std.ArrayList(u8).initCapacity(alloc, name.len); for(name)|c|{switch(c){'a'...'z','A'...'Z','0'...'9','_'=>buf.appendAssumeCapacity(c),else=>buf.appendAssumeCapacity('_'),}} return buf.toOwnedSlice(alloc); }
 fn isUniformVar(m: *const ParsedModule, id: u32) bool { const inst = getDef(m, id) orelse return false; if (inst.op == .Variable and inst.words.len >= 4) { const sc: spirv.StorageClass = @enumFromInt(inst.words[3]); return sc == .Uniform; } return false; }
 
-/// True when the resource's image type is a depth/comparison image (the
-/// OpTypeImage `Depth` operand is 1), e.g. a `sampler2DShadow`. `pointee` is the
-/// type behind the UniformConstant pointer: either an OpTypeSampledImage
-/// (wrapping the OpTypeImage) or an OpTypeImage directly. OpTypeImage layout:
-/// `[op, result_id, sampled_type, dim, DEPTH, arrayed, ms, sampled, format]`.
+/// True when the resource's image type is a 2D depth/comparison image (the
+/// OpTypeImage `Depth` operand is 1 AND `Dim` is 2D), e.g. a `sampler2DShadow`.
+/// `pointee` is the type behind the UniformConstant pointer: either an
+/// OpTypeSampledImage (wrapping the OpTypeImage) or an OpTypeImage directly.
+/// OpTypeImage layout: `[op, result_id, sampled_type, DIM, DEPTH, arrayed, ms,
+/// sampled, format]` — so `words[3]` is Dim and `words[4]` is Depth.
+///
+/// Only 2D is gated on purpose: this whole backend hardcodes 2D textures, so a
+/// non-2D depth sampler (samplerCubeShadow → depthcube, sampler2DArrayShadow →
+/// depth2d_array, etc.) must NOT be promoted to `depth2d` — that would swap one
+/// non-compiling type for another. glslpp marks ALL shadow samplers with
+/// Depth=1 regardless of dimension, so the Dim check is what keeps the depth2d
+/// promotion scoped to the case it actually models. Non-2D textures (shadow or
+/// not) are a separate, backend-wide gap.
 fn imageTypeIsDepth(m: *const ParsedModule, pointee: Instruction) bool {
     var img = pointee;
     if (img.op == .TypeSampledImage and img.words.len > 2) {
         img = getDef(m, img.words[2]) orelse return false;
     }
-    return img.op == .TypeImage and img.words.len > 4 and img.words[4] == 1;
+    if (img.op != .TypeImage or img.words.len <= 4) return false;
+    const dim = img.words[3]; // SPIR-V Dim: 1 == 2D
+    const depth = img.words[4]; // 0 = non-depth, 1 = depth, 2 = no indication
+    return depth == 1 and dim == 1;
 }
 
 /// MSL texture type for a sampled texture parameter. Comparison/shadow samplers
