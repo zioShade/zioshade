@@ -9,6 +9,14 @@ const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
 const DecorationEntry = common.DecorationEntry;
 
+/// Human-readable detail for the most recent `error.UnsupportedExtInst`. Zig
+/// errors carry no payload, so the failing GLSL.std.450 instruction is recorded
+/// here for the CLI/tests to surface (e.g. "GLSL.std.450 InterpolateAtCentroid
+/// (76) has no WGSL equivalent"). Backed by a threadlocal buffer; valid until
+/// the next `spirvToWGSL` call on the same thread. Reset at `spirvToWGSL` entry.
+pub threadlocal var last_error_detail: ?[]const u8 = null;
+threadlocal var last_error_detail_buf: [192]u8 = undefined;
+
 /// Options for SPIR-V → WGSL cross-compilation.
 pub const WgslCompileOptions = struct {
     /// Entry point name to compile (default: "main").
