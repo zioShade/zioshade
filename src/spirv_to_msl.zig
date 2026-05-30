@@ -270,6 +270,57 @@ fn resolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
     return try alloc.dupe(u8, n);
 }
 
+/// MSL column-major matrix type for a UBO/SSBO matrix member, matching
+/// spirv-cross --msl. The SPIR-V `MatrixStride` decoration is the column stride
+/// in bytes (16 for std140, 8 or 16 for std430), and MUST drive the emitted MSL
+/// row count — never assume std140's 16. spirv-cross emits `float{cols}x{rows'}`
+/// where:
+///   rows' = (rows == 3) ? 3 : MatrixStride / column_scalar_size
+/// An MSL `float3` column already occupies a 16-byte-aligned slot, so 3-row
+/// matrices keep their row count; a 2-row column is `float2` (8 B), so it stays
+/// 2 rows under std430 (stride 8) but is widened to 4 rows under std140
+/// (stride 16). Verified against the oracle for std140 AND std430:
+///   std140 (stride 16): mat2→float2x4 mat3→float3x3 mat4→float4x4
+///                       mat2x3→float2x3 mat2x4→float2x4 mat3x2→float3x4
+///                       mat3x4→float3x4 mat4x2→float4x4 mat4x3→float4x3
+///   std430 (stride 8) : mat2→float2x2 mat3x2→float3x2 mat4x2→float4x2
+/// Only the 32-bit float component type is implemented; any other component
+/// (half/double) — or a missing/odd MatrixStride — returns an honest error
+/// rather than a silent-wrong layout.
+fn mslMatrixMemberType(m: *const ParsedModule, mat_inst: Instruction, matrix_stride: ?u32, alloc: std.mem.Allocator) ![]const u8 {
+    const cols = mat_inst.words[3];
+    const col_ty = getDef(m, mat_inst.words[2]) orelse return error.UnsupportedUboMemberLayout;
+    if (col_ty.op != .TypeVector) return error.UnsupportedUboMemberLayout;
+    // The column scalar must be 32-bit float (4 bytes).
+    const scalar = getDef(m, col_ty.words[2]);
+    const is_f32 = if (scalar) |s| (s.op == .TypeFloat and !(s.words.len > 2 and s.words[2] == 16)) else false;
+    if (!is_f32) return error.UnsupportedUboMemberLayout;
+    const scalar_size: u32 = 4;
+    const rows: u32 = col_ty.words[3];
+    // The real column stride drives the row count. Without it we cannot know the
+    // layout (std140 vs std430 differ for 2-row matrices) — fail loudly.
+    const stride = matrix_stride orelse return error.UnsupportedUboMemberLayout;
+    if (stride == 0 or stride % scalar_size != 0) return error.UnsupportedUboMemberLayout;
+    const rows_prime: u32 = if (rows == 3) 3 else stride / scalar_size;
+    if (cols < 2 or cols > 4 or rows_prime < 2 or rows_prime > 4)
+        return error.UnsupportedUboMemberLayout;
+    return std.fmt.allocPrint(alloc, "float{d}x{d}", .{ cols, rows_prime });
+}
+
+/// Look up the SPIR-V `MatrixStride` decoration (column stride in bytes) on a
+/// struct member, returning null if absent.
+fn memberMatrixStride(m: *const ParsedModule, struct_id: u32, member_index: u32) ?u32 {
+    for (m.instructions) |inst| {
+        if (inst.op == .MemberDecorate and inst.words.len >= 5 and
+            inst.words[1] == struct_id and inst.words[2] == member_index)
+        {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[3]);
+            if (dec == .matrix_stride) return inst.words[4];
+        }
+    }
+    return null;
+}
+
 /// MSL type for uniform buffer struct members.
 /// Uses packed_float3 instead of float3 to match SPIR-V offset layout.
 fn mslPackedType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
@@ -286,9 +337,12 @@ fn mslPackedType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
         }
     }
     if (inst.op == .TypeMatrix) {
-        const cols = inst.words[3];
-        // packed float3xN for 3-row matrices
-        if (cols == 3) return "packed_float3x3"; // uncommon but handle
+        // A matrix's correct MSL row count depends on its MatrixStride
+        // decoration (std140 vs std430 differ), which this stride-less helper
+        // does not have. Callers with struct-member context resolve matrices
+        // via mslMatrixMemberType(stride); reaching here means we'd have to
+        // GUESS the layout — fail loudly instead of emitting silent-wrong.
+        return error.UnsupportedUboMemberLayout;
     }
     return try mslType(m, type_id, names, alloc);
 }
@@ -1008,35 +1062,63 @@ fn typeNatSize(m: *const ParsedModule, type_id: u32) u32 {
 }
 
 /// Return the widened Metal element type for an array in a UBO struct,
-/// given the SPIR-V ArrayStride. If stride > natural element size, we widen
-/// to match (e.g. float -> float4 for stride=16).
-fn mslWidenedElementType(m: *const ParsedModule, elem_type_id: u32, stride: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
+/// given the SPIR-V ArrayStride, matching spirv-cross --msl. In std140 each
+/// array element is rounded up to a 16-byte boundary, so a stride larger than
+/// the element's natural size means the element type must be widened to its
+/// 16-byte form (e.g. float→float4, int→int4, vec2→float4). Verified vs the
+/// oracle: float[]→float4[] int[]→int4[] uint[]→uint4[] vec2[]→float4[]
+/// vec3[]→float3[] vec4[]→float4[] ivec2[]→int4[] uvec3[]→uint3[]
+/// mat3[]→float3x3[] mat4[]→float4x4[].
+///
+/// Any element whose correct widened std140→MSL form is NOT implemented returns
+/// error.UnsupportedUboMemberLayout — glslpp fails LOUDLY rather than emitting a
+/// silent-wrong (wrong-stride / wrong-type) array layout.
+fn mslWidenedElementType(m: *const ParsedModule, elem_type_id: u32, stride: u32, matrix_stride: ?u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
+    const elem_inst = getDef(m, elem_type_id) orelse return error.UnsupportedUboMemberLayout;
+    // Matrix elements: the MSL type is driven by the member's MatrixStride
+    // (the ArrayStride is cols*MatrixStride). Independent of the array stride.
+    if (elem_inst.op == .TypeMatrix) return try mslMatrixMemberType(m, elem_inst, matrix_stride, alloc);
     const nat = typeNatSize(m, elem_type_id);
     if (stride <= nat) return try mslPackedType(m, elem_type_id, names, alloc);
-    // Need to widen. Determine the padded vector type.
-    const elem_inst = getDef(m, elem_type_id) orelse return try mslPackedType(m, elem_type_id, names, alloc);
-    if (elem_inst.op == .TypeFloat or elem_inst.op == .TypeInt) {
-        // Scalar: widen to vecN where N = stride / 4
-        const n = stride / 4;
-        if (n == 4) {
-            if (elem_inst.op == .TypeInt) {
-                const signed = elem_inst.words.len > 3 and elem_inst.words[3] != 0;
-                if (!signed) return "uint4";
-            }
-            return "float4";
+    // stride > nat: must widen the element so the natural array stride == std140.
+    if (elem_inst.op == .TypeFloat) {
+        if (stride == 16) {
+            // 32-bit float scalar → float4 (16 B). half (16-bit) is unhandled.
+            if (!(elem_inst.words.len > 2 and elem_inst.words[2] == 16)) return "float4";
         }
-        if (n == 3) return "float3";
-        if (n == 2) return "float2";
+        return error.UnsupportedUboMemberLayout;
+    }
+    if (elem_inst.op == .TypeInt) {
+        if (stride == 16) {
+            const signed = elem_inst.words.len > 3 and elem_inst.words[3] != 0;
+            return if (signed) "int4" else "uint4";
+        }
+        return error.UnsupportedUboMemberLayout;
     }
     if (elem_inst.op == .TypeVector) {
         const count = elem_inst.words[3];
-        if (count == 3 and stride == 16) {
-            // packed_float3 (12 bytes) widened to float3 (16 bytes in Metal)
-            return "float3";
+        const scalar = getDef(m, elem_inst.words[2]);
+        // Determine the 32-bit MSL scalar prefix for the vector element.
+        const prefix: ?[]const u8 = if (scalar) |s| switch (s.op) {
+            .TypeFloat => if (s.words.len > 2 and s.words[2] == 16) null else @as([]const u8, "float"),
+            .TypeInt => if (s.words.len > 3 and s.words[3] != 0) @as([]const u8, "int") else @as([]const u8, "uint"),
+            else => null,
+        } else null;
+        // std140 vec2/vec3/vec4 array elements all round up to 16 B. spirv-cross
+        // widens a 2-component element to a 4-component vector (vec2→float4,
+        // ivec2→int4); a 3-component element stays vec3 (float3/int3 is already
+        // 16-byte aligned in MSL); a 4-component element stays vec4.
+        if (prefix) |p| {
+            if (stride == 16) {
+                if (count == 2) return std.fmt.allocPrint(alloc, "{s}4", .{p});
+                if (count == 3) return std.fmt.allocPrint(alloc, "{s}3", .{p});
+                if (count == 4) return std.fmt.allocPrint(alloc, "{s}4", .{p});
+            }
         }
+        return error.UnsupportedUboMemberLayout;
     }
-    // Fallback: use packed type as-is
-    return try mslPackedType(m, elem_type_id, names, alloc);
+    // Unknown element kind with a widening stride: do NOT guess a layout.
+    return error.UnsupportedUboMemberLayout;
 }
 
 fn mslEmitStructForwardDecls(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
@@ -1063,10 +1145,16 @@ fn mslUboMemberType(
     mt_id: u32,
     this_off: ?u32,
     next_off: ?u32,
+    matrix_stride: ?u32,
     names: *std.AutoHashMap(u32, []const u8),
     alloc: std.mem.Allocator,
 ) ![]const u8 {
     const inst = getDef(m, mt_id) orelse return try mslPackedType(m, mt_id, names, alloc);
+    if (inst.op == .TypeMatrix) {
+        // Resolve the matrix MSL type from its real MatrixStride (std140 vs
+        // std430 differ). mslPackedType would honest-error here (no stride).
+        return try mslMatrixMemberType(m, inst, matrix_stride, alloc);
+    }
     if (inst.op == .TypeVector and inst.words[3] == 3) {
         // 3-vec is tightly packed (12 B) only when the next member sits exactly
         // 12 bytes after this one. A trailing 3-vec (no next member) or one
@@ -1097,6 +1185,10 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
         // the body's access-chain emitter does — keeping decl<->body consistent.
         var mname_buf: [32]u8 = undefined;
         const mname = getMemberName(m, struct_id, @intCast(mi), &mname_buf);
+        // MatrixStride is a per-member decoration (present for any matrix or
+        // matrix-array member). It drives the MSL row count for matrices and
+        // differs between std140 (16) and std430 (8/16) — never assume one.
+        const mat_stride = memberMatrixStride(m, struct_id, @intCast(mi));
         const mti = getDef(m, mt_id);
         if (mti) |mi2| { if (mi2.op == .TypeArray and mi2.words.len > 3) {
             const elem_type_id = mi2.words[2];
@@ -1107,13 +1199,13 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
             // matches std140 (matching spirv-cross) — no [[offset]] needed.
             const stride = getDecVal(decs, mt_id, .array_stride);
             const et = if (stride) |s|
-                try mslWidenedElementType(m, elem_type_id, s, names, alloc)
+                try mslWidenedElementType(m, elem_type_id, s, mat_stride, names, alloc)
             else
                 try mslPackedType(m, elem_type_id, names, alloc);
             try w.print("    {s} {s}[{d}];\n", .{et, mname, lv});
             continue;
         } }
-        const mt = try mslUboMemberType(m, mt_id, this_off, next_off, names, alloc);
+        const mt = try mslUboMemberType(m, mt_id, this_off, next_off, mat_stride, names, alloc);
         try w.print("    {s} {s};\n", .{mt, mname});
     }
 }

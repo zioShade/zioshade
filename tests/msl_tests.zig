@@ -1511,6 +1511,35 @@ test "T18.15: mat3 array — float3x3 a[2], NOT packed_float3x3 a[2]" {
     try assertNotContains(msl, "[[offset(");
 }
 
+test "T18.15b: ivec2 array — int4 a[3] (stride 16, int scalar widened)" {
+    // ORACLE spirv-cross: struct U { int4 a[3]; };
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { ivec2 a[3]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(float(u.a[0].x), float(u.a[1].y), float(u.a[2].x), 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "int4 a[3];");
+    try assertNotContains(msl, "int2 a[3]");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.15c: uvec3 array — uint3 a[2] (16-aligned, scalar kept uint)" {
+    // ORACLE spirv-cross: struct U { uint3 a[2]; };
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { uvec3 a[2]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(float(u.a[0].x), float(u.a[1].z), 0.0, 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "uint3 a[2];");
+    try assertNotContains(msl, "[[offset(");
+}
+
 test "T18.16: mat4 array — float4x4 a[2] (already correct, regression guard)" {
     const source =
         \\#version 450
@@ -1575,6 +1604,24 @@ test "T18.19: vec2 a[2]; float b; — float4 a[2] then float b (b at std140 offs
     try assertContains(msl, "float4 a[2];");
     try assertContains(msl, "float b;");
     try assertNotContains(msl, "float2 a[2]");
+    try assertNotContains(msl, "[[offset(");
+}
+
+test "T18.20: mat3x2 array — float3x4 a[2] (non-square, rows widened via MatrixStride)" {
+    // ORACLE spirv-cross: struct U { float3x4 a[2]; };
+    // Pins the stride-driven matrix-array element path (MatrixStride 16 in
+    // std140 → rows widened 2->4). packed_float3x3 would drop rows + use the
+    // wrong 12-byte column stride.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform U { mat3x2 a[2]; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.a[0][0], u.a[1][0]); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "float3x4 a[2];");
+    try assertNotContains(msl, "packed_float3x3");
     try assertNotContains(msl, "[[offset(");
 }
 
