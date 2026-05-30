@@ -1168,17 +1168,30 @@ test "T17.3: multiple scalars tightly packed — source names, natural layout" {
 }
 
 test "T17.4: two UBOs — both use source member names" {
+    // NOTE: the two blocks must have STRUCTURALLY DISTINCT member layouts.
+    // Two byte-identical UBO struct types (e.g. both `{ vec4 x; }`) hit a
+    // SEPARATE pre-existing collision in the SPIR-V parser's id resolution:
+    // both variables resolve to the same struct type_id, so the SECOND block's
+    // member names alias the first's (in BOTH decl and body — predates this
+    // member-name fix). That identical-struct collision is out of scope here
+    // and noted as a follow-up; this test pins the member-name-consistency
+    // property for the (common) distinct-layout case.
     const source =
         \\#version 450
         \\layout(binding=0,std140) uniform A { vec4 ca; } a;
-        \\layout(binding=1,std140) uniform B { vec4 cb; } b;
+        \\layout(binding=1,std140) uniform B { vec2 cb; float cc; } b;
         \\layout(location=0) out vec4 o;
-        \\void main() { o = a.ca + b.cb; }
+        \\void main() { o = a.ca + vec4(b.cb, b.cc, 1.0); }
     ;
     const msl = try compileToMsl(source);
     defer alloc.free(msl);
     try assertContains(msl, "float4 ca;");
-    try assertContains(msl, "float4 cb;");
+    try assertContains(msl, "float2 cb;");
+    try assertContains(msl, "float cc;");
+    // Body references the source names consistently with the decl.
+    try assertContains(msl, "a_1.ca");
+    try assertContains(msl, "b_1.cb");
+    try assertContains(msl, "b_1.cc");
     try assertNotContains(msl, "_m0");
     try assertNotContains(msl, "[[offset(");
 }

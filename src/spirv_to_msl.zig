@@ -1047,36 +1047,74 @@ fn mslEmitOneStructForwardDecl(m: *const ParsedModule, names: *std.AutoHashMap(u
     return common.commonEmitOneStructForwardDecl(m, names, type_id, w, alloc, emitted, emitted_names, mslType, getMemberName);
 }
 
+/// MSL type for a non-array UBO/SSBO struct member, matching spirv-cross's
+/// natural-layout strategy (no `[[offset]]`).
+///
+/// For 3-component vectors std140 diverges from MSL's `packed_*3` (12 bytes):
+/// spirv-cross emits `packed_float3` (12 B) ONLY when the next member is packed
+/// tightly into the trailing 4 bytes (its std140 offset == this offset + 12);
+/// otherwise it emits the 16-byte-aligned form (`float3`) so the following
+/// member (or struct tail) lands at its std140 16-byte boundary without any
+/// explicit padding. Replicating that choice keeps the natural MSL layout equal
+/// to std140 — so we never need (the non-standard, spirv-cross-omitted)
+/// `[[offset]]` on a `constant U&` buffer struct member.
+fn mslUboMemberType(
+    m: *const ParsedModule,
+    mt_id: u32,
+    this_off: ?u32,
+    next_off: ?u32,
+    names: *std.AutoHashMap(u32, []const u8),
+    alloc: std.mem.Allocator,
+) ![]const u8 {
+    const inst = getDef(m, mt_id) orelse return try mslPackedType(m, mt_id, names, alloc);
+    if (inst.op == .TypeVector and inst.words[3] == 3) {
+        // 3-vec is tightly packed (12 B) only when the next member sits exactly
+        // 12 bytes after this one. A trailing 3-vec (no next member) or one
+        // followed by a 16-aligned member uses the 16-byte form (mslType →
+        // float3/half3/int3/uint3).
+        const tight = if (this_off) |to| (if (next_off) |no| no == to + 12 else false) else false;
+        return if (tight)
+            try mslPackedType(m, mt_id, names, alloc)
+        else
+            try mslType(m, mt_id, names, alloc);
+    }
+    return try mslPackedType(m, mt_id, names, alloc);
+}
+
 fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, cb_name: []const u8, w: anytype, alloc: std.mem.Allocator, member_offsets: *const std.AutoHashMap(MemberKey, u32), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry))) !void {
     _ = cb_name;
     const inst = getDef(m, struct_id) orelse return; if (inst.op != .TypeStruct) return;
+    const member_count = inst.words.len - 2;
     for (inst.words[2..], 0..) |mt_id, mi| {
+        const key = MemberKey{ .struct_id = struct_id, .member_index = @intCast(mi) };
+        const this_off = member_offsets.get(key);
+        // Next member's std140 offset (used for the vec3 packed/16-byte choice).
+        const next_off = if (mi + 1 < member_count)
+            member_offsets.get(MemberKey{ .struct_id = struct_id, .member_index = @intCast(mi + 1) })
+        else
+            null;
+        // Source member name (OpMemberName); falls back to `_m{i}` exactly as
+        // the body's access-chain emitter does — keeping decl<->body consistent.
+        var mname_buf: [32]u8 = undefined;
+        const mname = getMemberName(m, struct_id, @intCast(mi), &mname_buf);
         const mti = getDef(m, mt_id);
         if (mti) |mi2| { if (mi2.op == .TypeArray and mi2.words.len > 3) {
             const elem_type_id = mi2.words[2];
             const li = getDef(m, mi2.words[3]);
             const lv: u32 = if(li)|l| l.words[3] else 1;
-            // Check for ArrayStride decoration on the array type
+            // Check for ArrayStride decoration on the array type. A 16-byte
+            // stride widens the element to float4 so the natural array stride
+            // matches std140 (matching spirv-cross) — no [[offset]] needed.
             const stride = getDecVal(decs, mt_id, .array_stride);
             const et = if (stride) |s|
                 try mslWidenedElementType(m, elem_type_id, s, names, alloc)
             else
                 try mslPackedType(m, elem_type_id, names, alloc);
-            const key = MemberKey{ .struct_id = struct_id, .member_index = @intCast(mi) };
-            if (member_offsets.get(key)) |off| {
-                try w.print("    {s} _m{d}[{d}] [[offset({d})]];\n", .{et, mi, lv, off});
-            } else {
-                try w.print("    {s} _m{d}[{d}];\n", .{et, mi, lv});
-            }
+            try w.print("    {s} {s}[{d}];\n", .{et, mname, lv});
             continue;
         } }
-        const mt = try mslPackedType(m, mt_id, names, alloc);
-        const key = MemberKey{ .struct_id = struct_id, .member_index = @intCast(mi) };
-        if (member_offsets.get(key)) |off| {
-            try w.print("    {s} _m{d} [[offset({d})]];\n", .{mt, mi, off});
-        } else {
-            try w.print("    {s} _m{d};\n", .{mt, mi});
-        }
+        const mt = try mslUboMemberType(m, mt_id, this_off, next_off, names, alloc);
+        try w.print("    {s} {s};\n", .{mt, mname});
     }
 }
 
