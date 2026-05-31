@@ -794,7 +794,7 @@ fn renderStatusMd(alloc: std.mem.Allocator, unit: TestSummary, hlsl: TestSummary
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `mise exec -- zig build test-gen-status --summary all`
-Expected: all tests pass (now 13/13).
+Expected: all tests pass (now 12/12).
 
 - [ ] **Step 5: Commit**
 
@@ -967,7 +967,7 @@ pub fn main() !void {
 - [ ] **Step 2: Verify the whole tool still compiles and unit tests pass**
 
 Run: `mise exec -- zig build test-gen-status --summary all && mise exec -- zig build gen-status -- --help`
-Expected: 13/13 tests pass; the `gen-status` exe builds (it will error reading `.status-cache/test.txt` since none exists yet — that is fine, it proves the exe links).
+Expected: 12/12 tests pass; the `gen-status` exe builds (it will error reading `.status-cache/test.txt` since none exists yet — that is fine, it proves the exe links).
 
 - [ ] **Step 3: Commit**
 
@@ -1250,7 +1250,7 @@ gh pr create --repo deblasis/glslpp --base main --head docs/status-source-of-tru
 PR body must include:
 - **What/Why:** numbers drifted across README/TEST_COVERAGE/IMPLEMENTATION_STATUS/CONTRIBUTING/PR-template (1,996→2,054→2,060 unit; false "2,087/2,087 zero-failures"). Now generated from real runs; closes the `IMPLEMENTATION_STATUS.md:181` "single source of truth for status numbers" cleanup.
 - **How:** `tools/gen_status.zig` (`zig build gen-status`), `just update-status` / `just status`, `tests/known-conformance-fails.txt` regression guard, `docs/STATUS.md` + `<!-- STATUS:key -->` markers.
-- **Evidence:** the pasted `=== SUMMARY ===` block + `just status` → `check ok` from Task 10 Step 4; `mise exec -- zig build test-gen-status --summary all` → 13/13.
+- **Evidence:** the pasted `=== SUMMARY ===` block + `just status` → `check ok` from Task 10 Step 4; `mise exec -- zig build test-gen-status --summary all` → 12/12.
 - **Note:** conformance is Windows + Vulkan-SDK only (runner hardcodes the `spirv-val.exe` path); CI red on this repo is the known billing block, not a code failure.
 - Footer: `🤖 Generated with [Claude Code](https://claude.com/claude-code)`
 
