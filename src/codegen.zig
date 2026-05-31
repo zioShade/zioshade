@@ -2458,11 +2458,60 @@ const Codegen = struct {
                     }
                     try member_ids.append(self.alloc, try self.ensureType(member_ty));
                 }
-                // Check if a struct with the same member layout was already emitted
+                // Resolve the block layout BEFORE computing the dedup key so the key
+                // can fold it in. This loop only READS self.module.globals to set the
+                // locals needs_block / block_layout / block_row_major (it mutates no
+                // self.* state); the actual decoration emission stays below, after the
+                // struct type / OpName / OpMemberName are emitted.
+                var needs_block = false;
+                // Layout resolution:
+                //   explicit layout(std430)         -> .std430
+                //   explicit layout(std140)         -> .std140
+                //   no explicit qualifier           -> self.default_layout (.std140 by default,
+                //                                      or .scalar if GL_EXT_scalar_block_layout is enabled)
+                var block_layout: LayoutKind = self.default_layout;
+                var block_row_major = false;
+                for (self.module.globals) |global| {
+                    if (global.storage_class != .uniform and global.storage_class != .storage_buffer) continue;
+                    if (global.ty != .named) continue;
+                    if (!std.mem.eql(u8, global.ty.named, name)) continue;
+                    needs_block = true;
+                    if (global.layout) |l| {
+                        if (l.std430) block_layout = .std430
+                        else if (l.std140) block_layout = .std140;
+                        block_row_major = l.row_major;
+                    }
+                    break;
+                }
+                // Buffer_reference types also need Block decoration
+                if (td.is_buffer_reference) needs_block = true;
+
+                // Check if a struct with the same member layout was already emitted.
+                // The key folds in member NAMES as well as member types (two blocks
+                // with byte-identical layouts but different member names, e.g.
+                // `A { vec4 ca }` vs `B { vec4 cb }`, are distinct types and must NOT
+                // be merged — reusing one id would alias the other block's member
+                // names and decorations onto it, so `b.cb` would resolve to `ca`) AND
+                // the resolved block layout. The block_row_major bit is what keeps a
+                // `row_major` block distinct from a `column_major` one with identical
+                // members: their matrix members carry different RowMajor/ColMajor +
+                // MatrixStride OpMemberDecorate, so the structs must not share an id.
+                // block_layout (std140/std430/scalar) is folded too for completeness —
+                // it separates structs whose member-level Offset decorations differ by
+                // layout. NOTE: this does NOT fully separate two blocks differing only
+                // in std140-vs-std430 ARRAY stride: ArrayStride lives on the array TYPE
+                // (deduped independently in emitted_array_types), not on the struct, so
+                // that case still merges — tracked as a separate follow-up.
                 var layout_key: u64 = @as(u64, member_ids.items.len);
                 for (member_ids.items) |mid| {
                     layout_key = layout_key *% 33 +% @as(u64, mid);
                 }
+                for (td.members) |member| {
+                    for (member.name) |c| layout_key = layout_key *% 33 +% @as(u64, c);
+                    layout_key = layout_key *% 33 +% 0xFF; // member-name boundary
+                }
+                layout_key = layout_key *% 33 +% @as(u64, @intFromEnum(block_layout));
+                layout_key = layout_key *% 33 +% @as(u64, @intFromBool(block_row_major));
                 if (self.emitted_struct_layouts.get(layout_key)) |cached_id| {
                     // Reuse existing struct type — update name mapping too
                     if (self.in_interface_block) {
@@ -2488,30 +2537,9 @@ const Codegen = struct {
                         try self.emitNameSectionMemberName(id, @as(u32, @intCast(i)), member.name);
                     }
                 }
-                // Emit UBO/SSBO decorations: Block + Offset/MatrixStride/ArrayStride
-                // Check if this named type is used as a uniform/storage buffer global
-                var needs_block = false;
-                // Layout resolution:
-                //   explicit layout(std430)         -> .std430
-                //   explicit layout(std140)         -> .std140
-                //   no explicit qualifier           -> self.default_layout (.std140 by default,
-                //                                      or .scalar if GL_EXT_scalar_block_layout is enabled)
-                var block_layout: LayoutKind = self.default_layout;
-                var block_row_major = false;
-                for (self.module.globals) |global| {
-                    if (global.storage_class != .uniform and global.storage_class != .storage_buffer) continue;
-                    if (global.ty != .named) continue;
-                    if (!std.mem.eql(u8, global.ty.named, name)) continue;
-                    needs_block = true;
-                    if (global.layout) |l| {
-                        if (l.std430) block_layout = .std430
-                        else if (l.std140) block_layout = .std140;
-                        block_row_major = l.row_major;
-                    }
-                    break;
-                }
-                // Buffer_reference types also need Block decoration
-                if (td.is_buffer_reference) needs_block = true;
+                // Emit UBO/SSBO decorations: Block + Offset/MatrixStride/ArrayStride.
+                // needs_block / block_layout / block_row_major were resolved above
+                // (before the dedup key) so the key could fold in the layout qualifiers.
                 if (needs_block) {
                     try self.emitDecorationSectionDecorateNoExtra(id, @intFromEnum(spirv.Decoration.block));
                     self.default_row_major = block_row_major;

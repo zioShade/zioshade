@@ -13938,3 +13938,27 @@ test "hlsl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent
     );
 }
 
+// Guards the SHARED struct-dedup fix from the HLSL side: the dedup lives in the
+// backend-agnostic GLSL→SPIR-V path (codegen emitted_struct_layouts +
+// dedupStructTypes), so a regression there would corrupt every backend. Two
+// uniform blocks with byte-identical layouts but distinct member names
+// (`A { vec4 ca }` / `B { vec4 cb }`) must keep their own member names; merging
+// them aliased b's member onto a's, so b's cbuffer emitted `b_ca` and the body
+// referenced `b_ca` instead of `b_cb`. Twin of msl_tests T18.21.
+test "HLSL: byte-identical UBO blocks keep distinct member names" {
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140) uniform A { vec4 ca; } a;
+        \\layout(binding=1,std140) uniform B { vec4 cb; } b;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.ca + b.cb; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Each cbuffer keeps its own source member name.
+    try assertContains(hlsl, "a_ca");
+    try assertContains(hlsl, "b_cb");
+    // The collision aliased b's member onto a's — `b_ca` must never appear.
+    try assertNotContains(hlsl, "b_ca");
+}
+

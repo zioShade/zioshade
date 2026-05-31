@@ -2460,8 +2460,53 @@ pub fn foldSelect(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemor
     return dce;
 }
 
+/// Returns true iff structs `id_a` and `id_b` carry identical debug names
+/// (OpMemberName) and identical decorations (OpDecorate / OpMemberDecorate),
+/// comparing the operands with the target id field removed so only id_a/id_b
+/// differ. Callers use this AFTER confirming the member-type lists match.
+///
+/// This guards the dedup merge: two byte-identical interface blocks such as
+/// `A { vec4 ca }` and `B { vec4 cb }` share member types but differ in their
+/// OpMemberName strings (`ca` vs `cb`). Merging them would alias one block's
+/// member names — and layout decorations — onto the other, so they are NOT
+/// duplicates. Genuinely-redundant copies of the same type keep identical
+/// names + decorations and still match here.
+fn structDebugAndDecorMatch(alloc: std.mem.Allocator, words: []const u32, id_a: u32, id_b: u32) error{OutOfMemory}!bool {
+    var sig_a = std.ArrayList(u32).empty;
+    defer sig_a.deinit(alloc);
+    var sig_b = std.ArrayList(u32).empty;
+    defer sig_b.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        // OpMemberName=6, OpDecorate=71, OpMemberDecorate=72 all carry the
+        // target id in words[pos + 1]. Append a normalized record (opcode +
+        // word-count + every operand except the target id) in stream order.
+        if ((opcode == 6 or opcode == 71 or opcode == 72) and wc >= 2) {
+            const target = words[pos + 1];
+            const buf: ?*std.ArrayList(u32) = if (target == id_a) &sig_a else if (target == id_b) &sig_b else null;
+            if (buf) |b| {
+                try b.append(alloc, opcode);
+                try b.append(alloc, wc);
+                var k = pos + 2;
+                while (k < ie) : (k += 1) try b.append(alloc, words[k]);
+            }
+        }
+        pos = ie;
+    }
+
+    if (sig_a.items.len != sig_b.items.len) return false;
+    return std.mem.eql(u32, sig_a.items, sig_b.items);
+}
+
 /// Deduplicate struct types with identical member layouts.
-/// Multiple OpTypeStruct with same member types → remap to first one, remove duplicates.
+/// Multiple OpTypeStruct with same member types AND identical member names +
+/// decorations → remap to first one, remove duplicates. Structs that share a
+/// member-type layout but differ in OpMemberName/decorations (distinct
+/// interface blocks) are kept separate — see `structDebugAndDecorMatch`.
 pub fn dedupStructTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
     const bound = words[3];
     if (bound <= 1) return words;
@@ -2504,11 +2549,14 @@ pub fn dedupStructTypes(alloc: std.mem.Allocator, words: []const u32) error{OutO
                     }
                     verify_pos += vwc;
                 }
-                if (members.len == first_members.len and std.mem.eql(u32, members, first_members)) {
-                    // True duplicate — remap
+                if (members.len == first_members.len and std.mem.eql(u32, members, first_members)
+                    and try structDebugAndDecorMatch(alloc, words, first_id, result_id)) {
+                    // True duplicate — same member types, names, and decorations.
                     try replacements.put(alloc, result_id, first_id);
                 } else {
-                    // Hash collision — store separately (use result_id to disambiguate)
+                    // Hash collision, or same member types but distinct member
+                    // names/decorations (e.g. two byte-identical interface
+                    // blocks). Store separately so the names are preserved.
                     try structs.put(alloc, h ^ @as(u64, result_id) *% 0x9E3779B97F4A7C15, result_id);
                 }
             } else {
