@@ -117,6 +117,9 @@ fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
     }
 }
 
+/// NOTE: unlike `writeAccessExpr`, this alloc-based builder does NOT apply the
+/// row_major `transpose(...)` correction — it builds a plain pointer expression.
+/// It backs pointer/store contexts; matrix READS go through `writeAccessExpr`.
 fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) return try alloc.dupe(u8, base_name);
@@ -228,20 +231,38 @@ fn arrayStrideOf(m: *const ParsedModule, array_type_id: u32) ?u32 {
     return null;
 }
 
-/// A row-major matrix member encountered while walking an access chain.
-/// `boundary` is the index position that selects the matrix from its struct;
-/// `matrix_tid` is the matrix type id. Trailing indices (>`boundary`) index
-/// into the logical matrix and are emitted by `writeMatrixTail`.
+/// Resolve a type that is a matrix, or a (possibly nested) array of matrices,
+/// down to the underlying matrix type id; null if it is not ultimately a matrix.
+/// The `row_major` decoration sits on the struct MEMBER even when that member is
+/// an array, so this is how we recover the matrix the member holds.
+fn arrayMatrixElement(m: *const ParsedModule, type_id: u32) ?u32 {
+    var tid = type_id;
+    while (true) {
+        const ti = getDef(m, tid) orelse return null;
+        switch (ti.op) {
+            .TypeArray, .TypeRuntimeArray => tid = ti.words[2],
+            .TypeMatrix => return tid,
+            else => return null,
+        }
+    }
+}
+
+/// A row-major matrix reached while walking an access chain. `boundary` is the
+/// index position after which `cur_type` becomes the matrix (the struct-member
+/// index for a direct matrix, or the array-element index for a matrix array);
+/// `matrix_tid` is the matrix type id. Trailing indices (>`boundary`) index into
+/// the logical matrix and are emitted by `writeMatrixTail`.
 const RowMajorAccess = struct { boundary: usize, matrix_tid: u32 };
 
-/// If `indices` selects a member that is a row-major, SQUARE matrix, return
-/// where it sits in the chain. A `row_major` matrix is stored column-major in
-/// MSL but holds the TRANSPOSE of the logical matrix, so a read must wrap it in
-/// `transpose(...)`. Non-square row-major matrices also need swapped member
-/// DIMENSIONS, which is rejected at the struct declaration; only square ones
-/// reach here (and only square ones need a pure transpose at the read site).
+/// If `indices` reaches a `row_major` SQUARE matrix (a direct member or a matrix
+/// array element), return where it sits in the chain. A `row_major` matrix is
+/// stored column-major in MSL but holds the TRANSPOSE of the logical matrix, so
+/// a read must wrap it in `transpose(...)`. Non-square row-major matrices also
+/// need swapped member DIMENSIONS and are rejected up front by
+/// `checkUnsupportedRowMajor`; only square ones reach here.
 fn findRowMajorMatrix(m: *const ParsedModule, base_id: u32, indices: []const u32) ?RowMajorAccess {
     var cur_type: ?u32 = resolvePointee(m, base_id);
+    var target: ?u32 = null; // square row-major matrix we are descending toward
     for (indices, 0..) |index_id, i| {
         const tid = cur_type orelse return null;
         const ti = getDef(m, tid) orelse return null;
@@ -251,19 +272,21 @@ fn findRowMajorMatrix(m: *const ParsedModule, base_id: u32, indices: []const u32
             const val = def.words[3];
             if (val + 2 >= ti.words.len) return null;
             const member_tid = ti.words[val + 2];
-            const mdef = getDef(m, member_tid);
-            if (mdef != null and mdef.?.op == .TypeMatrix and memberIsRowMajor(m, tid, val)) {
-                const cols = mdef.?.words[3];
-                const colvec = getDef(m, mdef.?.words[2]);
-                const rows: u32 = if (colvec != null and colvec.?.op == .TypeVector) colvec.?.words[3] else 0;
-                if (cols == rows) return .{ .boundary = i, .matrix_tid = member_tid };
-                return null; // non-square: dimensions differ; handled at declaration
+            // A row-major member that is (an array of) a SQUARE matrix: remember
+            // the matrix type so we transpose once the chain reaches it.
+            if (memberIsRowMajor(m, tid, val)) {
+                if (arrayMatrixElement(m, member_tid)) |mtid| {
+                    if (!matrixIsNonSquare(m, mtid)) target = mtid;
+                }
             }
             cur_type = member_tid;
         } else if (ti.op == .TypeVector or ti.op == .TypeArray or ti.op == .TypeMatrix) {
             cur_type = ti.words[2];
         } else {
             return null;
+        }
+        if (target) |mt| {
+            if (cur_type == mt) return .{ .boundary = i, .matrix_tid = mt };
         }
     }
     return null;
@@ -311,18 +334,24 @@ fn writeMatrixTail(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     var cur_type: ?u32 = matrix_tid;
     for (indices) |index_id| {
         const def = getDef(m, index_id);
-        if (def != null and def.?.op == .Constant and def.?.words.len > 3) {
-            const val = def.?.words[3];
-            const ti = if (cur_type) |t| getDef(m, t) else null;
-            if (ti != null and ti.?.op == .TypeVector) {
+        const is_const = if (def) |d| (d.op == .Constant and d.words.len > 3) else false;
+        if (!is_const) {
+            try w.print("[{s}]", .{names.get(index_id) orelse "i"});
+            continue;
+        }
+        const val = def.?.words[3];
+        const ti = if (cur_type) |t| getDef(m, t) else null;
+        if (ti) |t| {
+            if (t.op == .TypeVector) {
                 try w.writeAll(swizzleChar(val));
-                cur_type = ti.?.words[2];
+                cur_type = t.words[2];
             } else {
                 try w.print("[{d}]", .{val});
-                cur_type = if (ti != null and (ti.?.op == .TypeMatrix or ti.?.op == .TypeArray)) ti.?.words[2] else null;
+                cur_type = if (t.op == .TypeMatrix or t.op == .TypeArray) t.words[2] else null;
             }
         } else {
-            try w.print("[{s}]", .{names.get(index_id) orelse "i"});
+            try w.print("[{d}]", .{val});
+            cur_type = null;
         }
     }
 }
@@ -535,6 +564,27 @@ fn matrixIsNonSquare(m: *const ParsedModule, type_id: u32) bool {
     return mt.words[3] != colvec.words[3]; // cols != rows
 }
 
+/// Reject every `row_major` matrix whose MSL layout we cannot yet emit
+/// correctly: a NON-square matrix (or non-square matrix array element) needs
+/// SWAPPED member dimensions (e.g. mat3x4 -> float4x3). Returns an honest error
+/// instead of letting the declaration emitter produce a column-major-shaped
+/// member with untransposed access (silent-wrong). Scans ALL structs, so it also
+/// covers NESTED structs, which are declared through a shared path that bypasses
+/// the top-level member emitter. Square row_major matrices are handled by
+/// transposing reads (see findRowMajorMatrix).
+fn checkUnsupportedRowMajor(m: *const ParsedModule) !void {
+    for (m.instructions) |inst| {
+        if (inst.op != .TypeStruct or inst.words.len < 2) continue;
+        const struct_id = inst.words[1];
+        for (inst.words[2..], 0..) |member_tid, i| {
+            if (!memberIsRowMajor(m, struct_id, @intCast(i))) continue;
+            if (arrayMatrixElement(m, member_tid)) |mtid| {
+                if (matrixIsNonSquare(m, mtid)) return error.UnsupportedRowMajorMatrix;
+            }
+        }
+    }
+}
+
 /// MSL type for uniform buffer struct members.
 /// Uses packed_float3 instead of float3 to match SPIR-V offset layout.
 fn mslPackedType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
@@ -686,6 +736,10 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     }
 
     const entry_id = module.entry_point_id orelse return error.NoEntryPoint;
+
+    // Reject row_major matrix layouts we cannot emit correctly (non-square, any
+    // struct depth) before emitting anything — honest error over silent-wrong.
+    try checkUnsupportedRowMajor(&module);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -1403,16 +1457,12 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
         // matrix-array member). It drives the MSL row count for matrices and
         // differs between std140 (16) and std430 (8/16) — never assume one.
         const mat_stride = memberMatrixStride(m, struct_id, @intCast(mi));
-        // A row_major matrix is stored transposed; reads are corrected with
-        // transpose() (see findRowMajorMatrix). That only preserves the byte
-        // layout for SQUARE matrices. A non-square row_major matrix additionally
-        // needs SWAPPED member dimensions (mat3x4 -> float4x3), which is not yet
-        // implemented — fail loudly rather than emit silent-wrong output.
-        const member_row_major = memberIsRowMajor(m, struct_id, @intCast(mi));
+        // Non-square / unsupported row_major matrix layouts are rejected up front
+        // by checkUnsupportedRowMajor (covers nested structs too), so the matrix
+        // members reaching here are either column_major or square row_major.
         const mti = getDef(m, mt_id);
         if (mti) |mi2| { if (mi2.op == .TypeArray and mi2.words.len > 3) {
             const elem_type_id = mi2.words[2];
-            if (member_row_major and matrixIsNonSquare(m, elem_type_id)) return error.UnsupportedRowMajorMatrix;
             const li = getDef(m, mi2.words[3]);
             const lv: u32 = if(li)|l| l.words[3] else 1;
             // Check for ArrayStride decoration on the array type. A 16-byte
@@ -1426,7 +1476,6 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
             try w.print("    {s} {s}[{d}];\n", .{et, mname, lv});
             continue;
         } }
-        if (member_row_major and matrixIsNonSquare(m, mt_id)) return error.UnsupportedRowMajorMatrix;
         const mt = try mslUboMemberType(m, mt_id, this_off, next_off, mat_stride, names, alloc);
         try w.print("    {s} {s};\n", .{mt, mname});
     }
@@ -2452,6 +2501,14 @@ fn emitInstruction(
         },
         .Store => {
             if (inst.words.len < 3) return;
+            // A store THROUGH a row_major matrix would need a transposed scatter
+            // (you cannot assign through `transpose(...)`). Fail loudly rather
+            // than emit a plain store to the wrong, transposed locations.
+            if (getDef(m, inst.words[1])) |ptr| {
+                if (ptr.op == .AccessChain and ptr.words.len >= 4 and
+                    findRowMajorMatrix(m, ptr.words[3], ptr.words[4..]) != null)
+                    return error.UnsupportedRowMajorMatrixStore;
+            }
             const on = names.get(inst.words[2]) orelse "0";
             try w.writeAll("    ");
             try writeResolvePointer(m, names, inst.words[1], false, w);

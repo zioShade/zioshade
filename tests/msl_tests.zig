@@ -1840,22 +1840,11 @@ test "T18.22: row_major UBO matrix access must be transposed (vs column_major)" 
     }
 
     // (2) Oracle behaviour: reading logical column 0 of a row_major matrix must
-    // gather across stored columns — evidenced by a reference to a non-zero
-    // stored column (`_m1`/`_m2`/`_m3` or `[1]`/`[2]`/`[3]`) or an explicit
-    // transpose(). The current wrong output only ever names column 0 (`_m0`).
-    const transposed =
-        std.mem.indexOf(u8, row_msl, "transpose") != null or
-        std.mem.indexOf(u8, row_msl, "_m3") != null or
-        std.mem.indexOf(u8, row_msl, "_m1") != null or
-        std.mem.indexOf(u8, row_msl, "[3]") != null or
-        std.mem.indexOf(u8, row_msl, "[1]") != null;
-    if (!transposed) {
-        std.debug.print(
-            "row_major mat4 m[0] access is not transposed (no gather/transpose):\n{s}\n",
-            .{row_msl},
-        );
-        return error.TestExpectedFind;
-    }
+    // read the LOGICAL matrix, which (given column-major storage of the
+    // transpose) means an explicit transpose(). Assert the exact emitted form.
+    try assertContains(row_msl, "transpose(a_1.m)[0]");
+    // The column_major (correct-as-is) path must NOT gain a transpose.
+    try assertNotContains(col_msl, "transpose(");
 }
 
 test "T18.23: non-square row_major matrix is an honest error (not silent-wrong)" {
@@ -1883,4 +1872,69 @@ test "T18.23: non-square row_major matrix is an honest error (not silent-wrong)"
     } else |_| {
         // Expected: an honest error rather than silent-wrong output.
     }
+}
+
+test "T18.24: row_major SQUARE matrix ARRAY read is transposed" {
+    // The RowMajor decoration sits on the struct MEMBER even when that member is
+    // an array of matrices. Reading `a.m[1][0]` must transpose the indexed
+    // element: ORACLE spirv-cross --msl emits
+    //   float4(a.m[1][0][0], a.m[1][1][0], a.m[1][2][0], a.m[1][3][0])
+    // i.e. transpose(a.m[1])[0]. Without array handling glslpp emitted the
+    // untransposed `a_1.m[1]._m0` (silent-wrong).
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat4 m[2]; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[1][0]; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "transpose(a_1.m[1])[0]");
+    try assertNotContains(msl, "a_1.m[1]._m0");
+}
+
+test "T18.25: non-square row_major matrix in a NESTED struct is an honest error" {
+    // The non-square honest-error must also cover matrices inside nested
+    // structs (emitted through a shared forward-decl path that bypasses the
+    // top-level member emitter). `Inner { mat3x4 m; }` in a row_major block must
+    // FAIL LOUDLY, not emit a column-major-shaped `float3x4` member.
+    const source =
+        \\#version 450
+        \\struct Inner { mat3x4 m; };
+        \\layout(binding=0,std140,row_major) uniform A { Inner inner; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.inner.m[0]; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    if (glslpp.spirvToMSL(alloc, spirv, .{})) |msl| {
+        defer alloc.free(msl);
+        std.debug.print(
+            "expected an honest error for nested non-square row_major matrix, got MSL:\n{s}\n",
+            .{msl},
+        );
+        return error.TestExpectedError;
+    } else |_| {}
+}
+
+test "T18.26: storing through a row_major matrix is an honest error (not silent-wrong)" {
+    // A row_major matrix is stored transposed; a WRITE to a logical column would
+    // need a transposed scatter, which we cannot express as `transpose(...) = x`.
+    // Rather than emit a plain (wrong-location) store, fail loudly.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std430,row_major) buffer B { mat4 m; } b;
+        \\layout(location=0) out vec4 o;
+        \\void main() { b.m[0] = vec4(1.0); o = vec4(0.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    if (glslpp.spirvToMSL(alloc, spirv, .{})) |msl| {
+        defer alloc.free(msl);
+        std.debug.print(
+            "expected an honest error for a row_major matrix store, got MSL:\n{s}\n",
+            .{msl},
+        );
+        return error.TestExpectedError;
+    } else |_| {}
 }
