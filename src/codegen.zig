@@ -2540,10 +2540,14 @@ const Codegen = struct {
                 // MatrixStride OpMemberDecorate, so the structs must not share an id.
                 // block_layout (std140/std430/scalar) is folded too for completeness —
                 // it separates structs whose member-level Offset decorations differ by
-                // layout. NOTE: this does NOT fully separate two blocks differing only
-                // in std140-vs-std430 ARRAY stride: ArrayStride lives on the array TYPE
-                // (deduped independently in emitted_array_types), not on the struct, so
-                // that case still merges — tracked as a separate follow-up.
+                // layout. Two blocks differing ONLY in std140-vs-std430 ARRAY stride
+                // are now separated as well: array types fold the block layout into
+                // their identity (see array_layout_ctx / arrayCacheKey), so the blocks
+                // reference different array type ids → different member_ids → different
+                // key. (Still open, separate follow-up: a NAMED nested struct shared by
+                // an std140 and an std430 block keeps a single shared type — its arrays
+                // are deliberately left unsplit so the struct stays resolvable, so one
+                // of the two layouts gets silently-wrong member offsets.)
                 var layout_key: u64 = @as(u64, member_ids.items.len);
                 for (member_ids.items) |mid| {
                     layout_key = layout_key *% 33 +% @as(u64, mid);
@@ -3523,8 +3527,13 @@ const Codegen = struct {
         // The layout pass keeps that context in sync with creation time (block
         // layout for direct members, null while recursing through a nested struct),
         // so the keys line up and we decorate the right array type id. `kind` still
-        // drives the stride VALUE — nested arrays keep correct per-block strides
-        // even though their TYPE is shared (unsplit).
+        // drives the stride VALUE — so the different nesting levels of a single
+        // block each get their own correct stride. NOTE this does NOT make a shared
+        // nested struct's array correct across layouts: when the SAME named struct
+        // is a member of both an std140 and an std430 block, its array type is
+        // shared (unsplit) and the emitted_array_stride guard below keeps only the
+        // first layout's stride — the documented cross-layout nested-struct
+        // follow-up, not a per-level bug.
         const cache_key = arrayCacheKey(base_type_id, arr.size, self.array_layout_ctx);
         if (self.emitted_array_types.get(cache_key)) |array_type_id| {
             if (!self.emitted_array_stride.contains(array_type_id)) {
