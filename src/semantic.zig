@@ -1790,7 +1790,24 @@ const Analyzer = struct {
                     }
                 }
                 const ir_id = self.allocId();
-                const ty = node.data.ty orelse .void;
+                // Resolve expression-based array sizes (e.g. gl_WorkGroupSize.x → local_size_x).
+                // The parser records the source text in size_name when the dimension is a non-
+                // literal constant expression; size is left as 0. Fold it here before the type
+                // is stored so that codegen sees the correct concrete array size.
+                var ty = node.data.ty orelse ast.Type.void;
+                if (ty == .array and ty.array.size == 0) {
+                    if (ty.array.size_name) |sn| {
+                        if (self.resolveSizeExpr(sn)) |resolved| {
+                            // Allocate a new heap type for the base (same pointer is fine — it's
+                            // already heap-allocated by the parser; we just build a new wrapper).
+                            const resolved_base = ty.array.base;
+                            const resolved_ty = try self.alloc.create(ast.Type);
+                            resolved_ty.* = resolved_base.*;
+                            try self.heap_types.append(self.alloc, resolved_ty);
+                            ty = .{ .array = .{ .base = resolved_ty, .size = resolved } };
+                        }
+                    }
+                }
                 const storage_class: ir.SPIRVStorageClass = switch (node.tag) {
                     .in_decl => .input,
                     .out_decl => .output,
@@ -1812,7 +1829,7 @@ const Analyzer = struct {
                 }
                 try self.declare(node.data.name, .{
                     .kind = .var_sym,
-                    .ty = node.data.ty orelse .void,
+                    .ty = ty,
                     .ir_id = ir_id,
                 });
                 } // end if name.len > 0
@@ -3134,6 +3151,21 @@ const Analyzer = struct {
             },
             else => return error.SemanticFailed,
         }
+    }
+
+    /// Fold a compile-time constant array-size expression stored as source text.
+    /// Currently handles gl_WorkGroupSize.x/y/z → local_size_x/y/z.
+    /// Returns null when the expression is not a recognized constant.
+    fn resolveSizeExpr(self: *Analyzer, expr: []const u8) ?u32 {
+        const ls = self.local_size orelse return null;
+        // Trim surrounding whitespace for robustness.
+        const s = std.mem.trim(u8, expr, " \t\r\n");
+        if (std.mem.eql(u8, s, "gl_WorkGroupSize.x")) return ls.x;
+        if (std.mem.eql(u8, s, "gl_WorkGroupSize.y")) return ls.y;
+        if (std.mem.eql(u8, s, "gl_WorkGroupSize.z")) return ls.z;
+        // Try plain integer literal in text form (e.g. produced by simple constant)
+        if (std.fmt.parseInt(u32, s, 10)) |v| return v else |_| {}
+        return null;
     }
 
     /// Lower a GLSL int/uint literal's value to its 32-bit SPIR-V constant word.

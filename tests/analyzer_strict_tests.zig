@@ -142,6 +142,30 @@ test "strict: user function with 4-term 2D array expression (full composite-cons
     _ = spirv;
 }
 
+test "strict: shared array sized by gl_WorkGroupSize.x is accepted" {
+    // RED: currently fails with ctx=assign_op because the parser cannot handle
+    // expression-based array sizes like [gl_WorkGroupSize.x], causing the whole
+    // sShared declaration to be discarded by error-recovery. The fix folds
+    // gl_WorkGroupSize.x/y/z to local_size_x/y/z at the semantic level.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 310 es
+        \\layout(local_size_x = 4) in;
+        \\shared float sShared[gl_WorkGroupSize.x];
+        \\layout(std430, binding = 0) readonly buffer SSBO { float in_data[]; };
+        \\layout(std430, binding = 1) writeonly buffer SSBO2 { float out_data[]; };
+        \\void main() {
+        \\    uint ident = gl_GlobalInvocationID.x;
+        \\    sShared[gl_LocalInvocationIndex] = in_data[ident];
+        \\    memoryBarrierShared();
+        \\    barrier();
+        \\    out_data[ident] = sShared[gl_WorkGroupSize.x - gl_LocalInvocationIndex - 1u];
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    _ = spirv;
+}
+
 test "strict: not(bvec) / any(bvec) / all(bvec) builtins are accepted (vec_compare fixture)" {
     // RED: currently fails with ctx=not inner=func_call because `not` is not registered
     // as a GLSL builtin. any/all are registered but not(bvec) → OpLogicalNot is missing.

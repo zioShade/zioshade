@@ -912,6 +912,9 @@ const Parser = struct {
         // Collect array dimensions (first dimension is outermost)
         var arr_dims: std.ArrayListUnmanaged(u32) = .empty;
         defer arr_dims.deinit(self.alloc);
+        // For expression-based sizes (e.g. gl_WorkGroupSize.x), store the source text.
+        // Only the first dimension's expression is tracked (covers the common case).
+        var arr_size_expr: ?[]const u8 = null;
         while (self.current().tag == .l_bracket) {
             _ = self.advance();
             const size_tok = self.current();
@@ -919,8 +922,32 @@ const Parser = struct {
             if (size_tok.tag == .int_literal) {
                 arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
                 _ = self.advance();
+                _ = self.expect(.r_bracket) catch break;
+            } else if (size_tok.tag == .r_bracket) {
+                // unsized array []
+                _ = self.advance();
+            } else {
+                // Expression-based size: consume all tokens up to the matching ']'
+                // and store the source text for semantic-time constant folding.
+                const expr_start = size_tok.start;
+                var expr_end: usize = expr_start;
+                var depth: u32 = 0;
+                while (self.current().tag != .eof) {
+                    const cur = self.current();
+                    if (cur.tag == .l_bracket) depth += 1;
+                    if (cur.tag == .r_bracket) {
+                        if (depth == 0) break;
+                        depth -= 1;
+                    }
+                    expr_end = cur.start + cur.len;
+                    _ = self.advance();
+                }
+                if (arr_size_expr == null) {
+                    arr_size_expr = self.source[expr_start..expr_end];
+                }
+                _ = self.expect(.r_bracket) catch break;
+                // arr_size stays 0; semantic.zig will fold the expression.
             }
-            _ = self.expect(.r_bracket) catch break;
             try arr_dims.append(self.alloc, arr_size);
         }
         // Build array type from outermost to innermost (reverse order)
@@ -929,7 +956,9 @@ const Parser = struct {
             while (i > 0) {
                 i -= 1;
                 const arr_base = try self.createType(ty);
-                ty = .{ .array = .{ .base = arr_base, .size = arr_dims.items[i] } };
+                // Attach size_name to the outermost dimension where it was set.
+                const sname: ?[]const u8 = if (i == arr_dims.items.len - 1) arr_size_expr else null;
+                ty = .{ .array = .{ .base = arr_base, .size = arr_dims.items[i], .size_name = sname } };
             }
         }
         var init_nodes = std.ArrayListUnmanaged(ast.Node).empty;
