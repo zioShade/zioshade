@@ -54,3 +54,6 @@ shadertoy_test_cache/
 Thumbs.db
 __pycache__/
 *.pyc
+
+# status-generator captured suite output (just update-status / just status)
+.status-cache/
