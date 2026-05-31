@@ -546,6 +546,44 @@ pub fn compileToSPIRVNoOpt(
     };
 }
 
+/// Strict variant: semantic errors are NOT tolerated — analysis returns
+/// error.SemanticFailed on the first recorded error. Used ONLY by the
+/// strict-enumeration harness (tests/runner.zig --strict-enumerate) to surface
+/// analyzer false-positives. NOT a public compile path.
+pub fn compileToSPIRVStrict(
+    alloc: std.mem.Allocator,
+    source: [:0]const u8,
+    options: CompileOptions,
+) Error![]const u32 {
+    last_compile_detail = null;
+    const tokens = lexer.tokenize(alloc, source) catch {
+        last_compile_detail = .lex_failed;
+        semantic.last_error_line = lexer.last_error_line;
+        semantic.last_error_column = lexer.last_error_column;
+        return error.LexFailed;
+    };
+    defer alloc.free(tokens);
+
+    var pp = preprocessor.Preprocessor.init(alloc);
+    defer pp.deinit();
+    const pp_tokens = pp.process(source, tokens) catch tokens;
+    defer if (pp_tokens.ptr != tokens.ptr) alloc.free(pp_tokens);
+
+    var root_node = parser.parse(alloc, source, pp_tokens) catch {
+        last_compile_detail = .parse_failed;
+        return error.ParseFailed;
+    };
+    defer parser.freeTree(alloc, &root_node);
+
+    var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = false, .stage = options.stage }) catch {
+        last_compile_detail = .semantic_failed;
+        return error.SemanticFailed;
+    };
+    module.deinit();
+    // Enumeration only cares whether analysis SUCCEEDS; it does not need codegen.
+    return &[_]u32{};
+}
+
 /// Cross-compile SPIR-V binary to GLSL source.
 /// Targets GLSL 430 by default.
 pub fn spirvToGLSL(

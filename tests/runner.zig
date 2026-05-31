@@ -11,6 +11,7 @@ const Stats = struct {
     fail: u32 = 0,
     skip: u32 = 0,
     compile_error: u32 = 0,
+    strict_fp: u32 = 0, // false-positive candidates (tolerate OK, strict fails)
 
     fn total(self: Stats) u32 {
         return self.pass + self.fail + self.skip + self.compile_error;
@@ -174,6 +175,158 @@ fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, sav
     return .fail;
 }
 
+/// Enumerate false-positive candidates: fixtures where the tolerant compile
+/// succeeds but the strict compile fails with error.SemanticFailed.
+/// Mirrors testShader's setup (skip logic, include inlining, stage detection)
+/// but does NOT run spirv-val.
+fn enumerateShader(
+    io: compat.IoType,
+    alloc: std.mem.Allocator,
+    path: []const u8,
+    stats: *Stats,
+    hist_ctx: [][]const u8,
+    hist_cnt: []u32,
+    hist_n: *usize,
+    max_hist: usize,
+) !void {
+    const dir = compat.cwd();
+
+    const file = compat.dirOpenFile(io, dir, path, .{}) catch return;
+    defer compat.fileClose(io, file);
+    const source = try compat.fileReadToEndAlloc(io, file, alloc, 10 * 1024 * 1024);
+    const source_z_raw = try alloc.dupeZ(u8, source);
+    alloc.free(source);
+    const source_nt = source_z_raw;
+    defer alloc.free(source_nt);
+
+    // Skip empty files
+    if (source_nt.len == 0) return;
+
+    // Skip header/include files (no main function)
+    if (std.mem.indexOf(u8, source_nt, "void main") == null and
+        std.mem.indexOf(u8, source_nt, "void mainImage") == null)
+        return;
+
+    // Skip files that are error-validation tests
+    if (std.mem.indexOf(u8, source_nt, "// ERROR") != null) return;
+
+    // Inline #include directives
+    const final_source = inlineIncludes(io, alloc, path, source_nt) catch source_nt;
+    defer if (final_source.ptr != source_nt.ptr) alloc.free(final_source);
+    const source_z = try alloc.dupeZ(u8, final_source);
+    defer alloc.free(source_z);
+
+    // Detect stage from file extension
+    const stage: glslpp.Stage = blk: {
+        if (std.mem.endsWith(u8, path, ".vert") or std.mem.endsWith(u8, path, ".v.glsl"))
+            break :blk .vertex
+        else if (std.mem.endsWith(u8, path, ".comp") or std.mem.endsWith(u8, path, ".c.glsl"))
+            break :blk .compute
+        else if (std.mem.endsWith(u8, path, ".geom"))
+            break :blk .geometry
+        else if (std.mem.endsWith(u8, path, ".tesc"))
+            break :blk .tessellation_control
+        else if (std.mem.endsWith(u8, path, ".tese"))
+            break :blk .tessellation_evaluation
+        else if (std.mem.endsWith(u8, path, ".mesh"))
+            break :blk .mesh
+        else if (std.mem.endsWith(u8, path, ".task"))
+            break :blk .task
+        else if (std.mem.endsWith(u8, path, ".rgen"))
+            break :blk .raygen
+        else if (std.mem.endsWith(u8, path, ".rchit"))
+            break :blk .closesthit
+        else if (std.mem.endsWith(u8, path, ".rmiss"))
+            break :blk .miss
+        else if (std.mem.endsWith(u8, path, ".rahit"))
+            break :blk .anyhit
+        else if (std.mem.endsWith(u8, path, ".rint"))
+            break :blk .intersection
+        else if (std.mem.endsWith(u8, path, ".rcall"))
+            break :blk .callable
+        else
+            break :blk .fragment;
+    };
+
+    const spirv_ver: glslpp.SPIRVVersion = if (stage == .mesh or stage == .task or
+        stage == .raygen or stage == .closesthit or stage == .miss or
+        stage == .intersection or stage == .anyhit or stage == .callable) .@"1.4" else .@"1.5";
+
+    // Tolerate compile: if this fails there is nothing to enumerate.
+    const tol_words = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver }) catch return;
+    defer alloc.free(tol_words);
+
+    // Strict compile: a false-positive candidate fires here.
+    if (glslpp.compileToSPIRVStrict(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver })) |_| {
+        // Strict also succeeded: not a false-positive candidate.
+        // compileToSPIRVStrict returns a static empty slice — nothing to free.
+    } else |err| {
+        if (err == error.SemanticFailed) {
+            stats.strict_fp += 1;
+            const ctx = glslpp.lastErrorCtx() orelse "(none)";
+            const inner = glslpp.lastErrorInner() orelse "(none)";
+            log("  FP {s} ctx={s} inner={s}\n", .{ path, ctx, inner });
+
+            // Update per-ctx histogram
+            var found = false;
+            for (hist_ctx[0..hist_n.*], 0..) |existing, hi| {
+                if (std.mem.eql(u8, existing, ctx)) {
+                    hist_cnt[hi] += 1;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found and hist_n.* < max_hist) {
+                hist_ctx[hist_n.*] = ctx;
+                hist_cnt[hist_n.*] = 1;
+                hist_n.* += 1;
+            }
+        }
+        // compileToSPIRVStrict returns a static empty slice on success — nothing to free.
+    }
+}
+
+fn enumerateDir(
+    io: compat.IoType,
+    alloc: std.mem.Allocator,
+    dir_path: []const u8,
+    stats: *Stats,
+    hist_ctx: [][]const u8,
+    hist_cnt: []u32,
+    hist_n: *usize,
+    max_hist: usize,
+) !void {
+    const dir = compat.dirOpenDir(io, compat.cwd(), dir_path, .{ .iterate = true }) catch return;
+    defer compat.dirClose(io, dir);
+
+    var walker = try compat.dirWalk(dir, alloc);
+    defer walker.deinit();
+
+    while (try compat.walkerNext(io, &walker)) |entry| {
+        if (entry.kind != .file) continue;
+        const ext = std.fs.path.extension(entry.basename);
+        if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
+            !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
+            !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task") and
+            !std.mem.eql(u8, ext, ".geom") and !std.mem.eql(u8, ext, ".tesc") and
+            !std.mem.eql(u8, ext, ".tese") and
+            !std.mem.eql(u8, ext, ".rgen") and !std.mem.eql(u8, ext, ".rchit") and
+            !std.mem.eql(u8, ext, ".rmiss") and !std.mem.eql(u8, ext, ".rahit") and
+            !std.mem.eql(u8, ext, ".rint") and !std.mem.eql(u8, ext, ".rcall"))
+            continue;
+
+        if (std.mem.indexOf(u8, entry.basename, ".error.") != null) continue;
+        if (std.mem.startsWith(u8, entry.basename, "link.")) continue;
+        if (std.mem.indexOf(u8, entry.basename, ".asm.") != null) continue;
+        if (std.mem.indexOf(u8, entry.basename, ".nocompat.") != null) continue;
+
+        var path_buf: [compat.max_path_bytes]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
+
+        enumerateShader(io, alloc, full_path, stats, hist_ctx, hist_cnt, hist_n, max_hist) catch {};
+    }
+}
+
 fn runDir(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []const u8, stats: *Stats) !void {
     const dir = compat.dirOpenDir(io, compat.cwd(), dir_path, .{ .iterate = true }) catch return;
     defer compat.dirClose(io, dir);
@@ -244,6 +397,7 @@ fn mainImpl() !void {
     var stats = Stats{};
     var save_spv_path: ?[]const u8 = null;
     var target_arg: ?[]const u8 = null;
+    var strict_enumerate = false;
 
     if (!compat.is_0_16) {
         const args = try std.process.argsAlloc(alloc);
@@ -253,6 +407,8 @@ fn mainImpl() !void {
             if (std.mem.eql(u8, args[i], "--save-spv") and i + 1 < args.len) {
                 save_spv_path = args[i + 1];
                 i += 1;
+            } else if (std.mem.eql(u8, args[i], "--strict-enumerate")) {
+                strict_enumerate = true;
             } else {
                 target_arg = args[i];
             }
@@ -274,6 +430,30 @@ fn mainImpl() !void {
         .{ "tessellation", "tests/tessellation" },
         .{ "stress", "tests/conformance/stress" },
     };
+
+    if (strict_enumerate) {
+        // Histogram: linear array of (ctx_slice, count) pairs. N is small (<256).
+        const max_hist = 256;
+        var hist_ctx: [max_hist][]const u8 = undefined;
+        var hist_cnt: [max_hist]u32 = [_]u32{0} ** max_hist;
+        var hist_n: usize = 0;
+
+        log("\n=== STRICT-ENUMERATE: false-positive candidates ===\n", .{});
+        inline for (all_suites) |suite| {
+            log("\n--- {s} ---\n", .{suite.@"0"});
+            enumerateDir(io, alloc, suite.@"1", &stats, &hist_ctx, &hist_cnt, &hist_n, max_hist) catch {};
+        }
+
+        log("\n=== STRICT-ENUMERATE HISTOGRAM (ctx → count) ===\n", .{});
+        for (hist_ctx[0..hist_n], hist_cnt[0..hist_n]) |ctx, cnt| {
+            log("  {s}: {d}\n", .{ ctx, cnt });
+        }
+        log("\n=== STRICT-ENUMERATE SUMMARY ===\n", .{});
+        log("False-positive candidates: {d}\n", .{stats.strict_fp});
+        log("(see FP lines above for per-fixture ctx= and inner= details)\n", .{});
+        // Exit 0 — this is a report, not a gate.
+        return;
+    }
 
     if (target_arg) |target| {
         var matched_suite = false;

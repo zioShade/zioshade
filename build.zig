@@ -181,6 +181,13 @@ pub fn build(b: *std.Build) void {
     const build_runner_step = b.step("build-runner", "Build the conformance runner executable");
     build_runner_step.dependOn(&runner_exe.step);
 
+    // Enumerate analyzer false-positive candidates — run with: zig build enumerate-fp
+    // Walks all fixture suites, compiles each with tolerate+strict, reports divergences.
+    const enumerate_step = b.step("enumerate-fp", "List analyzer false-positive candidates (strict vs tolerate)");
+    const run_enumerate = b.addRunArtifact(runner_exe);
+    run_enumerate.addArg("--strict-enumerate");
+    enumerate_step.dependOn(&run_enumerate.step);
+
     // HLSL backend tests — run with: zig build test-hlsl
     const hlsl_test_step = b.step("test-hlsl", "Run HLSL backend tests (GLSL → SPIR-V → HLSL pipeline)");
     const hlsl_test_mod = b.createModule(.{
@@ -217,6 +224,20 @@ pub fn build(b: *std.Build) void {
     }));
     corr_test_step.dependOn(&run_corr_tests.step);
     test_step.dependOn(&run_corr_tests.step);
+
+    // Analyzer strict self-test — run with: zig build test-analyzer-strict
+    const analyzer_strict_test_step = b.step("test-analyzer-strict", "Run analyzer strict-mode self-test (harness sanity check)");
+    const analyzer_strict_mod = b.createModule(.{
+        .root_source_file = b.path("tests/analyzer_strict_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    analyzer_strict_mod.addImport("glslpp", glslpp_mod);
+    const run_analyzer_strict = b.addRunArtifact(b.addTest(.{
+        .root_module = analyzer_strict_mod,
+    }));
+    analyzer_strict_test_step.dependOn(&run_analyzer_strict.step);
+    test_step.dependOn(&run_analyzer_strict.step);
 
     // Diagnostic tests (G3) — run with: zig build test-diagnostic
     const diag_test_step = b.step("test-diagnostic", "Run diagnostic quality tests");
