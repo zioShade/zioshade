@@ -3233,8 +3233,16 @@ const Codegen = struct {
                 .float, .int, .uint, .bool => 4,
                 .vec2, .ivec2, .uvec2 => 8,
                 .vec3, .vec4, .ivec3, .ivec4, .uvec3, .uvec4 => 16,
+                // Matrix alignment = stride of its stored vector (column for col_major,
+                // row for row_major). std430 2-component vectors align to 8, not 16.
                 .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
-                .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 16,
+                .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => blk: {
+                    const span = if (self.default_row_major)
+                        self.matrixColumnCount(ty)
+                    else
+                        self.matrixRowCount(ty);
+                    break :blk self.matrixMemberStride(span, .std430);
+                },
             .array => |arr| self.layoutAlignmentStd430(arr.base.*), // std430: array alignment = element alignment
             .named => |name| blk: {
                 // Struct alignment = max alignment of its members
@@ -3297,19 +3305,19 @@ const Codegen = struct {
             .vec2, .ivec2, .uvec2 => 8,
             .vec3, .ivec3, .uvec3 => 12,
             .vec4, .ivec4, .uvec4 => 16,
-            // Matrix sizes: under scalar layout, columns are tightly packed (no vec4 stride).
-            .mat2, .mat2x2 => if (kind == .scalar) 2 * 2 * 4 else 2 * 16,
-            .mat3, .mat3x3 => if (kind == .scalar) 3 * 3 * 4 else 3 * 16,
-            .mat4, .mat4x4 => if (kind == .scalar) 4 * 4 * 4 else 4 * 16,
-            .mat2x3, .mat2x4 => if (kind == .scalar)
-                (if (self.default_row_major) self.matrixRowCount(ty) * 2 * 4 else 2 * self.matrixRowCount(ty) * 4)
-                else if (self.default_row_major) self.matrixRowCount(ty) * 16 else 2 * 16,
-            .mat3x2, .mat3x4 => if (kind == .scalar)
-                (if (self.default_row_major) self.matrixRowCount(ty) * 3 * 4 else 3 * self.matrixRowCount(ty) * 4)
-                else if (self.default_row_major) self.matrixRowCount(ty) * 16 else 3 * 16,
-            .mat4x2, .mat4x3 => if (kind == .scalar)
-                (if (self.default_row_major) self.matrixRowCount(ty) * 4 * 4 else 4 * self.matrixRowCount(ty) * 4)
-                else if (self.default_row_major) self.matrixRowCount(ty) * 16 else 4 * 16,
+            // Matrix size = (stored vector count) * (matrix stride). For col_major
+            // the stored vectors are columns (span = rows); for row_major they are
+            // rows (span = cols). matrixMemberStride encodes the per-layout column
+            // alignment, so size stays consistent with the MatrixStride decoration.
+            .mat2, .mat2x2, .mat2x3, .mat2x4,
+            .mat3, .mat3x2, .mat3x3, .mat3x4,
+            .mat4, .mat4x2, .mat4x3, .mat4x4 => blk: {
+                const cols = self.matrixColumnCount(ty);
+                const rows = self.matrixRowCount(ty);
+                const vec_count = if (self.default_row_major) rows else cols;
+                const span = if (self.default_row_major) cols else rows;
+                break :blk vec_count * self.matrixMemberStride(span, kind);
+            },
             .array => |arr| blk: {
                 const stride = self.layoutArrayStride(ty, kind);
                 break :blk stride * arr.size;
@@ -3390,34 +3398,13 @@ const Codegen = struct {
                 } else {
                     try self.emitDecorationSectionMemberDecorateNoExtra(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.col_major));
                 }
-                // MatrixStride: the stride between columns (col_major) or rows (row_major)
-                const mat_stride: u32 = if (member_is_row_major) blk: {
-                    // RowMajor: stride = alignment of vec<column_count>
-                    const cols = self.matrixColumnCount(effective_ty);
-                    break :blk switch (kind) {
-                        .scalar => cols * 4, // scalar: tight, component-aligned
-                        .std430 => switch (cols) {
-                            2 => 8,
-                            3 => 16,
-                            4 => 16,
-                            else => 16,
-                        },
-                        .std140 => 16, // std140 always vec4-aligned
-                    };
-                } else blk: {
-                    // ColMajor: stride = alignment of vec<row_count>
-                    const rows = self.matrixRowCount(effective_ty);
-                    break :blk switch (kind) {
-                        .scalar => rows * 4, // scalar: tight, component-aligned
-                        .std430 => switch (rows) {
-                            2 => 8,
-                            3 => 16,
-                            4 => 16,
-                            else => 16,
-                        },
-                        .std140 => 16, // std140 always vec4-aligned
-                    };
-                };
+                // MatrixStride: stride between columns (col_major) or rows (row_major).
+                // span = length of the stored vector (rows for col_major, cols for row_major).
+                const span = if (member_is_row_major)
+                    self.matrixColumnCount(effective_ty)
+                else
+                    self.matrixRowCount(effective_ty);
+                const mat_stride = self.matrixMemberStride(span, kind);
                 try self.emitDecorationSectionMemberDecorate(struct_type_id, @intCast(i), @intFromEnum(spirv.Decoration.matrix_stride), mat_stride);
             }
             // ArrayStride for array members (all nesting levels)
@@ -3484,17 +3471,29 @@ const Codegen = struct {
 
     fn matrixRowCount(self: *Codegen, ty: ast.Type) u32 {
         _ = self;
+        // matNxM = N columns, M rows; the square aliases matN == matNxN.
         return switch (ty) {
-            .mat2, .mat2x2 => 2,
-            .mat2x3 => 3,
-            .mat2x4 => 4,
-            .mat3, .mat3x2 => 2,
-            .mat3x3 => 3,
-            .mat3x4 => 4,
-            .mat4, .mat4x2 => 2,
-            .mat4x3 => 3,
-            .mat4x4 => 4,
+            .mat2, .mat2x2, .mat3x2, .mat4x2 => 2,
+            .mat2x3, .mat3, .mat3x3, .mat4x3 => 3,
+            .mat2x4, .mat3x4, .mat4, .mat4x4 => 4,
             else => 0,
+        };
+    }
+
+    /// Byte stride between consecutive stored vectors of a matrix member under
+    /// the given layout. For col_major the stored vectors are columns (span =
+    /// row count); for row_major they are rows (span = column count). std430
+    /// follows vector alignment (vec2 -> 8, vec3/vec4 -> 16); std140 always
+    /// rounds the vector up to 16; scalar packs tightly at 4-byte components.
+    /// This single source of truth keeps MatrixStride, layoutSize, and matrix
+    /// alignment consistent (stride * vectorCount == reserved size).
+    /// `span` is the vector length and is always 2, 3, or 4 for a real matrix.
+    fn matrixMemberStride(self: *Codegen, span: u32, kind: LayoutKind) u32 {
+        _ = self;
+        return switch (kind) {
+            .scalar => span * 4, // tight, component-aligned
+            .std430 => if (span == 2) 8 else 16, // vec2 -> 8, vec3/vec4 -> 16
+            .std140 => 16, // always vec4-aligned
         };
     }
 

@@ -11,7 +11,12 @@ const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
 const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32, descriptor_set: u32 = 0 };
-const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0 };
+/// `is_depth` marks a comparison/shadow sampler (its OpTypeImage Depth operand
+/// is 1, e.g. `sampler2DShadow`). Such a texture's MSL `.sample_compare` /
+/// `.gather_compare` methods are members of `depth2d<float>`, NOT
+/// `texture2d<float>` — see mslTextureType. Emitting `texture2d<float>` for one
+/// yields MSL that does not compile.
+const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0, is_depth: bool = false };
 const MemberKey = struct { struct_id: u32, member_index: u32 };
 /// A stage input that becomes a `main0_in` field and is referenced in the body
 /// as `in.<name>`. For fragment the field is `T name [[user(locnN)]]`; for
@@ -40,6 +45,39 @@ fn swizzleChar(i: u32) []const u8 { return switch(i){ 0=>".x",1=>".y",2=>".z",3=
 fn parseLitStr(alloc: std.mem.Allocator, words: []const u32) ![]const u8 { var buf = try std.ArrayList(u8).initCapacity(alloc, words.len*4); for(words)|word|{const bytes:[4]u8=@bitCast(word);for(bytes)|c|{if(c==0)break;buf.appendAssumeCapacity(c);}} return buf.toOwnedSlice(alloc); }
 fn sanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 { var buf = try std.ArrayList(u8).initCapacity(alloc, name.len); for(name)|c|{switch(c){'a'...'z','A'...'Z','0'...'9','_'=>buf.appendAssumeCapacity(c),else=>buf.appendAssumeCapacity('_'),}} return buf.toOwnedSlice(alloc); }
 fn isUniformVar(m: *const ParsedModule, id: u32) bool { const inst = getDef(m, id) orelse return false; if (inst.op == .Variable and inst.words.len >= 4) { const sc: spirv.StorageClass = @enumFromInt(inst.words[3]); return sc == .Uniform; } return false; }
+
+/// True when the resource's image type is a 2D depth/comparison image (the
+/// OpTypeImage `Depth` operand is 1 AND `Dim` is 2D), e.g. a `sampler2DShadow`.
+/// `pointee` is the type behind the UniformConstant pointer: either an
+/// OpTypeSampledImage (wrapping the OpTypeImage) or an OpTypeImage directly.
+/// OpTypeImage layout: `[op, result_id, sampled_type, DIM, DEPTH, arrayed, ms,
+/// sampled, format]` — so `words[3]` is Dim and `words[4]` is Depth.
+///
+/// Only 2D is gated on purpose: this whole backend hardcodes 2D textures, so a
+/// non-2D depth sampler (samplerCubeShadow → depthcube, sampler2DArrayShadow →
+/// depth2d_array, etc.) must NOT be promoted to `depth2d` — that would swap one
+/// non-compiling type for another. glslpp marks ALL shadow samplers with
+/// Depth=1 regardless of dimension, so the Dim check is what keeps the depth2d
+/// promotion scoped to the case it actually models. Non-2D textures (shadow or
+/// not) are a separate, backend-wide gap.
+fn imageTypeIsDepth(m: *const ParsedModule, pointee: Instruction) bool {
+    var img = pointee;
+    if (img.op == .TypeSampledImage and img.words.len > 2) {
+        img = getDef(m, img.words[2]) orelse return false;
+    }
+    if (img.op != .TypeImage or img.words.len <= 4) return false;
+    const dim = img.words[3]; // SPIR-V Dim: 1 == 2D
+    const depth = img.words[4]; // 0 = non-depth, 1 = depth, 2 = no indication
+    return depth == 1 and dim == 1;
+}
+
+/// MSL texture type for a sampled texture parameter. Comparison/shadow samplers
+/// must be `depth2d<float>` (the home of `.sample_compare`/`.gather_compare`);
+/// everything else stays `texture2d<float>`. Only the 2D float case is modelled
+/// here, matching the rest of this backend.
+fn mslTextureType(tex: TextureDecl) []const u8 {
+    return if (tex.is_depth) "depth2d<float>" else "texture2d<float>";
+}
 
 fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(m, id) orelse return null;
@@ -177,6 +215,54 @@ fn writeResolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []co
     try w.writeAll(names.get(ptr_id) orelse "var");
 }
 
+/// Look up the SPIR-V `ArrayStride` decoration (bytes between consecutive
+/// elements) on an array type id, scanning OpDecorate directly. Returns null if
+/// absent. Mirrors memberMatrixStride but for the array-type decoration.
+fn arrayStrideOf(m: *const ParsedModule, array_type_id: u32) ?u32 {
+    for (m.instructions) |inst| {
+        if (inst.op == .Decorate and inst.words.len >= 4 and inst.words[1] == array_type_id) {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[2]);
+            if (dec == .array_stride) return inst.words[3];
+        }
+    }
+    return null;
+}
+
+/// When a std140 UBO array element is widened to a *wider* 4-component MSL type
+/// (e.g. `float arr[N]` stored as `float4 arr[N]` so the natural stride hits
+/// 16), an `arr[i]` index yields the wide type while the GLSL element is
+/// narrower. Return the trailing swizzle (".x"/".xy") that narrows the widened
+/// element back to its component count — matching spirv-cross's `u.arr[0].x`.
+/// Returns null when no narrowing applies: not an array, no ArrayStride, stride
+/// already natural (std430 tight packing), or the element is a matrix/struct
+/// (handled elsewhere). Crucially, this MUST mirror mslWidenedElementType, which
+/// only widens 1- and 2-component elements to a 4-wide type; a 3-component
+/// element stays `float3` (already 16-byte aligned) and a 4-component element
+/// stays `float4`, so BOTH index cleanly with NO swizzle — appending `.xyz` to
+/// a `float3` would diverge from the oracle even though it compiles.
+fn widenedArrayElementSwizzle(m: *const ParsedModule, array_type_id: u32) ?[]const u8 {
+    const arr = getDef(m, array_type_id) orelse return null;
+    if (arr.op != .TypeArray and arr.op != .TypeRuntimeArray) return null;
+    const elem_id = arr.words[2];
+    const stride = arrayStrideOf(m, array_type_id) orelse return null;
+    const nat = typeNatSize(m, elem_id);
+    if (nat == 0 or stride <= nat) return null; // not widened (tight packing)
+    const elem = getDef(m, elem_id) orelse return null;
+    const comp_count: u32 = switch (elem.op) {
+        .TypeFloat, .TypeInt => 1,
+        .TypeVector => elem.words[3],
+        else => return null, // matrices/structs: not a scalar-narrowing case
+    };
+    // Only 1- and 2-component elements are widened to a wider 4-wide MSL type by
+    // mslWidenedElementType, so only those need narrowing. A 3-component element
+    // stays float3 and a 4-component element stays float4 — both indexed bare.
+    return switch (comp_count) {
+        1 => ".x",
+        2 => ".xy",
+        else => null, // 3- or 4-wide element: not widened, no narrowing needed
+    };
+}
+
 fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) { try w.writeAll(base_name); return; }
@@ -185,7 +271,8 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     if (!base_is_cb) try w.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
     var first_member = true;
-    for (indices) |index_id| {
+    for (indices, 0..) |index_id, ix| {
+        const is_last = ix + 1 == indices.len;
         const idx_inst = getDef(m, index_id);
         if (idx_inst) |def| {
             if (def.op == .Constant and def.words.len > 3) {
@@ -213,7 +300,9 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     }
                     first_member = false;
                 } else if (base_is_cb) {
-                    // Use member name for structs, _mN for arrays/matrices
+                    // Use member name for structs, [index] for arrays (with a
+                    // trailing swizzle to narrow std140-widened elements, e.g.
+                    // `arr[0].x`), _mN otherwise.
                     if (cur_type) |tid| {
                         const ti = getDef(m, tid);
                         if (ti) |tinst| {
@@ -221,6 +310,17 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                                 var mname_buf: [32]u8 = undefined;
                                 const mname = getMemberName(m, tid, val, &mname_buf);
                                 try w.print(".{s}", .{mname});
+                            } else if (tinst.op == .TypeArray or tinst.op == .TypeRuntimeArray) {
+                                try w.print("[{d}]", .{val});
+                                // std140 rounds each array element up to 16 bytes,
+                                // so a narrow element (float/vecN/int) is stored as
+                                // a 4-wide MSL type. When this index is terminal,
+                                // narrow back to the element width — matching
+                                // spirv-cross's `u.arr[0].x`. A following component
+                                // index narrows on its own, so only do this last.
+                                if (is_last) {
+                                    if (widenedArrayElementSwizzle(m, tid)) |sw| try w.writeAll(sw);
+                                }
                             } else {
                                 try w.print("._m{d}", .{val});
                             }
@@ -612,7 +712,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             }
             for (textures.items) |tex| {
                 if (tex.descriptor_set != set_idx) continue;
-                try w.print("    texture2d<float> {s} [[id({d})]];\n", .{ tex.name, id_slot });
+                try w.print("    {s} {s} [[id({d})]];\n", .{ mslTextureType(tex), tex.name, id_slot });
                 id_slot += 1;
                 try w.print("    sampler {s}Smplr [[id({d})]];\n", .{ tex.name, id_slot });
                 id_slot += 1;
@@ -938,7 +1038,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pt = pi.words[3];
         switch (sc) {
             .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding, .descriptor_set=set}) catch {}; },
-            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; const name = names.get(rid) orelse "tex"; switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set}) catch {};}, else=>{}} },
+            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; const name = names.get(rid) orelse "tex"; const is_depth = imageTypeIsDepth(m, pei); switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth}) catch {};}, else=>{}} },
             else => {},
         }
     }
@@ -1441,7 +1541,7 @@ fn emitFunction(
         // Add texture + sampler params
         for (textures.items) |tex| {
             if (!first_param) try w.writeAll(", ");
-            try w.print("texture2d<float> {s}", .{tex.name});
+            try w.print("{s} {s}", .{ mslTextureType(tex), tex.name });
             try w.print(", sampler {s}Smplr", .{tex.name});
             first_param = false;
         }
@@ -1497,7 +1597,7 @@ fn emitFunction(
             for (textures.items) |tex| {
                 if (!first_param) try w.writeAll(", ");
                 const tex_b = common.applyBindingShift(tex.binding, binding_shift);
-                try w.print("texture2d<float> {s} [[texture({d})]]", .{tex.name, tex_b});
+                try w.print("{s} {s} [[texture({d})]]", .{ mslTextureType(tex), tex.name, tex_b});
                 try w.print(", sampler {s}Smplr [[sampler({d})]]", .{tex.name, tex_b});
                 first_param = false;
             }
@@ -1594,7 +1694,7 @@ fn emitFunction(
                 try w.print("    constant {s}& {s}_1 = set{d}.{s};\n", .{ cb.name, cb.name, cb.descriptor_set, cb.name });
             }
             for (textures.items) |tex| {
-                try w.print("    texture2d<float> {s} = set{d}.{s};\n", .{ tex.name, tex.descriptor_set, tex.name });
+                try w.print("    {s} {s} = set{d}.{s};\n", .{ mslTextureType(tex), tex.name, tex.descriptor_set, tex.name });
                 try w.print("    sampler {s}Smplr = set{d}.{s}Smplr;\n", .{ tex.name, tex.descriptor_set, tex.name });
             }
             // SSBO: body emitter expects `Name` as a `device Buf*` (deref'd
@@ -1672,7 +1772,7 @@ fn emitFunction(
         // Textures + samplers (stage-agnostic).
         for (textures.items) |tex| {
             if (!first_param) try w.writeAll(", ");
-            try w.print("texture2d<float> {s}, sampler {s}Smplr", .{ tex.name, tex.name });
+            try w.print("{s} {s}, sampler {s}Smplr", .{ mslTextureType(tex), tex.name, tex.name });
             first_param = false;
         }
         try w.writeAll(")\n{\n");
@@ -1698,7 +1798,7 @@ fn emitFunction(
         for (textures.items) |tex| {
             if (!first_param) try w.writeAll(", ");
             const tex_b = common.applyBindingShift(tex.binding, binding_shift);
-            try w.print("texture2d<float> {s} [[texture({d})]], sampler {s}Smplr [[sampler({d})]]", .{ tex.name, tex_b, tex.name, tex_b });
+            try w.print("{s} {s} [[texture({d})]], sampler {s}Smplr [[sampler({d})]]", .{ mslTextureType(tex), tex.name, tex_b, tex.name, tex_b });
             first_param = false;
         }
         try w.writeAll(")\n{\n    main0_out out = {};\n    ");
@@ -1777,7 +1877,7 @@ fn emitFunction(
     for (textures.items) |tex| {
         if (!first_param) try w.writeAll(", ");
         first_param = false;
-        try w.print("texture2d<float> {s}", .{tex.name});
+        try w.print("{s} {s}", .{ mslTextureType(tex), tex.name });
         try w.print(", sampler {s}Smplr", .{tex.name});
     }
 

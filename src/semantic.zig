@@ -565,12 +565,18 @@ const Analyzer = struct {
     fn tryBuildSpecConstOp(self: *Analyzer, node: ast.Node) Error!?SpecOpBuild {
         switch (node.tag) {
             .int_literal => {
-                const val: u32 = @intCast(node.data.int_val);
+                // Route through literalWord: lossless i64->u64 reinterpret +
+                // 32-bit-range check. A raw @intCast(i64->u32) here PANICS on a
+                // literal whose magnitude exceeds the 32-bit word range (this is
+                // a *top-level* const initializer walked before analyzeExpression
+                // ever vets it). literalWord yields the identical word for any
+                // valid int literal and an honest error otherwise.
+                const val: u32 = try literalWord(node);
                 const id = try self.ensureSpecOpLiteral(.int, val);
                 return .{ .id = id, .ty = .int, .is_spec_derived = false };
             },
             .uint_literal => {
-                const val: u32 = @intCast(node.data.int_val);
+                const val: u32 = try literalWord(node);
                 const id = try self.ensureSpecOpLiteral(.uint, val);
                 return .{ .id = id, .ty = .uint, .is_spec_derived = false };
             },
@@ -1762,9 +1768,19 @@ const Analyzer = struct {
                                 return; // No global variable / no IR instruction.
                             }
                         }
-                    } else |_| {
-                        // On error (alloc failure etc.), let the normal path
-                        // try -- it will surface a meaningful error if any.
+                    } else |err| {
+                        // tryBuildSpecConstOp only ever returns `null` (not an
+                        // error) for unsupported / non-spec expressions; the
+                        // ONLY errors it can produce are OutOfMemory and the
+                        // SemanticFailed that literalWord raises for an out-of-
+                        // 32-bit-range int/uint literal in the initializer. The
+                        // normal const-global fallback below does NOT re-validate
+                        // the initializer, so swallowing here would silently emit
+                        // a bogus global for `const uint y = 4294967296u;` —
+                        // exactly the silent-wrong outcome the Mitchell bar
+                        // forbids. Propagate the honest error instead of crashing
+                        // (pre-fix) or silently compiling.
+                        return err;
                     }
                 }
                 const ir_id = self.allocId();
@@ -6562,7 +6578,14 @@ const Analyzer = struct {
                     {
                         const arg_node = node.data.children[0];
                         if (arg_node.tag == .int_literal or arg_node.tag == .uint_literal) {
-                            const val: u32 = if (arg_node.tag == .uint_literal) @intCast(@as(u64, @bitCast(arg_node.data.int_val))) else @bitCast(@as(i32, @intCast(arg_node.data.int_val)));
+                            // Route through literalWord (lossless i64->u64 +
+                            // 32-bit-range check) instead of a raw @intCast that
+                            // panics out-of-range. Defensive: arg_node was already
+                            // vetted by analyzeExpression->literalWord above, so an
+                            // out-of-range literal can never reach here, but we keep
+                            // the cast panic-free. For an in-range int/uint literal
+                            // literalWord yields the identical 32-bit word.
+                            const val: u32 = try literalWord(arg_node);
                             const comp_ty: ast.Type = switch (result_ty) {
                                 .ivec2, .ivec3, .ivec4 => .int,
                                 .uvec2, .uvec3, .uvec4 => .uint,
@@ -6867,7 +6890,10 @@ const Analyzer = struct {
                         if (result_scalar == .float and (arg_scalar == .int or arg_scalar == .uint)) {
                             const child = node.data.children[i];
                             if (child.tag == .int_literal or child.tag == .uint_literal) {
-                                const val: u32 = @intCast(child.data.int_val);
+                                // literalWord instead of a raw @intCast that
+                                // panics out-of-range. Defensive (child was vetted
+                                // upstream); identical word for in-range literals.
+                                const val: u32 = try literalWord(child);
                                 const fval: f32 = @floatFromInt(val);
                                 arg_id = try self.getConstFloat(fval);
                                 flat_ids.append(self.alloc, arg_id) catch return error.OutOfMemory;
@@ -6974,11 +7000,23 @@ const Analyzer = struct {
                         else => .int,
                     };
                     for (node.data.children, 0..) |arg, i| {
+                        // Route every literal through literalWord (lossless
+                        // i64->u64 + 32-bit-range check) instead of raw @intCast
+                        // narrowings that panic out-of-range. Defensive: each arg
+                        // was already vetted by analyzeExpression->literalWord, so
+                        // an out-of-range literal cannot reach here, but we keep
+                        // the casts panic-free regardless. For in-range literals
+                        // the word is identical. The negated case computes the
+                        // 32-bit two's-complement of the (non-negative) magnitude
+                        // word — `0 -% w` — which matches @bitCast(-@as(i32, m))
+                        // for every valid i32 magnitude AND additionally handles
+                        // the -2147483648 edge that the old @as(i32, ...) panicked
+                        // on.
                         const val: u32 = blk: {
-                            if (arg.tag == .int_literal) break :blk @bitCast(@as(i32, @intCast(arg.data.int_val)));
-                            if (arg.tag == .uint_literal) break :blk @intCast(@as(u64, @bitCast(arg.data.int_val)));
+                            if (arg.tag == .int_literal) break :blk try literalWord(arg);
+                            if (arg.tag == .uint_literal) break :blk try literalWord(arg);
                             if (arg.tag == .unary_op and arg.data.children.len > 0 and arg.data.children[0].tag == .int_literal)
-                                break :blk @bitCast(-@as(i32, @intCast(arg.data.children[0].data.int_val)));
+                                break :blk 0 -% try literalWord(arg.data.children[0]);
                             break :blk 0;
                         };
                         const comp_id = try self.getConstInt(val, comp_ty);
@@ -7007,9 +7045,21 @@ const Analyzer = struct {
                     if (base_ty == .uint or base_ty == .int or base_ty == .float) {
                         const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, node.data.children.len);
                         for (node.data.children, 0..) |arg, i| {
+                            // literalWord (lossless + 32-bit-range check) instead
+                            // of raw @intCast narrowings that panic out-of-range.
+                            // Defensive: each arg was vetted upstream by
+                            // analyzeExpression->literalWord; identical word for
+                            // in-range int/uint literals.
                             const val: u32 = blk: {
-                                if (arg.tag == .int_literal) break :blk @bitCast(@as(i32, @intCast(arg.data.int_val)));
-                                if (arg.tag == .uint_literal) break :blk @intCast(@as(u64, @bitCast(arg.data.int_val)));
+                                if (arg.tag == .int_literal) break :blk try literalWord(arg);
+                                if (arg.tag == .uint_literal) break :blk try literalWord(arg);
+                                // The all-const-int scan also admits unary_op(-lit),
+                                // so mirror the vector composite folder's negation
+                                // (wrapping 0 -% word) — otherwise int[2](-5, 1) would
+                                // silently fold the negated element to 0 (Mitchell
+                                // silent-wrong).
+                                if (arg.tag == .unary_op and arg.data.children.len > 0 and arg.data.children[0].tag == .int_literal)
+                                    break :blk 0 -% try literalWord(arg.data.children[0]);
                                 break :blk 0;
                             };
                             const comp_id = try self.getConstInt(val, base_ty);
@@ -8797,4 +8847,233 @@ test "semantic: non-shadow textureGather 2-arg form (default component) still lo
         }
     }
     try testing.expect(found_gather);
+}
+
+// ── @intCast literal-overflow hardening (tryBuildSpecConstOp 568/573) ──
+//
+// A *top-level* const declaration's initializer is walked by tryBuildSpecConstOp
+// (semantic.zig:1733) BEFORE any analyzeExpression/literalWord runs on it. Its
+// int_literal/uint_literal branches previously did a raw `@intCast(int_val)`
+// (i64 -> u32), which PANICS ("integer does not fit in destination type") for a
+// literal whose magnitude exceeds the 32-bit word range. glslpp has no 64-bit
+// integer type, so such a literal is genuinely out of range and MUST produce an
+// honest error, never crash the compiler. These RED tests pin that behavior for
+// both the pure-literal and spec-derived initializer forms.
+//
+// (The constructor/array folding sites at 6565/6870/6978/6979/6981/7011/7012 are
+// hardened defensively in the same way, but are NOT reachable with a bare
+// out-of-range literal: every constructor argument is first analyzed via
+// analyzeExpression -> literalWord at semantic.zig:4126, which errors before the
+// folding code runs. See the "constructor arg pre-vetted" regression tests below.)
+
+test "semantic: out-of-32-bit GLOBAL const uint literal errors instead of panicking" {
+    // RED for tryBuildSpecConstOp uint_literal site (semantic.zig:573). A pure
+    // top-level `const uint y = 4294967296u;` (2^32, magnitude > 0xFFFFFFFF)
+    // reached tryBuildSpecConstOp's `@intCast(node.data.int_val)` and PANICKED.
+    const source =
+        \\const uint y = 4294967296u;
+        \\void main() {}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: out-of-32-bit GLOBAL const int literal errors instead of panicking" {
+    // RED for tryBuildSpecConstOp int_literal site (semantic.zig:568). A pure
+    // top-level `const int y = 4294967296;` (magnitude > 0xFFFFFFFF) reached the
+    // raw `@intCast(node.data.int_val)` and PANICKED.
+    const source =
+        \\const int y = 4294967296;
+        \\void main() {}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: out-of-32-bit spec-derived GLOBAL const uint errors instead of panicking" {
+    // RED for the spec-derived recursion into tryBuildSpecConstOp (binary_op ->
+    // uint_literal operand at :573). `S + 4294967296u` where S is a spec const:
+    // the `+` walker recurses into the literal operand and PANICKED.
+    const source =
+        \\layout(constant_id=0) const uint S = 1u;
+        \\const uint y = S + 4294967296u;
+        \\void main() {}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: out-of-32-bit spec-derived GLOBAL const int errors instead of panicking" {
+    // RED companion for the int_literal operand (semantic.zig:568) via the
+    // spec-derived binary_op recursion.
+    const source =
+        \\layout(constant_id=0) const int S = 1;
+        \\const int y = S + 4294967296;
+        \\void main() {}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, result);
+}
+
+test "semantic: in-range GLOBAL const uint literal still lowers correctly" {
+    // GREEN-side regression guard: a valid u32-max global const must STILL
+    // compile (the literalWord bound must not over-reject 0xFFFFFFFF).
+    const source =
+        \\const uint y = 4294967295u;
+        \\void main() {}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+    // Compiling without error is the assertion; the global is recorded.
+    try testing.expect(module.functions.len >= 1);
+}
+
+test "semantic: in-range spec-derived GLOBAL const still lowers correctly" {
+    // GREEN-side regression guard: an ordinary spec-derived const must keep
+    // working (S + 5 stays an OpSpecConstantOp, no honest error).
+    const source =
+        \\layout(constant_id=0) const uint S = 1u;
+        \\const uint y = S + 5u;
+        \\void main() {}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+    try testing.expect(module.functions.len >= 1);
+}
+
+// ── Defensive-hardening regression guards for the constructor/array folding
+// sites (6565/6870/6978/6979/6981/7011/7012). These are NOT reachable with a
+// bare out-of-range literal — analyzeExpression(arg)->literalWord errors first
+// (semantic.zig:4126) — so they cannot be RED-tested. These tests prove the
+// constructs (a) error honestly on out-of-range input (via the upstream guard,
+// confirming no panic) and (b) still compile correct output on in-range input.
+
+test "semantic: out-of-range uvecN splat constructor errors (not panic)" {
+    // uvec4(4294967296u): the splat-fold site is 6565; the arg is pre-vetted.
+    const source = "void main() { uvec4 v = uvec4(4294967296u); }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, analyze(testing.allocator, &root));
+}
+
+test "semantic: out-of-range ivecN multi-arg constructor errors (not panic)" {
+    // ivec2(9999999999, 0): integer-vector const-fold site 6978; arg pre-vetted.
+    const source = "void main() { ivec2 v = ivec2(9999999999, 0); }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, analyze(testing.allocator, &root));
+}
+
+test "semantic: out-of-range negated ivecN constructor errors (not panic)" {
+    // ivec2(-9999999999, 0): the unary-minus literal site 6981; the inner
+    // literal is pre-vetted via the analyzeExpression .unary_op recursion.
+    const source = "void main() { ivec2 v = ivec2(-9999999999, 0); }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, analyze(testing.allocator, &root));
+}
+
+test "semantic: out-of-range uint[] array constructor errors (not panic)" {
+    // uint[](4294967296u, 0u): array const-fold site 7012; arg pre-vetted.
+    const source = "void main() { uint a[2] = uint[](4294967296u, 0u); }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, analyze(testing.allocator, &root));
+}
+
+test "semantic: out-of-range vecN int->float fold constructor errors (not panic)" {
+    // vec2(4294967296): the int->float const-fold site 6870; arg pre-vetted.
+    const source = "void main() { vec2 v = vec2(4294967296); }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    try testing.expectError(error.SemanticFailed, analyze(testing.allocator, &root));
+}
+
+test "semantic: in-range uvecN splat + ivecN multi + uint[] array still compile" {
+    // GREEN-side regression: ordinary in-range constructors keep working with
+    // exact component values, proving the defensive routing didn't change
+    // behavior for valid shaders.
+    const source =
+        \\void main() {
+        \\    uvec4 a = uvec4(4294967295u);
+        \\    ivec2 b = ivec2(-5, 7);
+        \\    uint c[2] = uint[](1u, 2u);
+        \\    vec2 d = vec2(3);
+        \\}
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+    // The uvec4(0xFFFFFFFF) splat must produce a constant_int word 0xFFFFFFFF.
+    const body = module.functions[0].body;
+    var found_max: bool = false;
+    for (body) |inst| {
+        if (inst.tag == .constant_int and inst.ty == .uint and inst.operands.len == 1) {
+            if (inst.operands[0].literal_int == 0xFFFFFFFF) found_max = true;
+        }
+    }
+    try testing.expect(found_max);
+}
+
+test "semantic: negated literal in int array constructor folds to faithful word, not silent 0" {
+    // The all-const-int scan admits unary_op(-int_literal), and the vector
+    // composite folder negates it via `0 -% literalWord(...)`, but the ARRAY
+    // folder only handled bare int/uint literals and fell through to `break :blk 0`
+    // for the negated case — silently folding int[2](-5, 1) to {0, 1} (Mitchell
+    // silent-wrong). The faithful 32-bit word of -5 is 0 -% 5 == 0xFFFFFFFB.
+    const source = "void main() { int a[2] = int[2](-5, 1); }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    var found_neg = false;
+    var found_one = false;
+    for (module.functions[0].body) |inst| {
+        if (inst.tag == .constant_int and inst.ty == .int and inst.operands.len == 1) {
+            if (inst.operands[0].literal_int == 0xFFFFFFFB) found_neg = true;
+            if (inst.operands[0].literal_int == 1) found_one = true;
+        }
+    }
+    try testing.expect(found_neg);
+    try testing.expect(found_one);
 }
