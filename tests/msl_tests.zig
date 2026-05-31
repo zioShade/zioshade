@@ -1801,3 +1801,86 @@ test "T18.24: byte-identical UBO blocks keep distinct member names" {
     // The collision aliased b's member onto a's — `b_1.ca` must never appear.
     try assertNotContains(msl, "b_1.ca");
 }
+
+test "T18.22: row_major UBO matrix access must be transposed (vs column_major)" {
+    // ORACLE spirv-cross --msl, `mat4 m` with `o = a.m[0]`:
+    //   row_major    → out.o = float4(a.m[0][0], a.m[1][0], a.m[2][0], a.m[3][0]);
+    //   column_major → out.o = a.m[0];
+    // The RowMajor decoration means the matrix is stored transposed, so reading
+    // logical column 0 must GATHER element 0 from every stored column. glslpp
+    // currently ignores the RowMajor decoration and emits the SAME `a_1.m._m0`
+    // for both qualifiers — reading row-major storage as column-major
+    // (silent-wrong output). See codegen RowMajor/MatrixStride fix on
+    // claude/funny-murdock-8da7d8; the MSL backend never consumes that decoration.
+    const row_src =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat4 m; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[0]; }
+    ;
+    const col_src =
+        \\#version 450
+        \\layout(binding=0,std140,column_major) uniform A { mat4 m; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[0]; }
+    ;
+    const row_msl = try compileToMsl(row_src);
+    defer alloc.free(row_msl);
+    const col_msl = try compileToMsl(col_src);
+    defer alloc.free(col_msl);
+
+    // (1) Core bug: a row_major block and a column_major block that differ ONLY
+    // in layout qualifier must NOT produce byte-identical MSL.
+    if (std.mem.eql(u8, row_msl, col_msl)) {
+        std.debug.print(
+            "row_major and column_major MSL are byte-identical (silent-wrong):\n{s}\n",
+            .{row_msl},
+        );
+        return error.TestUnexpectedFind;
+    }
+
+    // (2) Oracle behaviour: reading logical column 0 of a row_major matrix must
+    // gather across stored columns — evidenced by a reference to a non-zero
+    // stored column (`_m1`/`_m2`/`_m3` or `[1]`/`[2]`/`[3]`) or an explicit
+    // transpose(). The current wrong output only ever names column 0 (`_m0`).
+    const transposed =
+        std.mem.indexOf(u8, row_msl, "transpose") != null or
+        std.mem.indexOf(u8, row_msl, "_m3") != null or
+        std.mem.indexOf(u8, row_msl, "_m1") != null or
+        std.mem.indexOf(u8, row_msl, "[3]") != null or
+        std.mem.indexOf(u8, row_msl, "[1]") != null;
+    if (!transposed) {
+        std.debug.print(
+            "row_major mat4 m[0] access is not transposed (no gather/transpose):\n{s}\n",
+            .{row_msl},
+        );
+        return error.TestExpectedFind;
+    }
+}
+
+test "T18.23: non-square row_major matrix is an honest error (not silent-wrong)" {
+    // A row_major NON-square matrix (e.g. mat3x4) must be stored with SWAPPED
+    // member dimensions in MSL (the transpose's shape, float4x3), which is not
+    // yet implemented. Until it is, the backend must FAIL LOUDLY instead of
+    // declaring a column-major-shaped member with untransposed access —
+    // i.e. silent-wrong output. Square row_major matrices (mat2/mat3/mat4)
+    // ARE fully handled via transpose(); see T18.22.
+    const source =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat3x4 m; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[0]; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    if (glslpp.spirvToMSL(alloc, spirv, .{})) |msl| {
+        defer alloc.free(msl);
+        std.debug.print(
+            "expected an honest error for non-square row_major matrix, got MSL:\n{s}\n",
+            .{msl},
+        );
+        return error.TestExpectedError;
+    } else |_| {
+        // Expected: an honest error rather than silent-wrong output.
+    }
+}

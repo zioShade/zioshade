@@ -206,10 +206,10 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     return buf.toOwnedSlice(alloc);
 }
 
-fn writeResolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32, w: anytype) !void {
+fn writeResolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32, read_context: bool, w: anytype) !void {
     const inst = getDef(m, ptr_id) orelse { try w.writeAll(names.get(ptr_id) orelse "var"); return; };
     if (inst.op == .AccessChain) {
-        try writeAccessExpr(m, names, inst.words[3], inst.words[4..], w);
+        try writeAccessExpr(m, names, inst.words[3], inst.words[4..], read_context, w);
         return;
     }
     try w.writeAll(names.get(ptr_id) orelse "var");
@@ -223,6 +223,47 @@ fn arrayStrideOf(m: *const ParsedModule, array_type_id: u32) ?u32 {
         if (inst.op == .Decorate and inst.words.len >= 4 and inst.words[1] == array_type_id) {
             const dec: spirv.Decoration = @enumFromInt(inst.words[2]);
             if (dec == .array_stride) return inst.words[3];
+        }
+    }
+    return null;
+}
+
+/// A row-major matrix member encountered while walking an access chain.
+/// `boundary` is the index position that selects the matrix from its struct;
+/// `matrix_tid` is the matrix type id. Trailing indices (>`boundary`) index
+/// into the logical matrix and are emitted by `writeMatrixTail`.
+const RowMajorAccess = struct { boundary: usize, matrix_tid: u32 };
+
+/// If `indices` selects a member that is a row-major, SQUARE matrix, return
+/// where it sits in the chain. A `row_major` matrix is stored column-major in
+/// MSL but holds the TRANSPOSE of the logical matrix, so a read must wrap it in
+/// `transpose(...)`. Non-square row-major matrices also need swapped member
+/// DIMENSIONS, which is rejected at the struct declaration; only square ones
+/// reach here (and only square ones need a pure transpose at the read site).
+fn findRowMajorMatrix(m: *const ParsedModule, base_id: u32, indices: []const u32) ?RowMajorAccess {
+    var cur_type: ?u32 = resolvePointee(m, base_id);
+    for (indices, 0..) |index_id, i| {
+        const tid = cur_type orelse return null;
+        const ti = getDef(m, tid) orelse return null;
+        if (ti.op == .TypeStruct) {
+            const def = getDef(m, index_id) orelse return null;
+            if (def.op != .Constant or def.words.len <= 3) return null;
+            const val = def.words[3];
+            if (val + 2 >= ti.words.len) return null;
+            const member_tid = ti.words[val + 2];
+            const mdef = getDef(m, member_tid);
+            if (mdef != null and mdef.?.op == .TypeMatrix and memberIsRowMajor(m, tid, val)) {
+                const cols = mdef.?.words[3];
+                const colvec = getDef(m, mdef.?.words[2]);
+                const rows: u32 = if (colvec != null and colvec.?.op == .TypeVector) colvec.?.words[3] else 0;
+                if (cols == rows) return .{ .boundary = i, .matrix_tid = member_tid };
+                return null; // non-square: dimensions differ; handled at declaration
+            }
+            cur_type = member_tid;
+        } else if (ti.op == .TypeVector or ti.op == .TypeArray or ti.op == .TypeMatrix) {
+            cur_type = ti.words[2];
+        } else {
+            return null;
         }
     }
     return null;
@@ -263,7 +304,49 @@ fn widenedArrayElementSwizzle(m: *const ParsedModule, array_type_id: u32) ?[]con
     };
 }
 
-fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
+/// Emit the access-chain indices that come AFTER a (transposed) row-major
+/// matrix: a matrix-column index becomes `[col]` on the transposed value, and a
+/// vector-element index becomes a `.xyzw` swizzle — both valid MSL.
+fn writeMatrixTail(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), matrix_tid: u32, indices: []const u32, w: anytype) !void {
+    var cur_type: ?u32 = matrix_tid;
+    for (indices) |index_id| {
+        const def = getDef(m, index_id);
+        if (def != null and def.?.op == .Constant and def.?.words.len > 3) {
+            const val = def.?.words[3];
+            const ti = if (cur_type) |t| getDef(m, t) else null;
+            if (ti != null and ti.?.op == .TypeVector) {
+                try w.writeAll(swizzleChar(val));
+                cur_type = ti.?.words[2];
+            } else {
+                try w.print("[{d}]", .{val});
+                cur_type = if (ti != null and (ti.?.op == .TypeMatrix or ti.?.op == .TypeArray)) ti.?.words[2] else null;
+            }
+        } else {
+            try w.print("[{s}]", .{names.get(index_id) orelse "i"});
+        }
+    }
+}
+
+/// Build an access-chain expression. On a READ that traverses a row-major
+/// matrix member, the matrix sub-expression is wrapped in `transpose(...)` so
+/// the column-major MSL storage is read as the logical (row-major) matrix —
+/// matching the spirv-cross --msl oracle, which emits transposed access for a
+/// `row_major` matrix. Writes (`read_context == false`) keep the plain form,
+/// since you cannot assign through `transpose(...)`.
+fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, read_context: bool, w: anytype) !void {
+    if (read_context) {
+        if (findRowMajorMatrix(m, base_id, indices)) |hit| {
+            try w.writeAll("transpose(");
+            try writeAccessExprPlain(m, names, base_id, indices[0 .. hit.boundary + 1], w);
+            try w.writeAll(")");
+            try writeMatrixTail(m, names, hit.matrix_tid, indices[hit.boundary + 1 ..], w);
+            return;
+        }
+    }
+    try writeAccessExprPlain(m, names, base_id, indices, w);
+}
+
+fn writeAccessExprPlain(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) { try w.writeAll(base_name); return; }
     const base_is_cb = isUniformVar(m, base_id);
@@ -419,6 +502,37 @@ fn memberMatrixStride(m: *const ParsedModule, struct_id: u32, member_index: u32)
         }
     }
     return null;
+}
+
+/// True if struct member `member_index` carries the SPIR-V `RowMajor`
+/// decoration (decoration 4). Mirrors `memberMatrixStride`. The default
+/// (`ColMajor`, decoration 5, or no decoration) returns false. A row-major
+/// matrix is stored TRANSPOSED relative to its logical shape, so every read
+/// must be transposed back — see `findRowMajorMatrix` / `writeMatrixTail`.
+fn memberIsRowMajor(m: *const ParsedModule, struct_id: u32, member_index: u32) bool {
+    for (m.instructions) |inst| {
+        if (inst.op == .MemberDecorate and inst.words.len >= 4 and
+            inst.words[1] == struct_id and inst.words[2] == member_index)
+        {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[3]);
+            if (dec == .row_major) return true;
+        }
+    }
+    return false;
+}
+
+/// True if `type_id` is a NON-square matrix (column count != row count).
+/// A row-major non-square matrix needs SWAPPED member dimensions in MSL
+/// (e.g. `mat3x4` stored as `float4x3`), which is not yet implemented; the
+/// declaration emitter rejects it with an honest error instead of emitting a
+/// column-major-shaped member (silent-wrong). Square row-major matrices are
+/// fully handled by transposing reads (`findRowMajorMatrix`).
+fn matrixIsNonSquare(m: *const ParsedModule, type_id: u32) bool {
+    const mt = getDef(m, type_id) orelse return false;
+    if (mt.op != .TypeMatrix) return false;
+    const colvec = getDef(m, mt.words[2]) orelse return false;
+    if (colvec.op != .TypeVector) return false;
+    return mt.words[3] != colvec.words[3]; // cols != rows
 }
 
 /// MSL type for uniform buffer struct members.
@@ -1289,9 +1403,16 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
         // matrix-array member). It drives the MSL row count for matrices and
         // differs between std140 (16) and std430 (8/16) — never assume one.
         const mat_stride = memberMatrixStride(m, struct_id, @intCast(mi));
+        // A row_major matrix is stored transposed; reads are corrected with
+        // transpose() (see findRowMajorMatrix). That only preserves the byte
+        // layout for SQUARE matrices. A non-square row_major matrix additionally
+        // needs SWAPPED member dimensions (mat3x4 -> float4x3), which is not yet
+        // implemented — fail loudly rather than emit silent-wrong output.
+        const member_row_major = memberIsRowMajor(m, struct_id, @intCast(mi));
         const mti = getDef(m, mt_id);
         if (mti) |mi2| { if (mi2.op == .TypeArray and mi2.words.len > 3) {
             const elem_type_id = mi2.words[2];
+            if (member_row_major and matrixIsNonSquare(m, elem_type_id)) return error.UnsupportedRowMajorMatrix;
             const li = getDef(m, mi2.words[3]);
             const lv: u32 = if(li)|l| l.words[3] else 1;
             // Check for ArrayStride decoration on the array type. A 16-byte
@@ -1305,6 +1426,7 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
             try w.print("    {s} {s}[{d}];\n", .{et, mname, lv});
             continue;
         } }
+        if (member_row_major and matrixIsNonSquare(m, mt_id)) return error.UnsupportedRowMajorMatrix;
         const mt = try mslUboMemberType(m, mt_id, this_off, next_off, mat_stride, names, alloc);
         try w.print("    {s} {s};\n", .{mt, mname});
     }
@@ -2324,7 +2446,7 @@ fn emitInstruction(
             } else {
                 const rtt = try mslType(m, inst.words[1], names, alloc);
                 try w.print("    {s} {s} = ", .{rtt, rn});
-                try writeResolvePointer(m, names, pid, w);
+                try writeResolvePointer(m, names, pid, true, w);
                 try w.writeAll(";\n");
             }
         },
@@ -2332,7 +2454,7 @@ fn emitInstruction(
             if (inst.words.len < 3) return;
             const on = names.get(inst.words[2]) orelse "0";
             try w.writeAll("    ");
-            try writeResolvePointer(m, names, inst.words[1], w);
+            try writeResolvePointer(m, names, inst.words[1], false, w);
             try w.print(" = {s};\n", .{on});
         },
         .Undef => {
@@ -2352,9 +2474,9 @@ fn emitInstruction(
         .CopyMemory => {
             if (inst.words.len < 3) return;
             try w.writeAll("    ");
-            try writeResolvePointer(m, names, inst.words[1], w);
+            try writeResolvePointer(m, names, inst.words[1], false, w);
             try w.writeAll(" = ");
-            try writeResolvePointer(m, names, inst.words[2], w);
+            try writeResolvePointer(m, names, inst.words[2], false, w);
             try w.writeAll(";\n");
         },
         .Phi => {
