@@ -89,7 +89,24 @@ clean:
 check-zig:
     @mise exec -- zig version | grep -q "0.15.2" && echo "Zig 0.15.2 ✓" || (echo "ERROR: expected Zig 0.15.2" && exit 1)
 
-# show test counts summary
-summary:
-    @echo "Unit tests:" && {{zig}} build test --summary all 2>&1 | grep "passed\|failed\|leaked" | head -1
-    @echo "HLSL tests:" && {{zig}} build test-hlsl --summary all 2>&1 | grep "passed" | head -1
+# ── status (single source of truth) ──────────────────────────────────
+
+# internal: run the three suites sequentially (RAM-safe), tee output to .status-cache/
+# Shebang recipe so `set -eu` gives deterministic semantics: test/test-hlsl
+# failures abort (never publish from a broken run); conformance's expected
+# exit(1) for the 7 known fails is swallowed with `|| true` so capture continues.
+_run-suites:
+    #!/usr/bin/env sh
+    set -eu
+    mkdir -p .status-cache
+    {{zig}} build test --summary all > .status-cache/test.txt 2>&1
+    {{zig}} build test-hlsl --summary all > .status-cache/hlsl.txt 2>&1
+    {{zig}} build conformance > .status-cache/conformance.txt 2>&1 || true
+
+# regenerate docs/STATUS.md + inject status numbers into the docs
+update-status: _run-suites
+    {{zig}} build gen-status -- --mode write --test .status-cache/test.txt --hlsl .status-cache/hlsl.txt --conf .status-cache/conformance.txt --allowlist tests/known-conformance-fails.txt --zig-version "$(mise exec -- zig version)"
+
+# verify committed status numbers match a fresh run (CI/pre-commit); no writes, exits non-zero on drift
+status: _run-suites
+    {{zig}} build gen-status -- --mode check --test .status-cache/test.txt --hlsl .status-cache/hlsl.txt --conf .status-cache/conformance.txt --allowlist tests/known-conformance-fails.txt --zig-version "$(mise exec -- zig version)"
