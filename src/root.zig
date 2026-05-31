@@ -579,7 +579,7 @@ pub fn compileToSPIRVStrict(
         last_compile_detail = .semantic_failed;
         return error.SemanticFailed;
     };
-    module.deinit();
+    defer module.deinit();
     // Enumeration only cares whether analysis SUCCEEDS; it does not need codegen.
     return &[_]u32{};
 }

@@ -180,6 +180,37 @@ fn stageFromPath(path: []const u8) glslpp.Stage {
         return .fragment;
 }
 
+/// SPIR-V version a fixture compiles against (shared by testShader/enumerateShader
+/// so both probe identically — ray-tracing/mesh need 1.4, everything else 1.5).
+fn spirvVersionForStage(stage: glslpp.Stage) glslpp.SPIRVVersion {
+    return if (stage == .mesh or stage == .task or
+        stage == .raygen or stage == .closesthit or stage == .miss or
+        stage == .intersection or stage == .anyhit or stage == .callable) .@"1.4" else .@"1.5";
+}
+
+/// Whether a directory entry is a conformance fixture we compile. Centralizes the
+/// extension allowlist + skip rules so testShader's walk and the enumeration walk
+/// select exactly the same corpus (they must not drift).
+fn isConformanceFixture(basename: []const u8) bool {
+    const ext = std.fs.path.extension(basename);
+    if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
+        !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
+        !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task") and
+        !std.mem.eql(u8, ext, ".geom") and !std.mem.eql(u8, ext, ".tesc") and
+        !std.mem.eql(u8, ext, ".tese") and
+        !std.mem.eql(u8, ext, ".rgen") and !std.mem.eql(u8, ext, ".rchit") and
+        !std.mem.eql(u8, ext, ".rmiss") and !std.mem.eql(u8, ext, ".rahit") and
+        !std.mem.eql(u8, ext, ".rint") and !std.mem.eql(u8, ext, ".rcall"))
+        return false;
+
+    // Skip error-validation tests, multi-file link tests, SPIR-V assembly files, and nocompat.
+    if (std.mem.indexOf(u8, basename, ".error.") != null) return false;
+    if (std.mem.startsWith(u8, basename, "link.")) return false;
+    if (std.mem.indexOf(u8, basename, ".asm.") != null) return false;
+    if (std.mem.indexOf(u8, basename, ".nocompat.") != null) return false;
+    return true;
+}
+
 /// Strict-enumeration probe: compile a fixture with BOTH the tolerate path
 /// (`compileToSPIRV`) and the strict path (`compileToSPIRVStrict`). A fixture is
 /// a false-positive *candidate* when tolerate SUCCEEDS but strict fails with
@@ -210,17 +241,21 @@ fn enumerateShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8
     defer alloc.free(source_z);
 
     const stage = stageFromPath(path);
+    // Match testShader's version selection so the tolerate probe here cannot
+    // succeed/fail differently from the conformance run for RT/mesh stages.
+    const spirv_ver = spirvVersionForStage(stage);
 
     // Tolerate compile: current public behavior. If it fails, this fixture is
     // not a false-positive candidate (the error is not masked today).
     const tolerate_ok = blk: {
-        const w = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage }) catch break :blk false;
+        const w = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver }) catch break :blk false;
         alloc.free(w);
         break :blk true;
     };
     if (!tolerate_ok) return;
 
-    // Strict compile: rejects on the first recorded semantic error.
+    // Strict compile: rejects on the first recorded semantic error. (Analysis-only;
+    // spirv_version is irrelevant — it affects codegen, which strict mode skips.)
     if (glslpp.compileToSPIRVStrict(alloc, source_z, .{ .stage = stage })) |w| {
         alloc.free(w); // static empty slice → safe no-op (Allocator.free returns on len==0)
         return; // strict also accepted → not a false-positive
@@ -231,7 +266,8 @@ fn enumerateShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8
         std.debug.print("  FP-CANDIDATE {s} ctx={s} inner={s}\n", .{ path, ctx, inner });
         stats.strict_fp += 1;
         // Histogram by ctx. The threadlocal ctx is overwritten on the next
-        // compile, so dupe the key (leaked intentionally; GPA reclaims on deinit).
+        // compile, so dupe the key. The dupe is owned by `hist` and freed by the
+        // enumerate-mode defer in mainImpl before hist.deinit().
         const key = alloc.dupe(u8, ctx) catch return;
         const gop = hist.getOrPut(key) catch return;
         if (gop.found_existing) {
@@ -252,21 +288,7 @@ fn runDirEnumerate(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []cons
 
     while (try compat.walkerNext(io, &walker)) |entry| {
         if (entry.kind != .file) continue;
-        const ext = std.fs.path.extension(entry.basename);
-        if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
-            !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
-            !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task") and
-            !std.mem.eql(u8, ext, ".geom") and !std.mem.eql(u8, ext, ".tesc") and
-            !std.mem.eql(u8, ext, ".tese") and
-            !std.mem.eql(u8, ext, ".rgen") and !std.mem.eql(u8, ext, ".rchit") and
-            !std.mem.eql(u8, ext, ".rmiss") and !std.mem.eql(u8, ext, ".rahit") and
-            !std.mem.eql(u8, ext, ".rint") and !std.mem.eql(u8, ext, ".rcall"))
-            continue;
-
-        if (std.mem.indexOf(u8, entry.basename, ".error.") != null) continue;
-        if (std.mem.startsWith(u8, entry.basename, "link.")) continue;
-        if (std.mem.indexOf(u8, entry.basename, ".asm.") != null) continue;
-        if (std.mem.indexOf(u8, entry.basename, ".nocompat.") != null) continue;
+        if (!isConformanceFixture(entry.basename)) continue;
 
         var path_buf: [compat.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
@@ -284,22 +306,7 @@ fn runDir(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []const u8, sta
 
     while (try compat.walkerNext(io, &walker)) |entry| {
         if (entry.kind != .file) continue;
-        const ext = std.fs.path.extension(entry.basename);
-        if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
-            !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
-            !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task") and
-            !std.mem.eql(u8, ext, ".geom") and !std.mem.eql(u8, ext, ".tesc") and
-            !std.mem.eql(u8, ext, ".tese") and
-            !std.mem.eql(u8, ext, ".rgen") and !std.mem.eql(u8, ext, ".rchit") and
-            !std.mem.eql(u8, ext, ".rmiss") and !std.mem.eql(u8, ext, ".rahit") and
-            !std.mem.eql(u8, ext, ".rint") and !std.mem.eql(u8, ext, ".rcall"))
-            continue;
-
-        // Skip error-validation tests, multi-file link tests, SPIR-V assembly files, and nocompat
-        if (std.mem.indexOf(u8, entry.basename, ".error.") != null) continue;
-        if (std.mem.startsWith(u8, entry.basename, "link.")) continue;
-        if (std.mem.indexOf(u8, entry.basename, ".asm.") != null) continue;
-        if (std.mem.indexOf(u8, entry.basename, ".nocompat.") != null) continue;
+        if (!isConformanceFixture(entry.basename)) continue;
 
         var path_buf: [compat.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
