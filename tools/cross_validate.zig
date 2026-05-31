@@ -1,14 +1,13 @@
 const std = @import("std");
 const glslpp = @import("glslpp");
 
-pub fn main(init: std.process.Init) !void {
-    const alloc = init.gpa;
-    const io = init.io;
-    const cwd = std.Io.Dir.cwd();
+pub fn main() !void {
+    // Short-lived generator: compileToSPIRV intentionally leaks internal state
+    // (see tests/runner.zig), so a leak-checking GPA would spam stderr on every
+    // run. Use the page allocator and let the OS reclaim memory on exit.
+    const alloc = std.heap.page_allocator;
 
-    const args = init.minimal.args.toSlice(init.arena.allocator()) catch |err| {
-        std.process.fatal("unable to parse args: {}", .{err});
-    };
+    const args = try std.process.argsAlloc(alloc);
     if (args.len < 4) {
         std.debug.print("Usage: cross_validate <input.glsl> <glslpp_output_prefix> <spirvcross_output_prefix>\n", .{});
         std.debug.print("  Compiles GLSL via both glslpp and glslangValidator+spirv-cross\n", .{});
@@ -19,9 +18,13 @@ pub fn main(init: std.process.Init) !void {
     const input_path = args[1];
     const glslpp_prefix = args[2];
     const spirvcross_prefix = args[3];
+    // The spirv-cross comparison pipeline is not yet wired up in this tool; the
+    // prefix is reserved for that future output. Discard it so the arg contract
+    // (3 positional args) stays documented without an unused-local error.
+    _ = spirvcross_prefix;
 
     // Read input GLSL
-    const source_raw = try cwd.readFileAlloc(io, input_path, alloc, .limited(10 * 1024 * 1024));
+    const source_raw = try std.fs.cwd().readFileAlloc(alloc, input_path, 10 * 1024 * 1024);
     defer alloc.free(source_raw);
 
     // Null-terminate
@@ -47,7 +50,7 @@ pub fn main(init: std.process.Init) !void {
     defer alloc.free(hlsl);
     const hlsl_path = try std.fmt.allocPrint(alloc, "{s}.hlsl", .{glslpp_prefix});
     defer alloc.free(hlsl_path);
-    try cwd.writeFile(io, .{ .sub_path = hlsl_path, .data = hlsl });
+    try std.fs.cwd().writeFile(.{ .sub_path = hlsl_path, .data = hlsl });
 
     // glslpp → GLSL
     const glsl = glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 }) catch |err| {
@@ -57,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
     defer alloc.free(glsl);
     const glsl_path = try std.fmt.allocPrint(alloc, "{s}.glsl", .{glslpp_prefix});
     defer alloc.free(glsl_path);
-    try cwd.writeFile(io, .{ .sub_path = glsl_path, .data = glsl });
+    try std.fs.cwd().writeFile(.{ .sub_path = glsl_path, .data = glsl });
 
     // glslpp → MSL
     const msl = glslpp.spirvToMSL(alloc, spirv, .{}) catch |err| {
@@ -67,12 +70,12 @@ pub fn main(init: std.process.Init) !void {
     defer alloc.free(msl);
     const msl_path = try std.fmt.allocPrint(alloc, "{s}.msl", .{glslpp_prefix});
     defer alloc.free(msl_path);
-    try cwd.writeFile(io, .{ .sub_path = msl_path, .data = msl });
+    try std.fs.cwd().writeFile(.{ .sub_path = msl_path, .data = msl });
 
     // Write glslpp SPIR-V
     const spv_path = try std.fmt.allocPrint(alloc, "{s}.spv", .{glslpp_prefix});
     defer alloc.free(spv_path);
-    try cwd.writeFile(io, .{ .sub_path = spv_path, .data = std.mem.sliceAsBytes(spirv) });
+    try std.fs.cwd().writeFile(.{ .sub_path = spv_path, .data = std.mem.sliceAsBytes(spirv) });
 
     std.debug.print("glslpp outputs: {s}.*\n", .{glslpp_prefix});
 }
