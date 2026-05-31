@@ -2459,10 +2459,10 @@ const Codegen = struct {
                     try member_ids.append(self.alloc, try self.ensureType(member_ty));
                 }
                 // Resolve the block layout BEFORE computing the dedup key so the key
-                // can fold in the layout qualifiers. This loop has no side effects: it
-                // only reads self.module.globals to set needs_block/block_layout/
-                // block_row_major. The actual decoration emission stays below, after
-                // the struct type / OpName / OpMemberName are emitted.
+                // can fold it in. This loop only READS self.module.globals to set the
+                // locals needs_block / block_layout / block_row_major (it mutates no
+                // self.* state); the actual decoration emission stays below, after the
+                // struct type / OpName / OpMemberName are emitted.
                 var needs_block = false;
                 // Layout resolution:
                 //   explicit layout(std430)         -> .std430
@@ -2492,9 +2492,16 @@ const Codegen = struct {
                 // `A { vec4 ca }` vs `B { vec4 cb }`, are distinct types and must NOT
                 // be merged — reusing one id would alias the other block's member
                 // names and decorations onto it, so `b.cb` would resolve to `ca`) AND
-                // the resolved layout qualifiers: two blocks identical except for
-                // layout (row/column major, std140/std430) get different RowMajor/
-                // ColMajor/Offset/MatrixStride decorations and must also stay distinct.
+                // the resolved block layout. The block_row_major bit is what keeps a
+                // `row_major` block distinct from a `column_major` one with identical
+                // members: their matrix members carry different RowMajor/ColMajor +
+                // MatrixStride OpMemberDecorate, so the structs must not share an id.
+                // block_layout (std140/std430/scalar) is folded too for completeness —
+                // it separates structs whose member-level Offset decorations differ by
+                // layout. NOTE: this does NOT fully separate two blocks differing only
+                // in std140-vs-std430 ARRAY stride: ArrayStride lives on the array TYPE
+                // (deduped independently in emitted_array_types), not on the struct, so
+                // that case still merges — tracked as a separate follow-up.
                 var layout_key: u64 = @as(u64, member_ids.items.len);
                 for (member_ids.items) |mid| {
                     layout_key = layout_key *% 33 +% @as(u64, mid);

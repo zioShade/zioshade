@@ -100,8 +100,11 @@ test "scalar layout: vec3 runtime array gets ArrayStride 12" {
     try std.testing.expectEqual(@as(u32, 12), stride);
 }
 
-/// True if the SPIR-V stream contains an OpMemberDecorate (opcode 72) whose
-/// decoration literal (word 3) equals `decoration`.
+/// True if the SPIR-V stream contains ANY OpMemberDecorate (opcode 72) whose
+/// decoration literal (word 3) equals `decoration`. Not scoped to a specific
+/// struct or member — a single match anywhere in the module counts, which is
+/// sufficient here: a RowMajor *and* a ColMajor both appearing proves the two
+/// blocks were emitted as distinct structs rather than merged onto one.
 fn hasMemberDecoration(spv: []const u32, decoration: u32) bool {
     var i: usize = 5; // skip 5-word header
     while (i < spv.len) {
@@ -158,4 +161,24 @@ test "block dedup keeps row_major and column_major UBO blocks as distinct struct
 
     // Structurally the two blocks are distinct struct types, not one merged type.
     try std.testing.expectEqual(@as(usize, 2), countStructTypes(spv));
+}
+
+// Negative / no-regression guard for the fix above: tightening the dedup key must
+// NOT over-separate. Two blocks that are byte-identical in members, names AND
+// layout (both std140, both default column-major) must still MERGE onto a single
+// struct — otherwise the fix would bloat every module with duplicate types.
+test "block dedup still merges two UBO blocks identical in members and layout" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(binding=0,std140) uniform A { mat4 m; } a;
+        \\layout(binding=1,std140) uniform B { mat4 m; } b;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[0] + b.m[0]; }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // Identical column-major std140 blocks → exactly one shared struct type.
+    try std.testing.expectEqual(@as(usize, 1), countStructTypes(spv));
 }
