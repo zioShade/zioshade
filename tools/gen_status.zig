@@ -383,4 +383,150 @@ fn injectMarkers(alloc: std.mem.Allocator, doc: []const u8, kv: []const Kv) ![]u
     return out.toOwnedSlice(alloc);
 }
 
+fn fixtureConfResult(alloc: std.mem.Allocator) !ConfResult {
+    var suites = try alloc.alloc(SuiteCounts, 2);
+    suites[0] = .{ .name = try alloc.dupe(u8, "glslang-430"), .pass = 35, .fail = 4, .skip = 3 };
+    suites[1] = .{ .name = try alloc.dupe(u8, "spirv-cross"), .pass = 2045, .fail = 3, .skip = 5 };
+    var failing = try alloc.alloc([]const u8, 1);
+    failing[0] = try alloc.dupe(u8, "tests/glslang-430/fp64.desktop.comp");
+    return .{
+        .summary = .{ .pass = 2080, .fail_spirv = 5, .fail_compile = 2, .skip = 8, .total = 2095 },
+        .suites = suites,
+        .failing = failing,
+    };
+}
+
+test "buildKv produces the documented scalar keys" {
+    const alloc = std.testing.allocator;
+    const conf = try fixtureConfResult(alloc);
+    defer freeConfResult(alloc, conf);
+    const kv = try buildKv(alloc, .{ .passed = 2004, .total = 2004 }, .{ .passed = 780, .total = 780 }, conf);
+    defer freeKv(alloc, kv);
+    try std.testing.expectEqualStrings("2,080", lookupKv(kv, "conformance.pass").?);
+    try std.testing.expectEqualStrings("7", lookupKv(kv, "conformance.fail").?);
+    try std.testing.expectEqualStrings("8", lookupKv(kv, "conformance.skip").?);
+    try std.testing.expectEqualStrings("2,095", lookupKv(kv, "conformance.total").?);
+    try std.testing.expectEqualStrings("2,087", lookupKv(kv, "conformance.runnable").?);
+    try std.testing.expectEqualStrings("2,080 PASS / 7 FAIL / 8 SKIP / 2,095 TOTAL", lookupKv(kv, "conformance.summary").?);
+    try std.testing.expectEqualStrings("2,004", lookupKv(kv, "unit.tests").?);
+    try std.testing.expectEqualStrings("780", lookupKv(kv, "hlsl.tests").?);
+}
+
+test "renderStatusMd is byte-stable and contains headline + a suite row + named fails" {
+    const alloc = std.testing.allocator;
+    const conf = try fixtureConfResult(alloc);
+    defer freeConfResult(alloc, conf);
+    var allow = try alloc.alloc(AllowEntry, 1);
+    allow[0] = .{ .path = try alloc.dupe(u8, "tests/glslang-430/fp64.desktop.comp"), .reason = try alloc.dupe(u8, "64-bit float not modelled") };
+    defer freeAllowlist(alloc, allow);
+    const md = try renderStatusMd(alloc, .{ .passed = 2004, .total = 2004 }, .{ .passed = 780, .total = 780 }, conf, allow, "0.15.2");
+    defer alloc.free(md);
+    try std.testing.expect(std.mem.indexOf(u8, md, "2,080 PASS / 7 FAIL / 8 SKIP / 2,095 TOTAL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, md, "| glslang-430 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, md, "tests/glslang-430/fp64.desktop.comp") != null);
+    try std.testing.expect(std.mem.indexOf(u8, md, "64-bit float not modelled") != null);
+    // byte-stable: no timestamp/SHA -> rendering twice is identical
+    const md2 = try renderStatusMd(alloc, .{ .passed = 2004, .total = 2004 }, .{ .passed = 780, .total = 780 }, conf, allow, "0.15.2");
+    defer alloc.free(md2);
+    try std.testing.expectEqualStrings(md, md2);
+}
+
+fn appendf(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
+    const s = try std.fmt.allocPrint(alloc, fmt, args);
+    defer alloc.free(s);
+    try buf.appendSlice(alloc, s);
+}
+
+fn freeKv(alloc: std.mem.Allocator, kv: []Kv) void {
+    for (kv) |e| alloc.free(e.value); // keys are string literals; only values are heap
+    alloc.free(kv);
+}
+
+/// The injectable scalar keys (design spec "Marker scheme"). Conformance `fail`
+/// is the combined spirv+compile count; `runnable` = pass + fail.
+fn buildKv(alloc: std.mem.Allocator, unit: TestSummary, hlsl: TestSummary, conf: ConfResult) ![]Kv {
+    const fail_total = conf.summary.fail_spirv + conf.summary.fail_compile;
+    const runnable = conf.summary.pass + fail_total;
+
+    const pass_s = try formatThousands(alloc, conf.summary.pass);
+    errdefer alloc.free(pass_s);
+    const total_s = try formatThousands(alloc, conf.summary.total);
+    errdefer alloc.free(total_s);
+    const runnable_s = try formatThousands(alloc, runnable);
+    errdefer alloc.free(runnable_s);
+
+    // Success path is leak-clean (caller frees via freeKv). On mid-build OOM the
+    // three *_s allocations above are reclaimed by their errdefers; appended
+    // allocPrint values would leak, but the tool never runs under OOM pressure
+    // (and main uses an arena). Keeping this simple avoids an errdefer that would
+    // have to mutate the list it is guarding.
+    var kv: std.ArrayListUnmanaged(Kv) = .empty;
+
+    try kv.append(alloc, .{ .key = "conformance.pass", .value = pass_s });
+    try kv.append(alloc, .{ .key = "conformance.fail", .value = try std.fmt.allocPrint(alloc, "{d}", .{fail_total}) });
+    try kv.append(alloc, .{ .key = "conformance.skip", .value = try std.fmt.allocPrint(alloc, "{d}", .{conf.summary.skip}) });
+    try kv.append(alloc, .{ .key = "conformance.total", .value = total_s });
+    try kv.append(alloc, .{ .key = "conformance.runnable", .value = runnable_s });
+    try kv.append(alloc, .{ .key = "conformance.summary", .value = try std.fmt.allocPrint(alloc, "{s} PASS / {d} FAIL / {d} SKIP / {s} TOTAL", .{ pass_s, fail_total, conf.summary.skip, total_s }) });
+    try kv.append(alloc, .{ .key = "unit.tests", .value = try formatThousands(alloc, unit.passed) });
+    try kv.append(alloc, .{ .key = "hlsl.tests", .value = try formatThousands(alloc, hlsl.passed) });
+    return kv.toOwnedSlice(alloc);
+}
+
+fn renderStatusMd(alloc: std.mem.Allocator, unit: TestSummary, hlsl: TestSummary, conf: ConfResult, allow: []const AllowEntry, zig_version: []const u8) ![]u8 {
+    const fail_total = conf.summary.fail_spirv + conf.summary.fail_compile;
+    const runnable = conf.summary.pass + fail_total;
+    const pass_s = try formatThousands(alloc, conf.summary.pass);
+    defer alloc.free(pass_s);
+    const total_s = try formatThousands(alloc, conf.summary.total);
+    defer alloc.free(total_s);
+    const runnable_s = try formatThousands(alloc, runnable);
+    defer alloc.free(runnable_s);
+    const unit_s = try formatThousands(alloc, unit.passed);
+    defer alloc.free(unit_s);
+    const hlsl_s = try formatThousands(alloc, hlsl.passed);
+    defer alloc.free(hlsl_s);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(alloc);
+
+    try buf.appendSlice(alloc,
+        \\<!-- GENERATED by `just update-status` — do not edit by hand. -->
+        \\# glslpp — Status
+        \\
+        \\Single source of truth for test/conformance counts. Regenerate with
+        \\`just update-status`; verify with `just status` (re-runs the suites and
+        \\fails if the committed docs drift). Numbers below come from a real run of
+        \\`zig build test`, `zig build test-hlsl`, and `zig build conformance`.
+        \\
+        \\## Conformance (`zig build conformance` — spirv-val oracle)
+        \\
+        \\
+    );
+    try appendf(&buf, alloc, "**{s} PASS / {d} FAIL / {d} SKIP / {s} TOTAL** ({s} runnable = pass + known fails).\n\n", .{ pass_s, fail_total, conf.summary.skip, total_s, runnable_s });
+    try appendf(&buf, alloc, "The suite exits non-zero while the {d} known feature-gap fails remain — these are pre-existing capability gaps, **not regressions** (see list below).\n\n", .{fail_total});
+
+    try buf.appendSlice(alloc,
+        \\| Suite | Pass | Fail | Skip |
+        \\|---|---:|---:|---:|
+        \\
+    );
+    for (conf.suites) |s| {
+        try appendf(&buf, alloc, "| {s} | {d} | {d} | {d} |\n", .{ s.name, s.pass, s.fail, s.skip });
+    }
+
+    try buf.appendSlice(alloc, "\n## Unit & backend tests\n\n| Suite | Command | Tests |\n|---|---|---:|\n");
+    try appendf(&buf, alloc, "| Unit (all modules) | `zig build test` | {s} |\n", .{unit_s});
+    try appendf(&buf, alloc, "| HLSL backend | `zig build test-hlsl` | {s} |\n", .{hlsl_s});
+
+    try buf.appendSlice(alloc, "\n## Known feature-gap conformance fails (not regressions)\n\nSource of truth: [`tests/known-conformance-fails.txt`](../tests/known-conformance-fails.txt). A failing fixture not on this list aborts `gen-status` as a regression.\n\n| Fixture | Reason |\n|---|---|\n");
+    for (allow) |e| {
+        try appendf(&buf, alloc, "| `{s}` | {s} |\n", .{ e.path, e.reason });
+    }
+
+    try appendf(&buf, alloc, "\n---\n_Generated on Zig {s}. Windows + Vulkan SDK only (the conformance runner hardcodes a Windows `spirv-val.exe` path)._\n", .{zig_version});
+
+    return buf.toOwnedSlice(alloc);
+}
+
 pub fn main() !void {}
