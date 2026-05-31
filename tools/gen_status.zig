@@ -190,4 +190,114 @@ fn parseConformance(alloc: std.mem.Allocator, text: []const u8) !ConfResult {
     };
 }
 
+test "loadAllowlist strips comments/blanks, keeps path + reason, normalizes slashes" {
+    const text =
+        \\# known feature-gap conformance fails
+        \\
+        \\tests/glslang-430/fp64.desktop.comp   # 64-bit float not modelled
+        \\tests/glslang-430\int64.desktop.comp  # 64-bit int not modelled
+    ;
+    const entries = try loadAllowlist(std.testing.allocator, text);
+    defer freeAllowlist(std.testing.allocator, entries);
+    try std.testing.expectEqual(@as(usize, 2), entries.len);
+    try std.testing.expectEqualStrings("tests/glslang-430/fp64.desktop.comp", entries[0].path);
+    try std.testing.expectEqualStrings("64-bit float not modelled", entries[0].reason);
+    try std.testing.expectEqualStrings("tests/glslang-430/int64.desktop.comp", entries[1].path);
+}
+
+test "checkRegressions flags unexpected fails and now-passing allowlist entries" {
+    const allow = [_][]const u8{ "a/x.frag", "a/y.frag" };
+    const failing_ok = [_][]const u8{"a/x.frag"};
+    const r1 = try checkRegressions(std.testing.allocator, &failing_ok, &allow);
+    defer freeRegResult(std.testing.allocator, r1);
+    try std.testing.expectEqual(@as(usize, 0), r1.unexpected.len); // x is allowlisted
+    try std.testing.expectEqual(@as(usize, 1), r1.now_passing.len); // y no longer fails
+
+    const failing_bad = [_][]const u8{ "a/x.frag", "a/NEW.frag" };
+    const r2 = try checkRegressions(std.testing.allocator, &failing_bad, &allow);
+    defer freeRegResult(std.testing.allocator, r2);
+    try std.testing.expectEqual(@as(usize, 1), r2.unexpected.len);
+    try std.testing.expectEqualStrings("a/NEW.frag", r2.unexpected[0]);
+}
+
+const AllowEntry = struct { path: []const u8, reason: []const u8 };
+const RegResult = struct { unexpected: [][]const u8, now_passing: [][]const u8 };
+
+fn freeAllowlist(alloc: std.mem.Allocator, entries: []AllowEntry) void {
+    for (entries) |e| {
+        alloc.free(e.path);
+        alloc.free(e.reason);
+    }
+    alloc.free(entries);
+}
+
+fn freeRegResult(alloc: std.mem.Allocator, r: RegResult) void {
+    for (r.unexpected) |s| alloc.free(s);
+    alloc.free(r.unexpected);
+    for (r.now_passing) |s| alloc.free(s);
+    alloc.free(r.now_passing);
+}
+
+/// One fixture per line: `path[ \t]*# reason`. '#'-only and blank lines ignored.
+fn loadAllowlist(alloc: std.mem.Allocator, text: []const u8) ![]AllowEntry {
+    var list: std.ArrayListUnmanaged(AllowEntry) = .empty;
+    errdefer {
+        for (list.items) |e| {
+            alloc.free(e.path);
+            alloc.free(e.reason);
+        }
+        list.deinit(alloc);
+    }
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        var path_part = line;
+        var reason: []const u8 = "";
+        if (std.mem.indexOfScalar(u8, line, '#')) |h| {
+            path_part = std.mem.trimRight(u8, line[0..h], " \t");
+            reason = std.mem.trim(u8, line[h + 1 ..], " \t");
+        }
+        if (path_part.len == 0) continue;
+        const end = std.mem.indexOfAny(u8, path_part, " \t") orelse path_part.len;
+        try list.append(alloc, .{
+            .path = try normalizePath(alloc, path_part[0..end]),
+            .reason = try alloc.dupe(u8, reason),
+        });
+    }
+    return list.toOwnedSlice(alloc);
+}
+
+fn containsStr(haystack: []const []const u8, needle: []const u8) bool {
+    for (haystack) |h| if (std.mem.eql(u8, h, needle)) return true;
+    return false;
+}
+
+fn allowPaths(alloc: std.mem.Allocator, entries: []const AllowEntry) ![][]const u8 {
+    const out = try alloc.alloc([]const u8, entries.len);
+    for (entries, 0..) |e, i| out[i] = e.path;
+    return out;
+}
+
+/// unexpected = failing fixtures NOT in the allowlist (regressions -> caller aborts).
+/// now_passing = allowlisted fixtures that no longer fail (caller warns).
+fn checkRegressions(alloc: std.mem.Allocator, failing: []const []const u8, allow: []const []const u8) !RegResult {
+    var unexpected: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (unexpected.items) |s| alloc.free(s);
+        unexpected.deinit(alloc);
+    }
+    var now_passing: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (now_passing.items) |s| alloc.free(s);
+        now_passing.deinit(alloc);
+    }
+    for (failing) |f| if (!containsStr(allow, f)) try unexpected.append(alloc, try alloc.dupe(u8, f));
+    for (allow) |a| if (!containsStr(failing, a)) try now_passing.append(alloc, try alloc.dupe(u8, a));
+    return .{
+        .unexpected = try unexpected.toOwnedSlice(alloc),
+        .now_passing = try now_passing.toOwnedSlice(alloc),
+    };
+}
+
 pub fn main() !void {}
