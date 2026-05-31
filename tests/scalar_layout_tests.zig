@@ -99,3 +99,86 @@ test "scalar layout: vec3 runtime array gets ArrayStride 12" {
     };
     try std.testing.expectEqual(@as(u32, 12), stride);
 }
+
+/// True if the SPIR-V stream contains ANY OpMemberDecorate (opcode 72) whose
+/// decoration literal (word 3) equals `decoration`. Not scoped to a specific
+/// struct or member — a single match anywhere in the module counts, which is
+/// sufficient here: a RowMajor *and* a ColMajor both appearing proves the two
+/// blocks were emitted as distinct structs rather than merged onto one.
+fn hasMemberDecoration(spv: []const u32, decoration: u32) bool {
+    var i: usize = 5; // skip 5-word header
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const op = spv[i] & 0xFFFF;
+        if (wc == 0) break;
+        // OpMemberDecorate = 72: word1=struct id, word2=member index, word3=decoration
+        if (op == 72 and wc >= 4 and i + 3 < spv.len and spv[i + 3] == decoration) return true;
+        i += wc;
+    }
+    return false;
+}
+
+/// Count OpTypeStruct (opcode 30) instructions in the SPIR-V stream.
+fn countStructTypes(spv: []const u32) usize {
+    var count: usize = 0;
+    var i: usize = 5;
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const op = spv[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == 30) count += 1; // OpTypeStruct = 30
+        i += wc;
+    }
+    return count;
+}
+
+// Regression: two interface blocks with byte-identical member TYPES and NAMES
+// but DIFFERENT layout qualifiers (row_major vs column_major) must NOT be merged
+// by the struct-dedup cache. The dedup key used to be computed before the block
+// layout was resolved, so block B silently inherited block A's RowMajor
+// decoration — the module ended up with a single struct and no ColMajor at all,
+// i.e. block b was wrongly treated as row-major. The oracle (spirv-cross/
+// glslang) keeps A and B as distinct structs decorated RowMajor vs ColMajor.
+// This bug is masked in the MSL/HLSL text backends (their row-major matrix
+// access is not yet differentiated), so it can only be caught at the SPIR-V
+// level. RowMajor = decoration 4, ColMajor = decoration 5 (SPIR-V spec).
+test "block dedup keeps row_major and column_major UBO blocks as distinct structs" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(binding=0,std140,row_major)    uniform A { mat4 m; } a;
+        \\layout(binding=1,std140,column_major) uniform B { mat4 m; } b;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[0] + b.m[0]; }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // RowMajor (4) comes from block A, ColMajor (5) from block B. If the blocks
+    // were merged, only the first block's RowMajor survives and ColMajor is gone.
+    try std.testing.expect(hasMemberDecoration(spv, 4)); // RowMajor
+    try std.testing.expect(hasMemberDecoration(spv, 5)); // ColMajor
+
+    // Structurally the two blocks are distinct struct types, not one merged type.
+    try std.testing.expectEqual(@as(usize, 2), countStructTypes(spv));
+}
+
+// Negative / no-regression guard for the fix above: tightening the dedup key must
+// NOT over-separate. Two blocks that are byte-identical in members, names AND
+// layout (both std140, both default column-major) must still MERGE onto a single
+// struct — otherwise the fix would bloat every module with duplicate types.
+test "block dedup still merges two UBO blocks identical in members and layout" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(binding=0,std140) uniform A { mat4 m; } a;
+        \\layout(binding=1,std140) uniform B { mat4 m; } b;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[0] + b.m[0]; }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // Identical column-major std140 blocks → exactly one shared struct type.
+    try std.testing.expectEqual(@as(usize, 1), countStructTypes(spv));
+}
