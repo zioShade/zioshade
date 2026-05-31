@@ -65,3 +65,27 @@ test "harness self-test: compileToSPIRVStrict rejects a recorded error" {
     // The strict arm is the enumerator's detection signal; it must fire.
     try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
 }
+
+test "strict: SSBO block array (buffer {...} name[N]) is accepted" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 310 es
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer SSBO { vec4 data[]; } ssbos[2];
+        \\void main() {
+        \\    uint ident = gl_GlobalInvocationID.x;
+        \\    ssbos[1].data[ident] = ssbos[0].data[ident];
+        \\}
+    ;
+    // tolerate-mode must compile without error
+    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    try std.testing.expect(spirv.len > 5);
+
+    // strict mode must also accept this valid construct (RED: currently rejects with UndeclaredIdentifier).
+    // compileToSPIRVStrict is enumeration-only (returns empty slice on success), so we just check
+    // it does NOT return an error.
+    const spirv_strict = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    // strict returns &[_]u32{} on success (enumeration-only path — no codegen); just verify no error.
+    _ = spirv_strict;
+}

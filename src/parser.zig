@@ -1080,11 +1080,23 @@ const Parser = struct {
             });
         }
         _ = try self.expect(.r_brace);
-        // Consume optional instance name: } instance_name;
+        // Consume optional instance name: } instance_name[N];
+        // `int_val` on the node is repurposed to carry the instance array size (0 = not an array).
         var instance_name: []const u8 = "";
+        var instance_array_size: i64 = 0;
         if (self.current().tag == .identifier) {
             instance_name = self.text(self.current());
             _ = self.advance(); // consume instance name
+            // Optionally consume array dimension: instance_name[N]
+            if (self.current().tag == .l_bracket) {
+                _ = self.advance(); // consume [
+                const size_tok = self.current();
+                if (size_tok.tag == .int_literal) {
+                    instance_array_size = std.fmt.parseInt(i64, self.text(size_tok), 0) catch 0;
+                    _ = self.advance();
+                }
+                _ = self.expect(.r_bracket) catch {};
+            }
         }
         _ = try self.expect(.semicolon);
 
@@ -1097,6 +1109,7 @@ const Parser = struct {
                 .qualifier = qualifier,
                 .layout = layout,
                 .instance_name = instance_name,
+                .int_val = instance_array_size,
             },
         };
     }

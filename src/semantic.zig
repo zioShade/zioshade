@@ -1860,9 +1860,25 @@ const Analyzer = struct {
                 const ir_id = self.allocId();
                 // Use instance name for the global variable if present
                 const global_name = if (node.data.instance_name.len > 0) node.data.instance_name else name;
+
+                // If the block instance is declared as an array (e.g. `buffer SSBO { ... } ssbos[2]`),
+                // `node.data.int_val` carries the array size (parsed from the `[N]` suffix by the parser).
+                // We must represent the global as an array-of-the-block-type so that the semantic
+                // analyzer can type-check indexed access `ssbos[i].member` correctly.
+                const instance_array_size: u32 = if (node.data.int_val > 0) @intCast(node.data.int_val) else 0;
+                const is_block_array = instance_array_size > 0;
+
+                // Build the type for the global variable (either named or array-of-named).
+                const global_ty: ast.Type = if (is_block_array) blk: {
+                    const arr_base = try self.alloc.create(ast.Type);
+                    arr_base.* = .{ .named = name };
+                    try self.heap_types.append(self.alloc, arr_base);
+                    break :blk .{ .array = .{ .base = arr_base, .size = instance_array_size } };
+                } else .{ .named = name };
+
                 try self.globals.append(self.alloc, .{
                     .name = global_name,
-                    .ty = .{ .named = name },
+                    .ty = global_ty,
                     .qualifier = qual,
                     .layout = node.data.layout,
                     .storage_class = storage_class,
@@ -1872,6 +1888,19 @@ const Analyzer = struct {
                 if (storage_class == .input or storage_class == .output or storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant or storage_class == .uniform_constant or storage_class == .workgroup) {
                     self.global_ptr_ids.put(self.alloc, ir_id, {}) catch {};
                 }
+
+                if (is_block_array) {
+                    // For block arrays (e.g. `buffer SSBO { ... } ssbos[2]`):
+                    // - Only declare the instance name (not the block type name) as a symbol.
+                    // - Type is the array type so that `ssbos[i]` resolves element type correctly.
+                    // - Do NOT inject members as directly-accessible scope symbols: members are
+                    //   only reachable via `ssbos[i].member`, never as bare `member`.
+                    try self.declare(node.data.instance_name, .{
+                        .kind = .var_sym,
+                        .ty = global_ty,
+                        .ir_id = ir_id,
+                    });
+                } else {
                 // Declare the block variable under both names (type name and instance name)
                 try self.declare(name, .{
                     .kind = .var_sym,
@@ -1900,6 +1929,7 @@ const Analyzer = struct {
                         });
                     }
                 }
+                } // end else (not block array)
                 } // end if !buffer_reference
             },
             .struct_decl => {
