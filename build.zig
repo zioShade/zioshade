@@ -177,6 +177,13 @@ pub fn build(b: *std.Build) void {
     }
     conformance_step.dependOn(&run_conformance.step);
 
+    // Analyzer false-positive enumeration — run with: zig build enumerate-fp
+    // Lists fixtures the tolerate compile accepts but the strict analyzer rejects.
+    const enumerate_step = b.step("enumerate-fp", "List analyzer false-positive candidates (strict vs tolerate)");
+    const run_enumerate = b.addRunArtifact(runner_exe);
+    run_enumerate.addArg("--strict-enumerate");
+    enumerate_step.dependOn(&run_enumerate.step);
+
     // "build-runner" step: just compile the runner, don't run it
     const build_runner_step = b.step("build-runner", "Build the conformance runner executable");
     build_runner_step.dependOn(&runner_exe.step);
@@ -231,6 +238,20 @@ pub fn build(b: *std.Build) void {
     }));
     diag_test_step.dependOn(&run_diag_tests.step);
     test_step.dependOn(&run_diag_tests.step);
+
+    // Strict-analyzer tests (analyzer fail-loud milestone) — run with: zig build test-strict
+    const strict_test_step = b.step("test-strict", "Run strict-analyzer fail-loud tests");
+    const strict_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/analyzer_strict_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    strict_test_mod.addImport("glslpp", glslpp_mod);
+    const run_strict_tests = b.addRunArtifact(b.addTest(.{
+        .root_module = strict_test_mod,
+    }));
+    strict_test_step.dependOn(&run_strict_tests.step);
+    test_step.dependOn(&run_strict_tests.step);
 
     // C ABI tests (M7.2) — run with: zig build test-c-abi
     const c_abi_test_step = b.step("test-c-abi", "Run C ABI export-wrapper tests");

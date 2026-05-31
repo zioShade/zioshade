@@ -35,6 +35,10 @@ test-hlsl:
 test-conformance:
     {{zig}} build conformance --summary all
 
+# list analyzer false-positive candidates (strict vs tolerate compile)
+enumerate-fp:
+    {{zig}} build enumerate-fp --summary all
+
 # run tests with verbose output
 test-verbose:
     {{zig}} build test --summary all 2>&1 | grep -E "passed|failed|leaked|error:"
