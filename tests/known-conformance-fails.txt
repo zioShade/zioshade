@@ -1,0 +1,19 @@
+# Known feature-gap conformance fails — capability gaps, NOT regressions.
+#
+# Consumed by `zig build gen-status` (tools/gen_status.zig): a fixture that
+# fails spirv-val/compile but is ABSENT from this list aborts gen-status as a
+# regression. A fixture listed here that starts passing prints a "remove me" note.
+#
+# Format: <fixture path>   # reason   (forward slashes; '#' starts a comment)
+#
+# Wiring the conformance runner itself to XFAIL these is the separate
+# analyzer-fail-loud milestone (docs/specs/2026-05-31-analyzer-fail-loud-design.md);
+# until then `zig build conformance` exits non-zero while these 7 remain.
+
+tests/glslang-430/newTexture.frag       # OpExtInst word-count on new-form texture builtins
+tests/glslang-430/spv.newTexture.frag   # OpExtInst word-count on new-form texture builtins
+tests/spirv-cross/fp64.desktop.comp     # 64-bit float (fp64) type not modelled (honest gap)
+tests/spirv-cross/int64.desktop.comp    # 64-bit int (int64) type not modelled (honest gap)
+tests/spirv-cross/ray_sphere_test.frag  # feature gap — produces SPIR-V spirv-val rejects
+tests/spirv-cross/shader_ballot.comp    # subgroup ballot feature gap
+tests/spirv-cross/struct-material.frag  # feature gap — produces SPIR-V spirv-val rejects
