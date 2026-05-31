@@ -1,16 +1,18 @@
 const std = @import("std");
 const glslpp = @import("glslpp");
 
-pub fn main(init: std.process.Init) !void {
-    const alloc = init.gpa;
-    const io = init.io;
-    const cwd = std.Io.Dir.cwd();
+pub fn main() !void {
+    var gpa_impl = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa_impl.deinit();
+    const alloc = gpa_impl.allocator();
+
+    const cwd = std.fs.cwd();
 
     // Read files at runtime to avoid package path restrictions
-    const prefix = try cwd.readFileAlloc(io, "tests/wintty/shadertoy_prefix.glsl", alloc, .limited(1024 * 1024));
+    const prefix = try cwd.readFileAlloc(alloc, "tests/wintty/shadertoy_prefix.glsl", 1024 * 1024);
     defer alloc.free(prefix);
 
-    const crt = try cwd.readFileAlloc(io, "tests/wintty/test_crt.glsl", alloc, .limited(1024 * 1024));
+    const crt = try cwd.readFileAlloc(alloc, "tests/wintty/test_crt.glsl", 1024 * 1024);
     defer alloc.free(crt);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -27,16 +29,16 @@ pub fn main(init: std.process.Init) !void {
 
     const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
     defer alloc.free(hlsl);
-    try cwd.writeFile(io, .{ .sub_path = "tests/wintty/crt_output.hlsl", .data = hlsl });
+    try cwd.writeFile(.{ .sub_path = "tests/wintty/crt_output.hlsl", .data = hlsl });
     std.debug.print("HLSL: {d} bytes\n", .{hlsl.len});
 
     const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 });
     defer alloc.free(glsl);
-    try cwd.writeFile(io, .{ .sub_path = "tests/wintty/crt_output.glsl", .data = glsl });
+    try cwd.writeFile(.{ .sub_path = "tests/wintty/crt_output.glsl", .data = glsl });
     std.debug.print("GLSL: {d} bytes\n", .{glsl.len});
 
     const msl = try glslpp.spirvToMSL(alloc, spirv, .{});
     defer alloc.free(msl);
-    try cwd.writeFile(io, .{ .sub_path = "tests/wintty/crt_output.msl", .data = msl });
+    try cwd.writeFile(.{ .sub_path = "tests/wintty/crt_output.msl", .data = msl });
     std.debug.print("MSL: {d} bytes\n", .{msl.len});
 }

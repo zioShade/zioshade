@@ -42,9 +42,12 @@ test-verbose:
 # ── DXC validation ───────────────────────────────────────────────────
 
 # validate saved HLSL outputs with DXC (requires dxc.exe on PATH)
+# -Fo must be a real, writable path on Windows (/dev/null is not a valid dxc
+# output target), so compile to throwaway .dxil files and delete them after.
 validate-dxc: generate-outputs
-    dxc -T ps_6_0 -E main tests/wintty/crt_output.hlsl -Fo /dev/null
-    dxc -T ps_6_0 -E main tests/wintty/focus_output.hlsl -Fo /dev/null
+    dxc -T ps_6_0 -E main tests/wintty/crt_output.hlsl -Fo tests/wintty/crt_check.dxil
+    dxc -T ps_6_0 -E main tests/wintty/focus_output.hlsl -Fo tests/wintty/focus_check.dxil
+    rm -f tests/wintty/crt_check.dxil tests/wintty/focus_check.dxil
     @echo "DXC validation: ALL PASSED"
 
 # regenerate saved HLSL outputs from wintty shaders
