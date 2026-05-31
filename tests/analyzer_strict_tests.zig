@@ -237,3 +237,123 @@ test "strict: SSBO block array (buffer {...} name[N]) is accepted" {
     // strict returns &[_]u32{} on success (enumeration-only path — no codegen); just verify no error.
     _ = spirv_strict;
 }
+
+// ============================================================
+// ROOT CAUSE FIXES — Tests for the 8 false-positives surfaced by fail-loud flip.
+// Each test is RED (currently fails) → will turn GREEN after the fix.
+// ============================================================
+
+test "strict: outerProduct(vec2, vec3) produces mat3x2 (non-square matrix)" {
+    // glslang: outerProduct(vec2 c, vec3 r) → mat3x2 (3 columns, 2 rows).
+    // T64.1 was using mat2x3 (wrong type) — correct type is mat3x2.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(location = 0) in vec2 a;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 b = vec3(1.0, 2.0, 3.0);
+        \\    mat3x2 m = outerProduct(a, b);
+        \\    fragColor = vec4(m[0].x, m[0].y, m[1].x, 1.0);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spv.len > 5);
+}
+
+test "strict: for-loop with empty update and precision qualifier init (mediump int)" {
+    // Precision qualifiers (mediump/highp/lowp) before a type in a for-loop init
+    // were not recognized by parseStatement as local var decl prefixes, causing
+    // the for loop to fail to parse. The body was then analyzed outside loop context,
+    // causing continue-outside-loop. Fix: handle precision qualifiers in parseStatement.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 310 es
+        \\precision mediump float;
+        \\precision highp int;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    for (mediump int _46 = 0; _46 < 4; ) {
+        \\        mediump int _33 = _46 + 1;
+        \\        FragColor += vec4(float(_33));
+        \\        _46 = _33;
+        \\        continue;
+        \\    }
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spv.len > 5);
+}
+
+test "strict: gl_MaxTextureImageUnits and gl_MaxCombinedTextureImageUnits" {
+    // gl_Max* constants must be registered as builtin integer constants.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = x / float(gl_MaxTextureImageUnits);
+        \\    float b = x / float(gl_MaxCombinedTextureImageUnits);
+        \\    fragColor = vec4(a, b, 0.0, 1.0);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spv.len > 5);
+}
+
+test "strict: textureGatherOffsets with global const ivec2[4] offsets" {
+    // Global const array declarations must have is_const=true so that
+    // textureGatherOffsets can verify the offsets argument is compile-time constant.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\const ivec2 offsets[4] = ivec2[4](ivec2(0,0), ivec2(1,0), ivec2(0,1), ivec2(1,1));
+        \\void main() {
+        \\    vec4 g = textureGatherOffsets(tex, uv, offsets, 0);
+        \\    fragColor = g;
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spv.len > 5);
+}
+
+test "strict: SSBO array member swizzle compound-assign (p[id].vel.xyz += ...)" {
+    // Compound-assign to a multi-component swizzle of a struct member accessed through
+    // an SSBO array element (p[id].vel.xyz += ...) was failing with InvalidAssignment
+    // because the compound_assign handler only handled the swizzle case for bare identifiers.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\struct Particle { vec4 pos; vec4 vel; };
+        \\layout(std430, binding = 0) buffer Particles { Particle p[]; };
+        \\void main() {
+        \\    uint id = gl_GlobalInvocationID.x;
+        \\    vec3 acc = vec3(0.0);
+        \\    p[id].vel.xyz += acc * 0.01;
+        \\    p[id].pos.xyz += p[id].vel.xyz * 0.01;
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute });
+    defer alloc.free(spv);
+    try std.testing.expect(spv.len > 5);
+}
+
+test "strict: pixel_interlock_ordered extension and SPIRV_Cross macro pattern" {
+    // The spirv_cross pixel-interlock shader uses #ifdef GL_ARB_fragment_shader_interlock
+    // BEFORE the #extension directive, so the macro must be pre-defined by the preprocessor
+    // for supported extensions.
+    const alloc = std.testing.allocator;
+    const src = @embedFile("spirv_cross_shaders/pixel-interlock-ordered.frag");
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spv.len > 5);
+}

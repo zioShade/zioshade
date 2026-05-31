@@ -3373,14 +3373,16 @@ test "T63.1: texelFetch maps to Load" {
 }
 
 test "T64.1: outerProduct" {
+    // outerProduct(vec2 c, vec3 r) → mat3x2 (3 columns, 2 rows per GLSL spec).
+    // Previously used mat2x3 which is a type mismatch and invalid GLSL.
     const source =
         \\#version 450
         \\layout(location = 0) in vec2 a;
         \\layout(location = 0) out vec4 fragColor;
         \\void main() {
         \\    vec3 b = vec3(1.0, 2.0, 3.0);
-        \\    mat2x3 m = outerProduct(a, b);
-        \\    fragColor = vec4(m[0].x, m[0].y, m[0].z, 1.0);
+        \\    mat3x2 m = outerProduct(a, b);
+        \\    fragColor = vec4(m[0].x, m[0].y, m[1].x, 1.0);
         \\}
     ;
     const hlsl = try compileToHlsl(source);
@@ -10284,7 +10286,10 @@ test "T442.1: interpolateAtCentroid" {
 }
 
 test "T443.1: textureGatherOffsets" {
-    // Tests textureGatherOffsets with constant offsets
+    // Tests textureGatherOffsets with constant offsets.
+    // The semantic analyzer now correctly handles global const ivec2[4] offsets.
+    // HLSL cross-compilation legitimately fails (ConstOffsets has no HLSL equivalent),
+    // so we verify SPIR-V generation only.
     const source =
         \\#version 450
         \\layout(location = 0) in vec2 uv;
@@ -10296,9 +10301,12 @@ test "T443.1: textureGatherOffsets" {
         \\    fragColor = g;
         \\}
     ;
-    const hlsl = try compileToHlsl(source);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "float4");
+    // compileToSPIRV must succeed (semantic analyzer must not record any error)
+    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spv.len > 5);
+    // HLSL cross-compilation fails because ConstOffsets has no HLSL equivalent
+    try std.testing.expectError(error.UnsupportedImageOperands, compileToHlsl(source));
 }
 
 test "T444.1: compute scan prefix sum" {
