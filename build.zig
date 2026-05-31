@@ -181,6 +181,32 @@ pub fn build(b: *std.Build) void {
     const build_runner_step = b.step("build-runner", "Build the conformance runner executable");
     build_runner_step.dependOn(&runner_exe.step);
 
+    // Status generator — run with: zig build gen-status -- <args>
+    const gen_status_mod = b.createModule(.{
+        .root_source_file = b.path("tools/gen_status.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const gen_status_step = b.step("gen-status", "Generate/check docs/STATUS.md + status markers");
+    const gen_status_exe = b.addExecutable(.{
+        .name = "gen-status",
+        .root_module = gen_status_mod,
+    });
+    const run_gen_status = b.addRunArtifact(gen_status_exe);
+    if (b.args) |args| {
+        for (args) |arg| run_gen_status.addArg(arg);
+    }
+    gen_status_step.dependOn(&run_gen_status.step);
+
+    // Unit tests for the status generator (intentionally NOT part of `zig build test`,
+    // so the tool never counts its own tests into the published unit.tests total).
+    const test_gen_status_step = b.step("test-gen-status", "Run gen_status unit tests");
+    const run_gen_status_tests = b.addRunArtifact(b.addTest(.{
+        .name = "gen-status-tests",
+        .root_module = gen_status_mod,
+    }));
+    test_gen_status_step.dependOn(&run_gen_status_tests.step);
+
     // HLSL backend tests — run with: zig build test-hlsl
     const hlsl_test_step = b.step("test-hlsl", "Run HLSL backend tests (GLSL → SPIR-V → HLSL pipeline)");
     const hlsl_test_mod = b.createModule(.{
