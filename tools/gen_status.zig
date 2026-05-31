@@ -300,4 +300,87 @@ fn checkRegressions(alloc: std.mem.Allocator, failing: []const []const u8, allow
     };
 }
 
+test "formatThousands inserts comma separators" {
+    const a = try formatThousands(std.testing.allocator, 2080);
+    defer std.testing.allocator.free(a);
+    try std.testing.expectEqualStrings("2,080", a);
+    const b = try formatThousands(std.testing.allocator, 7);
+    defer std.testing.allocator.free(b);
+    try std.testing.expectEqualStrings("7", b);
+    const c = try formatThousands(std.testing.allocator, 1000000);
+    defer std.testing.allocator.free(c);
+    try std.testing.expectEqualStrings("1,000,000", c);
+}
+
+test "injectMarkers replaces inner body, leaves the rest untouched" {
+    const doc = "before <!-- STATUS:unit.tests -->999<!-- /STATUS --> after";
+    const kv = [_]Kv{.{ .key = "unit.tests", .value = "2,004" }};
+    const out = try injectMarkers(std.testing.allocator, doc, &kv);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("before <!-- STATUS:unit.tests -->2,004<!-- /STATUS --> after", out);
+}
+
+test "injectMarkers errors on unknown key" {
+    const doc = "x <!-- STATUS:bogus.key -->0<!-- /STATUS --> y";
+    const kv = [_]Kv{.{ .key = "unit.tests", .value = "1" }};
+    try std.testing.expectError(error.UnknownStatusKey, injectMarkers(std.testing.allocator, doc, &kv));
+}
+
+test "injectMarkers leaves a doc with no markers unchanged" {
+    const doc = "plain doc, no markers";
+    const kv = [_]Kv{.{ .key = "unit.tests", .value = "1" }};
+    const out = try injectMarkers(std.testing.allocator, doc, &kv);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings(doc, out);
+}
+
+const Kv = struct { key: []const u8, value: []const u8 };
+
+fn lookupKv(kv: []const Kv, key: []const u8) ?[]const u8 {
+    for (kv) |e| if (std.mem.eql(u8, e.key, key)) return e.value;
+    return null;
+}
+
+fn formatThousands(alloc: std.mem.Allocator, n: u64) ![]u8 {
+    var tmp: [32]u8 = undefined;
+    const s = try std.fmt.bufPrint(&tmp, "{d}", .{n});
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (s, 0..) |c, i| {
+        if (i != 0 and (s.len - i) % 3 == 0) try out.append(alloc, ',');
+        try out.append(alloc, c);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// Rewrite the body of every `<!-- STATUS:key -->BODY<!-- /STATUS -->` region
+/// with kv[key]. Unknown key -> error.UnknownStatusKey (key printed to stderr).
+/// A doc with no markers is returned byte-identical.
+fn injectMarkers(alloc: std.mem.Allocator, doc: []const u8, kv: []const Kv) ![]u8 {
+    const open = "<!-- STATUS:";
+    const open_end = " -->";
+    const close = "<!-- /STATUS -->";
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, doc, i, open)) |p| {
+        try out.appendSlice(alloc, doc[i..p]);
+        const key_start = p + open.len;
+        const key_end = std.mem.indexOfPos(u8, doc, key_start, open_end) orelse return error.MalformedMarker;
+        const key = doc[key_start..key_end];
+        const body_start = key_end + open_end.len;
+        const body_end = std.mem.indexOfPos(u8, doc, body_start, close) orelse return error.MalformedMarker;
+        const value = lookupKv(kv, key) orelse {
+            std.debug.print("gen_status: unknown STATUS marker key '{s}'\n", .{key});
+            return error.UnknownStatusKey;
+        };
+        try out.appendSlice(alloc, doc[p..body_start]); // "<!-- STATUS:key -->"
+        try out.appendSlice(alloc, value);
+        try out.appendSlice(alloc, close);
+        i = body_end + close.len;
+    }
+    try out.appendSlice(alloc, doc[i..]);
+    return out.toOwnedSlice(alloc);
+}
+
 pub fn main() !void {}
