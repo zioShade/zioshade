@@ -437,6 +437,30 @@ test "wgsl: samplerCubeArrayShadow emits texture_depth_cube_array + separate arr
     });
 }
 
+// textureLod on an arrayed shadow sampler lowers to OpImageSampleDrefExplicitLod
+// → textureSampleCompareLevel, exercising the OTHER branch of emitDepthCompare:
+// the array layer must STILL be split out as a separate i32 array_index (and the
+// SPIR-V Lod operand dropped — WGSL's compare-level builtin always samples mip 0).
+// Requires GL_EXT_texture_shadow_lod for textureLod() on a shadow sampler.
+test "wgsl: textureLod(sampler2DArrayShadow) emits textureSampleCompareLevel + array_index" {
+    try runShadowValidTest(.{
+        .name = "shadow_2d_array_lod",
+        .source =
+        \\#version 450
+        \\#extension GL_EXT_texture_shadow_lod : require
+        \\layout(binding=0) uniform sampler2DArrayShadow shadowArr;
+        \\layout(location=0) in vec4 vC;
+        \\layout(location=1) in float vLod;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(textureLod(shadowArr, vC, vLod)); }
+        ,
+        .tex_decl = "var shadowArr: texture_depth_2d_array;",
+        .builtin = "textureSampleCompareLevel",
+        .coord_swizzle = ".xy",
+        .array_index = ".z))",
+    });
+}
+
 // textureGatherCompare on an ARRAYED shadow sampler also needs a separate
 // array_index argument, which the gather path does not yet build. Until it does,
 // it must stay an honest error rather than emit wrong-arity textureGatherCompare
@@ -487,8 +511,13 @@ fn runShadowValidTest(c: ShadowCase) !void {
     try assertContains(wgsl, c.tex_decl);
     // ...the companion sampler must be a comparison sampler...
     try assertContains(wgsl, "sampler_comparison");
-    // ...the compare builtin must still be emitted (regression guard)...
-    try assertContains(wgsl, c.builtin);
+    // ...the compare builtin must still be emitted (regression guard). Match the
+    // trailing "(" so "textureSampleCompare" does not spuriously satisfy a case
+    // that actually emitted "textureSampleCompareLevel" (the former is a prefix
+    // of the latter), and vice versa...
+    const builtin_call = try std.fmt.allocPrint(alloc, "{s}(", .{c.builtin});
+    defer alloc.free(builtin_call);
+    try assertContains(wgsl, builtin_call);
     // ...the coordinate must be sliced to the texture dimension (naga-free guard)...
     if (c.coord_swizzle) |swz| try assertContains(wgsl, swz);
     // ...an arrayed depth texture must pass the layer as its own rounded i32
