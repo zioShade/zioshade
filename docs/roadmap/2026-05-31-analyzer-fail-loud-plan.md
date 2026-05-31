@@ -90,7 +90,7 @@ Wire `tests/analyzer_strict_tests.zig` into the default `test` step in `build.zi
 
   In `mainImpl` (`tests/runner.zig:232`), parse a `--strict-enumerate` flag alongside the existing arg loop (around `:251`). When set, run a separate pass: for every fixture in `all_suites` (reuse the existing `runDir`/walk filters), compile with BOTH `glslpp.compileToSPIRV` (tolerate, current behavior) and `glslpp.compileToSPIRVStrict`. A fixture is a **false-positive candidate** when the tolerate compile *succeeds* but the strict compile *fails with `error.SemanticFailed`*. For each candidate, print `path`, `glslpp.lastErrorCtx()`, and `glslpp.lastErrorInner()` (the runner already surfaces these at `tests/runner.zig:139-141`). Tally candidates and print a per-`ctx` histogram at the end.
 
-  Add a `strict_fp: u32 = 0` field to `Stats`, a new `enumerateShader` helper mirroring `testShader` (`:72`) but doing the dual-compile compare, and a `--strict-enumerate` branch in `mainImpl` that walks the suites calling `enumerateShader`. Do NOT run `spirv-val` in this mode (we only care about analyzer accept/reject). Exit 0 always in this mode (it's a report, not a gate).
+  Add a `strict_fp: u32 = 0` field to `Stats`, a new `enumerateShader` helper mirroring `testShader` (`:72`) but doing the dual-compile compare, and a `--strict-enumerate` branch in `mainImpl` that walks the suites calling `enumerateShader`. Do NOT run `spirv-val` in this mode (we only care about analyzer accept/reject). Exit 0 always in `--strict-enumerate` mode (it's a report); the gating `--strict-gate` variant that exits non-zero on any candidate is added in **Task F2 Step 5**. Note: `compileToSPIRVStrict` returns a static empty slice, so a `defer alloc.free(spirv)` copied from `testShader` (`:144`) is a **safe no-op** on the strict result — do not "fix" it.
 
 - [ ] **Step 4: Add the `enumerate-fp` build step in `build.zig`.**
 
@@ -118,11 +118,27 @@ Wire `tests/analyzer_strict_tests.zig` into the default `test` step in `build.zi
 
   Produce a classified table: `construct | ctx | count | glslang verdict | bucket`. Commit it as a comment block at the top of `tests/analyzer_strict_tests.zig`.
 
-- [ ] **Step 8: Commit.**
+- [ ] **Step 8: Add a harness self-test (spec-mandated).**
+
+  The enumerator produces the *entire* worklist, so an untested one that silently under-reports would hide false-positives — exactly the silent-wrong failure this milestone exists to kill. Add a unit test to `tests/analyzer_strict_tests.zig` asserting the enumerator's detection arm (`compileToSPIRVStrict` rejects a recorded error). Use an **undeclared identifier** as the seed — it is a permanent, flip-independent error (glslang rejects it too), so the test does not break when Task 1 models real false-positives or when Task F2 flips the plain API:
+  ```zig
+  test "harness self-test: compileToSPIRVStrict rejects a recorded error" {
+      const alloc = std.testing.allocator;
+      const src =
+          \\#version 450
+          \\layout(location=0) out vec4 o;
+          \\void main() { o = vec4(undeclared_xyz, 0.0, 0.0, 1.0); }
+          ;
+      // The strict arm is the enumerator's detection signal; it must fire.
+      try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
+  }
+  ```
+
+- [ ] **Step 9: Commit.**
 
   ```bash
   git add src/root.zig tests/runner.zig build.zig justfile tests/analyzer_strict_tests.zig
-  git commit -m "feat(analyzer): strict-mode false-positive enumeration harness"
+  git commit -m "feat(analyzer): strict-mode false-positive enumeration harness + self-test"
   ```
 
 ---
@@ -260,11 +276,22 @@ Repeat Task 1 for each bucket until `just enumerate-fp` reports **zero** false-p
 
 - [ ] **Step 2: Run — confirm the first test FAILS today** (plain API silently returns a partial module instead of erroring). Run: `mise exec -- zig build test 2>&1 | grep flip`.
 
-- [ ] **Step 3: Hoist the error-kind check into the plain path.**
+- [ ] **Step 3: Make the plain paths collect-all-then-fail.**
 
-  The proven implementation is the loop at `src/root.zig:1042-1048` inside `compileToSPIRVWithDiagnostics`. Factor it into a private helper and call it from BOTH `compileToSPIRV` (`:298`) and `compileToSPIRVNoOpt` (`:486`) after `analyzeWithOptions` returns. Mechanism: keep `tolerate_errors = true` (so all errors are still *collected* for diagnostics), but after analysis, if `analyzer.errors` recorded any error-kind entry, free the partial module/words and `return error.SemanticFailed`. The cleanest seam is in `analyzeWithOptions` itself (`src/semantic.zig:113`) — today it only fails when `!tolerate_errors`; add a third mode so tolerate-collect-then-fail is expressible, OR check `analyzer.errors.items.len` at the two `root.zig` call sites. Pick ONE; the spec prefers hoisting the existing check over a new `AnalyzeOptions` enum.
+  `analyzer` is local to `analyzeWithOptions` and is freed by its own `defer analyzer.deinit()`; it is **not** returned (the call sites receive only `ir.Module`, which has no `errors` field). So you **cannot** inspect `analyzer.errors` from the `root.zig` call sites. There are exactly two viable seams — pick ONE:
 
-  **Critical:** preserve multi-error collection (do not regress to fail-on-first `:106`) and preserve `compileToSPIRVWithDiagnostics`' existing behavior (it must still drain ALL diagnostics before failing).
+  **(a) New strictness flag on the in-analyzer gate (recommended).** Add `fail_on_recorded_errors: bool = false` to `AnalyzeOptions` (`src/semantic.zig:56`). At the gate (`src/semantic.zig:113`), change to:
+  ```zig
+  if ((!analyzer.tolerate_errors or options.fail_on_recorded_errors) and analyzer.errors.items.len > 0)
+      return error.SemanticFailed;
+  ```
+  Then `compileToSPIRV` (`:344`) and `compileToSPIRVNoOpt` (`:511`) pass `.tolerate_errors = true, .fail_on_recorded_errors = true` — every statement error is still *collected* (tolerate path, no fail-on-first), but analysis fails if any was recorded. `compileToSPIRVWithDiagnostics` keeps `.fail_on_recorded_errors = false` so its own `:1042-1048` drain-then-fail loop remains the single failure decision for that API (no behavior change there).
+
+  **(b) Register a sink in the plain paths and reuse the `:1042-1048` loop.** Have `compileToSPIRV`/`NoOpt` set `semantic.diag_sink` (mirroring `root.zig:986-988`), run the same error-kind loop over the drained diagnostics, then restore the sink. This literally hoists the proven check — but note the missing mechanical step the implementer must add: **the plain path must set the sink itself**, which today it does not.
+
+  Prefer **(a)**: less code, no threadlocal-sink re-entrancy surface, and the failure decision stays in one place.
+
+  **Critical:** preserve multi-error collection (do NOT regress to fail-on-first `src/semantic.zig:106`) and do NOT change `compileToSPIRVWithDiagnostics` behavior (it must still drain ALL diagnostics before failing — verify with its existing tests).
 
 - [ ] **Step 4: Verify the flip + the whole suite.**
 
@@ -273,11 +300,15 @@ Repeat Task 1 for each bucket until `just enumerate-fp` reports **zero** false-p
   ```
   Expected: green. **Any newly-failing previously-passing test is a residual false-positive — STOP, return to Task 1 for that construct, do not weaken the flip.**
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 5: Add the continuous strict gate (spec-mandated — nothing else stops a NEW false-positive from regressing in after the flip).**
+
+  Post-flip the enumerator's tolerate-vs-strict signal collapses (tolerate now *is* strict), so the continuous guard is a different shape: walk the curated-valid corpus, compile each fixture with `compileToSPIRV`, and **exit non-zero on any rejection that is NOT in `KNOWN_UNSUPPORTED`** — a curated-valid fixture newly rejected is, by definition, a false-positive regression. Add this as a `--strict-gate` mode to `tests/runner.zig` (reuse the suite walk; skip `spirv-val`), a `just strict-gate` recipe, and include it in the `just ci` recipe (`ci: test test-hlsl validate-dxc strict-gate`). This cheaply enforces Done-bar #4 on every run; the full `glslang -V` differential stays the one-time Acceptance #5 sweep, and any fixture `--strict-gate` flags must be `glslang -V`-checked during triage (glslang-accepts → real regression; glslang-rejects → add to `KNOWN_UNSUPPORTED`).
+
+- [ ] **Step 6: Commit.**
 
   ```bash
-  git add src/root.zig src/semantic.zig tests/analyzer_strict_tests.zig
-  git commit -m "feat(api): compileToSPIRV/NoOpt fail loud on recorded errors (collect-all-then-fail)"
+  git add src/root.zig src/semantic.zig tests/runner.zig justfile tests/analyzer_strict_tests.zig
+  git commit -m "feat(api): compileToSPIRV/NoOpt fail loud on recorded errors + continuous strict gate"
   ```
 
 ---
@@ -290,7 +321,7 @@ Repeat Task 1 for each bucket until `just enumerate-fp` reports **zero** false-p
 
 - [ ] **Step 1: Add the known-unsupported XFAIL list + an `xfail` stat.**
 
-  In `tests/runner.zig`, add `xfail: u32 = 0` to `Stats` and a const list of the 7 fixture paths:
+  In `tests/runner.zig`, add `xfail: u32 = 0` to `Stats`, add `+ self.xfail` to `Stats.total()` (`tests/runner.zig:15-17` — otherwise TOTAL undercounts by the XFAIL count), and add a const list of the 7 fixture paths:
   ```zig
   const KNOWN_UNSUPPORTED = [_][]const u8{
       "tests/spirv-cross/fp64.desktop.comp",
@@ -301,8 +332,11 @@ Repeat Task 1 for each bucket until `just enumerate-fp` reports **zero** false-p
       "tests/spirv-cross/ray_sphere_test.frag",
       "tests/spirv-cross/struct-material.frag",
   };
+  // Match the FULL repo-relative path (the runner builds full_path as
+  // "{dir_path}/{entry.path}", tests/runner.zig:204). Matching the bare basename
+  // would over-match — "newTexture.frag" is a suffix of ".../spv.newTexture.frag".
   fn isKnownUnsupported(path: []const u8) bool {
-      for (KNOWN_UNSUPPORTED) |p| if (std.mem.endsWith(u8, path, p[std.mem.lastIndexOfScalar(u8, p, '/').? + 1 ..])) return true;
+      for (KNOWN_UNSUPPORTED) |p| if (std.mem.endsWith(u8, path, p)) return true;
       return false;
   }
   ```

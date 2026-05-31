@@ -2,9 +2,10 @@ const std = @import("std");
 const glslpp = @import("glslpp");
 
 pub fn main() !void {
-    var gpa_impl = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_impl.deinit();
-    const alloc = gpa_impl.allocator();
+    // Short-lived generator: compileToSPIRV intentionally leaks internal state
+    // (see tests/runner.zig), so a leak-checking GPA would spam stderr on every
+    // run. Use the page allocator and let the OS reclaim memory on exit.
+    const alloc = std.heap.page_allocator;
 
     const cwd = std.fs.cwd();
 
