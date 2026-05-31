@@ -54,7 +54,7 @@ Each stress case is a single-purpose shader that, when broken in glslpp, would h
 
 ## Reproducibility
 
-Live counts: <!-- STATUS:conformance.summary -->2,080 PASS / 7 FAIL / 8 SKIP / 2,095 TOTAL<!-- /STATUS -->; <!-- STATUS:unit.tests -->2,054<!-- /STATUS --> unit tests; <!-- STATUS:hlsl.tests -->780<!-- /STATUS --> HLSL tests. See [docs/STATUS.md](./STATUS.md).
+Live counts: <!-- STATUS:conformance.summary -->2,080 PASS / 7 FAIL / 8 SKIP / 2,095 TOTAL<!-- /STATUS -->; <!-- STATUS:unit.tests -->2,063<!-- /STATUS --> unit tests; <!-- STATUS:hlsl.tests -->793<!-- /STATUS --> HLSL tests. See [docs/STATUS.md](./STATUS.md).
 
 ```bash
 zig build conformance               # spirv-val conformance suite (see docs/STATUS.md for live counts)
