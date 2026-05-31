@@ -142,6 +142,27 @@ test "strict: user function with 4-term 2D array expression (full composite-cons
     _ = spirv;
 }
 
+test "strict: not(bvec) / any(bvec) / all(bvec) builtins are accepted (vec_compare fixture)" {
+    // RED: currently fails with ctx=not inner=func_call because `not` is not registered
+    // as a GLSL builtin. any/all are registered but not(bvec) → OpLogicalNot is missing.
+    // Use uniform inputs so the optimizer cannot fold the expression away.
+    const alloc = std.testing.allocator;
+    const src =
+        \\precision mediump float;
+        \\uniform vec2 ua;
+        \\uniform vec2 ub;
+        \\void main() {
+        \\    bvec2 lt = lessThan(ua, ub);
+        \\    bvec2 nlt = not(lt);
+        \\    bool r = any(nlt);
+        \\    bool s = all(lt);
+        \\    gl_FragColor = vec4(r ? 1.0 : 0.0, s ? 1.0 : 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    _ = spirv;
+}
+
 test "strict: SSBO block array (buffer {...} name[N]) is accepted" {
     const alloc = std.testing.allocator;
     const src =
