@@ -66,6 +66,82 @@ test "harness self-test: compileToSPIRVStrict rejects a recorded error" {
     try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
 }
 
+test "strict: user function with 1D array parameter is accepted" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 430
+        \\layout(location=0) out vec4 o;
+        \\float sum(float a[3]) { return a[0]+a[1]+a[2]; }
+        \\void main() { float v[3]; v[0]=1.0; v[1]=2.0; v[2]=3.0; o = vec4(sum(v)); }
+    ;
+    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    _ = spirv;
+}
+
+test "strict: user function with 2D array parameter is accepted (composite-construct fixture)" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 310 es
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer SSBO0 { vec4 as[]; };
+        \\vec4 summe(vec4 values[3][2]) {
+        \\    return values[0][0] + values[2][1];
+        \\}
+        \\void main() {
+        \\    vec4 a[2]; a[0] = vec4(1.0); a[1] = vec4(2.0);
+        \\    vec4 b[2]; b[0] = vec4(3.0); b[1] = vec4(4.0);
+        \\    vec4 c[2]; c[0] = vec4(5.0); c[1] = vec4(6.0);
+        \\    as[0] = summe(vec4[][](a, b, c));
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    _ = spirv;
+}
+
+test "strict: user function with 2D array param + return (AofA fixture)" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 430
+        \\in float g5[5][7];
+        \\out float outfloat;
+        \\float[4][7] foo(float a[5][7]) {
+        \\    float r[7];
+        \\    r[0] = a[0][0];
+        \\    return float[4][7](r, r, r, r);
+        \\}
+        \\void main() {
+        \\    float g4[4][7];
+        \\    g4 = foo(g5);
+        \\    outfloat = g4[0][0];
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    _ = spirv;
+}
+
+test "strict: user function with 4-term 2D array expression (full composite-construct fixture body)" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 310 es
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer SSBO0 { vec4 as[]; };
+        \\layout(std430, binding = 1) buffer SSBO1 { vec4 bs[]; };
+        \\vec4 summe(vec4 values[3][2]) {
+        \\    return values[0][0] + values[2][1] + values[0][1] + values[1][0];
+        \\}
+        \\void main() {
+        \\    vec4 values[2] = vec4[](as[0], bs[0]);
+        \\    vec4 const_values[2] = vec4[](vec4(10.0), vec4(30.0));
+        \\    vec4 copy_values[2];
+        \\    copy_values = const_values;
+        \\    vec4 copy_values2[2] = values;
+        \\    as[0] = summe(vec4[][](values, copy_values, copy_values2));
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    _ = spirv;
+}
+
 test "strict: SSBO block array (buffer {...} name[N]) is accepted" {
     const alloc = std.testing.allocator;
     const src =

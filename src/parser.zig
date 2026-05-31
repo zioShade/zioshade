@@ -843,18 +843,29 @@ const Parser = struct {
                 return error.UnexpectedToken;
             }
             _ = self.advance();
-            // Handle array dimensions after param name: e.g. texture2D tex[4]
+            // Handle array dimensions after param name: e.g. float a[4] or float a[3][2]
+            // Collect all bracket pairs (first is outermost dimension in GLSL notation).
             var final_type = p_type;
-            if (self.current().tag == .l_bracket) {
+            var arr_dims: std.ArrayListUnmanaged(u32) = .empty;
+            defer arr_dims.deinit(self.alloc);
+            while (self.current().tag == .l_bracket) {
                 _ = self.advance(); // consume [
                 const size_tok = self.current();
-                _ = self.advance(); // consume size
-                if (self.current().tag == .r_bracket) _ = self.advance(); // consume ]
-                const size_str = self.text(size_tok);
-                const size = std.fmt.parseInt(u32, size_str, 10) catch 0;
-                if (size > 0) {
-                    const base_ptr = try self.createType(p_type);
-                    final_type = .{ .array = .{ .base = base_ptr, .size = size } };
+                var arr_size: u32 = 0;
+                if (size_tok.tag == .int_literal) {
+                    arr_size = std.fmt.parseInt(u32, self.text(size_tok), 10) catch 0;
+                    _ = self.advance();
+                }
+                _ = self.expect(.r_bracket) catch break;
+                try arr_dims.append(self.alloc, arr_size);
+            }
+            // Build array type from outermost to innermost (reverse order, same as parseVarDecl)
+            if (arr_dims.items.len > 0) {
+                var i: usize = arr_dims.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const arr_base = try self.createType(final_type);
+                    final_type = .{ .array = .{ .base = arr_base, .size = arr_dims.items[i] } };
                 }
             }
             try params.append(self.alloc, .{

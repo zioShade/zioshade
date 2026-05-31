@@ -2330,6 +2330,13 @@ const Analyzer = struct {
                             .operands = store_operands,
                             .ty = .void,
                         });
+                        // Forward-populate the load cache so subsequent emitLoadCached(id)
+                        // returns init_id directly (avoids redundant OpLoad that the optimizer
+                        // can incorrectly eliminate when tracing store→load pairs).
+                        self.load_cache.put(self.alloc, id, init_id) catch {};
+                        if (self.cache_globals) {
+                            self.global_load_cache.put(self.alloc, id, init_id) catch {};
+                        }
                         break :blk id;
                     };
                     try self.declare(node.data.name, .{
