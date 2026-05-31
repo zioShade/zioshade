@@ -4025,6 +4025,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // ImageDrefGather — depth comparison gather
             .ImageDrefGather => {
+                // Arrayed shadow textures need an array_index arg we don't emit
+                // yet; reject loudly rather than drop the layer (see
+                // sampledImageIsArrayedDepth). The gather coordinate is already
+                // vec2/vec3 (the dref is a separate operand, not packed into the
+                // coordinate), so no coordinate slicing is needed here - unlike
+                // the ImageSampleDref* handlers above.
+                if (sampledImageIsArrayedDepth(module, inst.words[3])) return error.UnsupportedImageOperands;
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const si_inst = getDef(module, inst.words[3]);
