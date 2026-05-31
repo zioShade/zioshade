@@ -464,11 +464,16 @@ const Analyzer = struct {
         self.global_const_ast_inits.deinit(self.alloc);
         self.pure_op_cache.deinit(self.alloc);
         self.global_pure_op_cache.deinit(self.alloc);
-        // Free owned name keys in the types map
+        // Free owned name keys AND member slices in the types map.
+        // On the success path `analyzer.types` is cleared to `.{}` (after ownership
+        // transfers to the Module, which frees the members in Module.deinit), so this
+        // loop only frees on the error path — including the fail-loud (fail_on_recorded_errors)
+        // rejection path, where without this the builtin/user TypeDef member slices leak.
         {
-            var type_key_it = self.types.keyIterator();
-            while (type_key_it.next()) |key_ptr| {
-                self.alloc.free(key_ptr.*);
+            var type_it = self.types.iterator();
+            while (type_it.next()) |entry| {
+                self.alloc.free(entry.key_ptr.*);
+                if (entry.value_ptr.members.len > 0) self.alloc.free(entry.value_ptr.members);
             }
             self.types.deinit(self.alloc);
         }
