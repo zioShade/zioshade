@@ -390,19 +390,68 @@ test "wgsl: textureLod(sampler2DShadow) emits valid textureSampleCompareLevel" {
     });
 }
 
-// Arrayed depth textures (sampler2DArrayShadow) would need a separate WGSL
-// array_index argument; emitting texture_depth_2d + a 2-component coordinate
-// VALIDATES in naga but silently samples the wrong layer. The backend must
-// fail loudly rather than trade one silent-wrong for another.
-test "wgsl: sampler2DArrayShadow is an honest error, not a silent dropped layer" {
-    const source: [:0]const u8 =
+// Arrayed depth textures (sampler2DArrayShadow) need a SEPARATE WGSL array_index
+// argument: textureSampleCompare(t, s, coord.xy, array_index, depth_ref). glslang
+// packs the layer into the coordinate (vec4: uv, layer, ref); the layer component
+// must be extracted, rounded, and passed as its own i32 argument. Emitting
+// texture_depth_2d + a 2-component coordinate (dropping the layer) VALIDATES in
+// naga but silently samples the wrong layer — the very silent-wrong this guards.
+test "wgsl: sampler2DArrayShadow emits texture_depth_2d_array + separate array_index" {
+    try runShadowValidTest(.{
+        .name = "shadow_2d_array",
+        .source =
         \\#version 450
         \\layout(binding=0) uniform sampler2DArrayShadow shadowArr;
         \\layout(location=0) in vec4 vC;
         \\layout(location=0) out vec4 fragColor;
         \\void main(){ fragColor = vec4(texture(shadowArr, vC)); }
+        ,
+        .tex_decl = "var shadowArr: texture_depth_2d_array;",
+        .builtin = "textureSampleCompare",
+        // 2D spatial coordinate is .xy; the layer (.z) becomes a separate arg.
+        .coord_swizzle = ".xy",
+        .array_index = ".z))",
+    });
+}
+
+// samplerCubeArrayShadow → texture_depth_cube_array. The coordinate is a vec4
+// (dir.xyz + layer.w); the direction is sliced to vec3 and the layer (.w) becomes
+// a separate rounded i32 array_index argument. The compare reference is a
+// separate GLSL argument, so it is NOT packed into the coordinate here.
+test "wgsl: samplerCubeArrayShadow emits texture_depth_cube_array + separate array_index" {
+    try runShadowValidTest(.{
+        .name = "shadow_cube_array",
+        .source =
+        \\#version 450
+        \\layout(binding=0) uniform samplerCubeArrayShadow shadowCubeArr;
+        \\layout(location=0) in vec4 vC;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(texture(shadowCubeArr, vC, vRef)); }
+        ,
+        .tex_decl = "var shadowCubeArr: texture_depth_cube_array;",
+        .builtin = "textureSampleCompare",
+        // Cube spatial coordinate is .xyz; the layer (.w) becomes a separate arg.
+        .coord_swizzle = ".xyz",
+        .array_index = ".w))",
+    });
+}
+
+// textureGatherCompare on an ARRAYED shadow sampler also needs a separate
+// array_index argument, which the gather path does not yet build. Until it does,
+// it must stay an honest error rather than emit wrong-arity textureGatherCompare
+// (the same silent-wrong class). The sample path above IS supported; only the
+// gather-array path remains gated.
+test "wgsl: textureGather(sampler2DArrayShadow) is an honest error, not wrong-arity" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArrayShadow shadowArr;
+        \\layout(location=0) in vec3 vC;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = textureGather(shadowArr, vC, vRef); }
     ;
-    const spirv = try compileToSpirv("shadow_array", source);
+    const spirv = try compileToSpirv("shadow_gather_array", source);
     defer alloc.free(spirv);
     try std.testing.expectError(
         error.UnsupportedDepthArrayTexture,
@@ -419,6 +468,12 @@ const ShadowCase = struct {
     /// the texture dimension; null when the form keeps the coordinate as-is
     /// (e.g. gather). A naga-independent regression guard.
     coord_swizzle: ?[]const u8,
+    /// For arrayed depth textures, the distinguishing tail of the SEPARATE
+    /// array_index argument (e.g. ".z))" for texture_depth_2d_array, ".w))" for
+    /// texture_depth_cube_array). null for non-arrayed forms. Proves the array
+    /// layer was preserved as its own integer argument rather than silently
+    /// folded into the coordinate or dropped.
+    array_index: ?[]const u8 = null,
 };
 
 fn runShadowValidTest(c: ShadowCase) !void {
@@ -436,6 +491,12 @@ fn runShadowValidTest(c: ShadowCase) !void {
     try assertContains(wgsl, c.builtin);
     // ...the coordinate must be sliced to the texture dimension (naga-free guard)...
     if (c.coord_swizzle) |swz| try assertContains(wgsl, swz);
+    // ...an arrayed depth texture must pass the layer as its own rounded i32
+    // array_index argument (naga-free guard against the dropped-layer bug)...
+    if (c.array_index) |ai| {
+        try assertContains(wgsl, "i32(round(");
+        try assertContains(wgsl, ai);
+    }
     // ...and (single-texture fixture) no plain sampled texture must appear.
     try assertNotContains(wgsl, "texture_2d<f32>");
     // Ground truth: the emitted WGSL must actually validate.
