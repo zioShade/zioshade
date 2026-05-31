@@ -1628,7 +1628,6 @@ const Analyzer = struct {
                                     const elem_ty = sc_ty.elementType();
                                     const is_float_elem = elem_ty == .float or elem_ty == .double or elem_ty == .float16;
 
-                                    _ = is_float_elem;
                                     // GLSL also allows `vec3(0.5)` to mean splat; if the constructor
                                     // has fewer args than components and the only arg is scalar,
                                     // replicate it. Conservatively detect splat: 1 arg, n_components > 1.
@@ -1642,13 +1641,20 @@ const Analyzer = struct {
                                             // Direct AST literal extraction (avoids emitting IR).
                                             switch (arg.tag) {
                                                 .int_literal, .uint_literal => {
-                                                    const v = arg.data.int_val;
+                                                    // Bounds-check the literal magnitude against 32 bits
+                                                    // before lowering it to a component word. literalWord
+                                                    // records an honest error.SemanticFailed for magnitudes
+                                                    // > 0xFFFFFFFF (glslangValidator: "numeric literal too
+                                                    // big") instead of silently truncating (int elements,
+                                                    // via @truncate) or silently widening (float elements,
+                                                    // via @floatFromInt) the out-of-range value.
+                                                    const word = try literalWord(arg);
                                                     // For float-element composites, convert int → float.
-                                                    if (elem_ty == .float or elem_ty == .double or elem_ty == .float16) {
-                                                        const fv: f32 = @floatFromInt(v);
+                                                    if (is_float_elem) {
+                                                        const fv: f32 = @floatFromInt(word);
                                                         lit = @as(u32, @bitCast(fv));
                                                     } else {
-                                                        lit = @as(u32, @bitCast(@as(i32, @truncate(v))));
+                                                        lit = word;
                                                     }
                                                 },
                                                 .float_literal => {
