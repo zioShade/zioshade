@@ -332,6 +332,25 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
         var mname_buf: [32]u8 = undefined;
         const mname = getMemberName(module, type_id, @as(u32, @intCast(mi)), &mname_buf);
         const atomic_kind: ?AtomicFieldKind = atomic_fields.get(.{ .struct_id = type_id, .member_idx = @intCast(mi) });
+
+        // A row_major NON-square matrix needs swapped declared dimensions in
+        // WGSL (which has no row_major feature) to read back the logical matrix
+        // via transpose; not yet implemented. Fail loudly instead of emitting a
+        // member that the transposed read silently mis-shapes. Square row_major
+        // matrices are fully handled by transposing reads (findRowMajorMatrix).
+        if (memberIsRowMajor(module, type_id, @intCast(mi))) {
+            const elem_tid: ?u32 = if (mti) |mi2| blk: {
+                if (mi2.op == .TypeMatrix) break :blk mt_id;
+                if (mi2.op == .TypeArray and mi2.words.len > 2) break :blk mi2.words[2];
+                break :blk null;
+            } else null;
+            if (elem_tid) |etid| {
+                const et = getDef(module, etid);
+                if (et != null and et.?.op == .TypeMatrix and !matrixIsSquare(module, etid))
+                    return error.UnsupportedRowMajorMatrix;
+            }
+        }
+
         if (mti) |mi2| {
             if (mi2.op == .TypeArray and mi2.words.len > 3) {
                 const et = try wgslType(module, mi2.words[2], names, alloc);
@@ -573,7 +592,126 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
 // Access expression builder
 // ---------------------------------------------------------------------------
 
+/// True if struct member `member_index` of `struct_id` carries the SPIR-V
+/// RowMajor decoration (4). WGSL has no row_major feature and is column-indexed,
+/// so a row-major matrix's std140 bytes are read as the TRANSPOSE of the logical
+/// matrix — every read must be transposed back (see `findRowMajorMatrix`).
+fn memberIsRowMajor(module: *const ParsedModule, struct_id: u32, member_index: u32) bool {
+    for (module.instructions) |inst| {
+        if (inst.op == .MemberDecorate and inst.words.len >= 4 and
+            inst.words[1] == struct_id and inst.words[2] == member_index)
+        {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[3]);
+            if (dec == .row_major) return true;
+        }
+    }
+    return false;
+}
+
+const RowMajorAccess = struct { boundary: usize, matrix_tid: u32 };
+
+/// Return where a row-major matrix VALUE is produced in `indices`, so the read
+/// can be wrapped in `transpose(...)` (`indices[0..boundary+1]` produces the
+/// matrix; `indices[boundary+1..]` is the column/element tail). A row-major
+/// matrix is stored transposed in WGSL (which is column-major with no row_major
+/// feature), so BOTH a whole-matrix load (feeding mul — WGSL has no keyword to
+/// fix storage) and a column read must transpose. The matrix may be a direct
+/// struct member OR a row-major member's array element (`a.mats[k]`). Non-square
+/// row-major matrices need swapped declared DIMENSIONS (rejected at struct
+/// emission); only square ones reach here. Generalizes the MSL backend's helper
+/// (which handles only direct members) to array-of-matrix members.
+fn findRowMajorMatrix(module: *const ParsedModule, base_id: u32, indices: []const u32) ?RowMajorAccess {
+    var cur_type: ?u32 = resolvePointee(module, base_id);
+    var member_row_major = false; // did the enclosing struct member carry RowMajor?
+    for (indices, 0..) |index_id, i| {
+        const tid = cur_type orelse return null;
+        const ti = getDef(module, tid) orelse return null;
+        if (ti.op == .TypeStruct) {
+            const def = getDef(module, index_id) orelse return null;
+            if (def.op != .Constant or def.words.len <= 3) return null;
+            const val = def.words[3];
+            if (val + 2 >= ti.words.len) return null;
+            member_row_major = memberIsRowMajor(module, tid, val);
+            const member_tid = ti.words[val + 2];
+            const mdef = getDef(module, member_tid);
+            if (mdef != null and mdef.?.op == .TypeMatrix and member_row_major) {
+                if (matrixIsSquare(module, member_tid)) return .{ .boundary = i, .matrix_tid = member_tid };
+                return null; // non-square: handled by honest error at declaration
+            }
+            cur_type = member_tid;
+        } else if (ti.op == .TypeArray) {
+            const elem = ti.words[2];
+            const edef = getDef(module, elem);
+            if (edef != null and edef.?.op == .TypeMatrix and member_row_major) {
+                if (matrixIsSquare(module, elem)) return .{ .boundary = i, .matrix_tid = elem };
+                return null; // non-square: handled at declaration
+            }
+            cur_type = elem;
+        } else if (ti.op == .TypeVector or ti.op == .TypeMatrix) {
+            cur_type = ti.words[2];
+        } else {
+            return null;
+        }
+    }
+    return null;
+}
+
+/// True if `type_id` is a SQUARE matrix (column count == row count).
+fn matrixIsSquare(module: *const ParsedModule, type_id: u32) bool {
+    const mt = getDef(module, type_id) orelse return false;
+    if (mt.op != .TypeMatrix) return false;
+    const colvec = getDef(module, mt.words[2]) orelse return false;
+    if (colvec.op != .TypeVector) return false;
+    return mt.words[3] == colvec.words[3];
+}
+
+/// Emit the access-chain indices that come AFTER a transposed row-major matrix:
+/// a matrix-column index becomes `[col]` on the transposed value, and a
+/// vector-element index becomes a `.xyzw` swizzle.
+fn appendMatrixTail(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), matrix_tid: u32, indices: []const u32, buf: *std.ArrayList(u8), alloc: std.mem.Allocator) !void {
+    var cur_type: ?u32 = matrix_tid;
+    for (indices) |index_id| {
+        const def = getDef(module, index_id);
+        const ti = if (cur_type) |t| getDef(module, t) else null;
+        if (def != null and def.?.op == .Constant and def.?.words.len > 3) {
+            const val = def.?.words[3];
+            if (ti != null and ti.?.op == .TypeVector) {
+                try buf.appendSlice(alloc, switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
+                cur_type = ti.?.words[2];
+            } else {
+                try buf.print(alloc, "[{d}]", .{val});
+                cur_type = if (ti != null and (ti.?.op == .TypeMatrix or ti.?.op == .TypeArray)) ti.?.words[2] else null;
+            }
+        } else {
+            try buf.print(alloc, "[{s}]", .{names.get(index_id) orelse "i"});
+            cur_type = if (ti != null and (ti.?.op == .TypeMatrix or ti.?.op == .TypeArray)) ti.?.words[2] else null;
+        }
+    }
+}
+
+/// Build an access-chain expression. A read that traverses a row-major matrix
+/// member is wrapped in `transpose(...)`: WGSL stores the row-major bytes as the
+/// transpose of the logical matrix, so transposing reconstructs it (matching the
+/// MSL backend). Whole-matrix loads ARE transposed too (WGSL has no row_major
+/// keyword to fix storage, so even `a.m` for `mul` reads Mᵀ).
 fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
+    if (indices.len != 0) {
+        if (findRowMajorMatrix(module, base_id, indices)) |hit| {
+            var buf = std.ArrayList(u8).initCapacity(alloc, 64) catch return error.OutOfMemory;
+            defer buf.deinit(alloc);
+            try buf.appendSlice(alloc, "transpose(");
+            const inner = try buildAccessExprPlain(module, names, base_id, indices[0 .. hit.boundary + 1], alloc);
+            defer alloc.free(inner);
+            try buf.appendSlice(alloc, inner);
+            try buf.appendSlice(alloc, ")");
+            try appendMatrixTail(module, names, hit.matrix_tid, indices[hit.boundary + 1 ..], &buf, alloc);
+            return buf.toOwnedSlice(alloc);
+        }
+    }
+    return buildAccessExprPlain(module, names, base_id, indices, alloc);
+}
+
+fn buildAccessExprPlain(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) return try alloc.dupe(u8, base_name);
 
