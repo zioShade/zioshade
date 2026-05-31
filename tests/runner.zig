@@ -12,11 +12,40 @@ const Stats = struct {
     skip: u32 = 0,
     compile_error: u32 = 0,
     strict_fp: u32 = 0, // false-positive candidates (tolerate OK, strict fails)
+    xfail: u32 = 0,     // expected failures (known-unsupported fixtures)
 
     fn total(self: Stats) u32 {
-        return self.pass + self.fail + self.skip + self.compile_error;
+        return self.pass + self.fail + self.skip + self.compile_error + self.xfail;
     }
 };
+
+/// Paths of fixtures that are expected to fail after the fail-loud flip.
+/// These are either genuinely unrepresentable constructs (extensions not modeled,
+/// 64-bit types, AMD-specific ops) or current spirv-val failures.
+/// Match by path suffix — full "tests/<suite>/<name>" to avoid over-matching
+/// (e.g. "newTexture.frag" is a suffix of "spv.newTexture.frag").
+const KNOWN_UNSUPPORTED = [_][]const u8{
+    "tests/glslang-430/newTexture.frag",
+    "tests/glslang-430/spv.newTexture.frag",
+    "tests/glslang-430/spv.AofA.frag",
+    "tests/glslang-430/spv.double.comp",
+    "tests/glslang-430/spv.nvAtomicFp16Vec.frag",
+    "tests/spirv-cross/extended-arithmetic.desktop.comp",
+    "tests/spirv-cross/fp64.desktop.comp",
+    "tests/spirv-cross/gcn_shader.comp",
+    "tests/spirv-cross/image-query.desktop.frag",
+    "tests/spirv-cross/int64.desktop.comp",
+    "tests/spirv-cross/ray_sphere_test.frag",
+    "tests/spirv-cross/shader-clock.frag",
+    "tests/spirv-cross/shader_ballot.comp",
+    "tests/spirv-cross/spec-constant-work-group-size.vk.comp",
+    "tests/spirv-cross/struct-material.frag",
+};
+
+fn isKnownUnsupported(path: []const u8) bool {
+    for (KNOWN_UNSUPPORTED) |p| if (std.mem.endsWith(u8, path, p)) return true;
+    return false;
+}
 
 fn log(comptime fmt: []const u8, args: anytype) void {
     std.debug.print(fmt, args);
@@ -362,23 +391,154 @@ fn runDir(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []const u8, sta
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
 
         const result = testShader(io, alloc, full_path, null) catch .skip;
+        const known = isKnownUnsupported(full_path);
         switch (result) {
             .pass => {
-                stats.pass += 1;
-                log("  PASS {s}\n", .{full_path});
+                if (known) {
+                    // A KNOWN_UNSUPPORTED fixture unexpectedly passed — the list is stale.
+                    // Fail loudly so it can be removed from the list and re-classified.
+                    stats.fail += 1;
+                    log("  UNEXPECTED-PASS {s} (was KNOWN_UNSUPPORTED — remove from list)\n", .{full_path});
+                } else {
+                    stats.pass += 1;
+                    log("  PASS {s}\n", .{full_path});
+                }
             },
             .fail => {
-                stats.fail += 1;
-                log("  FAIL {s} (spirv-val)\n", .{full_path});
+                if (known) {
+                    stats.xfail += 1;
+                    log("  XFAIL {s} (spirv-val, known-unsupported)\n", .{full_path});
+                } else {
+                    stats.fail += 1;
+                    log("  FAIL {s} (spirv-val)\n", .{full_path});
+                }
             },
             .compile_error => {
-                stats.compile_error += 1;
-                log("  FAIL {s} (compile error)\n", .{full_path});
+                if (known) {
+                    stats.xfail += 1;
+                    log("  XFAIL {s} (compile error, known-unsupported)\n", .{full_path});
+                } else {
+                    stats.compile_error += 1;
+                    log("  FAIL {s} (compile error)\n", .{full_path});
+                }
             },
             .skip => {
                 stats.skip += 1;
                 log("  SKIP {s}\n", .{full_path});
             },
+        }
+    }
+}
+
+/// Strict-gate: walk a suite directory, compile each fixture with compileToSPIRV
+/// (fail-loud mode since the flip), and report any rejection NOT in KNOWN_UNSUPPORTED
+/// as a false-positive regression (exit non-zero). Does NOT run spirv-val.
+fn strictGateDir(
+    io: compat.IoType,
+    alloc: std.mem.Allocator,
+    dir_path: []const u8,
+    stats: *Stats,
+) !void {
+    const dir = compat.dirOpenDir(io, compat.cwd(), dir_path, .{ .iterate = true }) catch return;
+    defer compat.dirClose(io, dir);
+
+    var walker = try compat.dirWalk(dir, alloc);
+    defer walker.deinit();
+
+    while (try compat.walkerNext(io, &walker)) |entry| {
+        if (entry.kind != .file) continue;
+        const ext = std.fs.path.extension(entry.basename);
+        if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
+            !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
+            !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task") and
+            !std.mem.eql(u8, ext, ".geom") and !std.mem.eql(u8, ext, ".tesc") and
+            !std.mem.eql(u8, ext, ".tese") and
+            !std.mem.eql(u8, ext, ".rgen") and !std.mem.eql(u8, ext, ".rchit") and
+            !std.mem.eql(u8, ext, ".rmiss") and !std.mem.eql(u8, ext, ".rahit") and
+            !std.mem.eql(u8, ext, ".rint") and !std.mem.eql(u8, ext, ".rcall"))
+            continue;
+
+        if (std.mem.indexOf(u8, entry.basename, ".error.") != null) continue;
+        if (std.mem.startsWith(u8, entry.basename, "link.")) continue;
+        if (std.mem.indexOf(u8, entry.basename, ".asm.") != null) continue;
+        if (std.mem.indexOf(u8, entry.basename, ".nocompat.") != null) continue;
+
+        var path_buf: [compat.max_path_bytes]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
+
+        // Apply same skip logic as testShader
+        const file = compat.dirOpenFile(io, compat.cwd(), full_path, .{}) catch continue;
+        defer compat.fileClose(io, file);
+        const source = compat.fileReadToEndAlloc(io, file, alloc, 10 * 1024 * 1024) catch continue;
+        defer alloc.free(source);
+        if (source.len == 0) continue;
+        if (std.mem.indexOf(u8, source, "void main") == null and
+            std.mem.indexOf(u8, source, "void mainImage") == null) continue;
+        if (std.mem.indexOf(u8, source, "// ERROR") != null) continue;
+
+        const final_source = inlineIncludes(io, alloc, full_path, source) catch source;
+        defer if (final_source.ptr != source.ptr) alloc.free(final_source);
+        const source_z = alloc.dupeZ(u8, final_source) catch continue;
+        defer alloc.free(source_z);
+
+        const stage: glslpp.Stage = blk: {
+            if (std.mem.endsWith(u8, full_path, ".vert") or std.mem.endsWith(u8, full_path, ".v.glsl"))
+                break :blk .vertex
+            else if (std.mem.endsWith(u8, full_path, ".comp") or std.mem.endsWith(u8, full_path, ".c.glsl"))
+                break :blk .compute
+            else if (std.mem.endsWith(u8, full_path, ".geom"))
+                break :blk .geometry
+            else if (std.mem.endsWith(u8, full_path, ".tesc"))
+                break :blk .tessellation_control
+            else if (std.mem.endsWith(u8, full_path, ".tese"))
+                break :blk .tessellation_evaluation
+            else if (std.mem.endsWith(u8, full_path, ".mesh"))
+                break :blk .mesh
+            else if (std.mem.endsWith(u8, full_path, ".task"))
+                break :blk .task
+            else if (std.mem.endsWith(u8, full_path, ".rgen"))
+                break :blk .raygen
+            else if (std.mem.endsWith(u8, full_path, ".rchit"))
+                break :blk .closesthit
+            else if (std.mem.endsWith(u8, full_path, ".rmiss"))
+                break :blk .miss
+            else if (std.mem.endsWith(u8, full_path, ".rahit"))
+                break :blk .anyhit
+            else if (std.mem.endsWith(u8, full_path, ".rint"))
+                break :blk .intersection
+            else if (std.mem.endsWith(u8, full_path, ".rcall"))
+                break :blk .callable
+            else
+                break :blk .fragment;
+        };
+
+        const spirv_ver: glslpp.SPIRVVersion = if (stage == .mesh or stage == .task or
+            stage == .raygen or stage == .closesthit or stage == .miss or
+            stage == .intersection or stage == .anyhit or stage == .callable) .@"1.4" else .@"1.5";
+
+        const compile_result = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver });
+        if (compile_result) |words| {
+            alloc.free(words);
+            if (isKnownUnsupported(full_path)) {
+                // Unexpectedly passed — the KNOWN_UNSUPPORTED list is stale.
+                stats.fail += 1;
+                log("  UNEXPECTED-PASS {s} (was KNOWN_UNSUPPORTED — remove from list)\n", .{full_path});
+            } else {
+                stats.pass += 1;
+            }
+        } else |_| {
+            if (isKnownUnsupported(full_path)) {
+                stats.xfail += 1;
+                log("  XFAIL {s}\n", .{full_path});
+            } else {
+                // A curated-valid fixture was rejected — false-positive regression!
+                stats.fail += 1;
+                log("  FP-REGRESSION {s} ctx={s} inner={s}\n", .{
+                    full_path,
+                    glslpp.lastErrorCtx() orelse "(none)",
+                    glslpp.lastErrorInner() orelse "(none)",
+                });
+            }
         }
     }
 }
@@ -403,6 +563,7 @@ fn mainImpl() !void {
     var save_spv_path: ?[]const u8 = null;
     var target_arg: ?[]const u8 = null;
     var strict_enumerate = false;
+    var strict_gate = false;
 
     if (!compat.is_0_16) {
         const args = try std.process.argsAlloc(alloc);
@@ -414,6 +575,8 @@ fn mainImpl() !void {
                 i += 1;
             } else if (std.mem.eql(u8, args[i], "--strict-enumerate")) {
                 strict_enumerate = true;
+            } else if (std.mem.eql(u8, args[i], "--strict-gate")) {
+                strict_gate = true;
             } else {
                 target_arg = args[i];
             }
@@ -457,6 +620,23 @@ fn mainImpl() !void {
         log("False-positive candidates: {d}\n", .{stats.strict_fp});
         log("(see FP lines above for per-fixture ctx= and inner= details)\n", .{});
         // Exit 0 — this is a report, not a gate.
+        return;
+    }
+
+    if (strict_gate) {
+        log("\n=== STRICT-GATE: curated-valid fixtures must compile (no spirv-val) ===\n", .{});
+        inline for (all_suites) |suite| {
+            log("\n--- {s} ---\n", .{suite.@"0"});
+            strictGateDir(io, alloc, suite.@"1", &stats) catch {};
+        }
+        log("\n=== STRICT-GATE SUMMARY ===\n", .{});
+        log("PASS:  {d}\n", .{stats.pass});
+        log("XFAIL: {d}\n", .{stats.xfail});
+        log("FAIL (FP-regression): {d}\n", .{stats.fail});
+        if (stats.fail > 0) {
+            log("ERROR: {} curated-valid fixture(s) were rejected — false-positive regressions!\n", .{stats.fail});
+            std.process.exit(1);
+        }
         return;
     }
 
@@ -515,6 +695,7 @@ fn mainImpl() !void {
     log("FAIL (spirv):   {d}\n", .{stats.fail});
     log("FAIL (compile): {d}\n", .{stats.compile_error});
     log("SKIP:           {d}\n", .{stats.skip});
+    log("XFAIL:          {d}\n", .{stats.xfail});
     log("TOTAL:          {d}\n", .{stats.total()});
 
     if (stats.fail > 0 or stats.compile_error > 0) {

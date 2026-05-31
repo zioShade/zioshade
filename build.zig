@@ -188,6 +188,15 @@ pub fn build(b: *std.Build) void {
     run_enumerate.addArg("--strict-enumerate");
     enumerate_step.dependOn(&run_enumerate.step);
 
+    // Continuous strict-gate — run with: zig build strict-gate
+    // Walks all fixture suites, compiles each with compileToSPIRV (fail-loud after flip),
+    // exits non-zero if any curated-valid fixture is newly rejected (FP regression).
+    // Known-unsupported fixtures in KNOWN_UNSUPPORTED are counted as XFAIL (not failures).
+    const strict_gate_step = b.step("strict-gate", "Verify no curated-valid fixtures are rejected by the fail-loud API");
+    const run_strict_gate = b.addRunArtifact(runner_exe);
+    run_strict_gate.addArg("--strict-gate");
+    strict_gate_step.dependOn(&run_strict_gate.step);
+
     // HLSL backend tests — run with: zig build test-hlsl
     const hlsl_test_step = b.step("test-hlsl", "Run HLSL backend tests (GLSL → SPIR-V → HLSL pipeline)");
     const hlsl_test_mod = b.createModule(.{

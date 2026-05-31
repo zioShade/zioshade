@@ -58,6 +58,9 @@ pub const AnalyzeOptions = struct {
     /// returning a partial module. When false, any error causes analyze() to return
     /// an error (used by unit tests to verify error detection).
     tolerate_errors: bool = false,
+    /// When true, fail after all functions are analyzed if ANY errors were recorded,
+    /// even when tolerate_errors=true. Combines collect-all-errors with fail-loud.
+    fail_on_recorded_errors: bool = false,
     /// Shader stage (needed for stage-dependent builtin variables like gl_TessLevelOuter)
     stage: ?@import("root.zig").Stage = null,
 };
@@ -110,7 +113,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         }
     }
 
-    if (!analyzer.tolerate_errors and analyzer.errors.items.len > 0) return error.SemanticFailed;
+    if ((!analyzer.tolerate_errors or options.fail_on_recorded_errors) and analyzer.errors.items.len > 0) return error.SemanticFailed;
 
     // Transfer ownership to module; clear analyzer fields so defer deinit doesn't double-free
     var mod: ir.Module = .{

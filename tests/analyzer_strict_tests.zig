@@ -187,6 +187,33 @@ test "strict: not(bvec) / any(bvec) / all(bvec) builtins are accepted (vec_compa
     _ = spirv;
 }
 
+// ============================================================
+// F2 flip contract tests — the plain compileToSPIRV/NoOpt APIs must
+// fail loud on recorded errors after the fail_on_recorded_errors flag flip.
+// ============================================================
+
+test "flip: plain compileToSPIRV fails loud on a genuinely-broken shader" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(undeclared_identifier_xyz, 0, 0, 1); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+}
+
+test "flip: plain compileToSPIRV still accepts a valid shader" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expect(spirv.len > 5);
+}
+
 test "strict: SSBO block array (buffer {...} name[N]) is accepted" {
     const alloc = std.testing.allocator;
     const src =
