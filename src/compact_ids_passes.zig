@@ -2647,6 +2647,26 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
     var replacements = std.AutoHashMapUnmanaged(u32, u32).empty; // dup_id -> first_id
     defer replacements.deinit(alloc);
 
+    // Pre-scan ArrayStride decorations: an array type's identity includes its
+    // stride. std140 and std430 give the SAME (element, length) array DIFFERENT
+    // strides (e.g. float[2] → 16 vs 4), so two such arrays must NOT merge —
+    // doing so would drop one stride, or (since the OpDecorate dedup keys on the
+    // value) leave two conflicting ArrayStride decorations on one id.
+    var strides = std.AutoHashMapUnmanaged(u32, u32).empty; // array id -> ArrayStride
+    defer strides.deinit(alloc);
+    {
+        var sp: u32 = 5;
+        while (sp < words.len) {
+            const hdr = words[sp]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break;
+            // OpDecorate=71, ArrayStride=6: word1=target, word2=decoration, word3=value
+            if (opcode == 71 and wc >= 4 and words[sp + 2] == 6) {
+                strides.put(alloc, words[sp + 1], words[sp + 3]) catch {};
+            }
+            sp += wc;
+        }
+    }
+
     // First pass: find duplicate array types
     var pos: u32 = 5;
     while (pos < words.len) {
@@ -2659,6 +2679,9 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
             var h: u64 = 0xA110CA7E0000001;
             h = h *% 33 +% @as(u64, element_type);
             h = h *% 33 +% @as(u64, length);
+            // Fold in the ArrayStride (0 if undecorated) so arrays that need
+            // different strides hash differently and are never merged.
+            h = h *% 33 +% @as(u64, strides.get(result_id) orelse 0);
             if (arrays.get(h)) |first_id| {
                 if (first_id != result_id) {
                     replacements.put(alloc, result_id, first_id) catch {};
