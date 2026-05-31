@@ -1214,6 +1214,12 @@ const Parser = struct {
         if (cur == .kw_const and (isTypeKeyword(nxt) or nxt == .identifier)) {
             return self.parseLocalVarDecl();
         }
+        // precision qualifier type identifier: mediump int x = 0; highp float y;
+        // parseLocalVarDecl already handles precision qualifiers via tryQualifier(),
+        // but parseStatement didn't recognize them as var-decl starters.
+        if ((cur == .kw_mediump or cur == .kw_highp or cur == .kw_lowp) and isTypeKeyword(nxt)) {
+            return self.parseLocalVarDecl();
+        }
 
         return switch (cur) {
             .l_brace => {
