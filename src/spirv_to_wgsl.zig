@@ -43,23 +43,39 @@ fn isStructType(module: *const ParsedModule, type_id: u32) bool {
     return false;
 }
 
+// SPIR-V Dim operand values (OpTypeImage word[3]) we care about for depth
+// textures; the rest of the file uses the same numbering for the sampled-texture
+// switch in wgslType.
+const SPV_DIM_CUBE: u32 = 3;
+const SPV_DIM_2D_ARRAY: u32 = 4;
+
+/// Resolve `type_id` down to the underlying OpTypeImage instruction. Unwraps one
+/// level each of OpTypePointer (-> pointee) and OpTypeSampledImage (-> image),
+/// so it accepts a pointer-to-sampled-image, a sampled-image, or an image type
+/// id. Returns null if it does not bottom out at an OpTypeImage.
+///
+/// OpTypeImage layout: [op, result_id, sampled_type, dim, DEPTH, arrayed, ms, sampled, format]
+fn underlyingImageType(module: *const ParsedModule, type_id: u32) ?Instruction {
+    var inst = getDef(module, type_id) orelse return null;
+    if (inst.op == .TypePointer and inst.words.len > 3) {
+        inst = getDef(module, inst.words[3]) orelse return null;
+    }
+    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
+        inst = getDef(module, inst.words[2]) orelse return null;
+    }
+    if (inst.op != .TypeImage) return null;
+    return inst;
+}
+
 /// True when `image_type_id` resolves to an OpTypeImage flagged as a depth
 /// (comparison) image - the Depth operand (word[4]) equals 1. GLSL's
 /// `sampler2DShadow` and friends lower to such images. WGSL requires these to
 /// be a `texture_depth_*` texture paired with a `sampler_comparison`, so both
 /// resource types must follow this flag; emitting the default
 /// `texture_2d<f32>` + plain `sampler` is silent-wrong (glslpp exits 0 but
-/// naga rejects with "Comparison sampling mismatch"). Accepts either an
-/// OpTypeImage id or an OpTypeSampledImage id (the latter is unwrapped to its
-/// underlying image).
-///
-/// OpTypeImage layout: [op, result_id, sampled_type, dim, DEPTH, arrayed, ms, sampled, format]
+/// naga rejects with "Comparison sampling mismatch").
 fn imageTypeIsDepth(module: *const ParsedModule, image_type_id: u32) bool {
-    var inst = getDef(module, image_type_id) orelse return false;
-    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
-        inst = getDef(module, inst.words[2]) orelse return false;
-    }
-    if (inst.op != .TypeImage) return false;
+    const inst = underlyingImageType(module, image_type_id) orelse return false;
     return inst.words.len > 4 and inst.words[4] == 1;
 }
 
@@ -71,20 +87,39 @@ fn imageTypeIsDepth(module: *const ParsedModule, image_type_id: u32) bool {
 /// coordinate to be EXACTLY the texture's dimension - so the coordinate has to
 /// be sliced down to this many components or naga rejects it ("Image
 /// coordinate type does not match dimension").
+///
+/// Keys on the SPIR-V Dim operand (word[3]) only. The conservative `else => 2`
+/// covers the non-array 2D case this PR targets and any unexpected type. Note
+/// a 2D-array depth texture's coordinate IS vec2 (the layer rides a separate
+/// array_index argument, not the coordinate), so returning 2 for dim==4 is the
+/// right coordinate WIDTH; the real arrayed-shadow gap is the missing
+/// array_index arg in the Dref handlers (see wgslType's depth branch).
 fn depthCompareCoordComps(module: *const ParsedModule, sampled_image_value_id: u32) u32 {
     const type_id = getTypeOf(module, sampled_image_value_id) orelse return 2;
-    var inst = getDef(module, type_id) orelse return 2;
-    if (inst.op == .TypePointer and inst.words.len > 3) {
-        inst = getDef(module, inst.words[3]) orelse return 2;
-    }
-    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
-        inst = getDef(module, inst.words[2]) orelse return 2;
-    }
-    if (inst.op != .TypeImage or inst.words.len <= 3) return 2;
+    const inst = underlyingImageType(module, type_id) orelse return 2;
+    if (inst.words.len <= 3) return 2;
     return switch (inst.words[3]) {
-        3 => 3, // Cube -> vec3 coordinate
-        else => 2, // 2D family -> vec2 coordinate
+        SPV_DIM_CUBE => 3, // Cube -> vec3 coordinate
+        else => 2, // 2D family (and unknown) -> vec2 coordinate
     };
+}
+
+/// True when the sampled-image VALUE resolves to a depth image that is ALSO
+/// arrayed (OpTypeImage Depth==word[4]==1 AND Arrayed==word[5]==1), i.e. GLSL
+/// `sampler2DArrayShadow` / `samplerCubeArrayShadow`. The frontend encodes
+/// array-ness via the Arrayed operand (Dim stays 2D/Cube), so wgslType would
+/// emit `texture_depth_2d` / `texture_depth_cube` and the Dref handlers would
+/// emit a comparison call with NO `array_index` argument - WGSL's arrayed
+/// compare builtins require that layer argument, so the result silently drops
+/// the layer (the exact silent-wrong class this fix targets). Until arrayed
+/// support is implemented, callers reject these loudly via
+/// error.UnsupportedImageOperands rather than emit wrong WGSL.
+fn sampledImageIsArrayedDepth(module: *const ParsedModule, sampled_image_value_id: u32) bool {
+    const type_id = getTypeOf(module, sampled_image_value_id) orelse return false;
+    const inst = underlyingImageType(module, type_id) orelse return false;
+    const is_depth = inst.words.len > 4 and inst.words[4] == 1;
+    const is_arrayed = inst.words.len > 5 and inst.words[5] == 1;
+    return is_depth and is_arrayed;
 }
 
 // Strict WGSL keywords + reserved words from https://www.w3.org/TR/WGSL/#reserved-words
@@ -382,8 +417,16 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
             if (is_depth) {
                 if (is_ms) break :blk "texture_depth_multisampled_2d";
                 break :blk switch (dim) {
-                    3 => "texture_depth_cube",
-                    4 => "texture_depth_2d_array",
+                    SPV_DIM_CUBE => "texture_depth_cube",
+                    // KNOWN GAP: arrayed depth (sampler2DArrayShadow /
+                    // samplerCubeArrayShadow) declares the type fine here, but the
+                    // ImageSampleDref* handlers do NOT yet emit the extra
+                    // array_index argument WGSL's arrayed compare builtins require
+                    // (textureSampleCompareLevel(t, s, coord, array_index, dref)),
+                    // so sampling an arrayed shadow texture would produce invalid
+                    // WGSL. Non-arrayed 2D/cube is fully handled + naga-validated;
+                    // arrayed-shadow sampling is a follow-up.
+                    SPV_DIM_2D_ARRAY => "texture_depth_2d_array",
                     else => "texture_depth_2d",
                 };
             } else if (is_storage) {
@@ -3416,6 +3459,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             .ImageSampleDrefImplicitLod => {
+                // Arrayed shadow textures need an array_index arg we don't emit
+                // yet; reject loudly rather than drop the layer (see
+                // sampledImageIsArrayedDepth).
+                if (sampledImageIsArrayedDepth(module, inst.words[3])) return error.UnsupportedImageOperands;
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const coord = names.get(inst.words[4]) orelse "uv";
@@ -3429,6 +3476,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             .ImageSampleDrefExplicitLod => {
+                // Arrayed shadow textures need an array_index arg we don't emit
+                // yet; reject loudly rather than drop the layer (see
+                // sampledImageIsArrayedDepth).
+                if (sampledImageIsArrayedDepth(module, inst.words[3])) return error.UnsupportedImageOperands;
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const coord = names.get(inst.words[4]) orelse "uv";

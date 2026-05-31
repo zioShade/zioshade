@@ -415,3 +415,26 @@ test "wgsl: sampler2DShadow textureLod (ExplicitLod) slices coord + drops lod" {
         return error.TestUnexpectedArgCount;
     }
 }
+
+// Arrayed shadow textures (sampler2DArrayShadow / samplerCubeArrayShadow) are
+// encoded with the SPIR-V Arrayed operand set. WGSL's comparison builtins for
+// arrayed depth textures take a separate array_index argument that the Dref
+// handlers do not yet emit, so emitting a non-arrayed call would silently drop
+// the layer. Until arrayed support exists, the backend must FAIL LOUDLY rather
+// than emit silent-wrong WGSL (mirrors the ConstOffsets gather guard).
+test "wgsl: sampler2DArrayShadow is an honest error, not silent-wrong (arrayed depth)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArrayShadow shadowTex;
+        \\layout(location=0) in vec3 vUVL;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(texture(shadowTex, vec4(vUVL, vRef))); }
+    ;
+    const spirv = try compileToSpirv("shadow_array_guard", source);
+    defer alloc.free(spirv);
+    try std.testing.expectError(
+        error.UnsupportedImageOperands,
+        glslpp.spirvToWGSL(alloc, spirv, .{}),
+    );
+}
