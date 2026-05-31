@@ -350,6 +350,20 @@ fn generateInternal(
 
 }
 
+/// Dedup key for an OpTypeArray in `emitted_array_types`. Folds the effective
+/// block layout so an `element[size]` array gets DISTINCT type ids under
+/// std140 vs std430 — each needs its own ArrayStride (e.g. float[2] → 16 vs 4).
+/// `layout == null` (function-local / non-block arrays carry no ArrayStride)
+/// reproduces the original injective `(base_id << 32) | size` key exactly, so
+/// non-block arrays keep their previous dedup behavior unchanged. Both
+/// `ensureType`'s `.array` branch and `emitArrayStrideRecursive` MUST agree on
+/// this formula, or the stride lookup misses the type it decorated.
+fn arrayCacheKey(base_id: u32, size: u32, layout: ?LayoutKind) u64 {
+    const base = (@as(u64, base_id) << 32) | @as(u64, size);
+    const disc: u64 = if (layout) |k| @as(u64, @intFromEnum(k)) + 1 else 0;
+    return base ^ (disc *% 0x9E3779B97F4A7C15);
+}
+
 const Codegen = struct {
     alloc: std.mem.Allocator,
     module: *const ir.Module,
@@ -363,6 +377,13 @@ const Codegen = struct {
     name_section: std.ArrayList(u32), // OpName/OpMemberName for struct types
     in_functions: bool = false,
     in_interface_block: bool = false, // true when emitting struct members for Block-decorated types
+    // Effective block layout while emitting a Block-decorated struct's member
+    // types. Folded into the array-type dedup key so a float[2] member of an
+    // std140 block (ArrayStride 16) and of an std430 block (ArrayStride 4) get
+    // DISTINCT array types — each carrying its own ArrayStride — instead of
+    // sharing one. null outside a Block (local/function arrays carry no stride
+    // and dedup freely). See ensureType's .array branch + emitArrayStrideRecursive.
+    array_layout_ctx: ?LayoutKind = null,
     next_id: u32,
     emitted_types: std.AutoHashMapUnmanaged(u32, u32), // @intFromEnum(ty) -> type_id
     emitted_array_types: std.AutoHashMapUnmanaged(u64, u32), // hash -> type_id
@@ -2404,6 +2425,51 @@ const Codegen = struct {
                     }
                 }
 
+                // Resolve the block layout BEFORE the member loop so array members
+                // can be created with the right ArrayStride context, and BEFORE the
+                // dedup key so the key can fold it in. This loop only READS
+                // self.module.globals to set the locals needs_block / block_layout /
+                // block_row_major (it mutates no self.* state); the actual decoration
+                // emission stays below, after the struct / OpName / OpMemberName.
+                var needs_block = false;
+                // Layout resolution:
+                //   explicit layout(std430)         -> .std430
+                //   explicit layout(std140)         -> .std140
+                //   no explicit qualifier           -> self.default_layout (.std140 by default,
+                //                                      or .scalar if GL_EXT_scalar_block_layout is enabled)
+                var block_layout: LayoutKind = self.default_layout;
+                var block_row_major = false;
+                for (self.module.globals) |global| {
+                    if (global.storage_class != .uniform and global.storage_class != .storage_buffer) continue;
+                    if (global.ty != .named) continue;
+                    if (!std.mem.eql(u8, global.ty.named, name)) continue;
+                    needs_block = true;
+                    if (global.layout) |l| {
+                        if (l.std430) block_layout = .std430
+                        else if (l.std140) block_layout = .std140;
+                        block_row_major = l.row_major;
+                    }
+                    break;
+                }
+                // Buffer_reference types also need Block decoration
+                if (td.is_buffer_reference) needs_block = true;
+
+                // Make the resolved layout the active array-stride context for the
+                // member loop AND the emitNestedStructLayout call below (the defer
+                // restores it on every exit path, including the dedup cache-hit
+                // early return). Only a DIRECT std140/std430 block sets the context;
+                // everything else — plain structs, buffer_reference blocks, and
+                // NESTED structs reached recursively from a block's member loop —
+                // resets it to null. That deliberately keeps arrays INSIDE a shared
+                // named nested struct unsplit: splitting them would fork the struct
+                // itself into per-layout variants, which the 1:1 struct-name → id
+                // access-chain resolution cannot follow (a separate follow-up). Only
+                // arrays that are DIRECT block members (the std140-vs-std430 stride
+                // collision this fix targets) get distinct per-layout array types.
+                const prev_array_ctx = self.array_layout_ctx;
+                defer self.array_layout_ctx = prev_array_ctx;
+                self.array_layout_ctx = if (needs_block and !td.is_buffer_reference) block_layout else null;
+
                 var member_ids = try std.ArrayList(u32).initCapacity(self.alloc, td.members.len);
                 defer member_ids.deinit(self.alloc);
                 for (td.members) |member| {
@@ -2458,33 +2524,9 @@ const Codegen = struct {
                     }
                     try member_ids.append(self.alloc, try self.ensureType(member_ty));
                 }
-                // Resolve the block layout BEFORE computing the dedup key so the key
-                // can fold it in. This loop only READS self.module.globals to set the
-                // locals needs_block / block_layout / block_row_major (it mutates no
-                // self.* state); the actual decoration emission stays below, after the
-                // struct type / OpName / OpMemberName are emitted.
-                var needs_block = false;
-                // Layout resolution:
-                //   explicit layout(std430)         -> .std430
-                //   explicit layout(std140)         -> .std140
-                //   no explicit qualifier           -> self.default_layout (.std140 by default,
-                //                                      or .scalar if GL_EXT_scalar_block_layout is enabled)
-                var block_layout: LayoutKind = self.default_layout;
-                var block_row_major = false;
-                for (self.module.globals) |global| {
-                    if (global.storage_class != .uniform and global.storage_class != .storage_buffer) continue;
-                    if (global.ty != .named) continue;
-                    if (!std.mem.eql(u8, global.ty.named, name)) continue;
-                    needs_block = true;
-                    if (global.layout) |l| {
-                        if (l.std430) block_layout = .std430
-                        else if (l.std140) block_layout = .std140;
-                        block_row_major = l.row_major;
-                    }
-                    break;
-                }
-                // Buffer_reference types also need Block decoration
-                if (td.is_buffer_reference) needs_block = true;
+                // needs_block / block_layout / block_row_major were resolved above,
+                // before the member loop, so the array members got the right stride
+                // context.
 
                 // Check if a struct with the same member layout was already emitted.
                 // The key folds in member NAMES as well as member types (two blocks
@@ -2498,10 +2540,14 @@ const Codegen = struct {
                 // MatrixStride OpMemberDecorate, so the structs must not share an id.
                 // block_layout (std140/std430/scalar) is folded too for completeness —
                 // it separates structs whose member-level Offset decorations differ by
-                // layout. NOTE: this does NOT fully separate two blocks differing only
-                // in std140-vs-std430 ARRAY stride: ArrayStride lives on the array TYPE
-                // (deduped independently in emitted_array_types), not on the struct, so
-                // that case still merges — tracked as a separate follow-up.
+                // layout. Two blocks differing ONLY in std140-vs-std430 ARRAY stride
+                // are now separated as well: array types fold the block layout into
+                // their identity (see array_layout_ctx / arrayCacheKey), so the blocks
+                // reference different array type ids → different member_ids → different
+                // key. (Still open, separate follow-up: a NAMED nested struct shared by
+                // an std140 and an std430 block keeps a single shared type — its arrays
+                // are deliberately left unsplit so the struct stays resolvable, so one
+                // of the two layouts gets silently-wrong member offsets.)
                 var layout_key: u64 = @as(u64, member_ids.items.len);
                 for (member_ids.items) |mid| {
                     layout_key = layout_key *% 33 +% @as(u64, mid);
@@ -2512,6 +2558,14 @@ const Codegen = struct {
                 }
                 layout_key = layout_key *% 33 +% @as(u64, @intFromEnum(block_layout));
                 layout_key = layout_key *% 33 +% @as(u64, @intFromBool(block_row_major));
+                // Fold needs_block too: a plain struct and a uniform/storage BLOCK
+                // with byte-identical members + names + default layout otherwise
+                // share a key and merge, but only the block carries Block + Offset
+                // decorations. Merging would leave the uniform variable pointing at
+                // a non-Block struct (invalid for Vulkan) or stamp Block/Offset onto
+                // a plain struct. This only ADDS discrimination — truly-identical
+                // types share needs_block so still merge.
+                layout_key = layout_key *% 33 +% @as(u64, @intFromBool(needs_block));
                 if (self.emitted_struct_layouts.get(layout_key)) |cached_id| {
                     // Reuse existing struct type — update name mapping too
                     if (self.in_interface_block) {
@@ -2579,7 +2633,11 @@ const Codegen = struct {
                     break :blk ptr_id;
                 } else try self.ensureType(arr.base.*);
 
-                const cache_key = (@as(u64, base_id) << 32) | @as(u64, arr.size);
+                // Fold the active block layout into the key so a `T[N]` member of
+                // an std140 block and of an std430 block become DISTINCT array
+                // types — each gets its own ArrayStride. Outside a Block the
+                // context is null and this reduces to the original (base, size) key.
+                const cache_key = arrayCacheKey(base_id, arr.size, self.array_layout_ctx);
                 if (self.emitted_array_types.get(cache_key)) |cached_id| {
                     return cached_id;
                 }
@@ -3415,6 +3473,12 @@ const Codegen = struct {
                     const elem_td = self.module.types.get(effective_ty.named) orelse continue;
                     const elem_type_id = self.emitted_interface_named_types.get(effective_ty.named) orelse
                         self.emitted_named_types.get(effective_ty.named) orelse continue;
+                    // Inside a nested struct the array-split context is null (its
+                    // arrays were created unsplit), so its array-stride lookups must
+                    // use the same null key.
+                    const saved_ctx = self.array_layout_ctx;
+                    self.array_layout_ctx = null;
+                    defer self.array_layout_ctx = saved_ctx;
                     try self.emitNestedStructLayoutInner(elem_type_id, elem_td.members, kind, member_is_row_major);
                 }
             }
@@ -3423,6 +3487,10 @@ const Codegen = struct {
                 const nested_td = self.module.types.get(member.ty.named) orelse continue;
                 const nested_type_id = self.emitted_interface_named_types.get(member.ty.named) orelse
                     self.emitted_named_types.get(member.ty.named) orelse continue;
+                // Nested struct → array-split context is null (see above).
+                const saved_ctx = self.array_layout_ctx;
+                self.array_layout_ctx = null;
+                defer self.array_layout_ctx = saved_ctx;
                 try self.emitNestedStructLayoutInner(nested_type_id, nested_td.members, kind, member_is_row_major);
             }
         }
@@ -3455,7 +3523,18 @@ const Codegen = struct {
             break :blk self.emitted_ptr_types.get(ptr_key) orelse struct_id;
         } else try self.ensureType(arr.base.*);
 
-        const cache_key = (@as(u64, base_type_id) << 32) | @as(u64, arr.size);
+        // Must match ensureType's `.array` key, which folds self.array_layout_ctx.
+        // The layout pass keeps that context in sync with creation time (block
+        // layout for direct members, null while recursing through a nested struct),
+        // so the keys line up and we decorate the right array type id. `kind` still
+        // drives the stride VALUE — so the different nesting levels of a single
+        // block each get their own correct stride. NOTE this does NOT make a shared
+        // nested struct's array correct across layouts: when the SAME named struct
+        // is a member of both an std140 and an std430 block, its array type is
+        // shared (unsplit) and the emitted_array_stride guard below keeps only the
+        // first layout's stride — the documented cross-layout nested-struct
+        // follow-up, not a per-level bug.
+        const cache_key = arrayCacheKey(base_type_id, arr.size, self.array_layout_ctx);
         if (self.emitted_array_types.get(cache_key)) |array_type_id| {
             if (!self.emitted_array_stride.contains(array_type_id)) {
                 const stride = self.layoutArrayStride(ty, kind);
