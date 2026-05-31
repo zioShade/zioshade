@@ -13962,3 +13962,234 @@ test "HLSL: byte-identical UBO blocks keep distinct member names" {
     try assertNotContains(hlsl, "b_ca");
 }
 
+// ---------------------------------------------------------------------------
+// T597: row_major / column_major UBO matrix layout (silent-wrong fix)
+//
+// glslpp ignored the SPIR-V RowMajor decoration entirely, emitting
+// byte-identical HLSL for a row_major vs column_major UBO matrix block. Two
+// distinct, independently-verified bugs hide behind that:
+//
+//   (1) The RowMajor decoration was never consumed, so a row_major block and a
+//       column_major block produced the SAME `float4x4 a_m` declaration. glslpp
+//       stores a cbuffer matrix as the LOGICAL matrix M (its `mul(M, v)` order
+//       proves it — verified by a dxc → spirv-cross round-trip of the
+//       column_major output, which is exactly `M*v`). A row_major block's std140
+//       bytes are the row-major layout of M, so reading them with HLSL's default
+//       (column_major) packing yields Mᵀ — silent-wrong. The fix is the HLSL
+//       `row_major` storage qualifier on the member so HLSL reconstructs M.
+//       NOTE: this is the OPPOSITE of spirv-cross's text (it emits `column_major`
+//       for RowMajor) because spirv-cross stores Mᵀ and multiplies on the left
+//       (`mul(v, M)`); glslpp's convention is the transpose of spirv-cross's, so
+//       it needs the opposite keyword. Round-trip-proven, not copied.
+//
+//   (2) A matrix-COLUMN read `a.m[i]` was emitted as HLSL `a_m[i]`, but HLSL
+//       `m[i]` is a ROW while GLSL/SPIR-V `m[i]` is a COLUMN. With a_m == M, the
+//       read must transpose: `transpose(a_m)[i]`. This was wrong for BOTH
+//       layouts (confirmed by round-trip: column_major `a.m[0]` read row 0).
+//       Local matrices are unaffected — glslpp builds them with HLSL's
+//       row-filling constructor, so the double transpose cancels.
+// ---------------------------------------------------------------------------
+
+const RM_ROW_SRC: [:0]const u8 =
+    \\#version 450
+    \\layout(binding=0,std140,row_major) uniform A { mat4 m; } a;
+    \\layout(location=0) out vec4 o;
+    \\void main() { o = a.m[0]; }
+;
+const RM_COL_SRC: [:0]const u8 =
+    \\#version 450
+    \\layout(binding=0,std140,column_major) uniform A { mat4 m; } a;
+    \\layout(location=0) out vec4 o;
+    \\void main() { o = a.m[0]; }
+;
+
+test "T597.1: row_major UBO mat4 carries the row_major qualifier; column_major stays bare; outputs differ" {
+    const row = try compileToHlsl(RM_ROW_SRC);
+    defer alloc.free(row);
+    const col = try compileToHlsl(RM_COL_SRC);
+    defer alloc.free(col);
+
+    // Core bug: the two blocks differ ONLY in layout qualifier and must NOT
+    // produce byte-identical HLSL (the RowMajor decoration must be consumed).
+    if (std.mem.eql(u8, row, col)) {
+        std.debug.print("row_major and column_major HLSL are byte-identical (silent-wrong):\n{s}\n", .{row});
+        return error.TestUnexpectedFind;
+    }
+    // RowMajor → HLSL `row_major` storage qualifier (reconstructs the logical M
+    // given glslpp's mul(M,v) convention; opposite of spirv-cross's text).
+    try assertContains(row, "row_major");
+    // ColMajor stays bare (HLSL default is column_major) — no regression.
+    try assertNotContains(col, "row_major");
+}
+
+test "T597.2: UBO matrix-column read is transposed (HLSL row-index != GLSL column) for both layouts" {
+    // The column_major case proves the read fix is independent of the qualifier:
+    // a_m == M, but HLSL `a_m[0]` is row 0 where GLSL wanted column 0, so the
+    // read must transpose. Assert the EXACT form (not just a stray `transpose`)
+    // so a transpose wrapping the wrong subexpression would still fail.
+    const col = try compileToHlsl(RM_COL_SRC);
+    defer alloc.free(col);
+    try assertContains(col, "transpose(a_m)[0]");
+
+    const row = try compileToHlsl(RM_ROW_SRC);
+    defer alloc.free(row);
+    try assertContains(row, "transpose(a_m)[0]");
+}
+
+test "T597.3: non-square row_major UBO matrix is an honest error (not silent-wrong)" {
+    // A row_major NON-square matrix (mat3x4) needs swapped HLSL dimensions and a
+    // layout we don't yet implement; fail loudly instead of emitting a
+    // column-major-shaped member with untransposed access (silent-wrong).
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat3x4 m; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[0]; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(
+        error.UnsupportedRowMajorMatrix,
+        glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }),
+    );
+}
+
+test "T597.4: local matrix column read is NOT transposed (regression guard)" {
+    // glslpp builds a local matrix with HLSL's row-filling constructor, so the
+    // value is Mᵀ and HLSL row-indexing already yields the GLSL column — no
+    // transpose needed. The UBO read fix must NOT touch local-matrix reads.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec4 v;
+        \\layout(location=0) out vec4 o;
+        \\void main() { mat4 L = mat4(v, v*2.0, v*3.0, v*4.0); o = L[1]; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertNotContains(hlsl, "transpose");
+}
+
+test "T597.5: array-of-matrix column read in a UBO is transposed (both layouts)" {
+    // An array-of-matrix member `mat4 m[4]` reaches the matrix via an array
+    // index, so the matrix is NOT a direct struct member. The column read
+    // a.m[2][0] still needs `transpose(a_m[2])[0]` — and once the row_major
+    // qualifier makes a_m[i] == M, an un-transposed `a_m[2][0]` reads ROW 0
+    // (silent-wrong). Verifies the matrix-column detector handles arrays.
+    const row_src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat4 m[4]; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[2][0]; }
+    ;
+    const col_src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,column_major) uniform A { mat4 m[4]; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[2][0]; }
+    ;
+    const row = try compileToHlsl(row_src);
+    defer alloc.free(row);
+    const col = try compileToHlsl(col_src);
+    defer alloc.free(col);
+    try assertContains(row, "transpose(a_m[2])[0]");
+    try assertContains(col, "transpose(a_m[2])[0]");
+}
+
+test "T597.6: whole array-element matrix load (for mul) is NOT transposed" {
+    // `a.m[2] * v` loads the whole matrix from the array element — no column
+    // index — so it feeds `mul(M, v)` with a_m[2] == M and must NOT transpose.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat4 m[4]; } a;
+        \\layout(location=0) in vec4 v;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[2] * v; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertNotContains(hlsl, "transpose");
+    try assertContains(hlsl, "row_major");
+    try assertContains(hlsl, "mul(");
+}
+
+test "T597.7: nested-struct row_major matrix is NOT transposed (regression guard)" {
+    // A matrix inside a NESTED struct member never receives the `row_major`
+    // storage qualifier (only top-level block members do), so for a row_major
+    // block it is stored as Mᵀ and reads correctly WITHOUT transpose. The
+    // transpose detector must NOT descend into nested structs — doing so
+    // double-flips and is silent-wrong (it was a regression caught in review).
+    // Round-trip-verified: `a_s.m[0]` reads logical column 0, matching the
+    // spirv-cross oracle.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\struct S { mat4 m; };
+        \\layout(binding=0,std140,row_major) uniform A { S s; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.s.m[0]; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertNotContains(hlsl, "transpose");
+    try assertContains(hlsl, "a_s.m[0]");
+}
+
+test "T597.8: row_major mat3 carries the qualifier and transposes the column read" {
+    // Square non-mat4 matrices follow the same path with a different std140
+    // stride — guard mat3 explicitly.
+    const row_src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat3 m; } a;
+        \\layout(location=0) out vec3 o;
+        \\void main() { o = a.m[0]; }
+    ;
+    const col_src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,column_major) uniform A { mat3 m; } a;
+        \\layout(location=0) out vec3 o;
+        \\void main() { o = a.m[0]; }
+    ;
+    const row = try compileToHlsl(row_src);
+    defer alloc.free(row);
+    const col = try compileToHlsl(col_src);
+    defer alloc.free(col);
+    try assertContains(row, "row_major float3x3");
+    try assertNotContains(col, "row_major");
+    try assertContains(row, "transpose(a_m)[0]");
+    try assertContains(col, "transpose(a_m)[0]");
+}
+
+test "T597.9: row_major matrix * vector keeps the qualifier and is NOT transposed (mul path)" {
+    // The whole-matrix load feeding mul(M, v) must stay untransposed (a_m == M
+    // via the qualifier); only column reads transpose. Direct-member counterpart
+    // to T597.6.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat4 m; } a;
+        \\layout(location=0) in vec4 v;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m * v; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "row_major float4x4");
+    try assertContains(hlsl, "mul(");
+    try assertNotContains(hlsl, "transpose");
+}
+
+test "T597.10: dynamic column index into a row_major UBO matrix is transposed" {
+    // The column index need not be constant; `a.m[i]` with a runtime i must
+    // still emit `transpose(a_m)[i]` (exercises the non-constant tail branch).
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat4 m; } a;
+        \\layout(binding=1,std140) uniform B { int idx; } b;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[b.idx]; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // The matrix sub-expression is transposed and indexed by a non-literal.
+    try assertContains(hlsl, "transpose(a_m)[");
+    try assertNotContains(hlsl, "transpose(a_m)[0]");
+}
+

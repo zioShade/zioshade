@@ -1235,17 +1235,47 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
 
         // Check for array
         const mt_inst = getDef(module, member_type_id);
+
+        // A row_major matrix member's std140 bytes are the row-major layout of
+        // the logical matrix M. glslpp stores a cbuffer matrix as M (its
+        // mul(M,v) convention requires it), so HLSL must read these bytes with
+        // the `row_major` storage qualifier to reconstruct M. ColMajor stays
+        // bare (HLSL's default is column_major). This is the OPPOSITE keyword to
+        // spirv-cross, whose convention is the transpose of glslpp's. Reject
+        // non-square row_major (needs swapped dims we don't yet emit) — honest
+        // error over silent-wrong. The matrix type id is the member type itself
+        // or, for an array-of-matrix member, the element type.
+        const matrix_tid: ?u32 = blk: {
+            if (mt_inst) |mi| {
+                if (mi.op == .TypeMatrix) break :blk member_type_id;
+                if (mi.op == .TypeArray and mi.words.len > 3) {
+                    const et = getDef(module, mi.words[2]);
+                    if (et != null and et.?.op == .TypeMatrix) break :blk mi.words[2];
+                }
+            }
+            break :blk null;
+        };
+        const row_major_qual: []const u8 = blk: {
+            if (matrix_tid) |mtid| {
+                if (memberIsRowMajor(module, struct_type_id, @intCast(member_idx))) {
+                    if (matrixIsNonSquare(module, mtid)) return error.UnsupportedRowMajorMatrix;
+                    break :blk "row_major ";
+                }
+            }
+            break :blk "";
+        };
+
         if (mt_inst) |mi| {
             if (mi.op == .TypeArray and mi.words.len > 3) {
                 const elem_type = try hlslType(module, mi.words[2], names, alloc);
                 const len_id = mi.words[3];
                 const len_inst = getDef(module, len_id);
                 const len_val: u32 = if (len_inst) |li| li.words[3] else 1;
-                try w.print("    {s} {s}_{s}[{d}];\n", .{ elem_type, cbuffer_name, mname, len_val });
+                try w.print("    {s}{s} {s}_{s}[{d}];\n", .{ row_major_qual, elem_type, cbuffer_name, mname, len_val });
                 continue;
             }
         }
-        try w.print("    {s} {s}_{s};\n", .{ member_type, cbuffer_name, mname });
+        try w.print("    {s}{s} {s}_{s};\n", .{ row_major_qual, member_type, cbuffer_name, mname });
     }
 }
 
@@ -4096,9 +4126,164 @@ fn parseMeshRoute(name: []const u8) ?struct { base: []const u8, member: ?[]const
     return .{ .base = rest, .member = null };
 }
 
+/// True if struct member `member_index` of `struct_id` carries the SPIR-V
+/// RowMajor decoration (4). The default (ColMajor=5, or no decoration) is
+/// false. A row-major matrix is stored as the row-major byte layout of the
+/// logical matrix M; see `emitStructMembers` (storage qualifier) and
+/// `findUniformMatrixColumnAccess` (transposed read).
+fn memberIsRowMajor(module: *const ParsedModule, struct_id: u32, member_index: u32) bool {
+    for (module.instructions) |inst| {
+        if (inst.op == .MemberDecorate and inst.words.len >= 4 and
+            inst.words[1] == struct_id and inst.words[2] == member_index)
+        {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[3]);
+            if (dec == .row_major) return true;
+        }
+    }
+    return false;
+}
+
+/// True if `type_id` is a NON-square matrix (column count != row count). A
+/// row-major non-square matrix needs swapped HLSL dimensions and a layout we
+/// don't yet implement; the declaration emitter rejects it with an honest error
+/// instead of emitting a column-major-shaped member (silent-wrong).
+fn matrixIsNonSquare(module: *const ParsedModule, type_id: u32) bool {
+    const mt = getDef(module, type_id) orelse return false;
+    if (mt.op != .TypeMatrix) return false;
+    const colvec = getDef(module, mt.words[2]) orelse return false;
+    if (colvec.op != .TypeVector) return false;
+    return mt.words[3] != colvec.words[3]; // cols != rows
+}
+
+/// True for a Uniform-storage (cbuffer/UBO) block variable — excludes SSBOs,
+/// whose access is rewritten through the `__ssbo_buf__` sentinel and a separate
+/// RWStructuredBuffer code path. Used to scope the cbuffer matrix-column
+/// transpose fix to genuine UBO matrices.
+fn isUniformBlockVar(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32) bool {
+    if (std.mem.startsWith(u8, names.get(id) orelse "", "__ssbo_buf__")) return false;
+    const inst = getDef(module, id) orelse return false;
+    if (inst.op == .Variable and inst.words.len >= 4) {
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        return sc == .Uniform;
+    }
+    return false;
+}
+
+const UniformMatrixAccess = struct { boundary: usize, matrix_tid: u32 };
+
+/// If `indices` (rooted at a Uniform/cbuffer variable `base_id`) selects a
+/// COLUMN (or deeper) out of a matrix, return where the matrix selection ends
+/// (`boundary`: `indices[0..boundary+1]` produces the matrix; `indices[boundary+1..]`
+/// is the column/element tail). glslpp stores a cbuffer matrix as the logical
+/// matrix M (its `mul(M, v)` operand order requires it, dxc->spirv-cross
+/// round-trip proven), but HLSL `m[i]` returns ROW i while GLSL/SPIR-V `m[i]` is
+/// COLUMN i — so a column read must be emitted as `transpose(M)[i]`. The matrix
+/// may be the top-level block member OR an array element of it (`a.mats[k][i]`).
+///
+/// CRITICAL scope: only the TOP-LEVEL block member (selected by `indices[0]`)
+/// receives the `row_major` storage qualifier in `emitStructMembers`, so only
+/// its matrices are stored as the logical M (where transpose is correct). A
+/// matrix inside a NESTED struct (`a.s.m`) is emitted bare, so for a row_major
+/// block it is stored as Mᵀ and reads correctly WITHOUT transpose — transposing
+/// it would be silent-wrong. We therefore refuse to descend into a nested struct
+/// (a TypeStruct at index position > 0). Nested-struct matrices are a documented
+/// limitation (their column_major reads remain a pre-existing, separate gap).
+///
+/// Returns null for a whole-matrix load (no index INTO the matrix) — that feeds
+/// `mul` and must stay untransposed — and for non-square matrices (row_major
+/// non-square is rejected at declaration; non-square column_major is a separate
+/// pre-existing gap).
+fn findUniformMatrixColumnAccess(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32) ?UniformMatrixAccess {
+    if (!isUniformBlockVar(module, names, base_id)) return null;
+    var cur_type: ?u32 = resolvePointeeType(module, base_id);
+    for (indices, 0..) |index_id, i| {
+        const tid = cur_type orelse return null;
+        const ti = getDef(module, tid) orelse return null;
+        // `cur_type` is what `indices[i]` indexes. If it is a matrix, then
+        // `indices[i]` selects a COLUMN and `indices[0..i]` produced the matrix.
+        if (ti.op == .TypeMatrix) {
+            if (i == 0) return null; // matrix must be reached via a block member
+            if (matrixIsNonSquare(module, tid)) return null;
+            return .{ .boundary = i - 1, .matrix_tid = tid };
+        }
+        if (ti.op == .TypeStruct) {
+            // Only the top-level block struct is qualifier-eligible; bail on any
+            // nested struct (see the doc-comment above — transposing a bare
+            // nested row_major matrix would be silent-wrong).
+            if (i != 0) return null;
+            const def = getDef(module, index_id) orelse return null;
+            if (def.op != .Constant or def.words.len <= 3) return null;
+            const val = def.words[3];
+            if (val + 2 >= ti.words.len) return null;
+            cur_type = ti.words[val + 2];
+        } else if (ti.op == .TypeArray) {
+            cur_type = ti.words[2];
+        } else {
+            return null;
+        }
+    }
+    return null;
+}
+
+/// Emit the access-chain indices that come AFTER a transposed cbuffer matrix: a
+/// matrix-column index becomes `[col]` on the transposed value, and a
+/// vector-element index becomes a `.xyzw` swizzle.
+fn writeMatrixTail(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), matrix_tid: u32, indices: []const u32, w: anytype) !void {
+    var cur_type: ?u32 = matrix_tid;
+    for (indices) |index_id| {
+        const def = getDef(module, index_id);
+        const ti = if (cur_type) |t| getDef(module, t) else null;
+        if (def != null and def.?.op == .Constant and def.?.words.len > 3) {
+            const val = def.?.words[3];
+            if (ti != null and ti.?.op == .TypeVector) {
+                try w.writeAll(switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
+                cur_type = ti.?.words[2];
+            } else {
+                try w.print("[{d}]", .{val});
+                cur_type = if (ti != null and (ti.?.op == .TypeMatrix or ti.?.op == .TypeArray)) ti.?.words[2] else null;
+            }
+        } else {
+            try w.print("[{s}]", .{names.get(index_id) orelse "i"});
+            cur_type = if (ti != null and (ti.?.op == .TypeMatrix or ti.?.op == .TypeArray)) ti.?.words[2] else null;
+        }
+    }
+}
+
+/// String-building variant of `writeMatrixTail` for `buildAccessExpr`.
+fn appendMatrixTail(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), matrix_tid: u32, indices: []const u32, buf: *std.ArrayList(u8), alloc: std.mem.Allocator) !void {
+    var cur_type: ?u32 = matrix_tid;
+    for (indices) |index_id| {
+        const def = getDef(module, index_id);
+        const ti = if (cur_type) |t| getDef(module, t) else null;
+        if (def != null and def.?.op == .Constant and def.?.words.len > 3) {
+            const val = def.?.words[3];
+            if (ti != null and ti.?.op == .TypeVector) {
+                try buf.appendSlice(alloc, switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
+                cur_type = ti.?.words[2];
+            } else {
+                try buf.print(alloc, "[{d}]", .{val});
+                cur_type = if (ti != null and (ti.?.op == .TypeMatrix or ti.?.op == .TypeArray)) ti.?.words[2] else null;
+            }
+        } else {
+            try buf.print(alloc, "[{s}]", .{names.get(index_id) orelse "i"});
+            cur_type = if (ti != null and (ti.?.op == .TypeMatrix or ti.?.op == .TypeArray)) ti.?.words[2] else null;
+        }
+    }
+}
+
 fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
     const base_name_raw = names.get(base_id) orelse "base";
     if (indices.len == 0) { try w.writeAll(base_name_raw); return; }
+
+    // A cbuffer matrix is stored as the logical matrix M, but HLSL `m[i]`
+    // selects a ROW where GLSL/SPIR-V selects a COLUMN — transpose the read.
+    if (findUniformMatrixColumnAccess(module, names, base_id, indices)) |hit| {
+        try w.writeAll("transpose(");
+        try writeAccessExpr(module, names, base_id, indices[0 .. hit.boundary + 1], w);
+        try w.writeAll(")");
+        try writeMatrixTail(module, names, hit.matrix_tid, indices[hit.boundary + 1 ..], w);
+        return;
+    }
     // Mesh-output routing (set by spirvToHLSL): rewrite `<base>[idx]` →
     // `verts[idx].<member>` / `prims[idx]` / `prims_data[idx].<member>`.
     if (parseMeshRoute(base_name_raw)) |route| {
@@ -4305,6 +4490,20 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     const base_name_raw = names.get(base_id) orelse "base";
 
     if (indices.len == 0) return try alloc.dupe(u8, base_name_raw);
+
+    // Transpose cbuffer matrix-column reads (see writeAccessExpr / the
+    // findUniformMatrixColumnAccess doc-comment for why).
+    if (findUniformMatrixColumnAccess(module, names, base_id, indices)) |hit| {
+        var tbuf = std.ArrayList(u8).initCapacity(alloc, 64) catch return error.OutOfMemory;
+        defer tbuf.deinit(alloc);
+        try tbuf.appendSlice(alloc, "transpose(");
+        const inner = try buildAccessExpr(module, names, base_id, indices[0 .. hit.boundary + 1], alloc);
+        defer alloc.free(inner);
+        try tbuf.appendSlice(alloc, inner);
+        try tbuf.appendSlice(alloc, ")");
+        try appendMatrixTail(module, names, hit.matrix_tid, indices[hit.boundary + 1 ..], &tbuf, alloc);
+        return tbuf.toOwnedSlice(alloc);
+    }
 
     // Mesh-output routing (set by spirvToHLSL): rewrite `<base>[idx]` →
     // `verts[idx].<member>` / `prims[idx]` / `prims_data[idx].<member>`.

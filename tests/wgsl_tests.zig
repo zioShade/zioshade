@@ -89,6 +89,14 @@ fn nagaValidateOrSkip(wgsl: []const u8, label: []const u8) !void {
     return error.NagaValidationFailed;
 }
 
+/// Compile GLSL → SPIR-V → WGSL via glslpp's own frontend (mirrors the MSL/HLSL
+/// test helpers). Caller frees the result.
+fn compileToWgsl(source: [:0]const u8) ![]const u8 {
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    return try glslpp.spirvToWGSL(alloc, spirv, .{});
+}
+
 fn runWgslTest(test_case: ShaderTest) !void {
     const spirv = compileToSpirv(test_case.name, test_case.source) catch |err| {
         std.debug.print("FAIL [{s}]: glslang failed: {}\n", .{ test_case.name, err });
@@ -455,4 +463,122 @@ test "WGSL: unmapped ext-inst error names the GLSL.std.450 instruction" {
     const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "InterpolateAtCentroid") != null);
     try std.testing.expect(std.mem.indexOf(u8, detail, "76") != null);
+}
+
+// ---------------------------------------------------------------------------
+// row_major / column_major UBO matrix layout (silent-wrong fix)
+//
+// WGSL has no row_major language feature — matrices are always column-major and
+// `m[i]` returns COLUMN i (like GLSL/MSL). So the column_major case is already
+// correct, but glslpp emitted byte-identical WGSL for a row_major block: a
+// row_major matrix's std140 bytes are the row-major layout of M, which WGSL
+// reads (column-major) as Mᵀ — silent-wrong. The fix mirrors the MSL backend:
+// wrap reads of a row_major matrix in `transpose(...)` so the stored Mᵀ is read
+// back as the logical M. Non-square row_major needs swapped declared dimensions
+// (not yet implemented) → honest error, never silent-wrong.
+// ---------------------------------------------------------------------------
+
+const WRM_ROW_SRC: [:0]const u8 =
+    \\#version 450
+    \\layout(binding=0,std140,row_major) uniform A { mat4 m; } a;
+    \\layout(location=0) out vec4 o;
+    \\void main() { o = a.m[0]; }
+;
+const WRM_COL_SRC: [:0]const u8 =
+    \\#version 450
+    \\layout(binding=0,std140,column_major) uniform A { mat4 m; } a;
+    \\layout(location=0) out vec4 o;
+    \\void main() { o = a.m[0]; }
+;
+
+test "wgsl: row_major UBO matrix read is transposed; column_major is not; outputs differ" {
+    const row = try compileToWgsl(WRM_ROW_SRC);
+    defer alloc.free(row);
+    const col = try compileToWgsl(WRM_COL_SRC);
+    defer alloc.free(col);
+
+    // Core bug: blocks differing only in layout qualifier must NOT be identical.
+    if (std.mem.eql(u8, row, col)) {
+        std.debug.print("row_major and column_major WGSL are byte-identical (silent-wrong):\n{s}\n", .{row});
+        return error.TestUnexpectedFind;
+    }
+    // row_major is stored transposed → the read must transpose() it back.
+    // Exact form (not a stray `transpose`) so a mis-wrapped transpose still fails.
+    try assertContains(row, "transpose(a.m)[0]");
+    // column_major is already correct in WGSL (column-indexed) → no transpose.
+    try assertNotContains(col, "transpose");
+    // Ground truth: the transposed output must actually validate.
+    try nagaValidateOrSkip(row, "row_major mat4 read");
+    try nagaValidateOrSkip(col, "column_major mat4 read");
+}
+
+test "wgsl: array-of-row_major matrix reads are transposed; column_major arrays are not" {
+    // `mat4 m[4]` reaches the matrix via an array index. A row_major array
+    // element is still stored transposed in WGSL, so both a whole-element load
+    // (a.m[2], for mul) and a column read (a.m[2][0]) must transpose. The
+    // column_major array stays untransposed (already correct, column-indexed).
+    const row_src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat4 m[4]; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[2][0]; }
+    ;
+    const col_src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,column_major) uniform A { mat4 m[4]; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[2][0]; }
+    ;
+    const row = try compileToWgsl(row_src);
+    defer alloc.free(row);
+    const col = try compileToWgsl(col_src);
+    defer alloc.free(col);
+    try assertContains(row, "transpose(a.m[2])[0]");
+    try assertNotContains(col, "transpose");
+    try nagaValidateOrSkip(row, "row_major mat4[4] read");
+    try nagaValidateOrSkip(col, "column_major mat4[4] read");
+}
+
+test "wgsl: whole row_major matrix load feeding mul IS transposed (no row_major keyword in WGSL)" {
+    // Unlike HLSL, WGSL has no row_major storage keyword — a row_major matrix is
+    // always stored as Mᵀ, so even a whole-matrix load feeding a multiply must
+    // transpose (transpose(a.m) * v). The array test's comment promises this
+    // case; verify it directly. column_major stays untransposed.
+    const row_src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat4 m; } a;
+        \\layout(location=0) in vec4 v;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m * v; }
+    ;
+    const col_src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,column_major) uniform A { mat4 m; } a;
+        \\layout(location=0) in vec4 v;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m * v; }
+    ;
+    const row = try compileToWgsl(row_src);
+    defer alloc.free(row);
+    const col = try compileToWgsl(col_src);
+    defer alloc.free(col);
+    try assertContains(row, "transpose(a.m)");
+    try assertNotContains(col, "transpose");
+    try nagaValidateOrSkip(row, "row_major mat4 mul");
+    try nagaValidateOrSkip(col, "column_major mat4 mul");
+}
+
+test "wgsl: non-square row_major UBO matrix is an honest error (not silent-wrong)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat3x4 m; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m[0]; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(
+        error.UnsupportedRowMajorMatrix,
+        glslpp.spirvToWGSL(alloc, spirv, .{}),
+    );
 }
