@@ -34,6 +34,7 @@ layout(binding = 1, std140) uniform Globals
 layout(binding = 0) uniform sampler2D iChannel0;
 
 
+
 void mainImage(out vec4 v27, vec2 v28)
 {
     vec3 v29;
@@ -86,8 +87,11 @@ void mainImage(out vec4 v27, vec2 v28)
     v29 = v71;
     }
     vec3 v72 = v29;
-    vec4 v73 = vec4(v72, 1.0);
-    v27 = v73;
+    float v73 = v72.x;
+    float v74 = v72.y;
+    float v75 = v72.z;
+    vec4 v76 = vec4(v73, v74, v75, 1.0);
+    v27 = v76;
     return;
 }
 layout(location = 0) out vec4 _fragColor;

@@ -2,53 +2,54 @@
 
 cbuffer Globals : register(b0)
 {
-    float3 Globals_m0;
-    float Globals_m1;
-    float Globals_m2;
-    float Globals_m3;
-    int Globals_m4;
-    float Globals_m5[4];
-    float3 Globals_m6[4];
-    float4 Globals_m7;
-    float4 Globals_m8;
-    float Globals_m9;
-    float4 Globals_m10;
-    float4 Globals_m11;
-    float4 Globals_m12;
-    float4 Globals_m13;
-    int Globals_m14;
-    int Globals_m15;
-    int Globals_m16;
-    float Globals_m17;
-    float Globals_m18;
-    int Globals_m19;
-    float3 Globals_m20[256];
-    float3 Globals_m21;
-    float3 Globals_m22;
-    float3 Globals_m23;
-    float3 Globals_m24;
-    float3 Globals_m25;
-    float3 Globals_m26;
+    float3 Globals_iResolution;
+    float Globals_iTime;
+    float Globals_iTimeDelta;
+    float Globals_iFrameRate;
+    int Globals_iFrame;
+    float Globals_iChannelTime[4];
+    float3 Globals_iChannelResolution[4];
+    float4 Globals_iMouse;
+    float4 Globals_iDate;
+    float Globals_iSampleRate;
+    float4 Globals_iCurrentCursor;
+    float4 Globals_iPreviousCursor;
+    float4 Globals_iCurrentCursorColor;
+    float4 Globals_iPreviousCursorColor;
+    int Globals_iCurrentCursorStyle;
+    int Globals_iPreviousCursorStyle;
+    int Globals_iCursorVisible;
+    float Globals_iTimeCursorChange;
+    float Globals_iTimeFocus;
+    int Globals_iFocus;
+    float3 Globals_iPalette[256];
+    float3 Globals_iBackgroundColor;
+    float3 Globals_iForegroundColor;
+    float3 Globals_iCursorColor;
+    float3 Globals_iCursorText;
+    float3 Globals_iSelectionForegroundColor;
+    float3 Globals_iSelectionBackgroundColor;
 };
 
-Texture2D iChannel0 : register(t0);
+Texture2D<float4> iChannel0 : register(t0);
 SamplerState iChannel0_sampler : register(s0);
+
 
 
 void mainImage(out float4 v27, float2 v28)
 {
     float3 v29;
-    float3 v31 = Globals_m0;
+    float3 v31 = Globals_iResolution;
     float2 v32 = float2(v31.x, v31.y);
     float2 v33 = v28 / v32;
     float4 v35 = iChannel0.Sample(iChannel0_sampler, v33);
     float3 v36 = float3(v35.x, v35.y, v35.z);
-    int v38 = Globals_m19;
+    int v38 = Globals_iFocus;
     bool v39 = v38 > 0;
     v29 = v36;
     if (v39) {
-    float v41 = Globals_m1;
-    float v43 = Globals_m18;
+    float v41 = Globals_iTime;
+    float v43 = Globals_iTimeFocus;
     float v44 = v41 - v43;
     float v45 = v44 / 3.0;
     float v46 = 1.0 - v45;
@@ -85,8 +86,11 @@ void mainImage(out float4 v27, float2 v28)
     v29 = v71;
     }
     float3 v72 = v29;
-    float4 v73 = float4(v72, 1.0);
-    v27 = v73;
+    float v73 = v72.x;
+    float v74 = v72.y;
+    float v75 = v72.z;
+    float4 v76 = float4(v73, v74, v75, 1.0);
+    v27 = v76;
     return;
 }
 float4 main(float4 gl_FragCoord : SV_Position) : SV_Target

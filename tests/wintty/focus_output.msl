@@ -5,33 +5,33 @@ using namespace metal;
 
 struct Globals
 {
-    packed_float3 _m0;
-    float _m1;
-    float _m2;
-    float _m3;
-    int _m4;
-    float4 _m5[4];
-    float3 _m6[4];
-    float4 _m7;
-    float4 _m8;
-    float _m9;
-    float4 _m10;
-    float4 _m11;
-    float4 _m12;
-    float4 _m13;
-    int _m14;
-    int _m15;
-    int _m16;
-    float _m17;
-    float _m18;
-    int _m19;
-    float3 _m20[256];
-    packed_float3 _m21;
-    packed_float3 _m22;
-    packed_float3 _m23;
-    packed_float3 _m24;
-    packed_float3 _m25;
-    packed_float3 _m26;
+    packed_float3 iResolution;
+    float iTime;
+    float iTimeDelta;
+    float iFrameRate;
+    int iFrame;
+    float4 iChannelTime[4];
+    float3 iChannelResolution[4];
+    float4 iMouse;
+    float4 iDate;
+    float iSampleRate;
+    float4 iCurrentCursor;
+    float4 iPreviousCursor;
+    float4 iCurrentCursorColor;
+    float4 iPreviousCursorColor;
+    int iCurrentCursorStyle;
+    int iPreviousCursorStyle;
+    int iCursorVisible;
+    float iTimeCursorChange;
+    float iTimeFocus;
+    int iFocus;
+    float3 iPalette[256];
+    float3 iBackgroundColor;
+    float3 iForegroundColor;
+    float3 iCursorColor;
+    float3 iCursorText;
+    float3 iSelectionForegroundColor;
+    float3 iSelectionBackgroundColor;
 };
 
 struct main0_out
@@ -43,18 +43,18 @@ struct main0_out
 void mainImage(thread float4& v27, float2 v28, constant Globals& Globals_1, texture2d<float> iChannel0, sampler iChannel0Smplr)
 {
     float3 v29;
-    float3 v31 = Globals_1._m0;
+    float3 v31 = Globals_1.iResolution;
     float2 v32 = float2(v31[0], v31[1]);
     float2 v33 = v28 / v32;
     float4 v35 = iChannel0.sample(iChannel0Smplr, v33);
     float3 v36 = float3(v35[0], v35[1], v35[2]);
-    int v38 = Globals_1._m19;
+    int v38 = Globals_1.iFocus;
     bool v39 = v38 > 0;
     v29 = v36;
     if (v39)
     {
-    float v41 = Globals_1._m1;
-    float v43 = Globals_1._m18;
+    float v41 = Globals_1.iTime;
+    float v43 = Globals_1.iTimeFocus;
     float v44 = v41 - v43;
     float v45 = v44 / 3.0;
     float v46 = 1.0 - v45;
@@ -63,16 +63,16 @@ void mainImage(thread float4& v27, float2 v28, constant Globals& Globals_1, text
     float3 v49 = float3(v48, v48, v48);
     float3 v50 = mix(v36, float3(0.0, 1.0, 0.0), v49);
     v29 = v50;
-    float v51 = v28[0];
+    float v51 = v28.x;
     bool v52 = v51 < 5.0;
-    float v53 = v31[0];
+    float v53 = v31.x;
     float v54 = v53 - 5.0;
     bool v55 = v51 > v54;
     bool v56 = v52 || v55;
-    float v57 = v28[1];
+    float v57 = v28.y;
     bool v58 = v57 < 5.0;
     bool v59 = v56 || v58;
-    float v60 = v31[1];
+    float v60 = v31.y;
     float v61 = v60 - 5.0;
     bool v62 = v57 > v61;
     bool v63 = v59 || v62;
@@ -92,8 +92,11 @@ void mainImage(thread float4& v27, float2 v28, constant Globals& Globals_1, text
     v29 = v71;
     }
     float3 v72 = v29;
-    float4 v73 = float4(v72, 1.0);
-    v27 = v73;
+    float v73 = v72.x;
+    float v74 = v72.y;
+    float v75 = v72.z;
+    float4 v76 = float4(v73, v74, v75, 1.0);
+    v27 = v76;
     return;
 }
 static inline __attribute__((always_inline))
