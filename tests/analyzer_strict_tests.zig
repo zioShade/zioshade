@@ -108,6 +108,24 @@ test "strict: not(bvec) relational builtin is accepted (no false-positive)" {
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 }
 
+test "strict: not() on a non-boolean operand fails loud (no silent-wrong)" {
+    const alloc = std.testing.allocator;
+    // not(float) and not(bool-scalar) are both rejected by glslang -V; glslpp must
+    // not silently emit an invalid OpLogicalNot on a numeric/scalar type.
+    const bad_float =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(float(not(3.0))); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, bad_float, .{ .stage = .fragment }));
+    const bad_scalar =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\void main() { bool b = true; o = vec4(float(not(b))); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, bad_scalar, .{ .stage = .fragment }));
+}
+
 /// Scan a SPIR-V module for an instruction with the given opcode (low 16 bits of
 /// each instruction's first word). Walks the instruction stream from the 5-word
 /// header so operand words are never mistaken for opcodes.

@@ -5722,19 +5722,28 @@ const Analyzer = struct {
                     } else if (std.mem.eql(u8, node.data.name, "not")) {
                         // not(bvecN) → OpLogicalNot; result is the same boolean
                         // vector type as the operand (componentwise logical negation).
-                        if (arg_tids.items.len >= 1) {
-                            const arg_ty = arg_tids.items[0].ty;
-                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                            operands[0] = .{ .id = arg_tids.items[0].id };
-                            try self.instructions.append(self.alloc, .{
-                                .tag = .logical_not,
-                                .result_type = null,
-                                .result_id = result_id,
-                                .operands = operands,
-                                .ty = arg_ty,
-                            });
-                            return .{ .ty = arg_ty, .id = result_id };
+                        // GLSL defines not() only over bvec2/3/4 (scalar bool and
+                        // numeric operands are rejected by glslang -V), so a
+                        // non-bvec operand fails loud rather than emitting an invalid
+                        // OpLogicalNot on a numeric type (silent-wrong).
+                        const arg_ty = if (arg_tids.items.len >= 1) arg_tids.items[0].ty else ast.Type.void;
+                        if (arg_ty != .bvec2 and arg_ty != .bvec3 and arg_ty != .bvec4) {
+                            last_error_ctx = "not-requires-boolean-vector";
+                            last_error_inner = "not-requires-boolean-vector";
+                            last_error_line = node.loc.line;
+                            last_error_column = node.loc.column;
+                            return error.SemanticFailed;
                         }
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .logical_not,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = arg_ty,
+                        });
+                        return .{ .ty = arg_ty, .id = result_id };
                     } else if (std.mem.eql(u8, node.data.name, "dot")) {
                         // dot(a, b) → OpDot (core SPIR-V, not GLSL.std.450)
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
