@@ -7045,24 +7045,49 @@ const Analyzer = struct {
                     if (base_ty == .uint or base_ty == .int or base_ty == .float) {
                         const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, node.data.children.len);
                         for (node.data.children, 0..) |arg, i| {
-                            // literalWord (lossless + 32-bit-range check) instead
-                            // of raw @intCast narrowings that panic out-of-range.
-                            // Defensive: each arg was vetted upstream by
-                            // analyzeExpression->literalWord; identical word for
-                            // in-range int/uint literals.
-                            const val: u32 = blk: {
-                                if (arg.tag == .int_literal) break :blk try literalWord(arg);
-                                if (arg.tag == .uint_literal) break :blk try literalWord(arg);
-                                // The all-const-int scan also admits unary_op(-lit),
-                                // so mirror the vector composite folder's negation
-                                // (wrapping 0 -% word) — otherwise int[2](-5, 1) would
-                                // silently fold the negated element to 0 (Mitchell
-                                // silent-wrong).
-                                if (arg.tag == .unary_op and arg.data.children.len > 0 and arg.data.children[0].tag == .int_literal)
-                                    break :blk 0 -% try literalWord(arg.data.children[0]);
-                                break :blk 0;
+                            const comp_id = if (base_ty == .float) blk: {
+                                // Float-base array with integer-literal args (e.g.
+                                // float[2](1, 2)): convert each integer VALUE to its
+                                // IEEE-754 float constant. Emitting getConstInt(word,
+                                // .float) here would mis-tag the raw integer bits as a
+                                // float type — a silent-wrong value (1.0 would become
+                                // the reinterpretation of 0x00000001 = 1.4e-45).
+                                const fval: f32 = fblk: {
+                                    // int literal: literalWord gives the literal's
+                                    // (non-negative) magnitude word; @bitCast reinterprets
+                                    // the >=2^31 band as a signed i32 — matching glslang's
+                                    // bare-int semantics (bare 2147483648 folds to
+                                    // -2147483648.0). Do NOT "simplify" this to an unsigned
+                                    // @floatFromInt or the high band silently flips sign.
+                                    if (arg.tag == .int_literal) break :fblk @floatFromInt(@as(i32, @bitCast(try literalWord(arg))));
+                                    // uint literal: word is the unsigned u32 value.
+                                    if (arg.tag == .uint_literal) break :fblk @floatFromInt(try literalWord(arg));
+                                    // negated int literal: negate the literal's magnitude.
+                                    if (arg.tag == .unary_op and arg.data.children.len > 0 and arg.data.children[0].tag == .int_literal)
+                                        break :fblk -@as(f32, @floatFromInt(try literalWord(arg.data.children[0])));
+                                    break :fblk 0;
+                                };
+                                break :blk try self.getConstFloat(fval);
+                            } else blk: {
+                                // literalWord (lossless + 32-bit-range check) instead
+                                // of raw @intCast narrowings that panic out-of-range.
+                                // Defensive: each arg was vetted upstream by
+                                // analyzeExpression->literalWord; identical word for
+                                // in-range int/uint literals.
+                                const val: u32 = vblk: {
+                                    if (arg.tag == .int_literal) break :vblk try literalWord(arg);
+                                    if (arg.tag == .uint_literal) break :vblk try literalWord(arg);
+                                    // The all-const-int scan also admits unary_op(-lit),
+                                    // so mirror the vector composite folder's negation
+                                    // (wrapping 0 -% word) — otherwise int[2](-5, 1) would
+                                    // silently fold the negated element to 0 (Mitchell
+                                    // silent-wrong).
+                                    if (arg.tag == .unary_op and arg.data.children.len > 0 and arg.data.children[0].tag == .int_literal)
+                                        break :vblk 0 -% try literalWord(arg.data.children[0]);
+                                    break :vblk 0;
+                                };
+                                break :blk try self.getConstInt(val, base_ty);
                             };
-                            const comp_id = try self.getConstInt(val, base_ty);
                             cc_ops[i] = .{ .id = comp_id };
                         }
                         const key = self.constCompositeKey(result_ty, cc_ops);
@@ -8224,6 +8249,186 @@ test "semantic: u32-max uint literal still lowers to 0xFFFFFFFF after u64 parse"
     }
     try testing.expect(found_word != null);
     try testing.expectEqual(@as(u32, 0xFFFFFFFF), found_word.?);
+}
+
+test "semantic: float array constructor with int-literal args folds to float constants" {
+    // RED guard for the all-const-int array folder running for base_ty == .float.
+    // float[2](1, 2) must lower its elements to constant_float with the proper
+    // IEEE-754 bit patterns (1.0 = 0x3F800000, 2.0 = 0x40000000), NOT to
+    // constant_int instructions tagged .ty = .float carrying raw integer bits
+    // (the silent-wrong failure: 1.0 would become the float reinterpretation of
+    // the integer word 0x00000001 = 1.4e-45).
+    const source = "void main() { float a[2] = float[2](1, 2); }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+
+    // Bug signature: no constant_int may be tagged with a float type.
+    for (body) |inst| {
+        if (inst.tag == .constant_int) try testing.expect(inst.ty != .float);
+    }
+
+    // The array's constant_composite elements must resolve to constant_float 1.0, 2.0.
+    const expected = [_]f32{ 1.0, 2.0 };
+    var found_composite = false;
+    for (body) |inst| {
+        if (inst.tag != .constant_composite or inst.ty != .array) continue;
+        found_composite = true;
+        try testing.expectEqual(@as(usize, 2), inst.operands.len);
+        for (inst.operands, 0..) |op, i| {
+            const elem_id = switch (op) {
+                .id => |id| id,
+                else => unreachable,
+            };
+            var elem_tag: ?ir.Instruction.Tag = null;
+            var elem_val: f32 = 0;
+            for (body) |e| {
+                if (e.result_id == elem_id) {
+                    elem_tag = e.tag;
+                    if (e.tag == .constant_float) elem_val = e.operands[0].literal_float;
+                }
+            }
+            try testing.expectEqual(ir.Instruction.Tag.constant_float, elem_tag.?);
+            try testing.expectEqual(expected[i], elem_val);
+        }
+    }
+    try testing.expect(found_composite);
+}
+
+test "semantic: float array constructor with negated int-literal arg folds to float constants" {
+    // Companion RED for the negated-literal element. float[2](-1, 2) must fold to
+    // constant_float -1.0 (0xBF800000) and 2.0 (0x40000000), NOT int-typed
+    // constants. The all-const-int folder also admits unary_op(-lit) and handled
+    // base_ty == .float, so the negated element silently became getConstInt(
+    // 0 -% 1, .float) = constant_int .ty=float 0xFFFFFFFF.
+    const source = "void main() { float a[2] = float[2](-1, 2); }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+
+    for (body) |inst| {
+        if (inst.tag == .constant_int) try testing.expect(inst.ty != .float);
+    }
+
+    const expected = [_]f32{ -1.0, 2.0 };
+    var found_composite = false;
+    for (body) |inst| {
+        if (inst.tag != .constant_composite or inst.ty != .array) continue;
+        found_composite = true;
+        try testing.expectEqual(@as(usize, 2), inst.operands.len);
+        for (inst.operands, 0..) |op, i| {
+            const elem_id = switch (op) {
+                .id => |id| id,
+                else => unreachable,
+            };
+            var elem_tag: ?ir.Instruction.Tag = null;
+            var elem_val: f32 = 0;
+            for (body) |e| {
+                if (e.result_id == elem_id) {
+                    elem_tag = e.tag;
+                    if (e.tag == .constant_float) elem_val = e.operands[0].literal_float;
+                }
+            }
+            try testing.expectEqual(ir.Instruction.Tag.constant_float, elem_tag.?);
+            try testing.expectEqual(expected[i], elem_val);
+        }
+    }
+    try testing.expect(found_composite);
+}
+
+test "semantic: int array constructor still folds to int constants (no float-fix regression)" {
+    // Guards the preserved int/uint branch of the all-const-int array folder:
+    // int[2](1, 2) must keep folding to constant_int .ty = .int with the exact
+    // integer words 1 and 2 (the float fix must not leak into the int path).
+    const source = "void main() { int a[2] = int[2](1, 2); }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+    const expected = [_]u32{ 1, 2 };
+    var found_composite = false;
+    for (body) |inst| {
+        if (inst.tag != .constant_composite or inst.ty != .array) continue;
+        found_composite = true;
+        try testing.expectEqual(@as(usize, 2), inst.operands.len);
+        for (inst.operands, 0..) |op, i| {
+            const elem_id = switch (op) {
+                .id => |id| id,
+                else => unreachable,
+            };
+            var elem_tag: ?ir.Instruction.Tag = null;
+            var elem_word: u32 = 0;
+            for (body) |e| {
+                if (e.result_id == elem_id) {
+                    elem_tag = e.tag;
+                    if (e.tag == .constant_int) elem_word = e.operands[0].literal_int;
+                }
+            }
+            try testing.expectEqual(ir.Instruction.Tag.constant_int, elem_tag.?);
+            try testing.expectEqual(expected[i], elem_word);
+        }
+    }
+    try testing.expect(found_composite);
+}
+
+test "semantic: float array constructor with high-bit uint-literal arg folds to unsigned float" {
+    // Locks down the uint_literal branch of the float-array folder: a uint with
+    // the high bit set must fold to its UNSIGNED float value, not a sign-flipped
+    // one. 3000000000u (0xB2D05E00, > i32 max) is exactly representable in f32, so
+    // it must yield constant_float 3000000000.0 — if the branch were ever
+    // "simplified" to a signed @bitCast, it would silently become -1294967296.0.
+    const source = "void main() { float a[2] = float[2](3000000000u, 0); }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    const body = module.functions[0].body;
+
+    for (body) |inst| {
+        if (inst.tag == .constant_int) try testing.expect(inst.ty != .float);
+    }
+
+    const expected = [_]f32{ 3000000000.0, 0.0 };
+    var found_composite = false;
+    for (body) |inst| {
+        if (inst.tag != .constant_composite or inst.ty != .array) continue;
+        found_composite = true;
+        try testing.expectEqual(@as(usize, 2), inst.operands.len);
+        for (inst.operands, 0..) |op, i| {
+            const elem_id = switch (op) {
+                .id => |id| id,
+                else => unreachable,
+            };
+            var elem_tag: ?ir.Instruction.Tag = null;
+            var elem_val: f32 = 0;
+            for (body) |e| {
+                if (e.result_id == elem_id) {
+                    elem_tag = e.tag;
+                    if (e.tag == .constant_float) elem_val = e.operands[0].literal_float;
+                }
+            }
+            try testing.expectEqual(ir.Instruction.Tag.constant_float, elem_tag.?);
+            try testing.expectEqual(expected[i], elem_val);
+        }
+    }
+    try testing.expect(found_composite);
 }
 
 test "semantic: literal exceeding u64 range errors honestly" {
