@@ -1,6 +1,6 @@
 # Test Coverage
 
-What `zig build conformance` actually validates: every shader listed below is compiled GLSL → SPIR-V by glslpp and the resulting SPIR-V binary is checked with `spirv-val`. Latest run: **2,087 / 2,087 PASS** on Windows 11 / Zig 0.15.2 / Vulkan SDK 1.4.341.1.
+What `zig build conformance` actually validates: every shader listed below is compiled GLSL → SPIR-V by glslpp and the resulting SPIR-V binary is checked with `spirv-val`. Latest run (verified 2026-05-31, `just test-conformance`): **2,080 / 2,087 runnable fixtures PASS** (7 known feature-gap failures, 8 skipped, 2,095 total) on Windows 11 / Zig 0.15.2 / Vulkan SDK 1.4.341.1. The 7 failures are pre-existing capability gaps, **not regressions**, and the suite exits non-zero while they remain: `fp64.desktop.comp` / `int64.desktop.comp` (64-bit float/int types), `newTexture.frag` / `spv.newTexture.frag` (OpExtInst word-count on new-form texture builtins), `shader_ballot.comp` (subgroup ballot), `ray_sphere_test.frag` (ray feature), `struct-material.frag`.
 
 ## Test corpora
 
@@ -45,19 +45,19 @@ Each stress case is a single-purpose shader that, when broken in glslpp, would h
 
 | Backend | Where it's exercised | Approx count |
 |---|---|---:|
-| **SPIR-V output (the conformance oracle)** | All 2,087 fixtures above | 2,087 |
-| **HLSL backend (SM 6.0)** | `zig build test-hlsl` (780 tests) + DXC compilation of 47/51 prebuilt SPIR-V fixtures via `tools/dxc_batch_test.zig` | 780 + 47 |
-| **MSL backend** | `zig build test` (52 msl-tests) + cross-compile of every stress fixture | 52 + 457 |
+| **SPIR-V output (the conformance oracle)** | All 2,087 runnable fixtures above | 2,080 pass / 7 known-fail |
+| **HLSL backend (SM 6.0)** | `zig build test-hlsl` (793 tests) + DXC compilation of 47/51 prebuilt SPIR-V fixtures via `tools/dxc_batch_test.zig` | 793 + 47 |
+| **MSL backend** | `zig build test` (108 msl-tests) + cross-compile of every stress fixture | 108 + 457 |
 | **GLSL round-trip** | `zig build test` (122 glsl-tests) + reference suite | 122 |
-| **WGSL backend** | `zig build test` (8 wgsl-tests) + WGSL-prefixed stress fixtures (321 cases under `tests/conformance/stress/wgsl_*`) | 8 + 321 |
+| **WGSL backend** | `zig build test` (20 wgsl-tests) + WGSL-prefixed stress fixtures (321 cases under `tests/conformance/stress/wgsl_*`) | 20 + 321 |
 | **`naga` validation of WGSL output** | `zig build test-realworld` — separate step; not part of `zig build conformance`. See `tests/realworld_tests.zig` and the [real-world corpus snapshot](./realworld-corpus.md). | 13 hand-authored shaders, exercises all 4 backends + naga |
 
 ## Reproducibility
 
 ```bash
-zig build conformance               # all 2,087 spirv-val fixtures
-zig build test --summary all        # 1,600 unit tests across all modules
-zig build test-hlsl --summary all   # 780 HLSL backend tests
+zig build conformance               # 2,080/2,087 runnable spirv-val fixtures pass (7 known feature-gap fails)
+zig build test --summary all        # 2,054 unit tests across all modules
+zig build test-hlsl --summary all   # 793 HLSL backend tests
 zig build fuzz -- --count 50000     # 50k random GLSL inputs, structured fuzzer
 zig build bench-compare             # head-to-head vs glslang+spirv-cross
 ```

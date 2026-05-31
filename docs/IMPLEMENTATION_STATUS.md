@@ -10,7 +10,7 @@ glslpp is a **pure-Zig GLSL→SPIR-V compiler and SPIR-V cross-compiler** (HLSL 
 
 **What works today:**
 - **wintty production use** — every shader wintty ships through GLSL → SPIR-V → HLSL / MSL / WGSL.
-- **Correctness** — 2,087 / 2,087 runnable fixtures pass `spirv-val`; HLSL outputs validate via DXC; pixel-level rendering matches glslang+SPIRV-Cross for the validated set.
+- **Correctness** — 2,080 / 2,087 runnable fixtures pass `spirv-val` (7 known feature-gap failures, not regressions); HLSL outputs validate via DXC; pixel-level rendering matches glslang+SPIRV-Cross for the validated set.
 - **In-process API** — no process spawn, no DLL init, no global state outside `threadlocal` per-thread caches.
 
 **What's missing relative to a true glslang / SPIRV-Cross drop-in:**
@@ -35,7 +35,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Cross-compilers (HLSL, GLSL, MSL, WGSL) | ~12,000 |
 | Optimizer (compact_ids_passes) | ~10,200 |
 | Preprocessor | ~1,800 |
-| `spirv-val` conformance passing | 2,087 / 2,087 runnable (`zig build conformance`) |
+| `spirv-val` conformance passing | 2,080 / 2,087 runnable (7 known feature-gap fails; `zig build conformance`) |
 | External DXC SPIR-V fixtures | 47 / 51 compile (4 limited by DXC SM 6.1+ / 2 KB structured-buffer cap) |
 | WGSL stress tests | 470 / 470 |
 | Fuzzer iterations (clean, ad-hoc) | 50,000 (run `zig build fuzz -- --count 50000` to reproduce) |
@@ -56,7 +56,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Mesh/Task shaders | ✅ | 4 pass | ⚠️ Basic |
 | Ray tracing shaders | ✅ | 3 pass | ⚠️ Basic |
 | SPIR-V output | 1.0–1.6 | 1.0–1.6 | ✅ |
-| spirv-val conformance | Reference | 1,894/1,894 pass | ✅ |
+| spirv-val conformance | Reference | 2,080/2,087 runnable pass (7 feature-gap fails) | ✅ |
 | GLSL extensions parsed | 100+ | 9 (subgroup basic/vote/arithmetic/ballot/shuffle, fragment interlock, mesh, ray tracing, null initializer) | ⚠️ Covers wintty needs |
 | Error diagnostics | Rich (line, column, context) | Basic (error enum, no location) | ❌ Gap |
 
@@ -166,7 +166,7 @@ DXC and the Metal compiler are **platform SDK tools** that produce GPU-specific 
 
 ### 3.1 SPIR-V Validation
 
-**1,766 / 1,766** shaders pass `spirv-val` — the official SPIR-V validator. Zero failures.
+**2,080 / 2,087** runnable fixtures pass `spirv-val` — the official SPIR-V validator (verified 2026-05-31). 7 known feature-gap failures remain (64-bit int/float types, OpExtInst word-count on new-form texture builtins, `shader_ballot`, `ray_sphere`, `struct-material`); 8 skipped; 2,095 total. These are pre-existing capability gaps, **not regressions**, and the suite exits non-zero while they remain.
 
 ### 3.2 DXC Validation
 
@@ -178,10 +178,10 @@ All 4 are DXC toolchain constraints, not glslpp bugs.
 
 ### 3.3 Cross-Compilation Validation
 
-All 3 primary backends produce compilable output for the 1,766 test shaders:
-- **GLSL backend**: 1,766/1,766 pass
-- **MSL backend**: 1,766/1,766 pass
-- **HLSL backend**: 1,766/1,766 pass
+All 3 primary backends produce compilable output across the conformance corpus (exact per-backend pass counts predate the current 2,095-fixture corpus and are pending regeneration — tracked under the "single source of truth for status numbers" cleanup):
+- **GLSL backend**: passes
+- **MSL backend**: passes
+- **HLSL backend**: passes (DXC-validated 47/51 on the prebuilt SPIR-V fixtures)
 - **Cross-compare** (GLSL↔HLSL output consistency): pass
 - **WGSL backend**: passes its test suite
 
