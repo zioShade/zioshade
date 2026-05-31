@@ -14,6 +14,13 @@
 //! against `glslangValidator -V --aml --amb` (auto-map locations/bindings so the
 //! verdict reflects the construct, not glslpp-vs-glslang layout-strictness).
 //!
+//! RESOLVED so far:
+//!   not(bvec)  → modeled (OpLogicalNot); fixture tests/conformance/stress/vec_not.frag
+//!   tests/conformance/stress/vec_compare.frag    → fixture repaired (was ES-legacy gl_FragColor)
+//!   tests/conformance/stress/wgsl_global_const.frag → fixture repaired (u_val was undeclared)
+//!   tests/conformance/stress/wgsl_saturate.frag  → fixture repaired (saturate() is HLSL, now clamp)
+//!   (enumerate-fp: 28 → 25 candidates)
+//!
 //! GROUP A — glslang ACCEPTS, glslpp can represent → FALSE-POSITIVE (Task 1, model):
 //!   fixture                                       | ctx             | notes
 //!   tests/glslang-430/spv.AofA.frag               | assign_op       | arrays-of-arrays
@@ -65,4 +72,55 @@ test "harness self-test: compileToSPIRVStrict rejects a recorded error" {
     // permanent (flip-independent) error — an undeclared identifier, which
     // glslang rejects too, so this test is stable across Task 1 / F2.
     try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
+}
+
+// ── Task 1 instances: modeled false-positives ───────────────────────────────
+
+test "strict: not(bvec) relational builtin is accepted (no false-positive)" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec2 lt = lessThan(gl_FragCoord.xy, vec2(0.5, 0.5));
+        \\    bvec2 n = not(lt);
+        \\    fragColor = vec4(float(n.x), float(n.y), 0.0, 1.0);
+        \\}
+    ;
+    // Strict analysis must NOT reject valid GLSL using not() — glslang -V accepts it.
+    const probe = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(probe);
+
+    // And codegen must lower it to a real OpLogicalNot (opcode 168), never OpUndef.
+    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expect(containsOpcode(spirv, 168)); // OpLogicalNot
+    try std.testing.expect(!containsOpcode(spirv, 1)); // OpUndef must NOT appear
+
+    // The fail-loud diagnostics path (used by the CLI) must also accept not().
+    var diags: std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |d| alloc.free(d.message);
+        diags.deinit(alloc);
+    }
+    const spirv2 = try glslpp.compileToSPIRVWithDiagnostics(alloc, src, .{ .stage = .fragment }, &diags);
+    defer alloc.free(spirv2);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+/// Scan a SPIR-V module for an instruction with the given opcode (low 16 bits of
+/// each instruction's first word). Walks the instruction stream from the 5-word
+/// header so operand words are never mistaken for opcodes.
+fn containsOpcode(spirv: []const u32, opcode: u16) bool {
+    if (spirv.len < 5) return false;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const word = spirv[i];
+        const op: u16 = @truncate(word & 0xFFFF);
+        const word_count: usize = @as(u16, @truncate(word >> 16));
+        if (word_count == 0) return false; // malformed; avoid infinite loop
+        if (op == opcode) return true;
+        i += word_count;
+    }
+    return false;
 }

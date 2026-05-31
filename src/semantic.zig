@@ -5719,6 +5719,22 @@ const Analyzer = struct {
                             });
                             return .{ .ty = bvec_ty, .id = result_id };
                         }
+                    } else if (std.mem.eql(u8, node.data.name, "not")) {
+                        // not(bvecN) → OpLogicalNot; result is the same boolean
+                        // vector type as the operand (componentwise logical negation).
+                        if (arg_tids.items.len >= 1) {
+                            const arg_ty = arg_tids.items[0].ty;
+                            const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            operands[0] = .{ .id = arg_tids.items[0].id };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .logical_not,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = operands,
+                                .ty = arg_ty,
+                            });
+                            return .{ .ty = arg_ty, .id = result_id };
+                        }
                     } else if (std.mem.eql(u8, node.data.name, "dot")) {
                         // dot(a, b) → OpDot (core SPIR-V, not GLSL.std.450)
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
@@ -7780,7 +7796,7 @@ const Analyzer = struct {
             // Fragment interpolation builtins (GLSL.std.450 76/77/78, pointer interpolant)
             "interpolateAtCentroid", "interpolateAtSample", "interpolateAtOffset",
             "lessThan", "greaterThan", "lessThanEqual", "greaterThanEqual",
-            "equal", "notEqual", "any", "all",
+            "equal", "notEqual", "any", "all", "not",
             "floatBitsToInt", "floatBitsToUint", "intBitsToFloat", "uintBitsToFloat",
             "fma", "frexp", "ldexp", "modf",
             "packSnorm4x8", "packUnorm4x8", "packHalf2x16",
