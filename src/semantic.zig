@@ -373,6 +373,12 @@ const Analyzer = struct {
     load_cache: std.AutoHashMapUnmanaged(u32, u32) = .empty, // ptr_id -> loaded_value_id (cleared at labels)
     global_load_cache: std.AutoHashMapUnmanaged(u32, u32) = .empty, // ptr_id -> loaded_value_id (persists across blocks)
     global_ptr_ids: std.AutoHashMapUnmanaged(u32, void) = .empty, // set of ptr_ids that point into global (Input/Uniform/Output) variables
+    /// Maps global-variable ir_id → constant-composite id for `const` globals.
+    /// Populated lazily when first needed (e.g. by textureGatherOffsets ConstOffsets check).
+    global_const_init_map: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+    /// Maps global-variable ir_id → AST initializer node for `const` global arrays.
+    /// Stored during collectTopLevel so we can evaluate the initializer lazily later.
+    global_const_ast_inits: std.AutoHashMapUnmanaged(u32, ast.Node) = .empty,
     in_entry_block: bool = true,
     cache_globals: bool = true, // true in entry block and loop headers (blocks that dominate subsequent blocks)
     pure_op_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty, // hash(type, op, operands) -> result_id
@@ -454,6 +460,8 @@ const Analyzer = struct {
         self.load_cache.deinit(self.alloc);
         self.global_load_cache.deinit(self.alloc);
         self.global_ptr_ids.deinit(self.alloc);
+        self.global_const_init_map.deinit(self.alloc);
+        self.global_const_ast_inits.deinit(self.alloc);
         self.pure_op_cache.deinit(self.alloc);
         self.global_pure_op_cache.deinit(self.alloc);
         // Free owned name keys in the types map
@@ -745,6 +753,21 @@ const Analyzer = struct {
     /// ConstOffsets image operand of textureGatherOffsets. Returns null if the
     /// pointer has no constant store (e.g. a non-const / runtime-built array).
     fn constStoreSource(self: *Analyzer, ptr_id: u32) ?u32 {
+        // Check the global const init map (populated lazily when first requested).
+        if (self.global_const_init_map.get(ptr_id)) |const_id| return const_id;
+        // Lazily evaluate the initializer of global `const` array declarations.
+        // The AST init node was recorded in collectTopLevel and is still live
+        // (the AST outlives the function analysis).
+        if (self.global_const_ast_inits.get(ptr_id)) |init_node| {
+            if (self.analyzeExpression(init_node)) |init_tid| {
+                if (self.isConstantId(init_tid.id)) {
+                    self.global_const_init_map.put(self.alloc, ptr_id, init_tid.id) catch {};
+                    return init_tid.id;
+                }
+            } else |_| {}
+        }
+        // Fall through to scanning the current function's instruction list
+        // (for function-local const arrays like `const ivec2 offs[4] = …`).
         for (self.instructions.items) |inst| {
             if (inst.tag == .store and inst.operands.len >= 2) {
                 const dst = switch (inst.operands[0]) {
@@ -1517,6 +1540,91 @@ const Analyzer = struct {
             return sym;
         }
 
+        // gl_Max* built-in constants — GLSL 4.60 §7.4. These are const int values
+        // pre-defined by every GLSL implementation. We expose them as SSA symbols
+        // mapping to a constant integer (value = the minimum required by the spec).
+        // They appear in float(gl_MaxTextureImageUnits) casts, array sizes, etc.
+        const gl_max_consts = [_]struct { name: []const u8, value: u32 }{
+            .{ .name = "gl_MaxVertexAttribs",               .value = 16 },
+            .{ .name = "gl_MaxVertexUniformVectors",         .value = 256 },
+            .{ .name = "gl_MaxVaryingVectors",               .value = 15 },
+            .{ .name = "gl_MaxVertexTextureImageUnits",       .value = 16 },
+            .{ .name = "gl_MaxCombinedTextureImageUnits",     .value = 96 },
+            .{ .name = "gl_MaxTextureImageUnits",             .value = 16 },
+            .{ .name = "gl_MaxFragmentUniformVectors",        .value = 224 },
+            .{ .name = "gl_MaxDrawBuffers",                   .value = 8 },
+            .{ .name = "gl_MaxVertexOutputVectors",           .value = 16 },
+            .{ .name = "gl_MaxFragmentInputVectors",          .value = 15 },
+            .{ .name = "gl_MinProgramTexelOffset",            .value = @as(u32, @bitCast(@as(i32, -8))) },
+            .{ .name = "gl_MaxProgramTexelOffset",            .value = 7 },
+            .{ .name = "gl_MaxImageUnits",                    .value = 8 },
+            .{ .name = "gl_MaxCombinedImageUnitsAndFragmentOutputs", .value = 8 },
+            .{ .name = "gl_MaxImageSamples",                  .value = 0 },
+            .{ .name = "gl_MaxVertexImageUniforms",           .value = 0 },
+            .{ .name = "gl_MaxTessControlImageUniforms",      .value = 0 },
+            .{ .name = "gl_MaxTessEvaluationImageUniforms",   .value = 0 },
+            .{ .name = "gl_MaxGeometryImageUniforms",         .value = 0 },
+            .{ .name = "gl_MaxFragmentImageUniforms",         .value = 8 },
+            .{ .name = "gl_MaxCombinedImageUniforms",         .value = 8 },
+            .{ .name = "gl_MaxComputeImageUniforms",          .value = 8 },
+            .{ .name = "gl_MaxGeometryInputComponents",       .value = 64 },
+            .{ .name = "gl_MaxGeometryOutputComponents",      .value = 128 },
+            .{ .name = "gl_MaxGeometryOutputVertices",        .value = 256 },
+            .{ .name = "gl_MaxGeometryTotalOutputComponents", .value = 1024 },
+            .{ .name = "gl_MaxGeometryUniformComponents",     .value = 1024 },
+            .{ .name = "gl_MaxGeometryVaryingComponents",     .value = 64 },
+            .{ .name = "gl_MaxTessControlInputComponents",    .value = 128 },
+            .{ .name = "gl_MaxTessControlOutputComponents",   .value = 128 },
+            .{ .name = "gl_MaxTessControlTextureImageUnits",  .value = 16 },
+            .{ .name = "gl_MaxTessControlUniformComponents",  .value = 1024 },
+            .{ .name = "gl_MaxTessControlTotalOutputComponents", .value = 4096 },
+            .{ .name = "gl_MaxTessEvaluationInputComponents", .value = 128 },
+            .{ .name = "gl_MaxTessEvaluationOutputComponents", .value = 128 },
+            .{ .name = "gl_MaxTessEvaluationTextureImageUnits", .value = 16 },
+            .{ .name = "gl_MaxTessEvaluationUniformComponents", .value = 1024 },
+            .{ .name = "gl_MaxTessPatchComponents",           .value = 120 },
+            .{ .name = "gl_MaxPatchVertices",                 .value = 32 },
+            .{ .name = "gl_MaxTessGenLevel",                  .value = 64 },
+            .{ .name = "gl_MaxUniformBufferBindings",         .value = 84 },
+            .{ .name = "gl_MaxVertexUniformBlocks",           .value = 12 },
+            .{ .name = "gl_MaxGeometryUniformBlocks",         .value = 12 },
+            .{ .name = "gl_MaxFragmentUniformBlocks",         .value = 12 },
+            .{ .name = "gl_MaxCombinedUniformBlocks",         .value = 60 },
+            .{ .name = "gl_MaxUniformBlockSize",              .value = 16384 },
+            .{ .name = "gl_MaxCombinedVertexUniformComponents", .value = 49152 },
+            .{ .name = "gl_MaxCombinedGeometryUniformComponents", .value = 49152 },
+            .{ .name = "gl_MaxCombinedFragmentUniformComponents", .value = 49152 },
+            .{ .name = "gl_MaxVaryingComponents",             .value = 60 },
+            .{ .name = "gl_MaxComputeWorkGroupCount",         .value = 0 },
+            .{ .name = "gl_MaxComputeWorkGroupSize",          .value = 0 },
+            .{ .name = "gl_MaxComputeUniformComponents",      .value = 512 },
+            .{ .name = "gl_MaxComputeTextureImageUnits",      .value = 16 },
+            .{ .name = "gl_MaxComputeAtomicCounters",         .value = 8 },
+            .{ .name = "gl_MaxComputeAtomicCounterBuffers",   .value = 1 },
+        };
+        for (gl_max_consts) |c| {
+            if (std.mem.eql(u8, name, c.name)) {
+                const key = (@as(u64, @intFromEnum(ast.Type.int)) << 32) | @as(u64, c.value);
+                const const_id: u32 = self.const_cache.get(key) orelse blk: {
+                    const id = self.allocId();
+                    const operands = self.alloc.alloc(ir.Instruction.Operand, 1) catch return null;
+                    operands[0] = .{ .literal_int = c.value };
+                    self.instructions.append(self.alloc, .{
+                        .tag = .constant_int,
+                        .result_type = null,
+                        .result_id = id,
+                        .operands = operands,
+                        .ty = .int,
+                    }) catch return null;
+                    self.const_cache.put(self.alloc, key, id) catch {};
+                    break :blk id;
+                };
+                const sym = Symbol{ .kind = .var_sym, .ty = .int, .ir_id = const_id, .is_ssa = true, .init_value = const_id, .is_const = true };
+                self.scopes.items[0].put(self.alloc, c.name, sym) catch return null;
+                return sym;
+            }
+        }
+
         return null;
     }
 
@@ -1834,7 +1942,20 @@ const Analyzer = struct {
                     .kind = .var_sym,
                     .ty = ty,
                     .ir_id = ir_id,
+                    // Propagate `const` qualifier so consumers that require a
+                    // provably immutable value (e.g. textureGatherOffsets ConstOffsets)
+                    // can verify the argument is a compile-time constant array.
+                    .is_const = node.data.qualifier != null and node.data.qualifier.?.is_const,
                 });
+                // For global `const` array declarations with an initializer, record the
+                // AST initializer node so constStoreSource() can evaluate it lazily
+                // (during function analysis) to obtain the constant-composite id for
+                // textureGatherOffsets ConstOffsets validation.
+                if (node.data.qualifier != null and node.data.qualifier.?.is_const and
+                    ty == .array and node.data.children.len > 0)
+                {
+                    self.global_const_ast_inits.put(self.alloc, ir_id, node.data.children[0]) catch {};
+                }
                 } // end if name.len > 0
             },
             .uniform_block => {
@@ -3887,20 +4008,21 @@ const Analyzer = struct {
                 if (node.data.children.len < 2) return error.SemanticFailed;
 
                 // Handle multi-component swizzle compound assignment: v.xy *= expr, v.xyz += expr, etc.
+                // Works for any lvalue base (bare identifier, SSBO member, array-indexed member, etc.).
                 const lhs = node.data.children[0];
-                if (lhs.tag == .member_access and lhs.data.children.len > 0) {
+                swizzle_ca: {
+                    if (lhs.tag != .member_access or lhs.data.children.len == 0) break :swizzle_ca;
+                    const swizzle_name_maybe = lhs.data.name;
+                    if (swizzle_name_maybe.len <= 1 or swizzle_name_maybe.len > 4) break :swizzle_ca;
+                    // Multi-component swizzle compound assignment. Get a pointer to the base vector.
                     const base_node = lhs.data.children[0];
-                    if (base_node.tag == .identifier) {
-                        if (self.lookup(base_node.data.name)) |sym| {
-                            const base_ty = sym.ty;
-                            if (base_ty.isVector()) {
-                                const swizzle_name = lhs.data.name;
-                                if (swizzle_name.len > 1) {
-                                    // Multi-component swizzle compound assign
-                                    // Materialize SSA variable if needed
-                                    _ = self.materializeSSA(base_node.data.name);
-                                    const mat_sym2 = self.lookup(base_node.data.name);
-                                    const var_ptr_id2 = if (mat_sym2) |ms| ms.ir_id else sym.ir_id;
+                    // analyzeLValue gives us the pointer; its .ty tells us the vector type.
+                    const base_ptr = self.analyzeLValue(base_node) catch break :swizzle_ca;
+                    if (!base_ptr.ty.isVector()) break :swizzle_ca;
+                    {
+                        const base_ty = base_ptr.ty;
+                        const swizzle_name = swizzle_name_maybe;
+                        const var_ptr_id2 = base_ptr.id;
 
                                     // 1. Load current vector
                                     const vec_load_id = try self.emitLoadCached(var_ptr_id2, base_ty);
@@ -4025,11 +4147,8 @@ const Analyzer = struct {
                                         .ty = .void,
                                     });
                                     return .{ .ty = .void, .id = 0 };
-                                }
-                            }
-                        }
-                    }
-                }
+                        } // end inner swizzle block
+                } // end swizzle_ca
 
                 // Regular (non-swizzle) compound assignment
                 const target = try self.analyzeLValue(node.data.children[0]);
