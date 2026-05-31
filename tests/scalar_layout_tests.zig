@@ -118,6 +118,39 @@ fn hasMemberDecoration(spv: []const u32, decoration: u32) bool {
     return false;
 }
 
+/// True if the SPIR-V stream contains ANY OpDecorate (opcode 71) whose
+/// decoration literal (word 2) equals `decoration`, ignoring any extra operand.
+/// Used for value-less decorations such as Block (2) / BufferBlock (3).
+fn hasDecoration(spv: []const u32, decoration: u32) bool {
+    var i: usize = 5; // skip 5-word header
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const op = spv[i] & 0xFFFF;
+        if (wc == 0) break;
+        // OpDecorate = 71: word1=target id, word2=decoration[, word3=operand]
+        if (op == 71 and wc >= 3 and i + 2 < spv.len and spv[i + 2] == decoration) return true;
+        i += wc;
+    }
+    return false;
+}
+
+/// True if the SPIR-V stream contains an OpDecorate (opcode 71) with the given
+/// `decoration` literal (word 2) AND a matching single `value` operand (word 3).
+/// Used to assert a specific decoration value is present, e.g. ArrayStride (6)
+/// equal to 16 or 4. Unlike findFirstArrayStride, this scans EVERY OpDecorate,
+/// so it is safe on modules with more than one array type.
+fn hasDecorationValue(spv: []const u32, decoration: u32, value: u32) bool {
+    var i: usize = 5; // skip 5-word header
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const op = spv[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == 71 and wc >= 4 and i + 3 < spv.len and spv[i + 2] == decoration and spv[i + 3] == value) return true;
+        i += wc;
+    }
+    return false;
+}
+
 /// Count OpTypeStruct (opcode 30) instructions in the SPIR-V stream.
 fn countStructTypes(spv: []const u32) usize {
     var count: usize = 0;
@@ -181,4 +214,70 @@ test "block dedup still merges two UBO blocks identical in members and layout" {
 
     // Identical column-major std140 blocks → exactly one shared struct type.
     try std.testing.expectEqual(@as(usize, 1), countStructTypes(spv));
+}
+
+// GAP 1: two interface blocks with byte-identical array members but DIFFERENT
+// layout qualifiers (std140 vs std430) need DIFFERENT array strides — std140
+// rounds the float[2] element stride up to 16, std430 packs it at 4. The array
+// TYPE was deduped on (element, length) ALONE — both in codegen's
+// emitted_array_types cache and in the dedupArrayTypes post-pass — so the two
+// blocks shared a single array type carrying a single ArrayStride (16); the
+// std430 stride (4) was silently dropped. Worse, sharing the array made the two
+// OpTypeStruct byte-identical, so dedupStructTypes then collapsed A and B onto
+// one struct (one id with both names). The oracle (glslangValidator -V) emits
+// two array types decorated ArrayStride 16 and ArrayStride 4 respectively.
+// ArrayStride = decoration 6 (SPIR-V spec).
+test "block dedup: std140 and std430 array members keep distinct ArrayStride 16 and 4" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(binding=0,std140) uniform A { float arr[2]; } a;
+        \\layout(binding=1,std430) buffer  B { float arr[2]; } b;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(a.arr[0], a.arr[1], b.arr[0], b.arr[1]); }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // The std140 element stride (16) AND the std430 element stride (4) must both
+    // be present — proof the two layouts produced two distinct array types.
+    try std.testing.expect(hasDecorationValue(spv, 6, 16)); // ArrayStride 16
+    try std.testing.expect(hasDecorationValue(spv, 6, 4)); // ArrayStride 4
+    // Distinct array members ⇒ the two blocks are distinct struct types, not one
+    // merged type sharing a single stride.
+    try std.testing.expectEqual(@as(usize, 2), countStructTypes(spv));
+}
+
+// GAP 2: a plain (non-block) struct and a uniform BLOCK with byte-identical
+// member types AND names must NOT be merged by the struct-dedup cache. The dedup
+// key folded member types/names + block layout but NOT the needs_block flag, so
+// the plain struct (emitted first, with no Block/Offset decorations) and the UBO
+// block collapsed onto one id — leaving the `uniform` variable pointing at a
+// struct with no Block decoration. That is invalid for Vulkan
+// (VUID-StandaloneSpirv-Uniform-06676: a Uniform variable's type must be Block-
+// or BufferBlock-decorated). The oracle keeps the two structs distinct and emits
+// Block + Offset 0/4 on the block. Block = decoration 2, member Offset = 35.
+// (countStructTypes is NOT asserted here: the local `s` is scalarized away, so
+//  the plain struct S is legitimately DCE'd once it no longer aliases the block.)
+test "block dedup: plain struct and identical UBO block stay distinct (needs_block)" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\struct S { float x; float y; };
+        \\layout(binding=0,std140) uniform B { float x; float y; } bb;
+        \\layout(location=0) out vec4 o;
+        \\void main() {
+        \\  S s;
+        \\  s.x = bb.x;
+        \\  s.y = bb.y;
+        \\  o = vec4(s.x, s.y, 0.0, 0.0);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // The uniform block must carry a Block decoration; the wrong merge dropped it.
+    try std.testing.expect(hasDecoration(spv, 2)); // Block
+    // …and its member layout (Offset 4 on the second float) must be present.
+    try std.testing.expectEqual(@as(u32, 4), findMemberOffset(spv, 1) orelse 0xFFFF_FFFF);
 }
