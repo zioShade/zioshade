@@ -27,7 +27,7 @@ release:
 test:
     {{zig}} build test --summary all
 
-# run HLSL backend tests (751 tests)
+# run HLSL backend tests (count in docs/STATUS.md)
 test-hlsl:
     {{zig}} build test-hlsl --summary all
 
