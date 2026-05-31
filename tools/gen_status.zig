@@ -529,4 +529,148 @@ fn renderStatusMd(alloc: std.mem.Allocator, unit: TestSummary, hlsl: TestSummary
     return buf.toOwnedSlice(alloc);
 }
 
-pub fn main() !void {}
+const DOCS = [_][]const u8{
+    "README.md",
+    "docs/TEST_COVERAGE.md",
+    "docs/IMPLEMENTATION_STATUS.md",
+    "CONTRIBUTING.md",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+};
+const STATUS_MD = "docs/STATUS.md";
+
+const Mode = enum { write, check };
+
+const Args = struct {
+    mode: Mode = .check,
+    test_path: []const u8 = ".status-cache/test.txt",
+    hlsl_path: []const u8 = ".status-cache/hlsl.txt",
+    conf_path: []const u8 = ".status-cache/conformance.txt",
+    allowlist_path: []const u8 = "tests/known-conformance-fails.txt",
+    zig_version: []const u8 = "unknown",
+};
+
+fn readFileAll(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
+    const f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    return try f.readToEndAlloc(alloc, 16 * 1024 * 1024);
+}
+
+fn parseArgs(argv: [][:0]u8) !Args {
+    var a = Args{};
+    var i: usize = 1;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--mode") and i + 1 < argv.len) {
+            i += 1;
+            a.mode = if (std.mem.eql(u8, argv[i], "write")) .write else .check;
+        } else if (std.mem.eql(u8, arg, "--test") and i + 1 < argv.len) {
+            i += 1;
+            a.test_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--hlsl") and i + 1 < argv.len) {
+            i += 1;
+            a.hlsl_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--conf") and i + 1 < argv.len) {
+            i += 1;
+            a.conf_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--allowlist") and i + 1 < argv.len) {
+            i += 1;
+            a.allowlist_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--zig-version") and i + 1 < argv.len) {
+            i += 1;
+            a.zig_version = argv[i];
+        }
+    }
+    return a;
+}
+
+pub fn main() !void {
+    // Arena over page_allocator: stable API across Zig versions and ideal for a
+    // short-lived tool (one deinit frees everything; the per-call frees below are
+    // harmless no-ops under the arena but keep intent clear).
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const argv = try std.process.argsAlloc(alloc);
+    const args = try parseArgs(argv);
+
+    // 1. parse the three captured suite outputs
+    const test_txt = try readFileAll(alloc, args.test_path);
+    defer alloc.free(test_txt);
+    const unit = parseBuildSummary(test_txt) catch |e| {
+        std.debug.print("gen_status: failed to parse {s}: {s}\n", .{ args.test_path, @errorName(e) });
+        return e;
+    };
+    if (unit.passed != unit.total) {
+        std.debug.print("gen_status: {s} reports {d}/{d} tests passed — failing unit tests, refusing to publish.\n", .{ args.test_path, unit.passed, unit.total });
+        std.process.exit(1);
+    }
+
+    const hlsl_txt = try readFileAll(alloc, args.hlsl_path);
+    defer alloc.free(hlsl_txt);
+    const hlsl = try parseBuildSummary(hlsl_txt);
+    if (hlsl.passed != hlsl.total) {
+        std.debug.print("gen_status: {s} reports {d}/{d} tests passed — failing HLSL tests, refusing to publish.\n", .{ args.hlsl_path, hlsl.passed, hlsl.total });
+        std.process.exit(1);
+    }
+
+    const conf_txt = try readFileAll(alloc, args.conf_path);
+    defer alloc.free(conf_txt);
+    const conf = try parseConformance(alloc, conf_txt);
+    defer freeConfResult(alloc, conf);
+
+    // 2. regression guard
+    const allow_txt = try readFileAll(alloc, args.allowlist_path);
+    defer alloc.free(allow_txt);
+    const allow = try loadAllowlist(alloc, allow_txt);
+    defer freeAllowlist(alloc, allow);
+    const allow_paths = try allowPaths(alloc, allow);
+    defer alloc.free(allow_paths);
+    const reg = try checkRegressions(alloc, conf.failing, allow_paths);
+    defer freeRegResult(alloc, reg);
+    for (reg.now_passing) |p| std.debug.print("gen_status: NOTE {s} no longer fails — remove it from {s}.\n", .{ p, args.allowlist_path });
+    if (reg.unexpected.len > 0) {
+        for (reg.unexpected) |p| std.debug.print("gen_status: REGRESSION {s} is failing but is not in {s}.\n", .{ p, args.allowlist_path });
+        std.process.exit(1);
+    }
+
+    // 3. render
+    const kv = try buildKv(alloc, unit, hlsl, conf);
+    defer freeKv(alloc, kv);
+    const status_md = try renderStatusMd(alloc, unit, hlsl, conf, allow, args.zig_version);
+    defer alloc.free(status_md);
+
+    var drift = false;
+
+    // STATUS.md
+    if (args.mode == .write) {
+        try std.fs.cwd().writeFile(.{ .sub_path = STATUS_MD, .data = status_md });
+    } else {
+        const cur = readFileAll(alloc, STATUS_MD) catch null;
+        if (cur == null or !std.mem.eql(u8, cur.?, status_md)) {
+            std.debug.print("gen_status: DRIFT {s} is out of date.\n", .{STATUS_MD});
+            drift = true;
+        }
+    }
+
+    // marker injection in the prose docs
+    for (DOCS) |doc| {
+        const cur = try readFileAll(alloc, doc);
+        defer alloc.free(cur);
+        const updated = try injectMarkers(alloc, cur, kv);
+        defer alloc.free(updated);
+        if (std.mem.eql(u8, cur, updated)) continue;
+        if (args.mode == .write) {
+            try std.fs.cwd().writeFile(.{ .sub_path = doc, .data = updated });
+        } else {
+            std.debug.print("gen_status: DRIFT {s} has stale status markers.\n", .{doc});
+            drift = true;
+        }
+    }
+
+    if (args.mode == .check and drift) {
+        std.debug.print("gen_status: committed docs do not match a fresh run. Run `just update-status`.\n", .{});
+        std.process.exit(1);
+    }
+    std.debug.print("gen_status: {s} ok ({s} conformance pass, {d} unit, {d} hlsl).\n", .{ @tagName(args.mode), kv[0].value, unit.passed, hlsl.passed });
+}
