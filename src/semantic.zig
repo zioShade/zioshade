@@ -438,6 +438,11 @@ const Analyzer = struct {
                 }
             }
             self.alloc.free(func.body);
+            // Mirror ir.Module.deinit(): functions analyzed before an error own
+            // their param_ids slice, which is otherwise leaked on the error path.
+            if (func.param_ids.len > 0) {
+                self.alloc.free(func.param_ids);
+            }
         }
         self.functions.deinit(self.alloc);
         for (self.errors.items) |msg| self.alloc.free(msg);
@@ -453,11 +458,15 @@ const Analyzer = struct {
         self.global_ptr_ids.deinit(self.alloc);
         self.pure_op_cache.deinit(self.alloc);
         self.global_pure_op_cache.deinit(self.alloc);
-        // Free owned name keys in the types map
+        // Free owned name keys and member slices in the types map.
+        // Note: when analysis succeeds, Module takes ownership and this map is
+        // cleared (`analyzer.types = .{}` in analyzeWithOptions), so the member
+        // free below only runs on error paths — mirroring ir.Module.deinit().
         {
-            var type_key_it = self.types.keyIterator();
-            while (type_key_it.next()) |key_ptr| {
-                self.alloc.free(key_ptr.*);
+            var type_it = self.types.iterator();
+            while (type_it.next()) |entry| {
+                self.alloc.free(entry.key_ptr.*);
+                self.alloc.free(entry.value_ptr.members);
             }
             self.types.deinit(self.alloc);
         }
