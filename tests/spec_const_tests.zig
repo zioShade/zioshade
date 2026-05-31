@@ -552,3 +552,133 @@ test "spec const: derived user-bound name preserved across all backends" {
         try std.testing.expect(std.mem.indexOf(u8, out, "DOUBLE_SIZE") != null);
     }
 }
+
+// ── M3.4 bounds check: composite spec-const default literals > 0xFFFFFFFF ──
+//
+// The M3.4 composite default-value extraction in collectTopLevel reads
+// constructor argument literals directly from the AST. For a literal whose
+// magnitude exceeds 32 bits (e.g. `uvec2(5000000000u, 1u)`), the int-element
+// path used `@truncate` and SILENTLY produced a wrong component word
+// (5000000000 → 705032704); the float-element path used `@floatFromInt` and
+// silently accepted the out-of-range literal. glslangValidator rejects both
+// with "numeric literal too big", so glslpp must record an honest error
+// (error.SemanticFailed) rather than emit a silent-wrong constant.
+
+/// Collect every OpSpecConstant (op 50) 32-bit literal value from a SPIR-V blob.
+fn collectSpecConstLiterals(alloc: std.mem.Allocator, spv: []const u32) ![]u32 {
+    var lits = std.ArrayListUnmanaged(u32).empty;
+    errdefer lits.deinit(alloc);
+    var i: usize = 5;
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const op = spv[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == 50 and wc >= 4) try lits.append(alloc, spv[i + 3]);
+        i += wc;
+    }
+    return lits.toOwnedSlice(alloc);
+}
+
+test "M3.4 spec const: uvec2 component literal > 0xFFFFFFFF is an honest error, not silent truncation" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(constant_id = 0) const uvec2 V = uvec2(5000000000u, 1u);
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(float(V.x), float(V.y), 0.0, 1.0); }
+    ;
+    // Oracle (glslangValidator -V): "numeric literal too big". glslpp must
+    // reject too — the silent-truncation path turned 5000000000 into 705032704.
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }),
+    );
+}
+
+test "M3.4 spec const: vec2 int-element literal > 0xFFFFFFFF is an honest error (float path)" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(constant_id = 0) const vec2 V = vec2(5000000000);
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(V, 0.0, 1.0); }
+    ;
+    // Oracle rejects with "numeric literal too big". The float-element branch
+    // (@floatFromInt) previously accepted the out-of-32-bit literal silently.
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }),
+    );
+}
+
+test "M3.4 spec const: in-range uvec2(7u, 8u) components emit correct literals 7 and 8" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(constant_id = 0) const uvec2 V = uvec2(7u, 8u);
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(float(V.x), float(V.y), 0.0, 1.0); }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const lits = try collectSpecConstLiterals(alloc, spv);
+    defer alloc.free(lits);
+    try std.testing.expect(std.mem.indexOfScalar(u32, lits, 7) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u32, lits, 8) != null);
+    // The silently-truncated value must NOT appear.
+    try std.testing.expect(std.mem.indexOfScalar(u32, lits, 705032704) == null);
+}
+
+test "M3.4 spec const: in-range ivec3(1, 2, 3) components emit correct literals 1, 2, 3" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(constant_id = 0) const ivec3 I = ivec3(1, 2, 3);
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(float(I.x), float(I.y), float(I.z), 1.0); }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const lits = try collectSpecConstLiterals(alloc, spv);
+    defer alloc.free(lits);
+    try std.testing.expect(std.mem.indexOfScalar(u32, lits, 1) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u32, lits, 2) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u32, lits, 3) != null);
+}
+
+test "M3.4 spec const: in-range vec2(3, 4) int args convert to float component literals 3.0 and 4.0" {
+    // Exercises the float-element branch (@floatFromInt(word)) with in-range
+    // integer constructor arguments, pinning that routing through literalWord
+    // did not change the correct conversion for valid literals.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(constant_id = 0) const vec2 V = vec2(3, 4);
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(V, 0.0, 1.0); }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const lits = try collectSpecConstLiterals(alloc, spv);
+    defer alloc.free(lits);
+    const f3: u32 = @bitCast(@as(f32, 3.0));
+    const f4: u32 = @bitCast(@as(f32, 4.0));
+    try std.testing.expect(std.mem.indexOfScalar(u32, lits, f3) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u32, lits, f4) != null);
+}
+
+test "M3.4 spec const: scalar uint default > 0xFFFFFFFF is an honest error (scalar path guard)" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(constant_id = 0) const uint N = 5000000000u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(float(N)); }
+    ;
+    // The scalar path routes through analyzeExpression → literalWord, so it is
+    // already guarded; this test pins that behavior against regressions.
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }),
+    );
+}
