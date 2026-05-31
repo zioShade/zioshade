@@ -7053,6 +7053,13 @@ const Analyzer = struct {
                             const val: u32 = blk: {
                                 if (arg.tag == .int_literal) break :blk try literalWord(arg);
                                 if (arg.tag == .uint_literal) break :blk try literalWord(arg);
+                                // The all-const-int scan also admits unary_op(-lit),
+                                // so mirror the vector composite folder's negation
+                                // (wrapping 0 -% word) — otherwise int[2](-5, 1) would
+                                // silently fold the negated element to 0 (Mitchell
+                                // silent-wrong).
+                                if (arg.tag == .unary_op and arg.data.children.len > 0 and arg.data.children[0].tag == .int_literal)
+                                    break :blk 0 -% try literalWord(arg.data.children[0]);
                                 break :blk 0;
                             };
                             const comp_id = try self.getConstInt(val, base_ty);
@@ -9043,4 +9050,30 @@ test "semantic: in-range uvecN splat + ivecN multi + uint[] array still compile"
         }
     }
     try testing.expect(found_max);
+}
+
+test "semantic: negated literal in int array constructor folds to faithful word, not silent 0" {
+    // The all-const-int scan admits unary_op(-int_literal), and the vector
+    // composite folder negates it via `0 -% literalWord(...)`, but the ARRAY
+    // folder only handled bare int/uint literals and fell through to `break :blk 0`
+    // for the negated case — silently folding int[2](-5, 1) to {0, 1} (Mitchell
+    // silent-wrong). The faithful 32-bit word of -5 is 0 -% 5 == 0xFFFFFFFB.
+    const source = "void main() { int a[2] = int[2](-5, 1); }";
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    var found_neg = false;
+    var found_one = false;
+    for (module.functions[0].body) |inst| {
+        if (inst.tag == .constant_int and inst.ty == .int and inst.operands.len == 1) {
+            if (inst.operands[0].literal_int == 0xFFFFFFFB) found_neg = true;
+            if (inst.operands[0].literal_int == 1) found_one = true;
+        }
+    }
+    try testing.expect(found_neg);
+    try testing.expect(found_one);
 }
