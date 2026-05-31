@@ -1222,9 +1222,9 @@ Confirmed entirely missing. This is the biggest single unlock for non-Zig adopte
 
 ```bash
 # All must remain green (with adjusted baselines as work lands):
-mise exec -- zig build test --summary all          # 1640+ pass after M1 (added orphaned tests)
-mise exec -- zig build test-hlsl --summary all     # 780+ pass
-mise exec -- zig build conformance                 # 2087+ PASS
+mise exec -- zig build test --summary all          # 2,054+ pass (as of 2026-05-31)
+mise exec -- zig build test-hlsl --summary all     # 793+ pass
+mise exec -- zig build conformance                 # 2,080 PASS / 7 known feature-gap FAIL (2,087 runnable)
 mise exec -- zig build fuzz -- --count 5000        # 5000 pass, 0 crashes
 mise exec -- zig build examples                    # builds
 mise exec -- env GLSLPP_BENCH_GLSLANG=... GLSLPP_BENCH_SPIRVX=... zig build bench-compare
