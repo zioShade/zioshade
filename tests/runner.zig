@@ -277,7 +277,12 @@ fn enumerateShader(
                 }
             }
             if (!found and hist_n.* < max_hist) {
-                hist_ctx[hist_n.*] = ctx;
+                // Dupe ctx into owned memory: lastErrorCtx() returns a slice into
+                // an internal buffer that the NEXT compile overwrites, so storing
+                // the raw slice would leave the histogram full of dangling/garbled
+                // entries. The runner intentionally leaks (GPA reclaims at deinit),
+                // so the dup is never explicitly freed.
+                hist_ctx[hist_n.*] = alloc.dupe(u8, ctx) catch ctx;
                 hist_cnt[hist_n.*] = 1;
                 hist_n.* += 1;
             }
