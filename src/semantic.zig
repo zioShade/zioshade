@@ -447,6 +447,11 @@ const Analyzer = struct {
                 }
             }
             self.alloc.free(func.body);
+            // Mirror Module.deinit (ir.zig): param_ids is owned. On success the
+            // functions slice is moved to the Module (analyzer.functions = .empty),
+            // so this only frees on the error path — without it, every fail-loud
+            // rejection of a shader with user functions leaks param_ids.
+            if (func.param_ids.len > 0) self.alloc.free(func.param_ids);
         }
         self.functions.deinit(self.alloc);
         for (self.errors.items) |msg| self.alloc.free(msg);
