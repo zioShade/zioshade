@@ -164,7 +164,14 @@ fn parseConformance(alloc: std.mem.Allocator, text: []const u8) !ConfResult {
         } else if (std.mem.startsWith(u8, line, "  FAIL ")) {
             if (cur_idx) |i| suites.items[i].fail += 1;
             const rest = line["  FAIL ".len..];
-            const path = if (std.mem.lastIndexOf(u8, rest, " (")) |p| rest[0..p] else rest;
+            // The runner appends exactly one of these two suffixes (tests/runner.zig).
+            // Anchor on them so a fixture path containing " (" is never mis-stripped.
+            const path = if (std.mem.endsWith(u8, rest, " (spirv-val)"))
+                rest[0 .. rest.len - " (spirv-val)".len]
+            else if (std.mem.endsWith(u8, rest, " (compile error)"))
+                rest[0 .. rest.len - " (compile error)".len]
+            else
+                rest;
             try failing.append(alloc, try normalizePath(alloc, path));
         }
     }
@@ -655,7 +662,10 @@ pub fn main() !void {
 
     // marker injection in the prose docs
     for (DOCS) |doc| {
-        const cur = try readFileAll(alloc, doc);
+        const cur = readFileAll(alloc, doc) catch {
+            std.debug.print("gen_status: WARN {s} not found — skipping marker injection.\n", .{doc});
+            continue;
+        };
         defer alloc.free(cur);
         const updated = try injectMarkers(alloc, cur, kv);
         defer alloc.free(updated);
@@ -672,5 +682,6 @@ pub fn main() !void {
         std.debug.print("gen_status: committed docs do not match a fresh run. Run `just update-status`.\n", .{});
         std.process.exit(1);
     }
-    std.debug.print("gen_status: {s} ok ({s} conformance pass, {d} unit, {d} hlsl).\n", .{ @tagName(args.mode), kv[0].value, unit.passed, hlsl.passed });
+    const conf_pass = lookupKv(kv, "conformance.pass") orelse "?";
+    std.debug.print("gen_status: {s} ok ({s} conformance pass, {d} unit, {d} hlsl).\n", .{ @tagName(args.mode), conf_pass, unit.passed, hlsl.passed });
 }
