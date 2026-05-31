@@ -1,6 +1,6 @@
 # Test Coverage
 
-What `zig build conformance` actually validates: every shader listed below is compiled GLSL → SPIR-V by glslpp and the resulting SPIR-V binary is checked with `spirv-val`. Latest run (verified 2026-05-31, `just test-conformance`): **2,080 / 2,087 runnable fixtures PASS** (7 known feature-gap failures, 8 skipped, 2,095 total) on Windows 11 / Zig 0.15.2 / Vulkan SDK 1.4.341.1. The 7 failures are pre-existing capability gaps, **not regressions**, and the suite exits non-zero while they remain: `fp64.desktop.comp` / `int64.desktop.comp` (64-bit float/int types), `newTexture.frag` / `spv.newTexture.frag` (OpExtInst word-count on new-form texture builtins), `shader_ballot.comp` (subgroup ballot), `ray_sphere_test.frag` (ray feature), `struct-material.frag`.
+What `zig build conformance` actually validates: every shader listed below is compiled GLSL → SPIR-V by glslpp and the resulting SPIR-V binary is checked with `spirv-val`. Latest run (verified 2026-05-31, `just test-conformance`): **<!-- STATUS:conformance.pass -->2,080<!-- /STATUS --> / <!-- STATUS:conformance.runnable -->2,087<!-- /STATUS --> runnable fixtures PASS** (<!-- STATUS:conformance.fail -->7<!-- /STATUS --> known feature-gap failures, <!-- STATUS:conformance.skip -->8<!-- /STATUS --> skipped, <!-- STATUS:conformance.total -->2,095<!-- /STATUS --> total) on Windows 11 / Zig 0.15.2 / Vulkan SDK 1.4.341.1. The 7 failures are pre-existing capability gaps, **not regressions**, and the suite exits non-zero while they remain: `fp64.desktop.comp` / `int64.desktop.comp` (64-bit float/int types), `newTexture.frag` / `spv.newTexture.frag` (OpExtInst word-count on new-form texture builtins), `shader_ballot.comp` (subgroup ballot), `ray_sphere_test.frag` (ray feature), `struct-material.frag`.
 
 ## Test corpora
 
@@ -45,7 +45,7 @@ Each stress case is a single-purpose shader that, when broken in glslpp, would h
 
 | Backend | Where it's exercised | Approx count |
 |---|---|---:|
-| **SPIR-V output (the conformance oracle)** | All 2,087 runnable fixtures above | 2,080 pass / 7 known-fail |
+| **SPIR-V output (the conformance oracle)** | All <!-- STATUS:conformance.runnable -->2,087<!-- /STATUS --> runnable fixtures above | <!-- STATUS:conformance.pass -->2,080<!-- /STATUS --> pass / <!-- STATUS:conformance.fail -->7<!-- /STATUS --> known-fail |
 | **HLSL backend (SM 6.0)** | `zig build test-hlsl` (793 tests) + DXC compilation of 47/51 prebuilt SPIR-V fixtures via `tools/dxc_batch_test.zig` | 793 + 47 |
 | **MSL backend** | `zig build test` (108 msl-tests) + cross-compile of every stress fixture | 108 + 457 |
 | **GLSL round-trip** | `zig build test` (122 glsl-tests) + reference suite | 122 |
@@ -54,10 +54,12 @@ Each stress case is a single-purpose shader that, when broken in glslpp, would h
 
 ## Reproducibility
 
+Live counts: <!-- STATUS:conformance.summary -->2,080 PASS / 7 FAIL / 8 SKIP / 2,095 TOTAL<!-- /STATUS -->; <!-- STATUS:unit.tests -->2,054<!-- /STATUS --> unit tests; <!-- STATUS:hlsl.tests -->780<!-- /STATUS --> HLSL tests. See [docs/STATUS.md](./STATUS.md).
+
 ```bash
-zig build conformance               # 2,080/2,087 runnable spirv-val fixtures pass (7 known feature-gap fails)
-zig build test --summary all        # 2,054 unit tests across all modules
-zig build test-hlsl --summary all   # 793 HLSL backend tests
+zig build conformance               # spirv-val conformance suite (see docs/STATUS.md for live counts)
+zig build test --summary all        # unit tests across all modules (see docs/STATUS.md)
+zig build test-hlsl --summary all   # HLSL backend tests
 zig build fuzz -- --count 50000     # 50k random GLSL inputs, structured fuzzer
 zig build bench-compare             # head-to-head vs glslang+spirv-cross
 ```

@@ -10,7 +10,7 @@ What problem this solves or what capability it adds. Link to an issue if applica
 
 - [ ] `zig build test` passes
 - [ ] `zig build test-hlsl` passes (if HLSL backend changed)
-- [ ] `zig build conformance` — 2,080 PASS / 7 known feature-gap FAIL does not regress (PASS must not drop, FAIL must not grow)
+- [ ] `zig build conformance` — <!-- STATUS:conformance.summary -->2,080 PASS / 7 FAIL / 8 SKIP / 2,095 TOTAL<!-- /STATUS --> does not regress (PASS must not drop, FAIL must not grow; `just status` verifies)
 - [ ] For SPIR-V emitter / cross-compiler changes: `zig build fuzz -- --count 5000` is clean
 - [ ] New regression fixtures added under `tests/conformance/stress/` if a new shader feature is supported
 

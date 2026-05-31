@@ -30,7 +30,7 @@ Thank you for considering a contribution! glslpp is a young, single-contributor 
 5. Open a PR. The PR description should call out:
    - Why the change is needed.
    - Test coverage added (new fixtures in `tests/conformance/stress/`, regression cases, etc.).
-   - Any conformance-count delta (`zig build conformance` → 2,080 PASS / 7 known-FAIL / 8 SKIP; the PASS count must not drop and the FAIL count must not grow).
+   - Any conformance-count delta (`zig build conformance` → <!-- STATUS:conformance.summary -->2,080 PASS / 7 FAIL / 8 SKIP / 2,095 TOTAL<!-- /STATUS -->; the PASS count must not drop and the FAIL count must not grow — run `just status` to verify). See [docs/STATUS.md](docs/STATUS.md).
 
 ## Style
 

@@ -25,7 +25,7 @@ Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated t
 
 | Metric | Value |
 |---|---|
-| `spirv-val` conformance | **2,080 / 2,087** runnable fixtures pass (`zig build conformance`); 7 known feature-gap failures (64-bit int/float, OpExtInst word-count, shader_ballot, ray_sphere, struct-material), 8 skipped, 2,095 total — see [docs/TEST_COVERAGE.md](docs/TEST_COVERAGE.md) |
+| `spirv-val` conformance | **<!-- STATUS:conformance.pass -->2,080<!-- /STATUS --> / <!-- STATUS:conformance.runnable -->2,087<!-- /STATUS -->** runnable fixtures pass (`zig build conformance`); <!-- STATUS:conformance.fail -->7<!-- /STATUS --> known feature-gap failures (64-bit int/float, OpExtInst word-count, shader_ballot, ray_sphere, struct-material), <!-- STATUS:conformance.skip -->8<!-- /STATUS --> skipped, <!-- STATUS:conformance.total -->2,095<!-- /STATUS --> total — see [docs/STATUS.md](docs/STATUS.md) |
 | External DXC SPIR-V fixtures | **47 / 51** compile to DXIL (4 limited by DXC's SM 6.1+ / 2 KB structured-buffer cap) |
 | WGSL stress tests | **470 / 470** |
 | Fuzzer iterations (ad-hoc, no CI yet) | 50,000 crash-free — reproduce with `zig build fuzz -- --count 50000` |
