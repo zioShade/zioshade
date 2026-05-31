@@ -43,6 +43,50 @@ fn isStructType(module: *const ParsedModule, type_id: u32) bool {
     return false;
 }
 
+/// True when `image_type_id` resolves to an OpTypeImage flagged as a depth
+/// (comparison) image - the Depth operand (word[4]) equals 1. GLSL's
+/// `sampler2DShadow` and friends lower to such images. WGSL requires these to
+/// be a `texture_depth_*` texture paired with a `sampler_comparison`, so both
+/// resource types must follow this flag; emitting the default
+/// `texture_2d<f32>` + plain `sampler` is silent-wrong (glslpp exits 0 but
+/// naga rejects with "Comparison sampling mismatch"). Accepts either an
+/// OpTypeImage id or an OpTypeSampledImage id (the latter is unwrapped to its
+/// underlying image).
+///
+/// OpTypeImage layout: [op, result_id, sampled_type, dim, DEPTH, arrayed, ms, sampled, format]
+fn imageTypeIsDepth(module: *const ParsedModule, image_type_id: u32) bool {
+    var inst = getDef(module, image_type_id) orelse return false;
+    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
+        inst = getDef(module, inst.words[2]) orelse return false;
+    }
+    if (inst.op != .TypeImage) return false;
+    return inst.words.len > 4 and inst.words[4] == 1;
+}
+
+/// Spatial coordinate component count WGSL's depth-compare builtins expect for
+/// the texture behind a sampled-image value: 2 for 2D, 3 for cube. glslang
+/// packs the depth reference as a trailing coordinate component for the
+/// `texture(sampler2DShadow, vec3(uv, ref))` form (and passes it again as the
+/// separate Dref operand), but WGSL's textureSampleCompare* require the
+/// coordinate to be EXACTLY the texture's dimension - so the coordinate has to
+/// be sliced down to this many components or naga rejects it ("Image
+/// coordinate type does not match dimension").
+fn depthCompareCoordComps(module: *const ParsedModule, sampled_image_value_id: u32) u32 {
+    const type_id = getTypeOf(module, sampled_image_value_id) orelse return 2;
+    var inst = getDef(module, type_id) orelse return 2;
+    if (inst.op == .TypePointer and inst.words.len > 3) {
+        inst = getDef(module, inst.words[3]) orelse return 2;
+    }
+    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
+        inst = getDef(module, inst.words[2]) orelse return 2;
+    }
+    if (inst.op != .TypeImage or inst.words.len <= 3) return 2;
+    return switch (inst.words[3]) {
+        3 => 3, // Cube -> vec3 coordinate
+        else => 2, // 2D family -> vec2 coordinate
+    };
+}
+
 // Strict WGSL keywords + reserved words from https://www.w3.org/TR/WGSL/#reserved-words
 // plus the commonly-emitted predeclared type / address-space names that
 // callers also can't legally use as identifiers. Reserved words include `ref`,
@@ -330,7 +374,19 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
             const access_qualifier: u32 = if (inst.words.len > 7) inst.words[7] else 0;
             const is_storage = access_qualifier == 2; // Only ReadWrite is storage with both load+store
             // WriteOnly (1) images are also storage but we handle them with regular textures
-            if (is_storage) {
+            // Depth (comparison) image - the Depth operand (word[4]) is 1, e.g.
+            // GLSL sampler2DShadow. WGSL depth textures take NO <T> sampled-type
+            // parameter (they are implicitly f32) and must pair with a
+            // sampler_comparison; see imageTypeIsDepth for why this matters.
+            const is_depth = inst.words.len > 4 and inst.words[4] == 1;
+            if (is_depth) {
+                if (is_ms) break :blk "texture_depth_multisampled_2d";
+                break :blk switch (dim) {
+                    3 => "texture_depth_cube",
+                    4 => "texture_depth_2d_array",
+                    else => "texture_depth_2d",
+                };
+            } else if (is_storage) {
                 const access_mode: []const u8 = switch (access_qualifier) {
                     1 => "write",
                     2 => "read_write",
@@ -1147,10 +1203,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, binding, tex.name, tex_type });
         } else {
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n", .{ group, binding, tex.name, tex_type });
-            // Emit paired sampler
+            // Emit paired sampler. A depth/comparison image (sampler2DShadow)
+            // requires a sampler_comparison so textureSampleCompare /
+            // textureSampleCompareLevel / textureGatherCompare typecheck; a
+            // plain `sampler` is silent-wrong (naga rejects).
             const sampler_name = try std.fmt.allocPrint(arena, "{s}_sampler", .{tex.name});
+            const sampler_kind: []const u8 = if (imageTypeIsDepth(&module, tex.image_type_id)) "sampler_comparison" else "sampler";
             try sampler_names.append(arena, .{ .name = sampler_name, .binding = tex.binding + 1 });
-            try w.print("@group({d}) @binding({d})\nvar {s}: sampler;\n\n", .{ group, shifted_sampler, sampler_name });
+            try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, shifted_sampler, sampler_name, sampler_kind });
         }
     }
 
@@ -3361,7 +3421,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
+                // Slice the packed coordinate down to the texture's dimension
+                // (.xy for 2D, .xyz for cube); see depthCompareCoordComps.
+                const swz: []const u8 = if (depthCompareCoordComps(module, inst.words[3]) == 3) ".xyz" else ".xy";
+                const sample_coord = try std.fmt.allocPrint(arena, "{s}{s}", .{ coord, swz });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, sample_coord, dref });
             },
 
             .ImageSampleDrefExplicitLod => {
@@ -3369,9 +3433,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                const lod = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompareLevel({s}, {s}_sampler, {s}, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref, lod });
+                // WGSL textureSampleCompareLevel for a non-arrayed depth texture
+                // is (t, s, coord, depth_ref) -> f32: it always samples mip 0 and
+                // takes NO explicit level argument, so the SPIR-V Lod operand is
+                // intentionally dropped (emitting it makes naga reject). The
+                // coordinate is also sliced to the texture's dimension (.xy /
+                // .xyz); see depthCompareCoordComps.
+                const swz: []const u8 = if (depthCompareCoordComps(module, inst.words[3]) == 3) ".xyz" else ".xy";
+                const sample_coord = try std.fmt.allocPrint(arena, "{s}{s}", .{ coord, swz });
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompareLevel({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, sample_coord, dref });
             },
 
             .ImageFetch => {

@@ -51,6 +51,44 @@ fn assertNotContains(haystack: []const u8, needle: []const u8) !void {
     }
 }
 
+fn assertContains(haystack: []const u8, needle: []const u8) !void {
+    if (std.mem.indexOf(u8, haystack, needle) == null) {
+        std.debug.print("Expected to find \"{s}\" in output:\n{s}\n", .{ needle, haystack });
+        return error.TestExpectedFind;
+    }
+}
+
+// Validate WGSL with naga - the external WebGPU validator. The whole point of
+// the "silent-wrong" class of bugs is that glslpp emits text that LOOKS fine
+// (exit 0) but a real validator rejects, so string assertions alone can pass
+// while the output is still invalid. naga is the ground truth. When naga isn't
+// installed we SKIP rather than fail, keeping `zig build test` hermetic.
+fn nagaValidateOrSkip(wgsl: []const u8, label: []const u8) !void {
+    const probe = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ "naga", "--version" },
+    }) catch return error.SkipZigTest;
+    alloc.free(probe.stdout);
+    alloc.free(probe.stderr);
+    if (!(probe.term == .Exited and probe.term.Exited == 0)) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "out.wgsl", .data = wgsl });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp.dir.realpath("out.wgsl", &path_buf);
+
+    const result = try std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ "naga", "--input-kind", "wgsl", tmp_path },
+    });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if (result.term == .Exited and result.term.Exited == 0) return;
+    std.debug.print("naga REJECTED WGSL for [{s}]:\n{s}\n{s}\n--- WGSL ---\n{s}\n", .{ label, result.stdout, result.stderr, wgsl });
+    return error.NagaValidationFailed;
+}
+
 fn runWgslTest(test_case: ShaderTest) !void {
     const spirv = compileToSpirv(test_case.name, test_case.source) catch |err| {
         std.debug.print("FAIL [{s}]: glslang failed: {}\n", .{ test_case.name, err });
@@ -252,4 +290,128 @@ test "wgsl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent
         error.UnsupportedImageOperands,
         glslpp.spirvToWGSL(alloc, spirv, .{}),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Depth / shadow sampler comparison sampling (texture_depth_* + sampler_comparison)
+// ---------------------------------------------------------------------------
+//
+// A GLSL `sampler2DShadow` lowers to an OpTypeImage with the Depth operand set
+// (word[4] == 1). WGSL's `textureGatherCompare` / `textureSampleCompare` /
+// `textureSampleCompareLevel` builtins REQUIRE a `texture_depth_2d` texture
+// paired with a `sampler_comparison` sampler, and the coordinate must match the
+// texture's dimension EXACTLY (glslang packs the depth reference as a trailing
+// coordinate component that WGSL forbids). Emitting the default
+// `texture_2d<f32>` + plain `sampler` + packed vec3 coordinate produces WGSL
+// that glslpp emits without error (exit 0) but naga REJECTS - a silent-wrong
+// cross-compile. The resource TYPES and coordinate width must follow the
+// depth/comparison nature of the image.
+
+fn runShadowTypeTest(name: []const u8, source: [:0]const u8, expect_builtin: []const u8) !void {
+    const spirv = try compileToSpirv(name, source);
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+
+    // The companion sampler must be a comparison sampler...
+    try assertContains(wgsl, "sampler_comparison");
+    // ...the texture must be a depth texture (no <f32> sampled-type param)...
+    try assertContains(wgsl, "texture_depth_2d");
+    // ...the compare builtin must still be emitted (regression guard)...
+    try assertContains(wgsl, expect_builtin);
+    // ...and the shadow texture must NOT be emitted as a plain sampled texture.
+    try assertNotContains(wgsl, "texture_2d<f32>");
+    // Ground truth: the emitted WGSL must actually validate.
+    try nagaValidateOrSkip(wgsl, name);
+}
+
+test "wgsl: sampler2DShadow gather emits texture_depth_2d + sampler_comparison" {
+    try runShadowTypeTest(
+        "shadow_gather",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = textureGather(shadowTex, vUV, vRef); }
+    ,
+        "textureGatherCompare",
+    );
+}
+
+test "wgsl: sampler2DShadow compare-sample emits texture_depth_2d + sampler_comparison" {
+    try runShadowTypeTest(
+        "shadow_sample",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(texture(shadowTex, vec3(vUV, vRef))); }
+    ,
+        "textureSampleCompare",
+    );
+}
+
+// Count the top-level (depth-0) commas inside the first `call_prefix(...)` call
+// in `wgsl`, i.e. the argument-separator count for that builtin. Used to prove
+// the ExplicitLod path drops the SPIR-V Lod operand: WGSL's
+// textureSampleCompareLevel takes NO explicit level for non-arrayed depth
+// textures, so the correct call has 4 args (3 separators), not 5 (4 separators).
+fn topLevelCommaCount(wgsl: []const u8, call_prefix: []const u8) !usize {
+    const start = std.mem.indexOf(u8, wgsl, call_prefix) orelse return error.TestExpectedFind;
+    var i = start + call_prefix.len;
+    var depth: usize = 0;
+    var commas: usize = 0;
+    while (i < wgsl.len) : (i += 1) {
+        const ch = wgsl[i];
+        switch (ch) {
+            '(' => depth += 1,
+            ')' => {
+                if (depth == 0) return commas;
+                depth -= 1;
+            },
+            ',' => if (depth == 0) {
+                commas += 1;
+            },
+            else => {},
+        }
+    }
+    return error.TestExpectedFind;
+}
+
+// ExplicitLod sibling of the compare-sample path. GLSL
+// `textureLod(sampler2DShadow, vec3(uv, ref), lod)` lowers to SPIR-V
+// ImageSampleDrefExplicitLod, which the backend maps to
+// `textureSampleCompareLevel`. That builtin's signature for a non-arrayed depth
+// texture is `(t: texture_depth_2d, s: sampler_comparison, coord: vec2<f32>,
+// depth_ref: f32) -> f32` - it takes NO level argument (it always samples mip
+// 0). Two things were wrong (silent-wrong, naga rejects):
+//   1. the coordinate was the packed vec3, not sliced to vec2; and
+//   2. a trailing lod arg was emitted, which naga rejects.
+test "wgsl: sampler2DShadow textureLod (ExplicitLod) slices coord + drops lod" {
+    const name = "shadow_lod";
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(textureLod(shadowTex, vec3(vUV, vRef), 0.0)); }
+    ;
+    // Resource types, builtin name, depth-texture guard, and naga ground truth.
+    try runShadowTypeTest(name, source, "textureSampleCompareLevel(");
+
+    // Additionally prove the Lod operand is dropped: the call must have exactly
+    // 4 arguments (3 top-level commas), not 5. This guard holds even when naga
+    // is not installed.
+    const spirv = try compileToSpirv(name, source);
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    const commas = try topLevelCommaCount(wgsl, "textureSampleCompareLevel(");
+    if (commas != 3) {
+        std.debug.print("textureSampleCompareLevel should have 4 args (3 commas), found {d}:\n{s}\n", .{ commas, wgsl });
+        return error.TestUnexpectedArgCount;
+    }
 }
