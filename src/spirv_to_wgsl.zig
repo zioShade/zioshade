@@ -110,42 +110,78 @@ fn imageTypeIsDepth(module: *const ParsedModule, image_type_id: u32) bool {
     return inst.words.len > 4 and inst.words[4] == 1;
 }
 
-/// Spatial coordinate component count WGSL's depth-compare builtins expect for
-/// the texture behind a sampled-image value: 2 for 2D, 3 for cube. glslang
-/// packs the depth reference as a trailing coordinate component for the
-/// `texture(sampler2DShadow, vec3(uv, ref))` form (and passes it again as the
-/// separate Dref operand), but WGSL's textureSampleCompare* require the
-/// coordinate to be EXACTLY the texture's dimension — so the coordinate has to
-/// be sliced down to this many components or naga rejects it ("Image
-/// coordinate type does not match dimension").
-fn depthCompareCoordComps(module: *const ParsedModule, sampled_image_value_id: u32) u32 {
-    const type_id = getTypeOf(module, sampled_image_value_id) orelse return 2;
-    var inst = getDef(module, type_id) orelse return 2;
+/// How a depth-compare coordinate must be reshaped for WGSL's
+/// textureSampleCompare* builtins, derived from the OpTypeImage behind a
+/// sampled-image value.
+const DepthCompareShape = struct {
+    /// Spatial coordinate component count: 2 for the 2D family, 3 for cube.
+    /// glslang packs the depth reference (and, for arrayed forms, the array
+    /// layer) as trailing coordinate components, but WGSL requires the spatial
+    /// coordinate to be EXACTLY the texture's dimension — so it must be sliced
+    /// to this many components or naga rejects it ("Image coordinate type does
+    /// not match dimension").
+    comps: u32,
+    /// True for an arrayed depth texture (sampler2DArrayShadow,
+    /// samplerCubeArrayShadow). WGSL takes the array layer as a SEPARATE integer
+    /// argument right after the coordinate, not packed into it; the layer is the
+    /// coordinate component just past the spatial coords (.z for 2D, .w for cube).
+    arrayed: bool,
+};
+
+fn depthCompareShape(module: *const ParsedModule, sampled_image_value_id: u32) DepthCompareShape {
+    const default = DepthCompareShape{ .comps = 2, .arrayed = false };
+    const type_id = getTypeOf(module, sampled_image_value_id) orelse return default;
+    var inst = getDef(module, type_id) orelse return default;
     if (inst.op == .TypePointer and inst.words.len > 3) {
-        inst = getDef(module, inst.words[3]) orelse return 2;
+        inst = getDef(module, inst.words[3]) orelse return default;
     }
     if (inst.op == .TypeSampledImage and inst.words.len > 2) {
-        inst = getDef(module, inst.words[2]) orelse return 2;
+        inst = getDef(module, inst.words[2]) orelse return default;
     }
-    if (inst.op != .TypeImage or inst.words.len <= 3) return 2;
-    return switch (inst.words[3]) {
+    if (inst.op != .TypeImage or inst.words.len <= 3) return default;
+    const comps: u32 = switch (inst.words[3]) {
         3 => 3, // Cube → vec3 coordinate
         else => 2, // 2D family → vec2 coordinate (array layer is a separate arg)
     };
+    const arrayed = inst.words.len > 5 and inst.words[5] == 1;
+    return .{ .comps = comps, .arrayed = arrayed };
 }
 
-/// True when `image_type_id` resolves to an arrayed OpTypeImage — the Arrayed
-/// operand (word[5]) equals 1, e.g. GLSL sampler2DArrayShadow. Accepts either
-/// an OpTypeImage id or an OpTypeSampledImage id.
+/// Emit a WGSL depth-compare sample for OpImageSampleDref{Implicit,Explicit}Lod.
+/// `builtin` is "textureSampleCompare" (implicit) or "textureSampleCompareLevel"
+/// (explicit — WGSL drops the SPIR-V Lod operand, always sampling mip 0).
 ///
-/// OpTypeImage layout: [op, result_id, sampled_type, dim, depth, ARRAYED, ms, sampled, format]
-fn imageTypeIsArrayed(module: *const ParsedModule, image_type_id: u32) bool {
-    var inst = getDef(module, image_type_id) orelse return false;
-    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
-        inst = getDef(module, inst.words[2]) orelse return false;
+/// glslang packs the depth reference (and, for arrayed forms, the array layer)
+/// into the coordinate, but WGSL wants the spatial coordinate sliced to exactly
+/// the texture's dimension (.xy / .xyz) with the Dref taken from the separate
+/// SPIR-V operand. Arrayed depth textures additionally take the layer as its own
+/// rounded i32 argument right after the coordinate (the component just past the
+/// spatial coords: .z for 2D, .w for cube) — matching texture_depth_2d_array /
+/// texture_depth_cube_array's signature. Emitting the packed coordinate as-is,
+/// or dropping the layer, is rejected by naga (or silently wrong).
+fn emitDepthCompare(
+    module: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    w: anytype,
+    indent: u32,
+    arena: std.mem.Allocator,
+    inst: Instruction,
+    builtin: []const u8,
+) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    const tex_name = names.get(inst.words[3]) orelse "tex";
+    const coord = names.get(inst.words[4]) orelse "uv";
+    const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+    const shape = depthCompareShape(module, inst.words[3]);
+    const coord_swz: []const u8 = if (shape.comps == 3) ".xyz" else ".xy";
+    try writeIndentStatic(w, indent);
+    if (shape.arrayed) {
+        const layer_comp: []const u8 = if (shape.comps == 3) ".w" else ".z";
+        try w.print("let {s}: {s} = {s}({s}, {s}_sampler, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, builtin, tex_name, tex_name, coord, coord_swz, coord, layer_comp, dref });
+    } else {
+        try w.print("let {s}: {s} = {s}({s}, {s}_sampler, {s}{s}, {s});\n", .{ result_name, rt, builtin, tex_name, tex_name, coord, coord_swz, dref });
     }
-    if (inst.op != .TypeImage) return false;
-    return inst.words.len > 5 and inst.words[5] == 1;
 }
 
 // Strict WGSL keywords + reserved words from https://www.w3.org/TR/WGSL/#reserved-words
@@ -460,13 +496,15 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
             // sampler_comparison; see imageTypeIsDepth for why this matters.
             const is_depth = inst.words.len > 4 and inst.words[4] == 1;
             if (is_depth) {
-                // Array-ness comes from the Arrayed operand, not `dim`; arrayed
-                // depth textures are gated as an honest error before they reach
-                // here (see spirvToWGSL), so `dim` only selects cube vs 2D.
+                // Array-ness comes from the Arrayed operand (word[5]), not `dim`;
+                // `dim` only selects cube vs 2D. WGSL has no multisampled depth
+                // array type, so a (rare, GLSL-inexpressible) depth+MS+arrayed
+                // image falls back to the non-arrayed multisampled form.
+                const arrayed = inst.words.len > 5 and inst.words[5] == 1;
                 if (is_ms) break :blk "texture_depth_multisampled_2d";
                 break :blk switch (dim) {
-                    3 => "texture_depth_cube",
-                    else => "texture_depth_2d",
+                    3 => if (arrayed) "texture_depth_cube_array" else "texture_depth_cube",
+                    else => if (arrayed) "texture_depth_2d_array" else "texture_depth_2d",
                 };
             } else if (is_storage) {
                 const access_mode: []const u8 = switch (access_qualifier) {
@@ -1401,15 +1439,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         const group = @divFloor(shifted_tex, 2);
         const binding = shifted_tex;
         // Arrayed depth textures (sampler2DArrayShadow / samplerCubeArrayShadow)
-        // need a separate WGSL array_index argument on every compare call AND
-        // the array-layer coordinate component preserved. Emitting
-        // texture_depth_2d with a 2-component coordinate (as the non-arrayed
-        // path does) would VALIDATE in naga but silently sample the wrong layer
-        // — trading one silent-wrong for another. Fail loudly until proper
-        // array-shadow support lands.
-        if (imageTypeIsDepth(&module, tex.image_type_id) and imageTypeIsArrayed(&module, tex.image_type_id)) {
-            return error.UnsupportedDepthArrayTexture;
-        }
+        // are emitted as texture_depth_2d_array / texture_depth_cube_array (see
+        // wgslType) and the compare-sample handlers pass the array layer as a
+        // separate WGSL array_index argument (see depthCompareShape). The gather
+        // form (textureGatherCompare) is not yet wired for the array_index arg,
+        // so it stays an honest error in its own handler rather than emitting
+        // wrong-arity WGSL.
         const tex_type = try wgslType(&module, tex.image_type_id, &names, arena);
         if (tex.is_storage) {
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, binding, tex.name, tex_type });
@@ -3627,33 +3662,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             .ImageSampleDrefImplicitLod => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const result_name = names.get(inst.words[2]) orelse "v";
-                const coord = names.get(inst.words[4]) orelse "uv";
-                const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                const tex_name = names.get(inst.words[3]) orelse "tex";
-                // Slice the packed coordinate down to the texture's dimension
-                // (.xy for 2D, .xyz for cube); see depthCompareCoordComps.
-                const swz: []const u8 = if (depthCompareCoordComps(module, inst.words[3]) == 3) ".xyz" else ".xy";
-                const sample_coord = try std.fmt.allocPrint(arena, "{s}{s}", .{ coord, swz });
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, sample_coord, dref });
+                try emitDepthCompare(module, names, w, indent, arena, inst, "textureSampleCompare");
             },
 
             .ImageSampleDrefExplicitLod => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const result_name = names.get(inst.words[2]) orelse "v";
-                const coord = names.get(inst.words[4]) orelse "uv";
-                const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                const tex_name = names.get(inst.words[3]) orelse "tex";
                 // WGSL textureSampleCompareLevel always samples mip level 0 and
                 // takes NO explicit level argument — the SPIR-V Lod operand is
                 // dropped (it is 0 for the common textureLod(shadow, …, 0.0)).
-                // Slice the packed coordinate to the texture dimension like the
-                // implicit form (see depthCompareCoordComps); passing the raw
-                // packed vec3/vec4 is rejected by naga.
-                const swz: []const u8 = if (depthCompareCoordComps(module, inst.words[3]) == 3) ".xyz" else ".xy";
-                const sample_coord = try std.fmt.allocPrint(arena, "{s}{s}", .{ coord, swz });
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleCompareLevel({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, sample_coord, dref });
+                try emitDepthCompare(module, names, w, indent, arena, inst, "textureSampleCompareLevel");
             },
 
             .ImageFetch => {
@@ -4186,6 +4202,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // ImageDrefGather — depth comparison gather
             .ImageDrefGather => {
+                // textureGatherCompare on an ARRAYED depth texture needs a
+                // separate array_index argument the gather path does not yet
+                // build; fail loudly rather than emit wrong-arity WGSL. (The
+                // compare-SAMPLE path DOES support arrays — see emitDepthCompare.)
+                if (depthCompareShape(module, inst.words[3]).arrayed) return error.UnsupportedDepthArrayTexture;
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const si_inst = getDef(module, inst.words[3]);
