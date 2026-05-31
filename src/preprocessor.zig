@@ -804,6 +804,37 @@ pub const Preprocessor = struct {
         self.output.clearRetainingCapacity();
         self.if_stack.clearRetainingCapacity();
 
+        // Pre-define macros for all extensions that glslpp supports.
+        // This mirrors what glslang does: extensions we handle must be pre-defined so
+        // #ifdef GL_EXT_NAME guards (which appear BEFORE the matching #extension line
+        // in spirv-cross-generated shaders) evaluate to true.
+        const supported_extensions = [_][]const u8{
+            "GL_ARB_fragment_shader_interlock",
+            "GL_EXT_mesh_shader",
+            "GL_KHR_ray_tracing",
+            "GL_EXT_scalar_block_layout",
+            "GL_EXT_buffer_reference",
+            "GL_KHR_shader_subgroup_basic",
+            "GL_KHR_shader_subgroup_vote",
+            "GL_KHR_shader_subgroup_arithmetic",
+            "GL_KHR_shader_subgroup_ballot",
+            "GL_KHR_shader_subgroup_shuffle",
+        };
+        // Emit a synthetic "1" token for the macro body. start=0, len=1 means the
+        // single char '1' will be found in any source that starts with a digit —
+        // but we don't use start/len for macro body tokens (they are synthetic).
+        // Use a dedicated extra_string slot for the "1" literal.
+        const predef_one_str_start = self.extra_strings.items.len + source.len;
+        try self.extra_strings.appendSlice(self.alloc, "1");
+        const predef_one_tok = lexer.Token{ .tag = .int_literal, .loc = .{ .line = 0, .column = 0 }, .start = @intCast(predef_one_str_start), .len = 1 };
+        for (supported_extensions) |ext_name| {
+            if (!self.defines.contains(ext_name)) {
+                const name_dup = try self.alloc.dupe(u8, ext_name);
+                const body = try self.alloc.dupe(lexer.Token, &.{predef_one_tok});
+                try self.defines.put(self.alloc, name_dup, .{ .object = body });
+            }
+        }
+
         var i: usize = 0;
         while (i < tokens.len) {
             const tok = tokens[i];
@@ -1002,10 +1033,14 @@ pub const Preprocessor = struct {
                                         if (std.mem.eql(u8, ext_name, "GL_EXT_scalar_block_layout")) {
                                             self.has_ext_scalar_block_layout = true;
                                         }
-                                        const name_dup = try self.alloc.dupe(u8, ext_name);
-                                        const one_tok = lexer.Token{ .tag = .int_literal, .loc = tokens[i].loc, .start = 0, .len = 1 };
-                                        const body = try self.alloc.dupe(lexer.Token, &.{one_tok});
-                                        try self.defines.put(self.alloc, name_dup, .{ .object = body });
+                                        // Only define if not already defined (avoids double-free
+                                        // when pre-defined macros are re-encountered in #extension).
+                                        if (!self.defines.contains(ext_name)) {
+                                            const name_dup = try self.alloc.dupe(u8, ext_name);
+                                            const ext_one_tok = lexer.Token{ .tag = .int_literal, .loc = tokens[i].loc, .start = 0, .len = 1 };
+                                            const body = try self.alloc.dupe(lexer.Token, &.{ext_one_tok});
+                                            try self.defines.put(self.alloc, name_dup, .{ .object = body });
+                                        }
                                     }
                                 }
                             }
