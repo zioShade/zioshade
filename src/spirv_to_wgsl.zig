@@ -607,7 +607,16 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
                 };
                 break :blk format;
             } else if (is_ms) {
-                break :blk std.fmt.allocPrint(alloc, "{s}_multisampled<{s}>", .{ tex_type, st }) catch "texture_2d<f32>";
+                // WGSL spells the multisampled 2D texture `texture_multisampled_2d<T>`
+                // (NOT `texture_2d_multisampled<T>`), and has NO multisampled 3D/cube
+                // /array texture. A multisampled ARRAY (sampler2DMSArray) is therefore
+                // unrepresentable — fail loud rather than emit an invalid type name.
+                const ms_arrayed = inst.words.len > 5 and inst.words[5] == 1;
+                if (ms_arrayed) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no multisampled array texture (sampler2DMSArray)", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
+                break :blk std.fmt.allocPrint(alloc, "texture_multisampled_2d<{s}>", .{st}) catch "texture_multisampled_2d<f32>";
             } else {
                 break :blk std.fmt.allocPrint(alloc, "{s}<{s}>", .{ tex_type, st }) catch "texture_2d<f32>";
             }
