@@ -3811,7 +3811,20 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const si = names.get(inst.words[3]) orelse "tex";
                 const coord = names.get(inst.words[4]) orelse "uv";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureLoad({s}, {s});\n", .{ result_name, rt, si, coord });
+                // WGSL textureLoad on a SAMPLED or MULTISAMPLED texture REQUIRES a
+                // 3rd argument — the mip level (sampled) or the sample index (MS).
+                // GLSL texelFetch always carries it as an OpImageFetch image operand
+                // (Lod/Sample) at words[6] (words[5] = operand mask). Emitting only
+                // (t, coord) produced WGSL naga rejects. (Storage-image loads go
+                // through OpImageRead, which correctly takes 2 args.)
+                if (inst.words.len > 6) {
+                    const level_or_sample = names.get(inst.words[6]) orelse "0";
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = textureLoad({s}, {s}, {s});\n", .{ result_name, rt, si, coord, level_or_sample });
+                } else {
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = textureLoad({s}, {s}, 0);\n", .{ result_name, rt, si, coord });
+                }
             },
 
             // Return
