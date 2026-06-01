@@ -140,10 +140,12 @@ pub const CompileOptions = struct {
     defines: []const DefineOverride = &.{},
 };
 
-pub const CrossCompileOptions = struct {
-    glsl_version: u32 = 430,
-    flatten_ubos: bool = false,
-};
+// (Removed dead `CrossCompileOptions`: it was unused by any public function and
+// its `flatten_ubos` field did nothing — a phantom capability. Per-backend
+// options structs (GlslCompileOptions / HlslCompileOptions / MslCompileOptions /
+// WgslCompileOptions) are the real cross-compile knobs. Descriptor remap is
+// `resource_bindings` on the HLSL/MSL options; UBO flattening is not yet
+// implemented and is intentionally NOT advertised.)
 
 /// Options for multi-kernel SPIR-V compilation.
 pub const MultiKernelOptions = struct {
