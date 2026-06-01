@@ -1532,7 +1532,20 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                     if (pt.op == .TypePointer and pt.words.len > 3) {
                         const pointee_type = pt.words[3];
                         const type_name = try wgslType(&module, pointee_type, &names, arena);
-                        const var_name = names.get(inst.words[2]) orelse "shared";
+                        var var_name = names.get(inst.words[2]) orelse "shared";
+                        // WGSL forbids a variable sharing its name with its struct
+                        // type. A GLSL `shared` block with no instance name yields a
+                        // struct AND a var both named e.g. `first` → naga rejects
+                        // "redefinition of `first`". Rename the variable in `names`
+                        // (body references resolve through it) so the type keeps its
+                        // name.
+                        if (std.mem.eql(u8, var_name, type_name)) {
+                            const renamed = std.fmt.allocPrint(alloc, "{s}_wg", .{var_name}) catch null;
+                            if (renamed) |rn| {
+                                if (names.fetchPut(inst.words[2], rn) catch null) |old| alloc.free(old.value);
+                                var_name = names.get(inst.words[2]) orelse rn;
+                            }
+                        }
                         // Emit struct declaration for array element types
                         try emitOneStructForwardDecl(&module, &names, pointee_type, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
                         try w.print("var<workgroup> {s}: {s};\n\n", .{ var_name, type_name });

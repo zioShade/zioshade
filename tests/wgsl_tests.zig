@@ -669,6 +669,27 @@ test "wgsl: fragment-shader interlock errors honestly (WGSL has no interlock)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "interlock") != null);
 }
 
+test "wgsl: shared block var is renamed to avoid struct-name collision" {
+    // A GLSL `shared` block with no instance name yields a struct and a var both
+    // named `blk`. WGSL forbids a variable sharing its name with its type (naga:
+    // "redefinition of `blk`"). The var must be renamed (struct keeps its name).
+    const source =
+        \\#version 450
+        \\#extension GL_EXT_shared_memory_block : enable
+        \\layout(local_size_x = 8) in;
+        \\shared blk { int a; } ;
+        \\void main() { blk.a = 2; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "struct blk {") != null);
+    // The variable must NOT also be named exactly `blk` (no `var<workgroup> blk:`).
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<workgroup> blk:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<workgroup> blk_wg:") != null);
+}
+
 test "wgsl: constant unsigned vector uses WGSL vec constructor, not GLSL uintN" {
     // A uvec2 constant composite must render as `vec2<u32>(...)`, not the GLSL
     // spelling `uint2(...)` / `uvec2i(...)` which naga rejects as an undefined

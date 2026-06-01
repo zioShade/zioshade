@@ -1,0 +1,9 @@
+#version 450
+#extension GL_EXT_shared_memory_block : enable
+// Regression guard: a GLSL `shared` block with no instance name yields a WGSL
+// struct AND a var both named `blk`. WGSL forbids a variable sharing its name
+// with its type — naga rejects "redefinition of `blk`". The var must be renamed
+// (e.g. `blk_wg`) while the struct keeps its name.
+layout(local_size_x = 8) in;
+shared blk { int a; } ;
+void main() { blk.a = 2; }
