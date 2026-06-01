@@ -37,6 +37,9 @@ pub fn main() !void {
             \\  --metal-version <ver> MSL version: 21, 24, 30 (default: 21)
             \\  --msl-argument-buffers
             \\                        Emit Metal 2+ argument buffers (spvDescriptorSetBufferN)
+            \\  --bind <set:bind:reg> Remap a (set, binding) to an explicit HLSL register /
+            \\                        MSL slot number (repeatable). Class b/t/s/u (HLSL) or
+            \\                        buffer/texture/sampler (MSL) is inferred from the type.
             \\  --stdin               Read input from stdin
             \\  --help                Show this help
             \\
@@ -65,6 +68,8 @@ pub fn main() !void {
 
     var spec_overrides = std.ArrayList(glslpp.SpecOverride).initCapacity(alloc, 4) catch return;
     defer spec_overrides.deinit(alloc);
+    var bind_overrides = std.ArrayList(BindOverride).initCapacity(alloc, 4) catch return;
+    defer bind_overrides.deinit(alloc);
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -141,6 +146,20 @@ pub fn main() !void {
             i += 1;
             if (i >= args.len) fatal("missing argument after --metal-version", .{});
             metal_version = std.fmt.parseInt(u32, args[i], 10) catch fatal("invalid metal version: {s}", .{args[i]});
+        } else if (std.mem.eql(u8, args[i], "--bind")) {
+            i += 1;
+            if (i >= args.len) fatal("missing argument after --bind (expected set:binding:register)", .{});
+            const arg = args[i];
+            var it = std.mem.splitScalar(u8, arg, ':');
+            const set_str = it.next() orelse fatal("--bind expects set:binding:register (got '{s}')", .{arg});
+            const bind_str = it.next() orelse fatal("--bind expects set:binding:register (got '{s}')", .{arg});
+            const reg_str = it.next() orelse fatal("--bind expects set:binding:register (got '{s}')", .{arg});
+            if (it.next() != null) fatal("--bind expects set:binding:register (got '{s}')", .{arg});
+            bind_overrides.append(alloc, .{
+                .set = std.fmt.parseInt(u32, set_str, 10) catch fatal("--bind: invalid set '{s}'", .{set_str}),
+                .binding = std.fmt.parseInt(u32, bind_str, 10) catch fatal("--bind: invalid binding '{s}'", .{bind_str}),
+                .reg = std.fmt.parseInt(u32, reg_str, 10) catch fatal("--bind: invalid register '{s}'", .{reg_str}),
+            }) catch return;
         } else if (std.mem.eql(u8, args[i], "--msl-argument-buffers")) {
             msl_arg_buffers = true;
         } else if (std.mem.eql(u8, args[i], "--stdin")) {
@@ -156,6 +175,7 @@ pub fn main() !void {
 
     // Publish parsed --spec-const overrides for compileWithDiagsOrExit to apply.
     cli_spec_overrides = spec_overrides.items;
+    cli_resource_bindings = bind_overrides.items;
 
     if (std.mem.eql(u8, command, "compile")) {
         const source = try readInput(alloc, input_path, use_stdin);
@@ -297,6 +317,7 @@ fn doSpvToHlsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8,
     const result = glslpp.spirvToHLSL(alloc, spv, .{
         .shader_model = shader_model,
         .entry_point_name = entry_point orelse "main",
+        .resource_bindings = hlslBindings(alloc),
     }) catch |e| crossErr(e);
     defer alloc.free(result);
     try writeOutput(output, result);
@@ -312,6 +333,7 @@ fn doGlslToHlsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const
     const result = glslpp.spirvToHLSL(alloc, spv, .{
         .shader_model = shader_model,
         .entry_point_name = entry_point orelse "main",
+        .resource_bindings = hlslBindings(alloc),
     }) catch |e| crossErr(e);
     defer alloc.free(result);
     try writeOutput(output, result);
@@ -354,6 +376,7 @@ fn doSpvToMsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, 
         .metal_version = metal_version,
         .entry_point_name = entry_point orelse "main",
         .argument_buffers = argument_buffers,
+        .resource_bindings = mslBindings(alloc),
     }) catch |e| crossErr(e);
     defer alloc.free(result);
     try writeOutput(output, result);
@@ -370,6 +393,7 @@ fn doGlslToMsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const 
         .metal_version = metal_version,
         .entry_point_name = entry_point orelse "main",
         .argument_buffers = argument_buffers,
+        .resource_bindings = mslBindings(alloc),
     }) catch |e| crossErr(e);
     defer alloc.free(result);
     try writeOutput(output, result);
@@ -467,6 +491,28 @@ fn printDiagnostic(d: glslpp.diagnostic.Diagnostic) void {
 /// `main`. Single-threaded CLI usage justifies the global; library callers
 /// should use `glslpp.compileToSPIRVWithSpecOverrides` directly.
 var cli_spec_overrides: []const glslpp.SpecOverride = &.{};
+
+/// Parsed `--bind set:binding:reg` descriptor-remap overrides (G6). Backend-
+/// neutral triples; converted to HlslCompileOptions.resource_bindings /
+/// MslCompileOptions.resource_bindings at each cross-compile call site.
+const BindOverride = struct { set: u32, binding: u32, reg: u32 };
+var cli_resource_bindings: []const BindOverride = &.{};
+
+/// Build the HLSL `resource_bindings` slice from the CLI `--bind` overrides.
+fn hlslBindings(alloc: std.mem.Allocator) []const glslpp.ResourceBinding {
+    if (cli_resource_bindings.len == 0) return &.{};
+    const out = alloc.alloc(glslpp.ResourceBinding, cli_resource_bindings.len) catch return &.{};
+    for (cli_resource_bindings, 0..) |b, i| out[i] = .{ .set = b.set, .binding = b.binding, .register = b.reg };
+    return out;
+}
+
+/// Build the MSL `resource_bindings` slice from the CLI `--bind` overrides.
+fn mslBindings(alloc: std.mem.Allocator) []const glslpp.MslResourceBinding {
+    if (cli_resource_bindings.len == 0) return &.{};
+    const out = alloc.alloc(glslpp.MslResourceBinding, cli_resource_bindings.len) catch return &.{};
+    for (cli_resource_bindings, 0..) |b, i| out[i] = .{ .set = b.set, .binding = b.binding, .msl_slot = b.reg };
+    return out;
+}
 
 /// Compile GLSL to SPIR-V, surfacing every collected Diagnostic to stderr
 /// in glslang-style format before exiting on failure. Used by all CLI
