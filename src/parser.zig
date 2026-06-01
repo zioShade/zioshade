@@ -482,6 +482,16 @@ const Parser = struct {
                         // per-primitive rather than per-vertex.
                         q.is_perprimitive_ext = true;
                         _ = self.advance(); found = true;
+                    } else if (std.mem.eql(u8, ident_text, "pervertexEXT")) {
+                        // GL_EXT_fragment_shader_barycentric: marks a fragment
+                        // `in` as a per-vertex array (PerVertexKHR decoration).
+                        q.is_pervertex_ext = true;
+                        _ = self.advance(); found = true;
+                    } else if (std.mem.eql(u8, ident_text, "pervertexNV")) {
+                        // GL_NV_fragment_shader_barycentric: NV spelling of the
+                        // same per-vertex array qualifier.
+                        q.is_pervertex_nv = true;
+                        _ = self.advance(); found = true;
                     } else break;
                 },
                 else => break,

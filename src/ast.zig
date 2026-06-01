@@ -466,6 +466,14 @@ pub const Qualifier = packed struct {
     /// per-primitive. Propagates to a SPIR-V `PerPrimitiveEXT` decoration so the
     /// HLSL backend can route the variable into a `struct PrimOut`. (M5.2 v2.b)
     is_perprimitive_ext: bool = false,
+    /// `pervertexEXT` (GL_EXT_fragment_shader_barycentric) — marks a fragment
+    /// input as per-vertex (an array indexed by triangle vertex 0..2, weighted
+    /// by gl_BaryCoord*). Propagates to a SPIR-V `PerVertexKHR` decoration.
+    is_pervertex_ext: bool = false,
+    /// `pervertexNV` (GL_NV_fragment_shader_barycentric) — the NV spelling of
+    /// the same construct. Emits the identical `PerVertexKHR` decoration; only
+    /// the OpExtension string differs (SPV_NV_… vs SPV_KHR_…).
+    is_pervertex_nv: bool = false,
 };
 
 pub const InputTopology = enum { points, lines, lines_adjacency, triangles, triangles_adjacency };
