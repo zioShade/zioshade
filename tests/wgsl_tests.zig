@@ -669,6 +669,40 @@ test "wgsl: fragment-shader interlock errors honestly (WGSL has no interlock)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "interlock") != null);
 }
 
+test "wgsl: nested switch does not leak OpSelectionMerge as a value" {
+    // A nested switch drives the switch/loop replay path. OpSelectionMerge (a
+    // structured-control-flow hint with no result id) must be skipped there, not
+    // emitted as `let v = SelectionMerge();` (which naga rejects: "no definition
+    // in scope for identifier: SelectionMerge").
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int mode = int(gl_FragCoord.x) % 4;
+        \\    vec3 color = vec3(0.0);
+        \\    switch (mode) {
+        \\        case 0: color = vec3(1.0, 0.0, 0.0); break;
+        \\        case 1: {
+        \\            int sub = int(gl_FragCoord.y) % 2;
+        \\            switch (sub) {
+        \\                case 0: color = vec3(0.0, 1.0, 0.0); break;
+        \\                default: color = vec3(0.0, 0.0, 1.0); break;
+        \\            }
+        \\            break;
+        \\        }
+        \\        default: color = vec3(0.5); break;
+        \\    }
+        \\    fragColor = vec4(color, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "SelectionMerge") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "LoopMerge") == null);
+}
+
 test "wgsl: QCOM block-match errors honestly (WGSL has no QCOM image ops)" {
     // GL_QCOM_image_processing block-match has no WGSL equivalent. glslpp must
     // fail loud instead of falling through to the `var v: T;` placeholder, which
