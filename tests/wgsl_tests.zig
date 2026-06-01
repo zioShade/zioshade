@@ -669,6 +669,41 @@ test "wgsl: fragment-shader interlock errors honestly (WGSL has no interlock)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "interlock") != null);
 }
 
+test "wgsl: vertex input without explicit location is still emitted as a param" {
+    // `in vec4 inV;` (no layout location) must become an `@location(N)` entry
+    // parameter; previously inputs lacking a Location decoration were dropped,
+    // leaving the body referencing an undeclared identifier (naga reject).
+    const source =
+        \\#version 450
+        \\in vec4 inV;
+        \\layout(location = 0) out vec4 vColor;
+        \\void main() { vColor = inV; gl_Position = inV; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "inV: vec4f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(") != null);
+}
+
+test "wgsl: vertex shader without gl_Position errors honestly" {
+    // WGSL requires a @builtin(position) vertex output. A vertex shader that
+    // never writes gl_Position cannot be valid WGSL; fabricating one would be
+    // silent-wrong, so glslpp must fail loud.
+    const source =
+        \\#version 430 core
+        \\in vec4 inV;
+        \\layout(location = 0) out vec4 outV;
+        \\void main() { outV = inV; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "gl_Position") != null);
+}
+
 test "wgsl: shared block var is renamed to avoid struct-name collision" {
     // A GLSL `shared` block with no instance name yields a struct and a var both
     // named `blk`. WGSL forbids a variable sharing its name with its type (naga:
