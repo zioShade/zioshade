@@ -14254,3 +14254,24 @@ test "T597.10: dynamic column index into a row_major UBO matrix is transposed" {
     try assertNotContains(hlsl, "transpose(a_m)[0]");
 }
 
+
+test "compute built-ins map to HLSL SV semantics on the entry signature" {
+    // gl_GlobalInvocationID / gl_LocalInvocationID / gl_WorkGroupID /
+    // gl_LocalInvocationIndex must become entry params with their SV semantic.
+    // Otherwise the body references undeclared identifiers and dxc rejects.
+    const source =
+        \\#version 450
+        \\layout(local_size_x=8) in;
+        \\layout(std430, binding=0) buffer B { uint data[]; };
+        \\void main() {
+        \\    data[gl_GlobalInvocationID.x] =
+        \\        gl_LocalInvocationID.x + gl_WorkGroupID.x + gl_LocalInvocationIndex;
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "gl_GlobalInvocationID : SV_DispatchThreadID");
+    try assertContains(hlsl, "gl_LocalInvocationID : SV_GroupThreadID");
+    try assertContains(hlsl, "gl_WorkGroupID : SV_GroupID");
+    try assertContains(hlsl, "gl_LocalInvocationIndex : SV_GroupIndex");
+}
