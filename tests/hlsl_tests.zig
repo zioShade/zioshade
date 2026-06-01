@@ -14293,3 +14293,44 @@ test "vertex gl_VertexIndex/gl_InstanceIndex use uint for SV_VertexID/SV_Instanc
     try assertContains(hlsl, "uint gl_VertexIndex : SV_VertexID");
     try assertContains(hlsl, "uint gl_InstanceIndex : SV_InstanceID");
 }
+
+test "descriptor remap: resource_bindings overrides register assignment" {
+    // G6: a per-resource (set, binding) -> register override. UBO at binding 0
+    // and sampler2D at binding 1 are remapped to b5 and t3/s3.
+    const source =
+        \\#version 450
+        \\layout(set = 0, binding = 0) uniform U { vec4 tint; } u;
+        \\layout(set = 0, binding = 1) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texture(tex, uv) * u.tint; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{
+        .shader_model = 60,
+        .resource_bindings = &.{
+            .{ .set = 0, .binding = 0, .register = 5 },
+            .{ .set = 0, .binding = 1, .register = 3 },
+        },
+    });
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "register(b5)");
+    try assertContains(hlsl, "register(t3)");
+    try assertContains(hlsl, "register(s3)");
+}
+
+test "descriptor remap: empty resource_bindings preserves default registers" {
+    const source =
+        \\#version 450
+        \\layout(set = 0, binding = 2) uniform U { vec4 tint; } u;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = u.tint; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    // No remap → default register from the binding number.
+    try assertContains(hlsl, "register(b2)");
+}
