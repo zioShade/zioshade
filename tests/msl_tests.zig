@@ -2040,3 +2040,19 @@ test "msl: gl_FrontFacing threads as bool [[front_facing]]" {
     try assertContains(msl, "bool gl_FrontFacing)");
     try assertNotContains(msl, "int(gl_FrontFacing)");
 }
+
+test "msl: gl_PointSize becomes a [[point_size]] main0_out field" {
+    const source =
+        \\#version 450
+        \\void main() {
+        \\    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+        \\    gl_PointSize = 4.0;
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .vertex);
+    defer alloc.free(msl);
+    // gl_PointSize is a struct field with the MSL builtin attribute, not a leak.
+    try assertContains(msl, "float gl_PointSize [[point_size]]");
+    // Body store resolves through the output struct.
+    try assertContains(msl, "out.gl_PointSize = 4.0");
+}
