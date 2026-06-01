@@ -4365,7 +4365,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const component = names.get(inst.words[5]) orelse "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureGather({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, component });
+                // WGSL textureGather takes the component as the FIRST argument:
+                // textureGather(component, texture, sampler, coords). Emitting the
+                // GLSL order (tex, sampler, coords, component) makes naga read the
+                // texture where it expects the integer component (silent-wrong).
+                try writeInd(w, indent); try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s});\n", .{ result_name, rt, component, tex_name, tex_name, coord });
             },
 
             // ImageDrefGather — depth comparison gather
