@@ -2074,3 +2074,28 @@ test "msl: compute built-ins thread as kernel parameter attributes" {
     try assertContains(msl, "uint3 gl_WorkGroupID [[threadgroup_position_in_grid]]");
     try assertContains(msl, "uint gl_LocalInvocationIndex [[thread_index_in_threadgroup]]");
 }
+
+test "msl: descriptor remap overrides [[buffer]]/[[texture]]/[[sampler]] slots" {
+    // G6: per-resource (set, binding) -> MSL slot override. UBO at binding 0 and
+    // sampler2D at binding 1 are remapped to buffer(4) and texture(2)/sampler(2).
+    const source =
+        \\#version 450
+        \\layout(set = 0, binding = 0) uniform U { vec4 tint; } u;
+        \\layout(set = 0, binding = 1) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texture(tex, uv) * u.tint; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const msl = try glslpp.spirvToMSL(alloc, spirv, .{
+        .resource_bindings = &.{
+            .{ .set = 0, .binding = 0, .msl_slot = 4 },
+            .{ .set = 0, .binding = 1, .msl_slot = 2 },
+        },
+    });
+    defer alloc.free(msl);
+    try assertContains(msl, "[[buffer(4)]]");
+    try assertContains(msl, "[[texture(2)]]");
+    try assertContains(msl, "[[sampler(2)]]");
+}
