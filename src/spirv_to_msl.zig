@@ -32,9 +32,10 @@ const StageInputDecl = struct { var_id: u32, name: []const u8, type_id: u32, loc
 ///   - gl_Position (`is_position == true`): `float4 gl_Position [[position]]`,
 ///     emitted LAST (matching spirv-cross --msl). It is made a struct field so
 ///     a body `gl_Position = ...` store resolves to `out.gl_Position = ...`,
-///     never a bare local. Other output built-ins (gl_PointSize,
-///     gl_ClipDistance) are NOT collected here — see collectStageOutputs.
-const StageOutputDecl = struct { var_id: u32, name: []const u8, type_id: u32, location: u32, is_position: bool };
+///     never a bare local.
+///   - gl_PointSize (`is_point_size == true`): `float gl_PointSize [[point_size]]`,
+///     emitted right after gl_Position (matching spirv-cross --msl).
+const StageOutputDecl = struct { var_id: u32, name: []const u8, type_id: u32, location: u32, is_position: bool, is_point_size: bool = false };
 
 // ---- Helpers ----
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction { if (id >= m.id_defs.len) return null; const i = m.id_defs[id] orelse return null; if (i >= m.instructions.len) return null; return m.instructions[i]; }
@@ -933,6 +934,8 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         for (stage_outputs.items) |so| {
             if (so.is_position) {
                 try w.print("    {s} {s} [[position]];\n", .{ try mslType(&module, so.type_id, &names, aa), so.name });
+            } else if (so.is_point_size) {
+                try w.print("    {s} {s} [[point_size]];\n", .{ try mslType(&module, so.type_id, &names, aa), so.name });
             } else {
                 try w.print("    {s} {s} [[user(locn{d})]];\n", .{ try mslType(&module, so.type_id, &names, aa), so.name, so.location });
             }
@@ -1286,6 +1289,7 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
 ///   - Non-position outputs without a Location decoration.
 fn collectStageOutputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), outputs: *std.ArrayList(StageOutputDecl), alloc: std.mem.Allocator) void {
     var position: ?StageOutputDecl = null;
+    var point_size: ?StageOutputDecl = null;
     for (m.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
@@ -1299,11 +1303,13 @@ fn collectStageOutputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []co
         if (pti.op == .TypeStruct) continue;
         const name = names.get(rid) orelse continue;
 
-        // gl_Position is the ONLY built-in output we map (→ [[position]]).
-        // Other built-in outputs are intentionally skipped (see doc comment).
+        // Built-in outputs we map: gl_Position → [[position]], gl_PointSize →
+        // [[point_size]]. Others are intentionally skipped (see doc comment).
         if (builtinOf(decs, rid)) |bi| {
             if (bi == @intFromEnum(spirv.BuiltIn.position)) {
                 position = .{ .var_id = rid, .name = name, .type_id = pt, .location = 0, .is_position = true };
+            } else if (bi == @intFromEnum(spirv.BuiltIn.point_size)) {
+                point_size = .{ .var_id = rid, .name = name, .type_id = pt, .location = 0, .is_position = false, .is_point_size = true };
             }
             continue;
         }
@@ -1318,8 +1324,10 @@ fn collectStageOutputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []co
         }
     };
     std.sort.insertion(StageOutputDecl, outputs.items, {}, SortCtx.lessThan);
-    // gl_Position goes LAST (matches spirv-cross --msl).
+    // gl_Position goes after user varyings, then gl_PointSize (matches
+    // spirv-cross --msl ordering).
     if (position) |p| outputs.append(alloc, p) catch {};
+    if (point_size) |p| outputs.append(alloc, p) catch {};
 }
 
 /// Return the BuiltIn enum value (as a u32) decorated on `id`, or null if `id`
