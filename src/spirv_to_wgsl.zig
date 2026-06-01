@@ -4223,21 +4223,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try writeInd(w, indent); try w.print("let {s}: {s} = textureNumSamples({s});\n", .{ result_name, rt, image });
             },
 
-            // ImageQueryLod
+            // ImageQueryLod (GLSL textureQueryLod) — WGSL has NO equivalent
+            // (no textureQueryLod builtin). glslpp previously emitted
+            // `textureQueryLod(...)`, which naga rejects as an undefined identifier
+            // (silent-wrong). Fail loud with a named error instead.
             .ImageQueryLod => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const result_name = names.get(inst.words[2]) orelse "v";
-                const si_inst = getDef(module, inst.words[3]);
-                var tex_name: []const u8 = "tex";
-                if (si_inst) |sii| {
-                    if (sii.op == .SampledImage and sii.words.len > 3) {
-                        tex_name = names.get(sii.words[2]) orelse "tex";
-                    } else {
-                        tex_name = names.get(inst.words[3]) orelse "tex";
-                    }
-                }
-                const coord = if (inst.words.len > 4) names.get(inst.words[4]) orelse "uv" else "uv";
-                try writeInd(w, indent); try w.print("let {s}: {s} = vec2f(f32(textureQueryLod({s}, {s})), 0.0);\n", .{ result_name, rt, tex_name, coord });
+                last_error_detail = std.fmt.bufPrint(
+                    &last_error_detail_buf,
+                    "WGSL has no textureQueryLod equivalent (GLSL textureQueryLod is unsupported)",
+                    .{},
+                ) catch null;
+                return error.UnsupportedOp;
             },
 
             // ImageGather
