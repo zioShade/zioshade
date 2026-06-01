@@ -718,11 +718,24 @@ fn addUniqueSet(list: *std.ArrayList(u32), set: u32, alloc: std.mem.Allocator) !
 
 // ---- Public API ----
 /// Options for SPIR-V → MSL cross-compilation.
+/// Explicit per-resource MSL slot override (descriptor remap, G6). Maps a SPIR-V
+/// (descriptor set, binding) to an explicit MSL attribute index — `[[buffer(N)]]`
+/// / `[[texture(N)]]` / `[[sampler(N)]]` (the attribute kind is inferred from the
+/// resource type). Takes precedence over `binding_shift`. Mirrors spirv-cross's
+/// `add_msl_resource_binding` for the common (legacy, non-argument-buffer) path.
+pub const MslResourceBinding = struct {
+    set: u32 = 0,
+    binding: u32,
+    msl_slot: u32,
+};
+
 pub const MslCompileOptions = struct {
     /// Target Metal version (21 = Metal 2.1, 30 = Metal 3.0).
     metal_version: u32 = 21,
     /// Entry point name to compile (default: "main").
     entry_point_name: []const u8 = "main",
+    /// Per-resource MSL slot overrides (checked before `binding_shift`).
+    resource_bindings: []const MslResourceBinding = &.{},
     /// Shift all descriptor bindings by this amount. -1 remaps binding=1 → [[buffer(0)]].
     /// Applied uniformly to [[buffer]], [[texture]], and [[sampler]] slot indices
     /// (their indices are separate namespaces, but glslpp's convention — matching
@@ -740,6 +753,16 @@ pub const MslCompileOptions = struct {
     /// to the `[[id]]` slots inside the struct.
     argument_buffers: bool = false,
 };
+
+/// Resolve the MSL attribute slot for a resource at (set, binding): an explicit
+/// `resource_bindings` override wins, otherwise fall back to the binding-shifted
+/// value (legacy per-resource path).
+fn resolveMslSlot(bindings: []const MslResourceBinding, binding_shift: i32, set: u32, binding: u32) u32 {
+    for (bindings) |rb| {
+        if (rb.set == set and rb.binding == binding) return rb.msl_slot;
+    }
+    return common.applyBindingShift(binding, binding_shift);
+}
 
 pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: MslCompileOptions) ![]const u8 {
     var module = try parseModule(alloc, spirv_words);
@@ -1070,9 +1093,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     if (local_structs_msl.count() > 0) try w.writeAll("\n");
 
     // Emit non-entry functions first
-    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers); }
+    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings); }
     // Emit entry function last
-    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers);
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -1670,6 +1693,7 @@ fn emitFunction(
     is_compute: bool,
     binding_shift: i32,
     argument_buffers: bool,
+    resource_bindings: []const MslResourceBinding,
 ) !void {
     const fi = getDef(m, func_id) orelse return;
     if (fi.op != .Function or fi.words.len < 5) return;
@@ -1899,13 +1923,13 @@ fn emitFunction(
         } else {
             for (cbuffers.items) |cb| {
                 if (!first_param) try w.writeAll(", ");
-                const cb_b = common.applyBindingShift(cb.binding, binding_shift);
+                const cb_b = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
                 try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb_b});
                 first_param = false;
             }
             for (textures.items) |tex| {
                 if (!first_param) try w.writeAll(", ");
-                const tex_b = common.applyBindingShift(tex.binding, binding_shift);
+                const tex_b = resolveMslSlot(resource_bindings, binding_shift, tex.descriptor_set, tex.binding);
                 try w.print("{s} {s} [[texture({d})]]", .{ mslTextureType(tex), tex.name, tex_b});
                 try w.print(", sampler {s}Smplr [[sampler({d})]]", .{tex.name, tex_b});
                 first_param = false;
@@ -1987,13 +2011,13 @@ fn emitFunction(
             // Legacy per-resource binding: storage buffers + uniform buffers.
             for (storage_buffers.items) |sb| {
                 if (!first_param) try w.writeAll(", ");
-                const sb_b = common.applyBindingShift(sb.binding, binding_shift);
+                const sb_b = resolveMslSlot(resource_bindings, binding_shift, sb.descriptor_set, sb.binding);
                 try w.print("device {s}* {s} [[buffer({d})]]", .{sb.name, sb.name, sb_b});
                 first_param = false;
             }
             for (cbuffers.items) |cb| {
                 if (!first_param) try w.writeAll(", ");
-                const cb_b = common.applyBindingShift(cb.binding, binding_shift);
+                const cb_b = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
                 try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb_b});
                 first_param = false;
             }
@@ -2138,13 +2162,13 @@ fn emitFunction(
         // now; vertex uses the legacy per-resource binding.)
         for (cbuffers.items) |cb| {
             if (!first_param) try w.writeAll(", ");
-            const cb_b = common.applyBindingShift(cb.binding, binding_shift);
+            const cb_b = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
             try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{ cb.name, cb.name, cb_b });
             first_param = false;
         }
         for (textures.items) |tex| {
             if (!first_param) try w.writeAll(", ");
-            const tex_b = common.applyBindingShift(tex.binding, binding_shift);
+            const tex_b = resolveMslSlot(resource_bindings, binding_shift, tex.descriptor_set, tex.binding);
             try w.print("{s} {s} [[texture({d})]], sampler {s}Smplr [[sampler({d})]]", .{ mslTextureType(tex), tex.name, tex_b, tex.name, tex_b });
             first_param = false;
         }
