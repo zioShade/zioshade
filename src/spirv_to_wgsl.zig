@@ -4577,6 +4577,23 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                 try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
             }
         },
+        .CompositeConstruct => {
+            // Loop/switch-replay path: a CompositeConstruct whose result is USED
+            // (not inlined into a store) must construct via its result type, e.g.
+            // `vec4f(a, b, c, d)`. Previously it fell to the generic fallback which
+            // emitted the opcode tag name `CompositeConstruct(...)` — a bare
+            // identifier naga rejects ("no definition in scope"). Mirrors the main
+            // emit path's general case.
+            const rt = try wgslType(module, inst.words[1], names, arena);
+            const result_name = names.get(inst.words[2]) orelse "v";
+            var args = std.ArrayList(u8).initCapacity(arena, 64) catch return;
+            defer args.deinit(arena);
+            for (inst.words[3..], 0..) |comp_id, ci| {
+                if (ci > 0) try args.appendSlice(arena, ", ");
+                try args.appendSlice(arena, names.get(comp_id) orelse "0");
+            }
+            try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, args.items });
+        },
         else => {
             // For all other instructions, try emitCall/emitBinOp patterns
             // Comparison ops
