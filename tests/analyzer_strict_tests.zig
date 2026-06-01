@@ -347,6 +347,50 @@ test "strict: SSBO array member swizzle compound-assign (p[id].vel.xyz += ...)" 
     try std.testing.expect(spv.len > 5);
 }
 
+test "strict: partial swizzle compound-assign writes the correct components (regression: swizzle_len+j)" {
+    // `col.rgb *= x` on a vec4 merges the computed rgb back via an OpVectorShuffle of
+    // (original vec4, computed vec3). The swizzled lanes (0,1,2) MUST select from the
+    // SECOND operand (indices >= n == 4); the non-swizzled lane (3) selects from the
+    // first. A prior bug used `swizzle_len+j` (== 3+j) instead of `n+j` (== 4+j), so
+    // lane r selected index 3 — silently writing col.w into col.r. Value-check the shuffle.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(location=0) in vec4 inCol;
+        \\layout(location=0) out vec4 o;
+        \\void main() { vec4 col = inCol; col.rgb *= 2.0; o = col; }
+        ;
+    const spv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var i: usize = 5;
+    var verified_merge = false;
+    while (i < spv.len) {
+        const wc: usize = spv[i] >> 16;
+        const op: u16 = @truncate(spv[i] & 0xFFFF);
+        if (wc == 0) break;
+        // OpVectorShuffle (79) with 4 result components: [op|9] rtype rid v1 v2 c0 c1 c2 c3
+        if (op == 79 and wc == 9) {
+            const c0 = spv[i + 5];
+            const c1 = spv[i + 6];
+            const c2 = spv[i + 7];
+            const c3 = spv[i + 8];
+            // Identify the merge shuffle: at least one lane from the second operand
+            // (>= 4) and at least one from the first (< 4). Ignore identity self-shuffles.
+            if ((c0 >= 4 or c1 >= 4 or c2 >= 4) and (c0 < 4 or c1 < 4 or c2 < 4 or c3 < 4)) {
+                // The three swizzled lanes (rgb) must come from the computed operand.
+                try std.testing.expect(c0 >= 4);
+                try std.testing.expect(c1 >= 4);
+                try std.testing.expect(c2 >= 4);
+                // The untouched lane (w) must come from the original.
+                try std.testing.expect(c3 < 4);
+                verified_merge = true;
+            }
+        }
+        i += wc;
+    }
+    try std.testing.expect(verified_merge); // the merge shuffle must exist and be correct
+}
+
 test "strict: pixel_interlock_ordered extension and SPIRV_Cross macro pattern" {
     // The spirv_cross pixel-interlock shader uses #ifdef GL_ARB_fragment_shader_interlock
     // BEFORE the #extension directive, so the macro must be pre-defined by the preprocessor

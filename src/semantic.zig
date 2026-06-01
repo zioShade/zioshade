@@ -4169,7 +4169,12 @@ const Analyzer = struct {
                                         var found = false;
                                         for (0..swizzle_len) |j| {
                                             if (self.swizzleIndex(swizzle_name[j]) == i) {
-                                                final_shuffle_ops[2 + i] = .{ .literal_int = @intCast(swizzle_len + j) };
+                                                // The computed values (operand 1) start at index n in the
+                                                // shuffle (operand 0 has n components), so the j-th computed
+                                                // value is at n+j — NOT swizzle_len+j (which only coincides
+                                                // for a full-width swizzle). swizzle_len+j silently wrote the
+                                                // wrong components for partial swizzles like `col.rgb *= x`.
+                                                final_shuffle_ops[2 + i] = .{ .literal_int = @intCast(n + j) };
                                                 found = true;
                                                 break;
                                             }
