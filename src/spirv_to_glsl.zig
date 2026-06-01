@@ -1246,41 +1246,14 @@ fn emitBody(
                 }
                 if (label_map.get(mval)) |mi| { idx = mi; }
             } else {
-                // No SelectionMerge — reconstruct if/else from branch targets
-                // Find convergence: both branches eventually branch to same label
-                var converge_lbl: ?u32 = null;
-                if (fl != null) {
-                    // Scan true branch for its terminal Branch
-                    const tl_idx = label_map.get(tl) orelse tl;
-                    var si: usize = tl_idx;
-                    while (si < m.instructions.len) : (si += 1) {
-                        const sinst = m.instructions[si];
-                        if (sinst.op == .Branch and sinst.words.len > 1) {
-                            converge_lbl = sinst.words[1];
-                            break;
-                        }
-                        if (sinst.op == .ReturnValue or sinst.op == .Return or sinst.op == .Kill) break;
-                        if (sinst.op == .BranchConditional) break;
-                    }
-                }
-                try w.print("    if ({s})\n    {{\n", .{cn});
-                if (converge_lbl) |cv| {
-                    idx = try emitBlock(m, names, decs, tl, cv, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
-                    if (fl != null and fl.? != cv) {
-                        try w.writeAll("    } else {\n");
-                        idx = try emitBlock(m, names, decs, fl.?, cv, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
-                    }
-                    try w.writeAll("    }\n");
-                    if (label_map.get(cv)) |mi| { idx = mi; }
-                } else if (fl != null) {
-                    idx = try emitBlock(m, names, decs, tl, fl.?, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
-                    try w.writeAll("    }\n");
-                    if (label_map.get(fl.?)) |mi| { idx = mi; }
-                } else {
-                    // Only true branch, no false — emit true branch and continue
-                    idx = try emitBlock(m, names, decs, tl, tl, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", true);
-                    try w.writeAll("    }\n");
-                }
+                // No OpSelectionMerge on an OpBranchConditional = unstructured
+                // control flow. The previous convergence-guessing if/else
+                // reconstruction was a heuristic that can silently mis-nest or
+                // drop branches (same lossy class as the switch path). glslpp's
+                // own frontend always emits merge info; refuse external/optimized
+                // unstructured SPIR-V loudly rather than emit a lossy
+                // reconstruction. Full CFG structurization is backlog #4 (G2).
+                return error.UnstructuredControlFlow;
             }
             continue;
         }
@@ -1307,41 +1280,14 @@ fn emitBody(
                 try w.writeAll("    }\n");
                 if (label_map.get(mval)) |mi| { idx = mi; }
             } else {
-                // No SelectionMerge for switch — try to find convergence point
-                var switch_merge: ?u32 = null;
-                if (inst.words.len >= 5) {
-                    const first_case_target = inst.words[4];
-                    const fc_idx = label_map.get(first_case_target) orelse first_case_target;
-                    var si: usize = fc_idx;
-                    while (si < m.instructions.len) : (si += 1) {
-                        const sinst = m.instructions[si];
-                        if (sinst.op == .Branch and sinst.words.len > 1) {
-                            switch_merge = sinst.words[1];
-                            break;
-                        }
-                        if (sinst.op == .ReturnValue or sinst.op == .Return or sinst.op == .Kill) break;
-                        if (sinst.op == .BranchConditional) break;
-                    }
-                }
-                if (switch_merge) |sm| {
-                    try w.print("    switch ({s}) {{\n", .{sn});
-                    if (dl != sm) {
-                        try w.writeAll("    default:\n");
-                        _ = try emitBlock(m, names, decs, dl, sm, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", true);
-                    }
-                    var wi: usize = 3;
-                    while (wi + 1 < inst.words.len) : (wi += 2) {
-                        const cv = inst.words[wi];
-                        const target = inst.words[wi + 1];
-                        if (target == sm) continue;
-                        try w.print("    case {d}:\n", .{cv});
-                        _ = try emitBlock(m, names, decs, target, sm, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", true);
-                    }
-                    try w.writeAll("    }\n");
-                    if (label_map.get(sm)) |mi| { idx = mi; }
-                } else {
-                    try w.writeAll("    // switch: no merge info\n");
-                }
+                // No OpSelectionMerge on an OpSwitch = unstructured control flow
+                // (e.g. externally-optimized / hand-authored SPIR-V; glslpp's own
+                // frontend always emits merge info). The previous convergence-
+                // guessing heuristic was SILENT-WRONG — it dropped the `default`
+                // case (and elided the whole switch when no convergence was
+                // found). Per Mitchell discipline, fail loud instead of emitting a
+                // lossy reconstruction. Full CFG structurization is backlog #4 (G2).
+                return error.UnstructuredControlFlow;
             }
             continue;
         }
