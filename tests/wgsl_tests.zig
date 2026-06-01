@@ -635,6 +635,23 @@ test "wgsl: scalar isnan lowers to (x != x); isinf errors honestly" {
     }
 }
 
+test "wgsl: textureQueryLod errors honestly (WGSL has no equivalent)" {
+    // WGSL has no textureQueryLod builtin; glslpp must fail loud, not emit
+    // textureQueryLod(...) which naga rejects (silent-wrong).
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D t;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(textureQueryLod(t, uv), 0.0, 1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "textureQueryLod") != null);
+}
+
 // ---------------------------------------------------------------------------
 // row_major / column_major UBO matrix layout (silent-wrong fix)
 //
