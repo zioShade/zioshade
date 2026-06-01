@@ -4725,6 +4725,12 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             }
             try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, args.items });
         },
+        .SelectionMerge, .LoopMerge => {
+            // Structured control-flow merge hints — they carry no result id and
+            // are consumed by the enclosing switch/if/loop replay. Emit nothing
+            // (otherwise the generic fallback below leaks the opcode name as a
+            // value, e.g. `let v = SelectionMerge();`, which naga rejects).
+        },
         else => {
             // For all other instructions, try emitCall/emitBinOp patterns
             // Comparison ops
