@@ -2025,6 +2025,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         const type_name = try wgslType(&module, actual_type, &names, arena);
         const var_name = names.get(iv.id) orelse "input";
         if (iv.builtin) |bi| {
+            // Map the SPIR-V input built-in to its WGSL @builtin name. An unmapped
+            // built-in (e.g. gl_PointCoord — no WGSL equivalent) must fail loud:
+            // the old `else => "position"` fallback fabricated a bogus
+            // @builtin(position) of the wrong type, which naga rejects (silent-wrong).
             const builtin_name: []const u8 = switch (bi) {
                 .frag_coord => "position",
                 .front_facing => "front_facing",
@@ -2039,14 +2043,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 .workgroup_id => "workgroup_id",
                 .num_workgroups => "num_workgroups",
                 .local_invocation_index => "local_invocation_index",
-                .workgroup_size => "workgroup_size",
                 .primitive_id => "primitive_id",
-                .invocation_id => "local_invocation_index",
                 .sample_id => "sample_index",
-                .sample_position => "sample_position",
-                .view_index => "view_index",
-                .layer => "view_index",
-                else => "position",
+                else => {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no @builtin for input '{s}'", .{@tagName(bi)}) catch null;
+                    return error.UnsupportedOp;
+                },
             };
             const needs_u32 = switch (bi) {
                 .vertex_id, .instance_id, .vertex_index, .instance_index => true,
