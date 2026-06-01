@@ -177,16 +177,25 @@ pub fn build(b: *std.Build) void {
     }
     conformance_step.dependOn(&run_conformance.step);
 
-    // Analyzer false-positive enumeration — run with: zig build enumerate-fp
-    // Lists fixtures the tolerate compile accepts but the strict analyzer rejects.
+    // "build-runner" step: just compile the runner, don't run it
+    const build_runner_step = b.step("build-runner", "Build the conformance runner executable");
+    build_runner_step.dependOn(&runner_exe.step);
+
+    // Enumerate analyzer false-positive candidates — run with: zig build enumerate-fp
+    // Walks all fixture suites, compiles each with tolerate+strict, reports divergences.
     const enumerate_step = b.step("enumerate-fp", "List analyzer false-positive candidates (strict vs tolerate)");
     const run_enumerate = b.addRunArtifact(runner_exe);
     run_enumerate.addArg("--strict-enumerate");
     enumerate_step.dependOn(&run_enumerate.step);
 
-    // "build-runner" step: just compile the runner, don't run it
-    const build_runner_step = b.step("build-runner", "Build the conformance runner executable");
-    build_runner_step.dependOn(&runner_exe.step);
+    // Continuous strict-gate — run with: zig build strict-gate
+    // Walks all fixture suites, compiles each with compileToSPIRV (fail-loud after flip),
+    // exits non-zero if any curated-valid fixture is newly rejected (FP regression).
+    // Known-unsupported fixtures in KNOWN_UNSUPPORTED are counted as XFAIL (not failures).
+    const strict_gate_step = b.step("strict-gate", "Verify no curated-valid fixtures are rejected by the fail-loud API");
+    const run_strict_gate = b.addRunArtifact(runner_exe);
+    run_strict_gate.addArg("--strict-gate");
+    strict_gate_step.dependOn(&run_strict_gate.step);
 
     // HLSL backend tests — run with: zig build test-hlsl
     const hlsl_test_step = b.step("test-hlsl", "Run HLSL backend tests (GLSL → SPIR-V → HLSL pipeline)");
@@ -225,6 +234,20 @@ pub fn build(b: *std.Build) void {
     corr_test_step.dependOn(&run_corr_tests.step);
     test_step.dependOn(&run_corr_tests.step);
 
+    // Analyzer strict self-test — run with: zig build test-analyzer-strict
+    const analyzer_strict_test_step = b.step("test-analyzer-strict", "Run analyzer strict-mode self-test (harness sanity check)");
+    const analyzer_strict_mod = b.createModule(.{
+        .root_source_file = b.path("tests/analyzer_strict_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    analyzer_strict_mod.addImport("glslpp", glslpp_mod);
+    const run_analyzer_strict = b.addRunArtifact(b.addTest(.{
+        .root_module = analyzer_strict_mod,
+    }));
+    analyzer_strict_test_step.dependOn(&run_analyzer_strict.step);
+    test_step.dependOn(&run_analyzer_strict.step);
+
     // Diagnostic tests (G3) — run with: zig build test-diagnostic
     const diag_test_step = b.step("test-diagnostic", "Run diagnostic quality tests");
     const diag_test_mod = b.createModule(.{
@@ -238,20 +261,6 @@ pub fn build(b: *std.Build) void {
     }));
     diag_test_step.dependOn(&run_diag_tests.step);
     test_step.dependOn(&run_diag_tests.step);
-
-    // Strict-analyzer tests (analyzer fail-loud milestone) — run with: zig build test-strict
-    const strict_test_step = b.step("test-strict", "Run strict-analyzer fail-loud tests");
-    const strict_test_mod = b.createModule(.{
-        .root_source_file = b.path("tests/analyzer_strict_tests.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    strict_test_mod.addImport("glslpp", glslpp_mod);
-    const run_strict_tests = b.addRunArtifact(b.addTest(.{
-        .root_module = strict_test_mod,
-    }));
-    strict_test_step.dependOn(&run_strict_tests.step);
-    test_step.dependOn(&run_strict_tests.step);
 
     // C ABI tests (M7.2) — run with: zig build test-c-abi
     const c_abi_test_step = b.step("test-c-abi", "Run C ABI export-wrapper tests");

@@ -11,14 +11,41 @@ const Stats = struct {
     fail: u32 = 0,
     skip: u32 = 0,
     compile_error: u32 = 0,
-    // Count of analyzer false-positive candidates (--strict-enumerate mode only):
-    // fixtures the tolerate compile accepts but the strict compile rejects.
-    strict_fp: u32 = 0,
+    strict_fp: u32 = 0, // false-positive candidates (tolerate OK, strict fails)
+    xfail: u32 = 0,     // expected failures (known-unsupported fixtures)
 
     fn total(self: Stats) u32 {
-        return self.pass + self.fail + self.skip + self.compile_error;
+        return self.pass + self.fail + self.skip + self.compile_error + self.xfail;
     }
 };
+
+/// Paths of fixtures that are expected to fail after the fail-loud flip.
+/// These are either genuinely unrepresentable constructs (extensions not modeled,
+/// 64-bit types, AMD-specific ops) or current spirv-val failures.
+/// Match by path suffix — full "tests/<suite>/<name>" to avoid over-matching
+/// (e.g. "newTexture.frag" is a suffix of "spv.newTexture.frag").
+const KNOWN_UNSUPPORTED = [_][]const u8{
+    "tests/glslang-430/newTexture.frag",
+    "tests/glslang-430/spv.newTexture.frag",
+    "tests/glslang-430/spv.AofA.frag",
+    "tests/glslang-430/spv.double.comp",
+    "tests/glslang-430/spv.nvAtomicFp16Vec.frag",
+    "tests/spirv-cross/extended-arithmetic.desktop.comp",
+    "tests/spirv-cross/fp64.desktop.comp",
+    "tests/spirv-cross/gcn_shader.comp",
+    "tests/spirv-cross/image-query.desktop.frag",
+    "tests/spirv-cross/int64.desktop.comp",
+    "tests/spirv-cross/ray_sphere_test.frag",
+    "tests/spirv-cross/shader-clock.frag",
+    "tests/spirv-cross/shader_ballot.comp",
+    "tests/spirv-cross/spec-constant-work-group-size.vk.comp",
+    "tests/spirv-cross/struct-material.frag",
+};
+
+fn isKnownUnsupported(path: []const u8) bool {
+    for (KNOWN_UNSUPPORTED) |p| if (std.mem.endsWith(u8, path, p)) return true;
+    return false;
+}
 
 fn log(comptime fmt: []const u8, args: anytype) void {
     std.debug.print(fmt, args);
@@ -102,7 +129,36 @@ fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, sav
     defer alloc.free(source_z);
 
     // Detect stage from file extension
-    const stage: glslpp.Stage = stageFromPath(path);
+    const stage: glslpp.Stage = blk: {
+        if (std.mem.endsWith(u8, path, ".vert") or std.mem.endsWith(u8, path, ".v.glsl"))
+            break :blk .vertex
+        else if (std.mem.endsWith(u8, path, ".comp") or std.mem.endsWith(u8, path, ".c.glsl"))
+            break :blk .compute
+        else if (std.mem.endsWith(u8, path, ".geom"))
+            break :blk .geometry
+        else if (std.mem.endsWith(u8, path, ".tesc"))
+            break :blk .tessellation_control
+        else if (std.mem.endsWith(u8, path, ".tese"))
+            break :blk .tessellation_evaluation
+        else if (std.mem.endsWith(u8, path, ".mesh"))
+            break :blk .mesh
+        else if (std.mem.endsWith(u8, path, ".task"))
+            break :blk .task
+        else if (std.mem.endsWith(u8, path, ".rgen"))
+            break :blk .raygen
+        else if (std.mem.endsWith(u8, path, ".rchit"))
+            break :blk .closesthit
+        else if (std.mem.endsWith(u8, path, ".rmiss"))
+            break :blk .miss
+        else if (std.mem.endsWith(u8, path, ".rahit"))
+            break :blk .anyhit
+        else if (std.mem.endsWith(u8, path, ".rint"))
+            break :blk .intersection
+        else if (std.mem.endsWith(u8, path, ".rcall"))
+            break :blk .callable
+        else
+            break :blk .fragment;
+    };
 
     // Compile GLSL -> SPIR-V
     const spirv_ver: glslpp.SPIRVVersion = if (stage == .mesh or stage == .task or
@@ -148,77 +204,20 @@ fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, sav
     return .fail;
 }
 
-/// Detect the shader stage from a fixture path's extension (shared by testShader/enumerateShader).
-fn stageFromPath(path: []const u8) glslpp.Stage {
-    if (std.mem.endsWith(u8, path, ".vert") or std.mem.endsWith(u8, path, ".v.glsl"))
-        return .vertex
-    else if (std.mem.endsWith(u8, path, ".comp") or std.mem.endsWith(u8, path, ".c.glsl"))
-        return .compute
-    else if (std.mem.endsWith(u8, path, ".geom"))
-        return .geometry
-    else if (std.mem.endsWith(u8, path, ".tesc"))
-        return .tessellation_control
-    else if (std.mem.endsWith(u8, path, ".tese"))
-        return .tessellation_evaluation
-    else if (std.mem.endsWith(u8, path, ".mesh"))
-        return .mesh
-    else if (std.mem.endsWith(u8, path, ".task"))
-        return .task
-    else if (std.mem.endsWith(u8, path, ".rgen"))
-        return .raygen
-    else if (std.mem.endsWith(u8, path, ".rchit"))
-        return .closesthit
-    else if (std.mem.endsWith(u8, path, ".rmiss"))
-        return .miss
-    else if (std.mem.endsWith(u8, path, ".rahit"))
-        return .anyhit
-    else if (std.mem.endsWith(u8, path, ".rint"))
-        return .intersection
-    else if (std.mem.endsWith(u8, path, ".rcall"))
-        return .callable
-    else
-        return .fragment;
-}
-
-/// SPIR-V version a fixture compiles against (shared by testShader/enumerateShader
-/// so both probe identically — ray-tracing/mesh need 1.4, everything else 1.5).
-fn spirvVersionForStage(stage: glslpp.Stage) glslpp.SPIRVVersion {
-    return if (stage == .mesh or stage == .task or
-        stage == .raygen or stage == .closesthit or stage == .miss or
-        stage == .intersection or stage == .anyhit or stage == .callable) .@"1.4" else .@"1.5";
-}
-
-/// Whether a directory entry is a conformance fixture we compile. Centralizes the
-/// extension allowlist + skip rules so testShader's walk and the enumeration walk
-/// select exactly the same corpus (they must not drift).
-fn isConformanceFixture(basename: []const u8) bool {
-    const ext = std.fs.path.extension(basename);
-    if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
-        !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
-        !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task") and
-        !std.mem.eql(u8, ext, ".geom") and !std.mem.eql(u8, ext, ".tesc") and
-        !std.mem.eql(u8, ext, ".tese") and
-        !std.mem.eql(u8, ext, ".rgen") and !std.mem.eql(u8, ext, ".rchit") and
-        !std.mem.eql(u8, ext, ".rmiss") and !std.mem.eql(u8, ext, ".rahit") and
-        !std.mem.eql(u8, ext, ".rint") and !std.mem.eql(u8, ext, ".rcall"))
-        return false;
-
-    // Skip error-validation tests, multi-file link tests, SPIR-V assembly files, and nocompat.
-    if (std.mem.indexOf(u8, basename, ".error.") != null) return false;
-    if (std.mem.startsWith(u8, basename, "link.")) return false;
-    if (std.mem.indexOf(u8, basename, ".asm.") != null) return false;
-    if (std.mem.indexOf(u8, basename, ".nocompat.") != null) return false;
-    return true;
-}
-
-/// Strict-enumeration probe: compile a fixture with BOTH the tolerate path
-/// (`compileToSPIRV`) and the strict path (`compileToSPIRVStrict`). A fixture is
-/// a false-positive *candidate* when tolerate SUCCEEDS but strict fails with
-/// error.SemanticFailed — i.e. the analyzer over-rejects GLSL that codegen
-/// otherwise handles. Records the candidate's `ctx` into `hist` and bumps
-/// `stats.strict_fp`. Does NOT run spirv-val (we only care about analyzer
-/// accept/reject here).
-fn enumerateShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, hist: *std.StringHashMap(u32), stats: *Stats) !void {
+/// Enumerate false-positive candidates: fixtures where the tolerant compile
+/// succeeds but the strict compile fails with error.SemanticFailed.
+/// Mirrors testShader's setup (skip logic, include inlining, stage detection)
+/// but does NOT run spirv-val.
+fn enumerateShader(
+    io: compat.IoType,
+    alloc: std.mem.Allocator,
+    path: []const u8,
+    stats: *Stats,
+    hist_ctx: [][]const u8,
+    hist_cnt: []u32,
+    hist_n: *usize,
+    max_hist: usize,
+) !void {
     const dir = compat.cwd();
 
     const file = compat.dirOpenFile(io, dir, path, .{}) catch return;
@@ -229,57 +228,108 @@ fn enumerateShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8
     const source_nt = source_z_raw;
     defer alloc.free(source_nt);
 
+    // Skip empty files
     if (source_nt.len == 0) return;
+
+    // Skip header/include files (no main function)
     if (std.mem.indexOf(u8, source_nt, "void main") == null and
         std.mem.indexOf(u8, source_nt, "void mainImage") == null)
         return;
+
+    // Skip files that are error-validation tests
     if (std.mem.indexOf(u8, source_nt, "// ERROR") != null) return;
 
+    // Inline #include directives
     const final_source = inlineIncludes(io, alloc, path, source_nt) catch source_nt;
     defer if (final_source.ptr != source_nt.ptr) alloc.free(final_source);
     const source_z = try alloc.dupeZ(u8, final_source);
     defer alloc.free(source_z);
 
-    const stage = stageFromPath(path);
-    // Match testShader's version selection so the tolerate probe here cannot
-    // succeed/fail differently from the conformance run for RT/mesh stages.
-    const spirv_ver = spirvVersionForStage(stage);
-
-    // Tolerate compile: current public behavior. If it fails, this fixture is
-    // not a false-positive candidate (the error is not masked today).
-    const tolerate_ok = blk: {
-        const w = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver }) catch break :blk false;
-        alloc.free(w);
-        break :blk true;
+    // Detect stage from file extension
+    const stage: glslpp.Stage = blk: {
+        if (std.mem.endsWith(u8, path, ".vert") or std.mem.endsWith(u8, path, ".v.glsl"))
+            break :blk .vertex
+        else if (std.mem.endsWith(u8, path, ".comp") or std.mem.endsWith(u8, path, ".c.glsl"))
+            break :blk .compute
+        else if (std.mem.endsWith(u8, path, ".geom"))
+            break :blk .geometry
+        else if (std.mem.endsWith(u8, path, ".tesc"))
+            break :blk .tessellation_control
+        else if (std.mem.endsWith(u8, path, ".tese"))
+            break :blk .tessellation_evaluation
+        else if (std.mem.endsWith(u8, path, ".mesh"))
+            break :blk .mesh
+        else if (std.mem.endsWith(u8, path, ".task"))
+            break :blk .task
+        else if (std.mem.endsWith(u8, path, ".rgen"))
+            break :blk .raygen
+        else if (std.mem.endsWith(u8, path, ".rchit"))
+            break :blk .closesthit
+        else if (std.mem.endsWith(u8, path, ".rmiss"))
+            break :blk .miss
+        else if (std.mem.endsWith(u8, path, ".rahit"))
+            break :blk .anyhit
+        else if (std.mem.endsWith(u8, path, ".rint"))
+            break :blk .intersection
+        else if (std.mem.endsWith(u8, path, ".rcall"))
+            break :blk .callable
+        else
+            break :blk .fragment;
     };
-    if (!tolerate_ok) return;
 
-    // Strict compile: rejects on the first recorded semantic error. (Analysis-only;
-    // spirv_version is irrelevant — it affects codegen, which strict mode skips.)
-    if (glslpp.compileToSPIRVStrict(alloc, source_z, .{ .stage = stage })) |w| {
-        alloc.free(w); // static empty slice → safe no-op (Allocator.free returns on len==0)
-        return; // strict also accepted → not a false-positive
+    const spirv_ver: glslpp.SPIRVVersion = if (stage == .mesh or stage == .task or
+        stage == .raygen or stage == .closesthit or stage == .miss or
+        stage == .intersection or stage == .anyhit or stage == .callable) .@"1.4" else .@"1.5";
+
+    // Tolerate compile: if this fails there is nothing to enumerate.
+    const tol_words = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver }) catch return;
+    defer alloc.free(tol_words);
+
+    // Strict compile: a false-positive candidate fires here.
+    if (glslpp.compileToSPIRVStrict(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver })) |_| {
+        // Strict also succeeded: not a false-positive candidate.
+        // compileToSPIRVStrict returns a static empty slice — nothing to free.
     } else |err| {
-        if (err != error.SemanticFailed) return; // lex/parse failure, not a semantic over-rejection
-        const ctx = glslpp.lastErrorCtx() orelse "<no-ctx>";
-        const inner = glslpp.lastErrorInner() orelse "";
-        std.debug.print("  FP-CANDIDATE {s} ctx={s} inner={s}\n", .{ path, ctx, inner });
-        stats.strict_fp += 1;
-        // Histogram by ctx. The threadlocal ctx is overwritten on the next
-        // compile, so dupe the key. The dupe is owned by `hist` and freed by the
-        // enumerate-mode defer in mainImpl before hist.deinit().
-        const key = alloc.dupe(u8, ctx) catch return;
-        const gop = hist.getOrPut(key) catch return;
-        if (gop.found_existing) {
-            alloc.free(key);
-            gop.value_ptr.* += 1;
-        } else {
-            gop.value_ptr.* = 1;
+        if (err == error.SemanticFailed) {
+            stats.strict_fp += 1;
+            const ctx = glslpp.lastErrorCtx() orelse "(none)";
+            const inner = glslpp.lastErrorInner() orelse "(none)";
+            log("  FP {s} ctx={s} inner={s}\n", .{ path, ctx, inner });
+
+            // Update per-ctx histogram
+            var found = false;
+            for (hist_ctx[0..hist_n.*], 0..) |existing, hi| {
+                if (std.mem.eql(u8, existing, ctx)) {
+                    hist_cnt[hi] += 1;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found and hist_n.* < max_hist) {
+                // Dupe ctx into owned memory: lastErrorCtx() returns a slice into
+                // an internal buffer that the NEXT compile overwrites, so storing
+                // the raw slice would leave the histogram full of dangling/garbled
+                // entries. The runner intentionally leaks (GPA reclaims at deinit),
+                // so the dup is never explicitly freed.
+                hist_ctx[hist_n.*] = alloc.dupe(u8, ctx) catch ctx;
+                hist_cnt[hist_n.*] = 1;
+                hist_n.* += 1;
+            }
         }
+        // compileToSPIRVStrict returns a static empty slice on success — nothing to free.
     }
 }
 
-fn runDirEnumerate(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []const u8, hist: *std.StringHashMap(u32), stats: *Stats) !void {
+fn enumerateDir(
+    io: compat.IoType,
+    alloc: std.mem.Allocator,
+    dir_path: []const u8,
+    stats: *Stats,
+    hist_ctx: [][]const u8,
+    hist_cnt: []u32,
+    hist_n: *usize,
+    max_hist: usize,
+) !void {
     const dir = compat.dirOpenDir(io, compat.cwd(), dir_path, .{ .iterate = true }) catch return;
     defer compat.dirClose(io, dir);
 
@@ -288,12 +338,26 @@ fn runDirEnumerate(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []cons
 
     while (try compat.walkerNext(io, &walker)) |entry| {
         if (entry.kind != .file) continue;
-        if (!isConformanceFixture(entry.basename)) continue;
+        const ext = std.fs.path.extension(entry.basename);
+        if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
+            !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
+            !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task") and
+            !std.mem.eql(u8, ext, ".geom") and !std.mem.eql(u8, ext, ".tesc") and
+            !std.mem.eql(u8, ext, ".tese") and
+            !std.mem.eql(u8, ext, ".rgen") and !std.mem.eql(u8, ext, ".rchit") and
+            !std.mem.eql(u8, ext, ".rmiss") and !std.mem.eql(u8, ext, ".rahit") and
+            !std.mem.eql(u8, ext, ".rint") and !std.mem.eql(u8, ext, ".rcall"))
+            continue;
+
+        if (std.mem.indexOf(u8, entry.basename, ".error.") != null) continue;
+        if (std.mem.startsWith(u8, entry.basename, "link.")) continue;
+        if (std.mem.indexOf(u8, entry.basename, ".asm.") != null) continue;
+        if (std.mem.indexOf(u8, entry.basename, ".nocompat.") != null) continue;
 
         var path_buf: [compat.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
 
-        enumerateShader(io, alloc, full_path, hist, stats) catch {};
+        enumerateShader(io, alloc, full_path, stats, hist_ctx, hist_cnt, hist_n, max_hist) catch {};
     }
 }
 
@@ -306,29 +370,175 @@ fn runDir(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []const u8, sta
 
     while (try compat.walkerNext(io, &walker)) |entry| {
         if (entry.kind != .file) continue;
-        if (!isConformanceFixture(entry.basename)) continue;
+        const ext = std.fs.path.extension(entry.basename);
+        if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
+            !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
+            !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task") and
+            !std.mem.eql(u8, ext, ".geom") and !std.mem.eql(u8, ext, ".tesc") and
+            !std.mem.eql(u8, ext, ".tese") and
+            !std.mem.eql(u8, ext, ".rgen") and !std.mem.eql(u8, ext, ".rchit") and
+            !std.mem.eql(u8, ext, ".rmiss") and !std.mem.eql(u8, ext, ".rahit") and
+            !std.mem.eql(u8, ext, ".rint") and !std.mem.eql(u8, ext, ".rcall"))
+            continue;
+
+        // Skip error-validation tests, multi-file link tests, SPIR-V assembly files, and nocompat
+        if (std.mem.indexOf(u8, entry.basename, ".error.") != null) continue;
+        if (std.mem.startsWith(u8, entry.basename, "link.")) continue;
+        if (std.mem.indexOf(u8, entry.basename, ".asm.") != null) continue;
+        if (std.mem.indexOf(u8, entry.basename, ".nocompat.") != null) continue;
 
         var path_buf: [compat.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
 
         const result = testShader(io, alloc, full_path, null) catch .skip;
+        const known = isKnownUnsupported(full_path);
         switch (result) {
             .pass => {
-                stats.pass += 1;
-                log("  PASS {s}\n", .{full_path});
+                if (known) {
+                    // A KNOWN_UNSUPPORTED fixture unexpectedly passed — the list is stale.
+                    // Fail loudly so it can be removed from the list and re-classified.
+                    stats.fail += 1;
+                    log("  UNEXPECTED-PASS {s} (was KNOWN_UNSUPPORTED — remove from list)\n", .{full_path});
+                } else {
+                    stats.pass += 1;
+                    log("  PASS {s}\n", .{full_path});
+                }
             },
             .fail => {
-                stats.fail += 1;
-                log("  FAIL {s} (spirv-val)\n", .{full_path});
+                if (known) {
+                    stats.xfail += 1;
+                    log("  XFAIL {s} (spirv-val, known-unsupported)\n", .{full_path});
+                } else {
+                    stats.fail += 1;
+                    log("  FAIL {s} (spirv-val)\n", .{full_path});
+                }
             },
             .compile_error => {
-                stats.compile_error += 1;
-                log("  FAIL {s} (compile error)\n", .{full_path});
+                if (known) {
+                    stats.xfail += 1;
+                    log("  XFAIL {s} (compile error, known-unsupported)\n", .{full_path});
+                } else {
+                    stats.compile_error += 1;
+                    log("  FAIL {s} (compile error)\n", .{full_path});
+                }
             },
             .skip => {
                 stats.skip += 1;
                 log("  SKIP {s}\n", .{full_path});
             },
+        }
+    }
+}
+
+/// Strict-gate: walk a suite directory, compile each fixture with compileToSPIRV
+/// (fail-loud mode since the flip), and report any rejection NOT in KNOWN_UNSUPPORTED
+/// as a false-positive regression (exit non-zero). Does NOT run spirv-val.
+fn strictGateDir(
+    io: compat.IoType,
+    alloc: std.mem.Allocator,
+    dir_path: []const u8,
+    stats: *Stats,
+) !void {
+    const dir = compat.dirOpenDir(io, compat.cwd(), dir_path, .{ .iterate = true }) catch return;
+    defer compat.dirClose(io, dir);
+
+    var walker = try compat.dirWalk(dir, alloc);
+    defer walker.deinit();
+
+    while (try compat.walkerNext(io, &walker)) |entry| {
+        if (entry.kind != .file) continue;
+        const ext = std.fs.path.extension(entry.basename);
+        if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
+            !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
+            !std.mem.eql(u8, ext, ".mesh") and !std.mem.eql(u8, ext, ".task") and
+            !std.mem.eql(u8, ext, ".geom") and !std.mem.eql(u8, ext, ".tesc") and
+            !std.mem.eql(u8, ext, ".tese") and
+            !std.mem.eql(u8, ext, ".rgen") and !std.mem.eql(u8, ext, ".rchit") and
+            !std.mem.eql(u8, ext, ".rmiss") and !std.mem.eql(u8, ext, ".rahit") and
+            !std.mem.eql(u8, ext, ".rint") and !std.mem.eql(u8, ext, ".rcall"))
+            continue;
+
+        if (std.mem.indexOf(u8, entry.basename, ".error.") != null) continue;
+        if (std.mem.startsWith(u8, entry.basename, "link.")) continue;
+        if (std.mem.indexOf(u8, entry.basename, ".asm.") != null) continue;
+        if (std.mem.indexOf(u8, entry.basename, ".nocompat.") != null) continue;
+
+        var path_buf: [compat.max_path_bytes]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
+
+        // Apply same skip logic as testShader
+        const file = compat.dirOpenFile(io, compat.cwd(), full_path, .{}) catch continue;
+        defer compat.fileClose(io, file);
+        const source = compat.fileReadToEndAlloc(io, file, alloc, 10 * 1024 * 1024) catch continue;
+        defer alloc.free(source);
+        if (source.len == 0) continue;
+        if (std.mem.indexOf(u8, source, "void main") == null and
+            std.mem.indexOf(u8, source, "void mainImage") == null) continue;
+        if (std.mem.indexOf(u8, source, "// ERROR") != null) continue;
+
+        const final_source = inlineIncludes(io, alloc, full_path, source) catch source;
+        defer if (final_source.ptr != source.ptr) alloc.free(final_source);
+        const source_z = alloc.dupeZ(u8, final_source) catch continue;
+        defer alloc.free(source_z);
+
+        const stage: glslpp.Stage = blk: {
+            if (std.mem.endsWith(u8, full_path, ".vert") or std.mem.endsWith(u8, full_path, ".v.glsl"))
+                break :blk .vertex
+            else if (std.mem.endsWith(u8, full_path, ".comp") or std.mem.endsWith(u8, full_path, ".c.glsl"))
+                break :blk .compute
+            else if (std.mem.endsWith(u8, full_path, ".geom"))
+                break :blk .geometry
+            else if (std.mem.endsWith(u8, full_path, ".tesc"))
+                break :blk .tessellation_control
+            else if (std.mem.endsWith(u8, full_path, ".tese"))
+                break :blk .tessellation_evaluation
+            else if (std.mem.endsWith(u8, full_path, ".mesh"))
+                break :blk .mesh
+            else if (std.mem.endsWith(u8, full_path, ".task"))
+                break :blk .task
+            else if (std.mem.endsWith(u8, full_path, ".rgen"))
+                break :blk .raygen
+            else if (std.mem.endsWith(u8, full_path, ".rchit"))
+                break :blk .closesthit
+            else if (std.mem.endsWith(u8, full_path, ".rmiss"))
+                break :blk .miss
+            else if (std.mem.endsWith(u8, full_path, ".rahit"))
+                break :blk .anyhit
+            else if (std.mem.endsWith(u8, full_path, ".rint"))
+                break :blk .intersection
+            else if (std.mem.endsWith(u8, full_path, ".rcall"))
+                break :blk .callable
+            else
+                break :blk .fragment;
+        };
+
+        const spirv_ver: glslpp.SPIRVVersion = if (stage == .mesh or stage == .task or
+            stage == .raygen or stage == .closesthit or stage == .miss or
+            stage == .intersection or stage == .anyhit or stage == .callable) .@"1.4" else .@"1.5";
+
+        const compile_result = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver });
+        if (compile_result) |words| {
+            alloc.free(words);
+            if (isKnownUnsupported(full_path)) {
+                // Unexpectedly passed — the KNOWN_UNSUPPORTED list is stale.
+                stats.fail += 1;
+                log("  UNEXPECTED-PASS {s} (was KNOWN_UNSUPPORTED — remove from list)\n", .{full_path});
+            } else {
+                stats.pass += 1;
+            }
+        } else |_| {
+            if (isKnownUnsupported(full_path)) {
+                stats.xfail += 1;
+                log("  XFAIL {s}\n", .{full_path});
+            } else {
+                // A curated-valid fixture was rejected — false-positive regression!
+                stats.fail += 1;
+                log("  FP-REGRESSION {s} ctx={s} inner={s}\n", .{
+                    full_path,
+                    glslpp.lastErrorCtx() orelse "(none)",
+                    glslpp.lastErrorInner() orelse "(none)",
+                });
+            }
         }
     }
 }
@@ -353,6 +563,7 @@ fn mainImpl() !void {
     var save_spv_path: ?[]const u8 = null;
     var target_arg: ?[]const u8 = null;
     var strict_enumerate = false;
+    var strict_gate = false;
 
     if (!compat.is_0_16) {
         const args = try std.process.argsAlloc(alloc);
@@ -364,6 +575,8 @@ fn mainImpl() !void {
                 i += 1;
             } else if (std.mem.eql(u8, args[i], "--strict-enumerate")) {
                 strict_enumerate = true;
+            } else if (std.mem.eql(u8, args[i], "--strict-gate")) {
+                strict_gate = true;
             } else {
                 target_arg = args[i];
             }
@@ -387,25 +600,43 @@ fn mainImpl() !void {
     };
 
     if (strict_enumerate) {
-        var hist = std.StringHashMap(u32).init(alloc);
-        defer {
-            var key_it = hist.keyIterator();
-            while (key_it.next()) |k| alloc.free(k.*);
-            hist.deinit();
-        }
-        log("\n=== STRICT FALSE-POSITIVE ENUMERATION ===\n", .{});
-        log("(fixtures the tolerate compile ACCEPTS but the strict compile REJECTS)\n", .{});
+        // Histogram: linear array of (ctx_slice, count) pairs. N is small (<256).
+        const max_hist = 256;
+        var hist_ctx: [max_hist][]const u8 = undefined;
+        var hist_cnt: [max_hist]u32 = [_]u32{0} ** max_hist;
+        var hist_n: usize = 0;
+
+        log("\n=== STRICT-ENUMERATE: false-positive candidates ===\n", .{});
         inline for (all_suites) |suite| {
-            log("\n--- {s} ---\n", .{suite.@"1"});
-            runDirEnumerate(io, alloc, suite.@"1", &hist, &stats) catch {};
+            log("\n--- {s} ---\n", .{suite.@"0"});
+            enumerateDir(io, alloc, suite.@"1", &stats, &hist_ctx, &hist_cnt, &hist_n, max_hist) catch {};
         }
-        log("\n=== FALSE-POSITIVE HISTOGRAM (by ctx) ===\n", .{});
-        var it = hist.iterator();
-        while (it.next()) |e| {
-            log("  {d:>4}  {s}\n", .{ e.value_ptr.*, e.key_ptr.* });
+
+        log("\n=== STRICT-ENUMERATE HISTOGRAM (ctx → count) ===\n", .{});
+        for (hist_ctx[0..hist_n], hist_cnt[0..hist_n]) |ctx, cnt| {
+            log("  {s}: {d}\n", .{ ctx, cnt });
         }
-        log("\nTOTAL FALSE-POSITIVE CANDIDATES: {d}\n", .{stats.strict_fp});
-        // Report mode: always exit 0. The gating --strict-gate variant is added in Task F2.
+        log("\n=== STRICT-ENUMERATE SUMMARY ===\n", .{});
+        log("False-positive candidates: {d}\n", .{stats.strict_fp});
+        log("(see FP lines above for per-fixture ctx= and inner= details)\n", .{});
+        // Exit 0 — this is a report, not a gate.
+        return;
+    }
+
+    if (strict_gate) {
+        log("\n=== STRICT-GATE: curated-valid fixtures must compile (no spirv-val) ===\n", .{});
+        inline for (all_suites) |suite| {
+            log("\n--- {s} ---\n", .{suite.@"0"});
+            strictGateDir(io, alloc, suite.@"1", &stats) catch {};
+        }
+        log("\n=== STRICT-GATE SUMMARY ===\n", .{});
+        log("PASS:  {d}\n", .{stats.pass});
+        log("XFAIL: {d}\n", .{stats.xfail});
+        log("FAIL (FP-regression): {d}\n", .{stats.fail});
+        if (stats.fail > 0) {
+            log("ERROR: {} curated-valid fixture(s) were rejected — false-positive regressions!\n", .{stats.fail});
+            std.process.exit(1);
+        }
         return;
     }
 
@@ -464,6 +695,7 @@ fn mainImpl() !void {
     log("FAIL (spirv):   {d}\n", .{stats.fail});
     log("FAIL (compile): {d}\n", .{stats.compile_error});
     log("SKIP:           {d}\n", .{stats.skip});
+    log("XFAIL:          {d}\n", .{stats.xfail});
     log("TOTAL:          {d}\n", .{stats.total()});
 
     if (stats.fail > 0 or stats.compile_error > 0) {

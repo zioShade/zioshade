@@ -4,6 +4,10 @@ layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 fragColor;
 
 // Test Aztec / geometric border pattern
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
 void main() {
     vec2 p = uv * 6.0;
     vec2 id = floor(p);

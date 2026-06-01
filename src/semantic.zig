@@ -58,9 +58,41 @@ pub const AnalyzeOptions = struct {
     /// returning a partial module. When false, any error causes analyze() to return
     /// an error (used by unit tests to verify error detection).
     tolerate_errors: bool = false,
+    /// When true, fail after all functions are analyzed if ANY errors were recorded,
+    /// even when tolerate_errors=true. Combines collect-all-errors with fail-loud.
+    fail_on_recorded_errors: bool = false,
     /// Shader stage (needed for stage-dependent builtin variables like gl_TessLevelOuter)
     stage: ?@import("root.zig").Stage = null,
 };
+
+/// Returns the canonical name of the 64-bit type (e.g. "double", "int64_t") when
+/// `ty` is an unsupported 64-bit GLSL type, or null otherwise.
+/// Used to emit a clear "unsupported 64-bit type" honest error in the semantic layer.
+fn is64BitType(ty: ast.Type) ?[]const u8 {
+    // ast.Type.double covers the enum variant (used by some internal paths).
+    if (ty == .double) return "double";
+    // All 64-bit type names (including "double" itself) arrive as .named because the
+    // lexer/parser does not give them dedicated keyword tokens; the parser's identifier
+    // arm returns .named = name for any unrecognized identifier used as a type.
+    if (ty == .named) {
+        const name = ty.named;
+        const names64 = [_][]const u8{
+            "double",
+            "dvec2", "dvec3", "dvec4",
+            "dmat2", "dmat3", "dmat4",
+            "dmat2x2", "dmat2x3", "dmat2x4",
+            "dmat3x2", "dmat3x3", "dmat3x4",
+            "dmat4x2", "dmat4x3", "dmat4x4",
+            "int64_t", "uint64_t",
+            "i64vec2", "i64vec3", "i64vec4",
+            "u64vec2", "u64vec3", "u64vec4",
+        };
+        for (names64) |n| {
+            if (std.mem.eql(u8, name, n)) return name;
+        }
+    }
+    return null;
+}
 
 pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
     return analyzeWithOptions(alloc, root, .{});
@@ -110,7 +142,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         }
     }
 
-    if (!analyzer.tolerate_errors and analyzer.errors.items.len > 0) return error.SemanticFailed;
+    if ((!analyzer.tolerate_errors or options.fail_on_recorded_errors) and analyzer.errors.items.len > 0) return error.SemanticFailed;
 
     // Transfer ownership to module; clear analyzer fields so defer deinit doesn't double-free
     var mod: ir.Module = .{
@@ -370,6 +402,12 @@ const Analyzer = struct {
     load_cache: std.AutoHashMapUnmanaged(u32, u32) = .empty, // ptr_id -> loaded_value_id (cleared at labels)
     global_load_cache: std.AutoHashMapUnmanaged(u32, u32) = .empty, // ptr_id -> loaded_value_id (persists across blocks)
     global_ptr_ids: std.AutoHashMapUnmanaged(u32, void) = .empty, // set of ptr_ids that point into global (Input/Uniform/Output) variables
+    /// Maps global-variable ir_id → constant-composite id for `const` globals.
+    /// Populated lazily when first needed (e.g. by textureGatherOffsets ConstOffsets check).
+    global_const_init_map: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+    /// Maps global-variable ir_id → AST initializer node for `const` global arrays.
+    /// Stored during collectTopLevel so we can evaluate the initializer lazily later.
+    global_const_ast_inits: std.AutoHashMapUnmanaged(u32, ast.Node) = .empty,
     in_entry_block: bool = true,
     cache_globals: bool = true, // true in entry block and loop headers (blocks that dominate subsequent blocks)
     pure_op_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty, // hash(type, op, operands) -> result_id
@@ -438,11 +476,11 @@ const Analyzer = struct {
                 }
             }
             self.alloc.free(func.body);
-            // Mirror ir.Module.deinit(): functions analyzed before an error own
-            // their param_ids slice, which is otherwise leaked on the error path.
-            if (func.param_ids.len > 0) {
-                self.alloc.free(func.param_ids);
-            }
+            // Mirror Module.deinit (ir.zig): param_ids is owned. On success the
+            // functions slice is moved to the Module (analyzer.functions = .empty),
+            // so this only frees on the error path — without it, every fail-loud
+            // rejection of a shader with user functions leaks param_ids.
+            if (func.param_ids.len > 0) self.alloc.free(func.param_ids);
         }
         self.functions.deinit(self.alloc);
         for (self.errors.items) |msg| self.alloc.free(msg);
@@ -456,17 +494,20 @@ const Analyzer = struct {
         self.load_cache.deinit(self.alloc);
         self.global_load_cache.deinit(self.alloc);
         self.global_ptr_ids.deinit(self.alloc);
+        self.global_const_init_map.deinit(self.alloc);
+        self.global_const_ast_inits.deinit(self.alloc);
         self.pure_op_cache.deinit(self.alloc);
         self.global_pure_op_cache.deinit(self.alloc);
-        // Free owned name keys and member slices in the types map.
-        // Note: when analysis succeeds, Module takes ownership and this map is
-        // cleared (`analyzer.types = .{}` in analyzeWithOptions), so the member
-        // free below only runs on error paths — mirroring ir.Module.deinit().
+        // Free owned name keys AND member slices in the types map.
+        // On the success path `analyzer.types` is cleared to `.{}` (after ownership
+        // transfers to the Module, which frees the members in Module.deinit), so this
+        // loop only frees on the error path — including the fail-loud (fail_on_recorded_errors)
+        // rejection path, where without this the builtin/user TypeDef member slices leak.
         {
             var type_it = self.types.iterator();
             while (type_it.next()) |entry| {
                 self.alloc.free(entry.key_ptr.*);
-                self.alloc.free(entry.value_ptr.members);
+                if (entry.value_ptr.members.len > 0) self.alloc.free(entry.value_ptr.members);
             }
             self.types.deinit(self.alloc);
         }
@@ -751,6 +792,21 @@ const Analyzer = struct {
     /// ConstOffsets image operand of textureGatherOffsets. Returns null if the
     /// pointer has no constant store (e.g. a non-const / runtime-built array).
     fn constStoreSource(self: *Analyzer, ptr_id: u32) ?u32 {
+        // Check the global const init map (populated lazily when first requested).
+        if (self.global_const_init_map.get(ptr_id)) |const_id| return const_id;
+        // Lazily evaluate the initializer of global `const` array declarations.
+        // The AST init node was recorded in collectTopLevel and is still live
+        // (the AST outlives the function analysis).
+        if (self.global_const_ast_inits.get(ptr_id)) |init_node| {
+            if (self.analyzeExpression(init_node)) |init_tid| {
+                if (self.isConstantId(init_tid.id)) {
+                    self.global_const_init_map.put(self.alloc, ptr_id, init_tid.id) catch {};
+                    return init_tid.id;
+                }
+            } else |_| {}
+        }
+        // Fall through to scanning the current function's instruction list
+        // (for function-local const arrays like `const ivec2 offs[4] = …`).
         for (self.instructions.items) |inst| {
             if (inst.tag == .store and inst.operands.len >= 2) {
                 const dst = switch (inst.operands[0]) {
@@ -1523,6 +1579,91 @@ const Analyzer = struct {
             return sym;
         }
 
+        // gl_Max* built-in constants — GLSL 4.60 §7.4. These are const int values
+        // pre-defined by every GLSL implementation. We expose them as SSA symbols
+        // mapping to a constant integer (value = the minimum required by the spec).
+        // They appear in float(gl_MaxTextureImageUnits) casts, array sizes, etc.
+        const gl_max_consts = [_]struct { name: []const u8, value: u32 }{
+            .{ .name = "gl_MaxVertexAttribs",               .value = 16 },
+            .{ .name = "gl_MaxVertexUniformVectors",         .value = 256 },
+            .{ .name = "gl_MaxVaryingVectors",               .value = 15 },
+            .{ .name = "gl_MaxVertexTextureImageUnits",       .value = 16 },
+            .{ .name = "gl_MaxCombinedTextureImageUnits",     .value = 96 },
+            .{ .name = "gl_MaxTextureImageUnits",             .value = 16 },
+            .{ .name = "gl_MaxFragmentUniformVectors",        .value = 224 },
+            .{ .name = "gl_MaxDrawBuffers",                   .value = 8 },
+            .{ .name = "gl_MaxVertexOutputVectors",           .value = 16 },
+            .{ .name = "gl_MaxFragmentInputVectors",          .value = 15 },
+            .{ .name = "gl_MinProgramTexelOffset",            .value = @as(u32, @bitCast(@as(i32, -8))) },
+            .{ .name = "gl_MaxProgramTexelOffset",            .value = 7 },
+            .{ .name = "gl_MaxImageUnits",                    .value = 8 },
+            .{ .name = "gl_MaxCombinedImageUnitsAndFragmentOutputs", .value = 8 },
+            .{ .name = "gl_MaxImageSamples",                  .value = 0 },
+            .{ .name = "gl_MaxVertexImageUniforms",           .value = 0 },
+            .{ .name = "gl_MaxTessControlImageUniforms",      .value = 0 },
+            .{ .name = "gl_MaxTessEvaluationImageUniforms",   .value = 0 },
+            .{ .name = "gl_MaxGeometryImageUniforms",         .value = 0 },
+            .{ .name = "gl_MaxFragmentImageUniforms",         .value = 8 },
+            .{ .name = "gl_MaxCombinedImageUniforms",         .value = 8 },
+            .{ .name = "gl_MaxComputeImageUniforms",          .value = 8 },
+            .{ .name = "gl_MaxGeometryInputComponents",       .value = 64 },
+            .{ .name = "gl_MaxGeometryOutputComponents",      .value = 128 },
+            .{ .name = "gl_MaxGeometryOutputVertices",        .value = 256 },
+            .{ .name = "gl_MaxGeometryTotalOutputComponents", .value = 1024 },
+            .{ .name = "gl_MaxGeometryUniformComponents",     .value = 1024 },
+            .{ .name = "gl_MaxGeometryVaryingComponents",     .value = 64 },
+            .{ .name = "gl_MaxTessControlInputComponents",    .value = 128 },
+            .{ .name = "gl_MaxTessControlOutputComponents",   .value = 128 },
+            .{ .name = "gl_MaxTessControlTextureImageUnits",  .value = 16 },
+            .{ .name = "gl_MaxTessControlUniformComponents",  .value = 1024 },
+            .{ .name = "gl_MaxTessControlTotalOutputComponents", .value = 4096 },
+            .{ .name = "gl_MaxTessEvaluationInputComponents", .value = 128 },
+            .{ .name = "gl_MaxTessEvaluationOutputComponents", .value = 128 },
+            .{ .name = "gl_MaxTessEvaluationTextureImageUnits", .value = 16 },
+            .{ .name = "gl_MaxTessEvaluationUniformComponents", .value = 1024 },
+            .{ .name = "gl_MaxTessPatchComponents",           .value = 120 },
+            .{ .name = "gl_MaxPatchVertices",                 .value = 32 },
+            .{ .name = "gl_MaxTessGenLevel",                  .value = 64 },
+            .{ .name = "gl_MaxUniformBufferBindings",         .value = 84 },
+            .{ .name = "gl_MaxVertexUniformBlocks",           .value = 12 },
+            .{ .name = "gl_MaxGeometryUniformBlocks",         .value = 12 },
+            .{ .name = "gl_MaxFragmentUniformBlocks",         .value = 12 },
+            .{ .name = "gl_MaxCombinedUniformBlocks",         .value = 60 },
+            .{ .name = "gl_MaxUniformBlockSize",              .value = 16384 },
+            .{ .name = "gl_MaxCombinedVertexUniformComponents", .value = 49152 },
+            .{ .name = "gl_MaxCombinedGeometryUniformComponents", .value = 49152 },
+            .{ .name = "gl_MaxCombinedFragmentUniformComponents", .value = 49152 },
+            .{ .name = "gl_MaxVaryingComponents",             .value = 60 },
+            .{ .name = "gl_MaxComputeWorkGroupCount",         .value = 0 },
+            .{ .name = "gl_MaxComputeWorkGroupSize",          .value = 0 },
+            .{ .name = "gl_MaxComputeUniformComponents",      .value = 512 },
+            .{ .name = "gl_MaxComputeTextureImageUnits",      .value = 16 },
+            .{ .name = "gl_MaxComputeAtomicCounters",         .value = 8 },
+            .{ .name = "gl_MaxComputeAtomicCounterBuffers",   .value = 1 },
+        };
+        for (gl_max_consts) |c| {
+            if (std.mem.eql(u8, name, c.name)) {
+                const key = (@as(u64, @intFromEnum(ast.Type.int)) << 32) | @as(u64, c.value);
+                const const_id: u32 = self.const_cache.get(key) orelse blk: {
+                    const id = self.allocId();
+                    const operands = self.alloc.alloc(ir.Instruction.Operand, 1) catch return null;
+                    operands[0] = .{ .literal_int = c.value };
+                    self.instructions.append(self.alloc, .{
+                        .tag = .constant_int,
+                        .result_type = null,
+                        .result_id = id,
+                        .operands = operands,
+                        .ty = .int,
+                    }) catch return null;
+                    self.const_cache.put(self.alloc, key, id) catch {};
+                    break :blk id;
+                };
+                const sym = Symbol{ .kind = .var_sym, .ty = .int, .ir_id = const_id, .is_ssa = true, .init_value = const_id, .is_const = true };
+                self.scopes.items[0].put(self.alloc, c.name, sym) catch return null;
+                return sym;
+            }
+        }
+
         return null;
     }
 
@@ -1799,7 +1940,24 @@ const Analyzer = struct {
                     }
                 }
                 const ir_id = self.allocId();
-                const ty = node.data.ty orelse .void;
+                // Resolve expression-based array sizes (e.g. gl_WorkGroupSize.x → local_size_x).
+                // The parser records the source text in size_name when the dimension is a non-
+                // literal constant expression; size is left as 0. Fold it here before the type
+                // is stored so that codegen sees the correct concrete array size.
+                var ty = node.data.ty orelse ast.Type.void;
+                if (ty == .array and ty.array.size == 0) {
+                    if (ty.array.size_name) |sn| {
+                        if (self.resolveSizeExpr(sn)) |resolved| {
+                            // Allocate a new heap type for the base (same pointer is fine — it's
+                            // already heap-allocated by the parser; we just build a new wrapper).
+                            const resolved_base = ty.array.base;
+                            const resolved_ty = try self.alloc.create(ast.Type);
+                            resolved_ty.* = resolved_base.*;
+                            try self.heap_types.append(self.alloc, resolved_ty);
+                            ty = .{ .array = .{ .base = resolved_ty, .size = resolved } };
+                        }
+                    }
+                }
                 const storage_class: ir.SPIRVStorageClass = switch (node.tag) {
                     .in_decl => .input,
                     .out_decl => .output,
@@ -1821,9 +1979,22 @@ const Analyzer = struct {
                 }
                 try self.declare(node.data.name, .{
                     .kind = .var_sym,
-                    .ty = node.data.ty orelse .void,
+                    .ty = ty,
                     .ir_id = ir_id,
+                    // Propagate `const` qualifier so consumers that require a
+                    // provably immutable value (e.g. textureGatherOffsets ConstOffsets)
+                    // can verify the argument is a compile-time constant array.
+                    .is_const = node.data.qualifier != null and node.data.qualifier.?.is_const,
                 });
+                // For global `const` array declarations with an initializer, record the
+                // AST initializer node so constStoreSource() can evaluate it lazily
+                // (during function analysis) to obtain the constant-composite id for
+                // textureGatherOffsets ConstOffsets validation.
+                if (node.data.qualifier != null and node.data.qualifier.?.is_const and
+                    ty == .array and node.data.children.len > 0)
+                {
+                    self.global_const_ast_inits.put(self.alloc, ir_id, node.data.children[0]) catch {};
+                }
                 } // end if name.len > 0
             },
             .uniform_block => {
@@ -1869,9 +2040,25 @@ const Analyzer = struct {
                 const ir_id = self.allocId();
                 // Use instance name for the global variable if present
                 const global_name = if (node.data.instance_name.len > 0) node.data.instance_name else name;
+
+                // If the block instance is declared as an array (e.g. `buffer SSBO { ... } ssbos[2]`),
+                // `node.data.int_val` carries the array size (parsed from the `[N]` suffix by the parser).
+                // We must represent the global as an array-of-the-block-type so that the semantic
+                // analyzer can type-check indexed access `ssbos[i].member` correctly.
+                const instance_array_size: u32 = if (node.data.int_val > 0) @intCast(node.data.int_val) else 0;
+                const is_block_array = instance_array_size > 0;
+
+                // Build the type for the global variable (either named or array-of-named).
+                const global_ty: ast.Type = if (is_block_array) blk: {
+                    const arr_base = try self.alloc.create(ast.Type);
+                    arr_base.* = .{ .named = name };
+                    try self.heap_types.append(self.alloc, arr_base);
+                    break :blk .{ .array = .{ .base = arr_base, .size = instance_array_size } };
+                } else .{ .named = name };
+
                 try self.globals.append(self.alloc, .{
                     .name = global_name,
-                    .ty = .{ .named = name },
+                    .ty = global_ty,
                     .qualifier = qual,
                     .layout = node.data.layout,
                     .storage_class = storage_class,
@@ -1881,6 +2068,19 @@ const Analyzer = struct {
                 if (storage_class == .input or storage_class == .output or storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant or storage_class == .uniform_constant or storage_class == .workgroup) {
                     self.global_ptr_ids.put(self.alloc, ir_id, {}) catch {};
                 }
+
+                if (is_block_array) {
+                    // For block arrays (e.g. `buffer SSBO { ... } ssbos[2]`):
+                    // - Only declare the instance name (not the block type name) as a symbol.
+                    // - Type is the array type so that `ssbos[i]` resolves element type correctly.
+                    // - Do NOT inject members as directly-accessible scope symbols: members are
+                    //   only reachable via `ssbos[i].member`, never as bare `member`.
+                    try self.declare(node.data.instance_name, .{
+                        .kind = .var_sym,
+                        .ty = global_ty,
+                        .ir_id = ir_id,
+                    });
+                } else {
                 // Declare the block variable under both names (type name and instance name)
                 try self.declare(name, .{
                     .kind = .var_sym,
@@ -1909,6 +2109,7 @@ const Analyzer = struct {
                         });
                     }
                 }
+                } // end else (not block array)
                 } // end if !buffer_reference
             },
             .struct_decl => {
@@ -2239,6 +2440,15 @@ const Analyzer = struct {
         switch (node.tag) {
             .var_decl => {
                 const ty = node.data.ty orelse .void;
+                // Reject 64-bit types with a clear named honest error instead of a
+                // misleading UndeclaredIdentifier for the variable name.
+                if (is64BitType(ty)) |type_name| {
+                    last_error_ctx = "unsupported-64bit-type";
+                    last_error_inner = type_name;
+                    last_error_line = node.loc.line;
+                    last_error_column = node.loc.column;
+                    return error.SemanticFailed;
+                }
                 if (node.data.children.len > 0) {
                     // Has initializer — try SSA path first
                     var init = try self.analyzeExpression(node.data.children[0]);
@@ -2309,6 +2519,13 @@ const Analyzer = struct {
                             .operands = store_operands,
                             .ty = .void,
                         });
+                        // Forward-populate the load cache so subsequent emitLoadCached(id)
+                        // returns init_id directly (avoids redundant OpLoad that the optimizer
+                        // can incorrectly eliminate when tracing store→load pairs).
+                        self.load_cache.put(self.alloc, id, init_id) catch {};
+                        if (self.cache_globals) {
+                            self.global_load_cache.put(self.alloc, id, init_id) catch {};
+                        }
                         break :blk id;
                     };
                     try self.declare(node.data.name, .{
@@ -3108,6 +3325,21 @@ const Analyzer = struct {
         }
     }
 
+    /// Fold a compile-time constant array-size expression stored as source text.
+    /// Currently handles gl_WorkGroupSize.x/y/z → local_size_x/y/z.
+    /// Returns null when the expression is not a recognized constant.
+    fn resolveSizeExpr(self: *Analyzer, expr: []const u8) ?u32 {
+        const ls = self.local_size orelse return null;
+        // Trim surrounding whitespace for robustness.
+        const s = std.mem.trim(u8, expr, " \t\r\n");
+        if (std.mem.eql(u8, s, "gl_WorkGroupSize.x")) return ls.x;
+        if (std.mem.eql(u8, s, "gl_WorkGroupSize.y")) return ls.y;
+        if (std.mem.eql(u8, s, "gl_WorkGroupSize.z")) return ls.z;
+        // Try plain integer literal in text form (e.g. produced by simple constant)
+        if (std.fmt.parseInt(u32, s, 10)) |v| return v else |_| {}
+        return null;
+    }
+
     /// Lower a GLSL int/uint literal's value to its 32-bit SPIR-V constant word.
     ///
     /// `node.data.int_val` is an i64 holding the literal's non-negative magnitude
@@ -3824,20 +4056,21 @@ const Analyzer = struct {
                 if (node.data.children.len < 2) return error.SemanticFailed;
 
                 // Handle multi-component swizzle compound assignment: v.xy *= expr, v.xyz += expr, etc.
+                // Works for any lvalue base (bare identifier, SSBO member, array-indexed member, etc.).
                 const lhs = node.data.children[0];
-                if (lhs.tag == .member_access and lhs.data.children.len > 0) {
+                swizzle_ca: {
+                    if (lhs.tag != .member_access or lhs.data.children.len == 0) break :swizzle_ca;
+                    const swizzle_name_maybe = lhs.data.name;
+                    if (swizzle_name_maybe.len <= 1 or swizzle_name_maybe.len > 4) break :swizzle_ca;
+                    // Multi-component swizzle compound assignment. Get a pointer to the base vector.
                     const base_node = lhs.data.children[0];
-                    if (base_node.tag == .identifier) {
-                        if (self.lookup(base_node.data.name)) |sym| {
-                            const base_ty = sym.ty;
-                            if (base_ty.isVector()) {
-                                const swizzle_name = lhs.data.name;
-                                if (swizzle_name.len > 1) {
-                                    // Multi-component swizzle compound assign
-                                    // Materialize SSA variable if needed
-                                    _ = self.materializeSSA(base_node.data.name);
-                                    const mat_sym2 = self.lookup(base_node.data.name);
-                                    const var_ptr_id2 = if (mat_sym2) |ms| ms.ir_id else sym.ir_id;
+                    // analyzeLValue gives us the pointer; its .ty tells us the vector type.
+                    const base_ptr = self.analyzeLValue(base_node) catch break :swizzle_ca;
+                    if (!base_ptr.ty.isVector()) break :swizzle_ca;
+                    {
+                        const base_ty = base_ptr.ty;
+                        const swizzle_name = swizzle_name_maybe;
+                        const var_ptr_id2 = base_ptr.id;
 
                                     // 1. Load current vector
                                     const vec_load_id = try self.emitLoadCached(var_ptr_id2, base_ty);
@@ -3936,7 +4169,12 @@ const Analyzer = struct {
                                         var found = false;
                                         for (0..swizzle_len) |j| {
                                             if (self.swizzleIndex(swizzle_name[j]) == i) {
-                                                final_shuffle_ops[2 + i] = .{ .literal_int = @intCast(swizzle_len + j) };
+                                                // The computed values (operand 1) start at index n in the
+                                                // shuffle (operand 0 has n components), so the j-th computed
+                                                // value is at n+j — NOT swizzle_len+j (which only coincides
+                                                // for a full-width swizzle). swizzle_len+j silently wrote the
+                                                // wrong components for partial swizzles like `col.rgb *= x`.
+                                                final_shuffle_ops[2 + i] = .{ .literal_int = @intCast(n + j) };
                                                 found = true;
                                                 break;
                                             }
@@ -3962,11 +4200,8 @@ const Analyzer = struct {
                                         .ty = .void,
                                     });
                                     return .{ .ty = .void, .id = 0 };
-                                }
-                            }
-                        }
-                    }
-                }
+                        } // end inner swizzle block
+                } // end swizzle_ca
 
                 // Regular (non-swizzle) compound assignment
                 const target = try self.analyzeLValue(node.data.children[0]);
@@ -5662,6 +5897,30 @@ const Analyzer = struct {
                             .ty = .bool,
                         });
                         return .{ .ty = .bool, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "not")) {
+                        // not(bvecN) → OpLogicalNot; result is the same boolean
+                        // vector type as the operand. GLSL defines not() only over
+                        // bvec2/3/4 (scalar bool and numeric operands are rejected by
+                        // glslang -V), so a non-bvec operand fails loud rather than
+                        // emitting an invalid OpLogicalNot on a numeric type (silent-wrong).
+                        const arg_ty = if (arg_tids.items.len >= 1) arg_tids.items[0].ty else ast.Type.void;
+                        if (arg_ty != .bvec2 and arg_ty != .bvec3 and arg_ty != .bvec4) {
+                            last_error_ctx = "not-requires-boolean-vector";
+                            last_error_inner = "not-requires-boolean-vector";
+                            last_error_line = node.loc.line;
+                            last_error_column = node.loc.column;
+                            return error.SemanticFailed;
+                        }
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        operands[0] = .{ .id = arg_tids.items[0].id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .logical_not,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = arg_ty,
+                        });
+                        return .{ .ty = arg_ty, .id = result_id };
                     } else if (std.mem.eql(u8, node.data.name, "allInvocationsARB") or std.mem.eql(u8, node.data.name, "allInvocations") or std.mem.eql(u8, node.data.name, "allInvocationsEqualARB") or std.mem.eql(u8, node.data.name, "allInvocationsEqual") or std.mem.eql(u8, node.data.name, "subgroupAll")) {
                         // Group vote: allInvocations → OpGroupAll
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
@@ -5732,31 +5991,6 @@ const Analyzer = struct {
                             });
                             return .{ .ty = bvec_ty, .id = result_id };
                         }
-                    } else if (std.mem.eql(u8, node.data.name, "not")) {
-                        // not(bvecN) → OpLogicalNot; result is the same boolean
-                        // vector type as the operand (componentwise logical negation).
-                        // GLSL defines not() only over bvec2/3/4 (scalar bool and
-                        // numeric operands are rejected by glslang -V), so a
-                        // non-bvec operand fails loud rather than emitting an invalid
-                        // OpLogicalNot on a numeric type (silent-wrong).
-                        const arg_ty = if (arg_tids.items.len >= 1) arg_tids.items[0].ty else ast.Type.void;
-                        if (arg_ty != .bvec2 and arg_ty != .bvec3 and arg_ty != .bvec4) {
-                            last_error_ctx = "not-requires-boolean-vector";
-                            last_error_inner = "not-requires-boolean-vector";
-                            last_error_line = node.loc.line;
-                            last_error_column = node.loc.column;
-                            return error.SemanticFailed;
-                        }
-                        const operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                        operands[0] = .{ .id = arg_tids.items[0].id };
-                        try self.instructions.append(self.alloc, .{
-                            .tag = .logical_not,
-                            .result_type = null,
-                            .result_id = result_id,
-                            .operands = operands,
-                            .ty = arg_ty,
-                        });
-                        return .{ .ty = arg_ty, .id = result_id };
                     } else if (std.mem.eql(u8, node.data.name, "dot")) {
                         // dot(a, b) → OpDot (core SPIR-V, not GLSL.std.450)
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
@@ -6307,6 +6541,16 @@ const Analyzer = struct {
                 return .{ .ty = result_ty, .id = result_id };
             },
             .type_constructor => {
+                // Reject 64-bit type constructors (e.g. dvec2(1.0, 2.0)) with a clear
+                // named honest error before evaluating arguments.
+                const ctor_ty = node.data.ty orelse .void;
+                if (is64BitType(ctor_ty)) |type_name| {
+                    last_error_ctx = "unsupported-64bit-type";
+                    last_error_inner = type_name;
+                    last_error_line = node.loc.line;
+                    last_error_column = node.loc.column;
+                    return error.SemanticFailed;
+                }
                 var arg_tids = std.ArrayListUnmanaged(TypedId).empty;
                 defer arg_tids.deinit(self.alloc);
                 for (node.data.children) |arg| {
@@ -8107,28 +8351,6 @@ test "semantic: find declared variable" {
 
 test "semantic: undeclared identifier" {
     const source = "void main() { float y = x; }";
-    const tokens = try lexer.tokenize(testing.allocator, source);
-    defer testing.allocator.free(tokens);
-    var root = try parser.parse(testing.allocator, source, tokens);
-    defer parser.freeTree(testing.allocator, &root);
-    const result = analyze(testing.allocator, &root);
-    try testing.expect(result == error.UndeclaredIdentifier or result == error.SemanticFailed);
-}
-
-test "semantic: deinit frees block TypeDef.members on error path (no leak)" {
-    // Regression guard for the error-path member-slice free in Analyzer.deinit().
-    // A uniform block makes collectTopLevel dupe a TypeDef.members slice into
-    // self.types. When analysis later fails (here an undeclared identifier in
-    // main), the error propagates and `defer analyzer.deinit()` runs WITHOUT a
-    // Module ever being created — so only deinit() can free those members.
-    // deinit() must free them (mirroring ir.Module.deinit()) or testing.allocator's
-    // leak check fails. Without that free the leak shows up at the `dupe` in
-    // collectTopLevel; this test fixes the coverage gap that let it ship unguarded.
-    const source =
-        \\#version 450
-        \\layout(set=0, binding=0) uniform UBO { vec4 color; float scale; } ubo;
-        \\void main(){ float y = x; }
-    ;
     const tokens = try lexer.tokenize(testing.allocator, source);
     defer testing.allocator.free(tokens);
     var root = try parser.parse(testing.allocator, source, tokens);

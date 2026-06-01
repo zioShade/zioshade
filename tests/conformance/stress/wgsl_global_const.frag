@@ -1,8 +1,7 @@
-#version 450
 // Tests: global constants used in function
+#version 450
+layout(location = 0) in float u_val;
 layout(location = 0) out vec4 fragColor;
-layout(binding = 0) uniform U { float u_val; };
-
 const float PI = 3.14159265;
 const float TWO_PI = 6.28318530;
 

@@ -315,6 +315,29 @@ const Parser = struct {
         };
     }
 
+    /// Returns true when `name` is a GLSL 64-bit type keyword that the lexer does not
+    /// map to a dedicated token (because glslpp does not implement 64-bit types).
+    /// Recognizing these names lets the parser build a proper var_decl node so that
+    /// the semantic layer can emit a clear "unsupported 64-bit type" honest error
+    /// instead of a misleading UndeclaredIdentifier for the variable name that follows.
+    fn is64BitTypeName(name: []const u8) bool {
+        const names64 = [_][]const u8{
+            "double",
+            "dvec2", "dvec3", "dvec4",
+            "dmat2", "dmat3", "dmat4",
+            "dmat2x2", "dmat2x3", "dmat2x4",
+            "dmat3x2", "dmat3x3", "dmat3x4",
+            "dmat4x2", "dmat4x3", "dmat4x4",
+            "int64_t", "uint64_t",
+            "i64vec2", "i64vec3", "i64vec4",
+            "u64vec2", "u64vec3", "u64vec4",
+        };
+        for (names64) |n| {
+            if (std.mem.eql(u8, name, n)) return true;
+        }
+        return false;
+    }
+
     // ── Top-level ─────────────────────────────────────────────
 
     fn parseTopLevel(self: *Parser) Error!ast.Node {
@@ -797,8 +820,13 @@ const Parser = struct {
             .kw_sampler_shadow, .kw_sampler_plain => { _ = self.advance(); return .sampler_plain; },
             .kw_sampler_cube => { _ = self.advance(); return .sampler_cube; },
             .identifier => {
-                const tok = self.advance();
-                return .{ .named = self.text(tok) };
+                // All identifiers (including 64-bit type names like `double`/`int64_t`,
+                // which the lexer does not map to dedicated tokens) become `.named`.
+                // 64-bit types are recognized in parseStatement via is64BitTypeName so the
+                // semantic layer can emit a clear "unsupported 64-bit type" honest error.
+                const name = self.text(self.current());
+                _ = self.advance();
+                return .{ .named = name };
             },
             else => null,
         };
@@ -843,18 +871,29 @@ const Parser = struct {
                 return error.UnexpectedToken;
             }
             _ = self.advance();
-            // Handle array dimensions after param name: e.g. texture2D tex[4]
+            // Handle array dimensions after param name: e.g. float a[4] or float a[3][2]
+            // Collect all bracket pairs (first is outermost dimension in GLSL notation).
             var final_type = p_type;
-            if (self.current().tag == .l_bracket) {
+            var arr_dims: std.ArrayListUnmanaged(u32) = .empty;
+            defer arr_dims.deinit(self.alloc);
+            while (self.current().tag == .l_bracket) {
                 _ = self.advance(); // consume [
                 const size_tok = self.current();
-                _ = self.advance(); // consume size
-                if (self.current().tag == .r_bracket) _ = self.advance(); // consume ]
-                const size_str = self.text(size_tok);
-                const size = std.fmt.parseInt(u32, size_str, 10) catch 0;
-                if (size > 0) {
-                    const base_ptr = try self.createType(p_type);
-                    final_type = .{ .array = .{ .base = base_ptr, .size = size } };
+                var arr_size: u32 = 0;
+                if (size_tok.tag == .int_literal) {
+                    arr_size = std.fmt.parseInt(u32, self.text(size_tok), 10) catch 0;
+                    _ = self.advance();
+                }
+                _ = self.expect(.r_bracket) catch break;
+                try arr_dims.append(self.alloc, arr_size);
+            }
+            // Build array type from outermost to innermost (reverse order, same as parseVarDecl)
+            if (arr_dims.items.len > 0) {
+                var i: usize = arr_dims.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const arr_base = try self.createType(final_type);
+                    final_type = .{ .array = .{ .base = arr_base, .size = arr_dims.items[i] } };
                 }
             }
             try params.append(self.alloc, .{
@@ -901,6 +940,9 @@ const Parser = struct {
         // Collect array dimensions (first dimension is outermost)
         var arr_dims: std.ArrayListUnmanaged(u32) = .empty;
         defer arr_dims.deinit(self.alloc);
+        // For expression-based sizes (e.g. gl_WorkGroupSize.x), store the source text.
+        // Only the first dimension's expression is tracked (covers the common case).
+        var arr_size_expr: ?[]const u8 = null;
         while (self.current().tag == .l_bracket) {
             _ = self.advance();
             const size_tok = self.current();
@@ -908,8 +950,32 @@ const Parser = struct {
             if (size_tok.tag == .int_literal) {
                 arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
                 _ = self.advance();
+                _ = self.expect(.r_bracket) catch break;
+            } else if (size_tok.tag == .r_bracket) {
+                // unsized array []
+                _ = self.advance();
+            } else {
+                // Expression-based size: consume all tokens up to the matching ']'
+                // and store the source text for semantic-time constant folding.
+                const expr_start = size_tok.start;
+                var expr_end: usize = expr_start;
+                var depth: u32 = 0;
+                while (self.current().tag != .eof) {
+                    const cur = self.current();
+                    if (cur.tag == .l_bracket) depth += 1;
+                    if (cur.tag == .r_bracket) {
+                        if (depth == 0) break;
+                        depth -= 1;
+                    }
+                    expr_end = cur.start + cur.len;
+                    _ = self.advance();
+                }
+                if (arr_size_expr == null) {
+                    arr_size_expr = self.source[expr_start..expr_end];
+                }
+                _ = self.expect(.r_bracket) catch break;
+                // arr_size stays 0; semantic.zig will fold the expression.
             }
-            _ = self.expect(.r_bracket) catch break;
             try arr_dims.append(self.alloc, arr_size);
         }
         // Build array type from outermost to innermost (reverse order)
@@ -918,7 +984,9 @@ const Parser = struct {
             while (i > 0) {
                 i -= 1;
                 const arr_base = try self.createType(ty);
-                ty = .{ .array = .{ .base = arr_base, .size = arr_dims.items[i] } };
+                // Attach size_name to the outermost dimension where it was set.
+                const sname: ?[]const u8 = if (i == arr_dims.items.len - 1) arr_size_expr else null;
+                ty = .{ .array = .{ .base = arr_base, .size = arr_dims.items[i], .size_name = sname } };
             }
         }
         var init_nodes = std.ArrayListUnmanaged(ast.Node).empty;
@@ -1080,11 +1148,23 @@ const Parser = struct {
             });
         }
         _ = try self.expect(.r_brace);
-        // Consume optional instance name: } instance_name;
+        // Consume optional instance name: } instance_name[N];
+        // `int_val` on the node is repurposed to carry the instance array size (0 = not an array).
         var instance_name: []const u8 = "";
+        var instance_array_size: i64 = 0;
         if (self.current().tag == .identifier) {
             instance_name = self.text(self.current());
             _ = self.advance(); // consume instance name
+            // Optionally consume array dimension: instance_name[N]
+            if (self.current().tag == .l_bracket) {
+                _ = self.advance(); // consume [
+                const size_tok = self.current();
+                if (size_tok.tag == .int_literal) {
+                    instance_array_size = std.fmt.parseInt(i64, self.text(size_tok), 0) catch 0;
+                    _ = self.advance();
+                }
+                _ = self.expect(.r_bracket) catch {};
+            }
         }
         _ = try self.expect(.semicolon);
 
@@ -1097,6 +1177,7 @@ const Parser = struct {
                 .qualifier = qualifier,
                 .layout = layout,
                 .instance_name = instance_name,
+                .int_val = instance_array_size,
             },
         };
     }
@@ -1156,9 +1237,24 @@ const Parser = struct {
                     return self.parseLocalVarDecl();
                 }
             }
+            // Recognize 64-bit type keywords (not in the lexer keyword map) so that
+            // `double d = ...` / `int64_t n = ...` are parsed as var-decls and the
+            // semantic layer can emit a clear "unsupported 64-bit type" honest error.
+            if (is64BitTypeName(type_name) and
+                (self.peek2().tag == .eq or self.peek2().tag == .semicolon or
+                 self.peek2().tag == .l_bracket or self.peek2().tag == .semicolon))
+            {
+                return self.parseLocalVarDecl();
+            }
         }
         // const type identifier ...
         if (cur == .kw_const and (isTypeKeyword(nxt) or nxt == .identifier)) {
+            return self.parseLocalVarDecl();
+        }
+        // precision qualifier type identifier: mediump int x = 0; highp float y;
+        // parseLocalVarDecl already handles precision qualifiers via tryQualifier(),
+        // but parseStatement didn't recognize them as var-decl starters.
+        if ((cur == .kw_mediump or cur == .kw_highp or cur == .kw_lowp) and isTypeKeyword(nxt)) {
             return self.parseLocalVarDecl();
         }
 

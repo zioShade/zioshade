@@ -39,6 +39,10 @@ test-conformance:
 enumerate-fp:
     {{zig}} build enumerate-fp --summary all
 
+# continuous strict-gate: verify no curated-valid fixtures are rejected (FP regression check)
+strict-gate:
+    {{zig}} build strict-gate --summary all
+
 # run tests with verbose output
 test-verbose:
     {{zig}} build test --summary all 2>&1 | grep -E "passed|failed|leaked|error:"
@@ -76,7 +80,7 @@ check:
 # ── full CI pipeline ─────────────────────────────────────────────────
 
 # run everything CI would run
-ci: test test-hlsl validate-dxc
+ci: test test-hlsl validate-dxc strict-gate
     @echo ""
     @echo "═══════════════════════════════════════"
     @echo "  CI PASSED — all gates green"
