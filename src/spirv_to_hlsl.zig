@@ -1622,7 +1622,7 @@ fn emitFunction(
         // Emit VS_INPUT struct.
         try w.writeAll("struct VS_INPUT\n{\n");
         for (vtx_inputs.items) |fld| {
-            const tname = try hlslType(module, fld.type_id, names, alloc);
+            var tname = try hlslType(module, fld.type_id, names, alloc);
             const semantic: []const u8 = if (fld.builtin) |b| blk: {
                 const bi: spirv.BuiltIn = @enumFromInt(b);
                 break :blk switch (bi) {
@@ -1631,6 +1631,17 @@ fn emitFunction(
                     else => @as([]const u8, "TEXCOORD0"),
                 };
             } else "TEXCOORD0";
+            // dxc requires SV_VertexID / SV_InstanceID to be `uint`, but glslang
+            // types gl_VertexIndex / gl_InstanceIndex as signed int. Force uint
+            // here (the body's int uses convert implicitly) — else dxc rejects
+            // ("SV_VertexID must be uint"), a silent-wrong output.
+            if (fld.builtin) |b| {
+                const bi: spirv.BuiltIn = @enumFromInt(b);
+                switch (bi) {
+                    .vertex_id, .vertex_index, .instance_id, .instance_index => tname = "uint",
+                    else => {},
+                }
+            }
             if (fld.builtin != null) {
                 try w.print("    {s} {s} : {s};\n", .{ tname, fld.orig_name, semantic });
             } else {
