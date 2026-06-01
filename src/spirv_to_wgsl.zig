@@ -1246,13 +1246,36 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 }
             }
             if (sc == .Input) {
-                const location = getDecVal(&decorations, inst.words[2], .location);
                 const builtin_val = getDecVal(&decorations, inst.words[2], .built_in);
                 const builtin: ?spirv.BuiltIn = if (builtin_val) |bv| @enumFromInt(bv) else null;
-                if (location != null or builtin != null) {
-                    try input_vars.append(arena, .{ .id = inst.words[2], .type_id = inst.words[1], .builtin = builtin });
+                // Collect EVERY stage input. A non-builtin input without an
+                // explicit Location (e.g. GLSL `in vec4 inV;`) still needs to be
+                // an entry-point parameter — the emit below auto-assigns
+                // `@location(i)`. Dropping it (the old `location != null or
+                // builtin != null` filter) left the body referencing an
+                // undeclared identifier (invalid WGSL, naga reject).
+                try input_vars.append(arena, .{ .id = inst.words[2], .type_id = inst.words[1], .builtin = builtin });
+            }
+        }
+    }
+
+    // WGSL requires every vertex entry to return a @builtin(position) value. A
+    // vertex shader that never writes gl_Position cannot be lowered to valid
+    // WGSL (naga: "Vertex shaders must return a @builtin(position) output").
+    // Fabricating one would be silent-wrong, so fail loud with an honest error.
+    if (is_vertex and output_vars.items.len > 0) {
+        var has_position = false;
+        for (output_vars.items) |ovid| {
+            if (getDecVal(&decorations, ovid, .built_in)) |bv| {
+                if (bv == @intFromEnum(spirv.BuiltIn.position)) {
+                    has_position = true;
+                    break;
                 }
             }
+        }
+        if (!has_position) {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL vertex shader requires a gl_Position (@builtin(position)) output", .{}) catch null;
+            return error.UnsupportedOp;
         }
     }
 
