@@ -763,6 +763,25 @@ test "wgsl: constant unsigned vector uses WGSL vec constructor, not GLSL uintN" 
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "uvec2") == null);
 }
 
+test "wgsl: textureGather emits the component as the first argument" {
+    // WGSL: textureGather(component, texture, sampler, coords). The GLSL order
+    // (tex, sampler, coords, component) makes naga read the texture where it
+    // expects the integer component ("must resolve to u32 or i32").
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D uTex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureGather(uTex, uv, 0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // Component (0) comes first, before the texture identifier.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "textureGather(0, uTex, uTex_sampler, uv)") != null);
+}
+
 test "wgsl: CompositeExtract/Select in loop-replay path do not leak opcode names" {
     // A while(true)+switch state machine drives the switch/loop replay path
     // (emitSimpleInstruction). OpCompositeExtract / OpSelect there must lower to
