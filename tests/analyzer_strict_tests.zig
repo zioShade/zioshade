@@ -490,6 +490,181 @@ test "strict: not() on a non-boolean operand fails loud (no silent-wrong)" {
     try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, bad_scalar, .{ .stage = .fragment }));
 }
 
+// ============================================================
+// GL_EXT/NV_fragment_shader_barycentric — HONEST faithfulness tests.
+//
+// These shaders previously compiled spirv-val-CLEAN but SILENTLY-WRONG:
+// the `pervertexEXT`/`pervertexNV` interpolation qualifier was swallowed by
+// the parser, the gl_BaryCoord* builtins got NO BuiltIn decoration, and the
+// FragmentBarycentricKHR capability + SPV_*_fragment_shader_barycentric
+// extension were never emitted. spirv-val tolerated the structurally-valid
+// (but semantically-meaningless) result → a false-green.
+//
+// An honest test asserts the SEMANTICS, not just that spirv-val passes:
+//   (1) compileToSPIRVStrict succeeds  → zero recorded diagnostics
+//       (we model it; we do NOT fail-loud).
+//   (2) the emitted SPIR-V actually carries the barycentric decorations &
+//       capability that the glslangValidator -V --aml --amb oracle emits.
+// Oracle ground-truth (spirv-dis):
+//   OpCapability FragmentBarycentricKHR            (cap 5284)
+//   OpExtension  "SPV_{KHR,NV}_fragment_shader_barycentric"
+//   OpDecorate %gl_BaryCoordEXT       BuiltIn BaryCoordKHR        (5286)
+//   OpDecorate %gl_BaryCoordNoPerspEXT BuiltIn BaryCoordNoPerspKHR (5287)
+//   OpDecorate %vUV                   PerVertexKHR                (5285)
+//   (io-block) OpDecorate %Foo Block + OpDecorate %foo PerVertexKHR
+const CAP_FRAGMENT_BARYCENTRIC_KHR: u32 = 5284;
+const BUILTIN_BARY_COORD_KHR: u32 = 5286;
+const BUILTIN_BARY_COORD_NO_PERSP_KHR: u32 = 5287;
+const DECO_PER_VERTEX_KHR: u32 = 5285;
+
+test "strict: GL_EXT_fragment_shader_barycentric (pervertexEXT + gl_BaryCoordEXT) is modeled faithfully" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\#extension GL_EXT_fragment_shader_barycentric : require
+        \\layout(location = 0) out vec2 value;
+        \\layout(location = 0) pervertexEXT in vec2 vUV[3];
+        \\layout(location = 3) pervertexEXT in vec2 vUV2[3];
+        \\void main () {
+        \\    value = gl_BaryCoordEXT.x * vUV[0] + gl_BaryCoordEXT.y * vUV[1] + gl_BaryCoordEXT.z * vUV[2];
+        \\    value += gl_BaryCoordNoPerspEXT.x * vUV2[0] + gl_BaryCoordNoPerspEXT.y * vUV2[1] + gl_BaryCoordNoPerspEXT.z * vUV2[2];
+        \\}
+    ;
+    // (1) modeled, not failed-loud
+    _ = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    // (2) faithful SPIR-V
+    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expect(hasCapability(spirv, CAP_FRAGMENT_BARYCENTRIC_KHR));
+    try std.testing.expect(hasBuiltInDecoration(spirv, BUILTIN_BARY_COORD_KHR));
+    try std.testing.expect(hasBuiltInDecoration(spirv, BUILTIN_BARY_COORD_NO_PERSP_KHR));
+    try std.testing.expect(hasPlainDecoration(spirv, DECO_PER_VERTEX_KHR));
+}
+
+test "strict: GL_NV_fragment_shader_barycentric (pervertexNV + gl_BaryCoordNV) is modeled faithfully" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\#extension GL_NV_fragment_shader_barycentric : require
+        \\layout(location = 0) out vec2 value;
+        \\layout(location = 0) pervertexNV in vec2 vUV[3];
+        \\layout(location = 1) pervertexNV in vec2 vUV2[3];
+        \\void main () {
+        \\    value = gl_BaryCoordNV.x * vUV[0] + gl_BaryCoordNV.y * vUV[1] + gl_BaryCoordNV.z * vUV[2];
+        \\    value += gl_BaryCoordNoPerspNV.x * vUV2[0] + gl_BaryCoordNoPerspNV.y * vUV2[1] + gl_BaryCoordNoPerspNV.z * vUV2[2];
+        \\}
+    ;
+    _ = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    // glslang canonicalizes the NV forms to the KHR capability/builtins;
+    // only the OpExtension string differs (SPV_NV_…). So the same numeric
+    // decorations must appear.
+    try std.testing.expect(hasCapability(spirv, CAP_FRAGMENT_BARYCENTRIC_KHR));
+    try std.testing.expect(hasBuiltInDecoration(spirv, BUILTIN_BARY_COORD_KHR));
+    try std.testing.expect(hasBuiltInDecoration(spirv, BUILTIN_BARY_COORD_NO_PERSP_KHR));
+    try std.testing.expect(hasPlainDecoration(spirv, DECO_PER_VERTEX_KHR));
+}
+
+test "strict: barycentric per-vertex interface block array (pervertexEXT in Foo {...} foo[3]) is modeled faithfully" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\#extension GL_EXT_fragment_shader_barycentric : require
+        \\layout(location = 0) out vec2 value;
+        \\layout(location = 0) pervertexEXT in vec2 vUV[3];
+        \\layout(location = 2) pervertexEXT in Foo
+        \\{
+        \\    vec2 a;
+        \\    vec2 b;
+        \\} foo[3];
+        \\void main () {
+        \\    value = gl_BaryCoordEXT.x * vUV[0] + gl_BaryCoordEXT.y * vUV[1] + gl_BaryCoordEXT.z * vUV[2];
+        \\    value += gl_BaryCoordEXT.x * foo[0].a;
+        \\    value += gl_BaryCoordEXT.y * foo[0].b;
+        \\    value += gl_BaryCoordEXT.z * foo[1].a;
+        \\}
+    ;
+    _ = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expect(hasCapability(spirv, CAP_FRAGMENT_BARYCENTRIC_KHR));
+    try std.testing.expect(hasBuiltInDecoration(spirv, BUILTIN_BARY_COORD_KHR));
+    // Both per-vertex inputs — the plain array `vUV` AND the per-vertex
+    // INTERFACE-BLOCK array `foo` — must each carry PerVertexKHR. Asserting a
+    // count >= 2 proves the block instance (not just the plain array) is
+    // decorated, i.e. the qualifier survives the interface-block path.
+    try std.testing.expectEqual(@as(usize, 2), countPlainDecoration(spirv, DECO_PER_VERTEX_KHR));
+    // NOTE: the `OpDecorate %Foo Block` decoration the oracle emits is a
+    // SEPARATE, pre-existing gap that affects ALL fragment input/output
+    // interface blocks (verified: a non-barycentric `in Foo {...} foo;` also
+    // lacks it) — it is out of scope for this barycentric fix (the task scopes
+    // the interface-block-array handling as already-separate). Tracked apart.
+}
+
+/// Scan for `OpCapability <cap>` (Op 17, word_count 2).
+fn hasCapability(spirv: []const u32, cap: u32) bool {
+    if (spirv.len < 5) return false;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const word = spirv[i];
+        const op: u16 = @truncate(word & 0xFFFF);
+        const wc: usize = @as(u16, @truncate(word >> 16));
+        if (wc == 0) return false;
+        if (op == 17 and wc == 2 and i + 1 < spirv.len and spirv[i + 1] == cap) return true;
+        i += wc;
+    }
+    return false;
+}
+
+/// Scan for `OpDecorate <target> BuiltIn <builtin>` (Op 71, BuiltIn=11 at word+2,
+/// builtin value at word+3).
+fn hasBuiltInDecoration(spirv: []const u32, builtin: u32) bool {
+    if (spirv.len < 5) return false;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const word = spirv[i];
+        const op: u16 = @truncate(word & 0xFFFF);
+        const wc: usize = @as(u16, @truncate(word >> 16));
+        if (wc == 0) return false;
+        if (op == 71 and wc >= 4 and spirv[i + 2] == 11 and spirv[i + 3] == builtin) return true;
+        i += wc;
+    }
+    return false;
+}
+
+/// Scan for `OpDecorate <target> <decoration>` with NO extra operand
+/// (Op 71, word_count 3) — e.g. PerVertexKHR (5285) or Block (2).
+fn hasPlainDecoration(spirv: []const u32, decoration: u32) bool {
+    if (spirv.len < 5) return false;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const word = spirv[i];
+        const op: u16 = @truncate(word & 0xFFFF);
+        const wc: usize = @as(u16, @truncate(word >> 16));
+        if (wc == 0) return false;
+        if (op == 71 and wc == 3 and spirv[i + 2] == decoration) return true;
+        i += wc;
+    }
+    return false;
+}
+
+/// Count `OpDecorate <target> <decoration>` (Op 71, word_count 3) occurrences.
+fn countPlainDecoration(spirv: []const u32, decoration: u32) usize {
+    if (spirv.len < 5) return 0;
+    var n: usize = 0;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const word = spirv[i];
+        const op: u16 = @truncate(word & 0xFFFF);
+        const wc: usize = @as(u16, @truncate(word >> 16));
+        if (wc == 0) return n;
+        if (op == 71 and wc == 3 and spirv[i + 2] == decoration) n += 1;
+        i += wc;
+    }
+    return n;
+}
+
 fn containsOpcode(spirv: []const u32, opcode: u16) bool {
     if (spirv.len < 5) return false;
     var i: usize = 5;
