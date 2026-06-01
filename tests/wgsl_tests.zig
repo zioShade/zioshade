@@ -274,6 +274,34 @@ test "wgsl unmapped ext-inst errors honestly instead of emitting unknown()" {
     );
 }
 
+// WGSL has no matrix-inverse builtin. GLSL inverse() (GLSL.std.450 MatrixInverse)
+// must fail loud rather than emit `matrixInverse(m)`, which naga rejects with
+// "no definition in scope" — the silent-wrong this milestone forbids.
+test "wgsl inverse() errors honestly (WGSL has no matrix-inverse builtin)" {
+    // Build the matrix from vertex inputs (not a UBO) so this targets only the
+    // MatrixInverse honest-error path. (A separate pre-existing struct-name
+    // error-path leak in spirvToWGSL is tracked as a follow-up.)
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec4 c0;
+        \\layout(location = 1) in vec4 c1;
+        \\layout(location = 2) in vec4 c2;
+        \\layout(location = 3) in vec4 c3;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat4 m = mat4(c0, c1, c2, c3);
+        \\    fragColor = inverse(m) * vec4(1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+
+    try std.testing.expectError(
+        error.UnsupportedExtInst,
+        glslpp.spirvToWGSL(alloc, spirv, .{}),
+    );
+}
+
 // textureGatherOffsets lowers (correctly, for the SPIR-V target) to
 // OpImageGather carrying the ConstOffsets image operand — a per-texel
 // 4-offset array. WGSL's `textureGather` cannot take a 4-offset array, so the
