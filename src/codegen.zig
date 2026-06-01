@@ -498,22 +498,22 @@ const Codegen = struct {
     /// string — the capability and decorations are the KHR forms either way).
     const BarycentricUse = struct { used: bool = false, nv: bool = false };
     fn barycentricUsage(self: *Codegen) BarycentricUse {
-        var r = BarycentricUse{};
+        var bary = BarycentricUse{};
         for (self.module.globals) |global| {
-            if (global.qualifier.is_pervertex_ext) r.used = true;
+            if (global.qualifier.is_pervertex_ext) bary.used = true;
             if (global.qualifier.is_pervertex_nv) {
-                r.used = true;
-                r.nv = true;
+                bary.used = true;
+                bary.nv = true;
             }
             if (std.mem.eql(u8, global.name, "gl_BaryCoordEXT") or
-                std.mem.eql(u8, global.name, "gl_BaryCoordNoPerspEXT")) r.used = true;
+                std.mem.eql(u8, global.name, "gl_BaryCoordNoPerspEXT")) bary.used = true;
             if (std.mem.eql(u8, global.name, "gl_BaryCoordNV") or
                 std.mem.eql(u8, global.name, "gl_BaryCoordNoPerspNV")) {
-                r.used = true;
-                r.nv = true;
+                bary.used = true;
+                bary.nv = true;
             }
         }
-        return r;
+        return bary;
     }
 
     fn emitCapabilities(self: *Codegen) !void {

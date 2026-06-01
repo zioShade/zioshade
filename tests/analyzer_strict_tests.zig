@@ -506,7 +506,7 @@ test "strict: not() on a non-boolean operand fails loud (no silent-wrong)" {
 //   (2) the emitted SPIR-V actually carries the barycentric decorations &
 //       capability that the glslangValidator -V --aml --amb oracle emits.
 // Oracle ground-truth (spirv-dis):
-//   OpCapability FragmentBarycentricKHR            (cap 5286)
+//   OpCapability FragmentBarycentricKHR            (cap 5284)
 //   OpExtension  "SPV_{KHR,NV}_fragment_shader_barycentric"
 //   OpDecorate %gl_BaryCoordEXT       BuiltIn BaryCoordKHR        (5286)
 //   OpDecorate %gl_BaryCoordNoPerspEXT BuiltIn BaryCoordNoPerspKHR (5287)
