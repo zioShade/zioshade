@@ -1676,6 +1676,27 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
     }
 
+    // Uniquify function names: GLSL permits overloading (same name, different
+    // parameter types) but WGSL requires unique top-level function names. Each
+    // OpFunctionCall targets a specific function id, and call sites resolve the
+    // callee via names.get(fid), so renaming the names-map entry here also fixes
+    // every call site — deterministic, with no risk of binding the wrong overload.
+    {
+        var fn_name_counts = std.StringHashMap(u32).init(alloc);
+        defer fn_name_counts.deinit();
+        for (func_ids.items) |fid| {
+            const cur = names.get(fid) orelse continue;
+            const gop = fn_name_counts.getOrPut(cur) catch continue;
+            if (gop.found_existing) {
+                gop.value_ptr.* += 1;
+                const uniq = std.fmt.allocPrint(alloc, "{s}_ov{d}", .{ cur, gop.value_ptr.* }) catch continue;
+                if (names.fetchPut(fid, uniq) catch null) |old| alloc.free(old.value);
+            } else {
+                gop.value_ptr.* = 0;
+            }
+        }
+    }
+
     for (func_ids.items) |fid| {
         if (fid == module.entry_point_id) continue; // emit entry last
         const fidx = func_idx_map.get(fid) orelse continue;
