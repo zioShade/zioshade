@@ -20,6 +20,7 @@ All notable changes to glslpp are documented here. The format is loosely based o
 
 ### Added
 - **Descriptor remap (G6):** `HlslCompileOptions.resource_bindings` / `MslCompileOptions.resource_bindings` map a SPIR-V `(set, binding)` to an explicit HLSL register / MSL slot (class inferred from type); CLI `--bind set:binding:reg` (repeatable). dxc/spirv-cross-gated.
+- **Fuzzing milestone:** the structured-GLSL fuzzer is clean over **1,000,000 iterations** (0 fail / 0 crash, seed 1). Reproduce with `just fuzz-million` (or `just fuzz <count>`).
 - `docs/IMPLEMENTATION_STATUS.md` — renamed and reframed gap analysis with an explicit "Other gaps" section flagging un-published comparisons against `libglslang.a`.
 - `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`.
 - `examples/glsl-to-hlsl.zig` and `examples/reflect-uniforms.zig` runnable demos.
