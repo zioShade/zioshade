@@ -1701,3 +1701,41 @@ test "GLSL: struct types used as local variables get declared" {
     defer alloc.free(glsl);
     try assertContains(glsl, "struct ResType");
 }
+
+test "vertex shader declares input attributes and output varyings" {
+    // Regression: the GLSL backend previously declared only the single fragment
+    // color output, so vertex attributes (in) and varyings (out) were emitted as
+    // undeclared identifiers — invalid GLSL (glslang rejects). They must now be
+    // declared with their location qualifiers.
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 in_pos;
+        \\layout(location = 1) in vec3 in_normal;
+        \\layout(location = 0) out vec3 v_normal;
+        \\void main() {
+        \\    v_normal = in_normal;
+        \\    gl_Position = vec4(in_pos, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlslStage(source, .vertex);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "layout(location = 0) in vec3 in_pos;");
+    try assertContains(glsl, "layout(location = 1) in vec3 in_normal;");
+    try assertContains(glsl, "layout(location = 0) out vec3 v_normal;");
+    // gl_Position is a predefined built-in — must NOT be declared as a varying.
+    try assertContains(glsl, "gl_Position =");
+}
+
+test "fragment shader declares input varyings (not just the color output)" {
+    // Regression: fragment input varyings were undeclared (only the output was).
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(uv, 0.0, 1.0); }
+    ;
+    const glsl = try compileToGlslStage(source, .fragment);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "layout(location = 0) in vec2 uv;");
+    try assertContains(glsl, "layout(location = 0) out vec4 o;");
+}
