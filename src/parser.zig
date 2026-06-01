@@ -315,6 +315,29 @@ const Parser = struct {
         };
     }
 
+    /// Returns true when `name` is a GLSL 64-bit type keyword that the lexer does not
+    /// map to a dedicated token (because glslpp does not implement 64-bit types).
+    /// Recognizing these names lets the parser build a proper var_decl node so that
+    /// the semantic layer can emit a clear "unsupported 64-bit type" honest error
+    /// instead of a misleading UndeclaredIdentifier for the variable name that follows.
+    fn is64BitTypeName(name: []const u8) bool {
+        const names64 = [_][]const u8{
+            "double",
+            "dvec2", "dvec3", "dvec4",
+            "dmat2", "dmat3", "dmat4",
+            "dmat2x2", "dmat2x3", "dmat2x4",
+            "dmat3x2", "dmat3x3", "dmat3x4",
+            "dmat4x2", "dmat4x3", "dmat4x4",
+            "int64_t", "uint64_t",
+            "i64vec2", "i64vec3", "i64vec4",
+            "u64vec2", "u64vec3", "u64vec4",
+        };
+        for (names64) |n| {
+            if (std.mem.eql(u8, name, n)) return true;
+        }
+        return false;
+    }
+
     // ── Top-level ─────────────────────────────────────────────
 
     fn parseTopLevel(self: *Parser) Error!ast.Node {
@@ -797,8 +820,42 @@ const Parser = struct {
             .kw_sampler_shadow, .kw_sampler_plain => { _ = self.advance(); return .sampler_plain; },
             .kw_sampler_cube => { _ = self.advance(); return .sampler_cube; },
             .identifier => {
-                const tok = self.advance();
-                return .{ .named = self.text(tok) };
+                const tok = self.current();
+                const name = self.text(tok);
+                // Recognize 64-bit type names as valid (but unsupported) types so the parser
+                // can build a proper var_decl / type_constructor node. The semantic analyzer
+                // will then emit a clear "unsupported 64-bit type" honest error instead of
+                // a misleading "UndeclaredIdentifier" for the variable name.
+                if (std.mem.eql(u8, name, "double") or
+                    std.mem.eql(u8, name, "dvec2") or
+                    std.mem.eql(u8, name, "dvec3") or
+                    std.mem.eql(u8, name, "dvec4") or
+                    std.mem.eql(u8, name, "dmat2") or
+                    std.mem.eql(u8, name, "dmat3") or
+                    std.mem.eql(u8, name, "dmat4") or
+                    std.mem.eql(u8, name, "dmat2x2") or
+                    std.mem.eql(u8, name, "dmat2x3") or
+                    std.mem.eql(u8, name, "dmat2x4") or
+                    std.mem.eql(u8, name, "dmat3x2") or
+                    std.mem.eql(u8, name, "dmat3x3") or
+                    std.mem.eql(u8, name, "dmat3x4") or
+                    std.mem.eql(u8, name, "dmat4x2") or
+                    std.mem.eql(u8, name, "dmat4x3") or
+                    std.mem.eql(u8, name, "dmat4x4") or
+                    std.mem.eql(u8, name, "int64_t") or
+                    std.mem.eql(u8, name, "uint64_t") or
+                    std.mem.eql(u8, name, "i64vec2") or
+                    std.mem.eql(u8, name, "i64vec3") or
+                    std.mem.eql(u8, name, "i64vec4") or
+                    std.mem.eql(u8, name, "u64vec2") or
+                    std.mem.eql(u8, name, "u64vec3") or
+                    std.mem.eql(u8, name, "u64vec4"))
+                {
+                    _ = self.advance();
+                    return .{ .named = name };
+                }
+                _ = self.advance();
+                return .{ .named = name };
             },
             else => null,
         };
@@ -1208,6 +1265,15 @@ const Parser = struct {
                 if (third == .eq or third == .semicolon or third == .l_bracket) {
                     return self.parseLocalVarDecl();
                 }
+            }
+            // Recognize 64-bit type keywords (not in the lexer keyword map) so that
+            // `double d = ...` / `int64_t n = ...` are parsed as var-decls and the
+            // semantic layer can emit a clear "unsupported 64-bit type" honest error.
+            if (is64BitTypeName(type_name) and
+                (self.peek2().tag == .eq or self.peek2().tag == .semicolon or
+                 self.peek2().tag == .l_bracket or self.peek2().tag == .semicolon))
+            {
+                return self.parseLocalVarDecl();
             }
         }
         // const type identifier ...

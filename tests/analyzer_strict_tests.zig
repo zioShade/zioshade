@@ -357,3 +357,47 @@ test "strict: pixel_interlock_ordered extension and SPIRV_Cross macro pattern" {
     defer alloc.free(spv);
     try std.testing.expect(spv.len > 5);
 }
+
+// ============================================================
+// F1 — Named honest-error for unsupported 64-bit types
+// (Task F1 bounded: error-message quality, NOT type implementation)
+// ============================================================
+
+test "F1: double type yields a named honest unsupported error (not UndeclaredIdentifier)" {
+    // The parser must recognise `double` as a 64-bit type keyword so the declaration
+    // is parsed as a proper var_decl, and the semantic layer emits a clear error
+    // naming the unsupported 64-bit type rather than a misleading UndeclaredIdentifier.
+    // Note: use a plain float initialiser (no `lf` suffix) so the lexer does not
+    // produce a stray `lf` identifier that would cause a parse error before the
+    // semantic layer is even reached.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main() { double d = 0.0; o = vec4(float(d)); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    const ctx = glslpp.lastErrorCtx() orelse "";
+    const inner = glslpp.lastErrorInner() orelse "";
+    // The error must NAME the unsupported 64-bit construct — NOT "UndeclaredIdentifier".
+    // ctx or inner must contain "64" or "double".
+    const names_it = std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, ctx, "double") != null
+        or std.mem.indexOf(u8, inner, "double") != null or std.mem.indexOf(u8, inner, "64") != null;
+    try std.testing.expect(names_it);
+}
+
+test "F1: int64_t yields a named honest unsupported error" {
+    // int64_t is parsed as a 64-bit type keyword so the declaration becomes a
+    // proper var_decl, and the semantic layer emits a clear named error.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\#extension GL_ARB_gpu_shader_int64 : enable
+        \\layout(location=0) out vec4 o;
+        \\void main() { int64_t n = 5; o = vec4(float(n)); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    const ctx = glslpp.lastErrorCtx() orelse "";
+    const inner = glslpp.lastErrorInner() orelse "";
+    try std.testing.expect(std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "int64") != null or std.mem.indexOf(u8, inner, "64") != null);
+}

@@ -65,6 +65,35 @@ pub const AnalyzeOptions = struct {
     stage: ?@import("root.zig").Stage = null,
 };
 
+/// Returns the canonical name of the 64-bit type (e.g. "double", "int64_t") when
+/// `ty` is an unsupported 64-bit GLSL type, or null otherwise.
+/// Used to emit a clear "unsupported 64-bit type" honest error in the semantic layer.
+fn is64BitType(ty: ast.Type) ?[]const u8 {
+    // ast.Type.double covers the enum variant (used by some internal paths).
+    if (ty == .double) return "double";
+    // All 64-bit type names (including "double" itself) arrive as .named because the
+    // lexer/parser does not give them dedicated keyword tokens; the parser's identifier
+    // arm returns .named = name for any unrecognized identifier used as a type.
+    if (ty == .named) {
+        const name = ty.named;
+        const names64 = [_][]const u8{
+            "double",
+            "dvec2", "dvec3", "dvec4",
+            "dmat2", "dmat3", "dmat4",
+            "dmat2x2", "dmat2x3", "dmat2x4",
+            "dmat3x2", "dmat3x3", "dmat3x4",
+            "dmat4x2", "dmat4x3", "dmat4x4",
+            "int64_t", "uint64_t",
+            "i64vec2", "i64vec3", "i64vec4",
+            "u64vec2", "u64vec3", "u64vec4",
+        };
+        for (names64) |n| {
+            if (std.mem.eql(u8, name, n)) return name;
+        }
+    }
+    return null;
+}
+
 pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
     return analyzeWithOptions(alloc, root, .{});
 }
@@ -2411,6 +2440,15 @@ const Analyzer = struct {
         switch (node.tag) {
             .var_decl => {
                 const ty = node.data.ty orelse .void;
+                // Reject 64-bit types with a clear named honest error instead of a
+                // misleading UndeclaredIdentifier for the variable name.
+                if (is64BitType(ty)) |type_name| {
+                    last_error_ctx = "unsupported-64bit-type";
+                    last_error_inner = type_name;
+                    last_error_line = node.loc.line;
+                    last_error_column = node.loc.column;
+                    return error.SemanticFailed;
+                }
                 if (node.data.children.len > 0) {
                     // Has initializer — try SSA path first
                     var init = try self.analyzeExpression(node.data.children[0]);
@@ -6476,6 +6514,16 @@ const Analyzer = struct {
                 return .{ .ty = result_ty, .id = result_id };
             },
             .type_constructor => {
+                // Reject 64-bit type constructors (e.g. dvec2(1.0, 2.0)) with a clear
+                // named honest error before evaluating arguments.
+                const ctor_ty = node.data.ty orelse .void;
+                if (is64BitType(ctor_ty)) |type_name| {
+                    last_error_ctx = "unsupported-64bit-type";
+                    last_error_inner = type_name;
+                    last_error_line = node.loc.line;
+                    last_error_column = node.loc.column;
+                    return error.SemanticFailed;
+                }
                 var arg_tids = std.ArrayListUnmanaged(TypedId).empty;
                 defer arg_tids.deinit(self.alloc);
                 for (node.data.children) |arg| {
