@@ -2421,38 +2421,11 @@ fn emitBody(
                     idx = merge_idx; // loop will increment
                 }
             } else {
-                // No merge info — reconstruct if/else from branch targets
-                var converge_lbl: ?u32 = null;
-                if (false_label != null) {
-                    const tl_idx = label_map.get(true_label) orelse true_label;
-                    var si: usize = tl_idx;
-                    while (si < module.instructions.len) : (si += 1) {
-                        const sinst = module.instructions[si];
-                        if (sinst.op == .Branch and sinst.words.len > 1) {
-                            converge_lbl = sinst.words[1];
-                            break;
-                        }
-                        if (sinst.op == .ReturnValue or sinst.op == .Return or sinst.op == .Kill) break;
-                        if (sinst.op == .BranchConditional) break;
-                    }
-                }
-                try w.print("    if ({s})\n    {{\n", .{cond_name});
-                if (converge_lbl) |cv| {
-                    idx = try emitBlock(module, names, decorations, true_label, cv, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
-                    if (false_label != null and false_label.? != cv) {
-                        try w.writeAll("    } else {\n");
-                        idx = try emitBlock(module, names, decorations, false_label.?, cv, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
-                    }
-                    try w.writeAll("    }\n");
-                    if (label_map.get(cv)) |mi| { idx = mi; }
-                } else if (false_label != null) {
-                    idx = try emitBlock(module, names, decorations, true_label, false_label.?, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
-                    try w.writeAll("    }\n");
-                    if (label_map.get(false_label.?)) |mi| { idx = mi; }
-                } else {
-                    idx = try emitBlock(module, names, decorations, true_label, true_label, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
-                    try w.writeAll("    }\n");
-                }
+                // Unstructured control flow (OpBranchConditional without
+                // OpSelectionMerge). The convergence-guessing reconstruction is
+                // silent-wrong; fail loud. glslpp's own frontend always emits
+                // merge info. Mirrors the GLSL backend (#88). Backlog #4 (G2).
+                return error.UnstructuredControlFlow;
             }
             continue;
         }
@@ -2487,41 +2460,11 @@ fn emitBody(
                     idx = merge_idx;
                 }
             } else {
-                // No merge info for switch — try to find convergence
-                var switch_merge: ?u32 = null;
-                if (inst.words.len >= 5) {
-                    const fct = inst.words[4];
-                    const fci = label_map.get(fct) orelse fct;
-                    var si: usize = fci;
-                    while (si < module.instructions.len) : (si += 1) {
-                        const sinst = module.instructions[si];
-                        if (sinst.op == .Branch and sinst.words.len > 1) {
-                            switch_merge = sinst.words[1];
-                            break;
-                        }
-                        if (sinst.op == .ReturnValue or sinst.op == .Return or sinst.op == .Kill) break;
-                        if (sinst.op == .BranchConditional) break;
-                    }
-                }
-                if (switch_merge) |sm| {
-                    try w.print("    switch ({s}) {{\n", .{selector_name});
-                    if (default_label != sm) {
-                        try w.writeAll("    default:\n");
-                        _ = try emitBlock(module, names, decorations, default_label, sm, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
-                    }
-                    var wi: usize = 3;
-                    while (wi + 1 < inst.words.len) : (wi += 2) {
-                        const cv = inst.words[wi];
-                        const target_label = inst.words[wi + 1];
-                        if (target_label == sm) continue;
-                        try w.print("    case {d}:\n", .{cv});
-                        _ = try emitBlock(module, names, decorations, target_label, sm, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
-                    }
-                    try w.writeAll("    }\n");
-                    if (label_map.get(sm)) |merge_idx| { idx = merge_idx; }
-                } else {
-                    try w.print("    // switch ({s}): no merge info\n", .{selector_name});
-                }
+                // Unstructured control flow (OpSwitch without OpSelectionMerge).
+                // The convergence-guessing reconstruction is silent-wrong (drops
+                // the default case / elides the switch); fail loud. Mirrors the
+                // GLSL backend (#88). Backlog #4 (G2) = structurize.
+                return error.UnstructuredControlFlow;
             }
             continue;
         }
