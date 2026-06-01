@@ -3373,14 +3373,16 @@ test "T63.1: texelFetch maps to Load" {
 }
 
 test "T64.1: outerProduct" {
+    // outerProduct(vec2 c, vec3 r) → mat3x2 (3 columns, 2 rows per GLSL spec).
+    // Previously used mat2x3 which is a type mismatch and invalid GLSL.
     const source =
         \\#version 450
         \\layout(location = 0) in vec2 a;
         \\layout(location = 0) out vec4 fragColor;
         \\void main() {
         \\    vec3 b = vec3(1.0, 2.0, 3.0);
-        \\    mat2x3 m = outerProduct(a, b);
-        \\    fragColor = vec4(m[0].x, m[0].y, m[0].z, 1.0);
+        \\    mat3x2 m = outerProduct(a, b);
+        \\    fragColor = vec4(m[0].x, m[0].y, m[1].x, 1.0);
         \\}
     ;
     const hlsl = try compileToHlsl(source);
@@ -3655,6 +3657,8 @@ test "T73.2: GLSL std.450 pow, exp, log" {
 }
 
 test "T73.3: GLSL std.450 sqrt, rsqrt" {
+    // rsqrt is HLSL/WGSL, NOT a GLSL built-in — glslangValidator -V rejects it.
+    // The flip now correctly rejects this; the test verifies fail-loud behavior.
     const source =
         \\#version 450
         \\layout(location = 0) in float x;
@@ -3667,11 +3671,7 @@ test "T73.3: GLSL std.450 sqrt, rsqrt" {
         \\    fragColor.zw = vec2(0.0, 1.0);
         \\}
     ;
-    const hlsl = try compileToHlsl(source);
-    defer alloc.free(hlsl);
-    // sqrt/rsqrt may be optimized away for simple cases
-    // Verify the shader at least compiles and produces valid HLSL
-    try assertContains(hlsl, "float4");
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
 }
 
 test "T74.1: GLSL std.450 cross, normalize, length, distance" {
@@ -7761,6 +7761,9 @@ test "T311.1: function with array parameter" {
 }
 
 test "T312.1: mat3x4 times vec4" {
+    // mat3x4 is 3 columns × 4 rows; multiplying by vec4 (4 components) requires
+    // vec of size equal to #columns (3), not #rows (4) — type error.
+    // glslangValidator -V rejects this. The flip now correctly rejects it.
     const source =
         \\#version 450
         \\layout(location = 0) in vec4 v;
@@ -7771,9 +7774,7 @@ test "T312.1: mat3x4 times vec4" {
         \\    fragColor = vec4(r, 1.0);
         \\}
     ;
-    const hlsl = try compileToHlsl(source);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "float4");
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
 }
 
 test "T313.1: nested struct uniform access" {
@@ -10285,7 +10286,10 @@ test "T442.1: interpolateAtCentroid" {
 }
 
 test "T443.1: textureGatherOffsets" {
-    // Tests textureGatherOffsets with constant offsets
+    // Tests textureGatherOffsets with constant offsets.
+    // The semantic analyzer now correctly handles global const ivec2[4] offsets.
+    // HLSL cross-compilation legitimately fails (ConstOffsets has no HLSL equivalent),
+    // so we verify SPIR-V generation only.
     const source =
         \\#version 450
         \\layout(location = 0) in vec2 uv;
@@ -10297,9 +10301,12 @@ test "T443.1: textureGatherOffsets" {
         \\    fragColor = g;
         \\}
     ;
-    const hlsl = try compileToHlsl(source);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "float4");
+    // compileToSPIRV must succeed (semantic analyzer must not record any error)
+    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spv.len > 5);
+    // HLSL cross-compilation fails because ConstOffsets has no HLSL equivalent
+    try std.testing.expectError(error.UnsupportedImageOperands, compileToHlsl(source));
 }
 
 test "T444.1: compute scan prefix sum" {
@@ -11681,7 +11688,8 @@ test "T517.1: gl_FragDepth write" {
 }
 
 test "T518.1: depth range gl_DepthRange" {
-    // Tests gl_DepthRange built-in struct access
+    // gl_DepthRange is not declared in Vulkan GLSL 450 (glslangValidator -V rejects it).
+    // It is a desktop OpenGL built-in that was removed for Vulkan. The flip correctly rejects it.
     const source =
         \\#version 450
         \\layout(location = 0) out vec4 fragColor;
@@ -11692,9 +11700,7 @@ test "T518.1: depth range gl_DepthRange" {
         \\    fragColor = vec4(near, far, diff, 1.0);
         \\}
     ;
-    const hlsl = try compileToHlsl(source);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "float4");
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
 }
 
 test "T519.1: nonuniformEXT qualifier" {
@@ -11867,7 +11873,8 @@ test "T527.1: gl_DrawID in vertex" {
 }
 
 test "T528.1: noise functions" {
-    // Tests that noise builtins compile (may return 0)
+    // noise1/noise2/noise3/noise4 were deprecated and removed from GLSL 450 (Vulkan).
+    // glslangValidator -V rejects them. The flip now correctly rejects this shader.
     const source =
         \\#version 450
         \\layout(location = 0) in vec4 v;
@@ -11879,9 +11886,7 @@ test "T528.1: noise functions" {
         \\    fragColor = vec4(n1, n2.x, n3.x, 1.0);
         \\}
     ;
-    const hlsl = try compileToHlsl(source);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "float4");
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
 }
 
 test "T529.1: mat4x3 and mat3x4 operations" {
@@ -12569,7 +12574,8 @@ test "T561.1: PBR lighting model" {
 
 
 test "T562.1: subgroup basic operations" {
-    // Tests subgroup basic operations
+    // Subgroup operations require SPIR-V 1.3; compiling at SPIR-V 1.0 (the
+    // default for compute) causes a semantic error. The flip correctly rejects this.
     const source =
         \\#version 450
         \\#extension GL_KHR_shader_subgroup_basic : enable
@@ -12581,13 +12587,12 @@ test "T562.1: subgroup basic operations" {
         \\    if (elect != 0u) values[id] = 1.0;
         \\}
     ;
-    const hlsl = try compileToHlslStage(source, .compute);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "main");
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
 test "T563.1: subgroup arithmetic add" {
-    // Tests subgroup arithmetic add operation
+    // Subgroup operations require SPIR-V 1.3; rejected at default SPIR-V 1.0.
+    // The flip correctly rejects this shader.
     const source =
         \\#version 450
         \\#extension GL_KHR_shader_subgroup_arithmetic : enable
@@ -12599,13 +12604,12 @@ test "T563.1: subgroup arithmetic add" {
         \\    values[id] = sum;
         \\}
     ;
-    const hlsl = try compileToHlslStage(source, .compute);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "main");
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
 test "T564.1: compute matrix multiply tiled" {
-    // Tests compute tiled matrix multiply
+    // gl_GlobalInvocationID is uvec3; assigning to uvec2 is a type error.
+    // glslangValidator -V rejects this. The flip correctly rejects it.
     const source =
         \\#version 450
         \\layout(local_size_x = 16, local_size_y = 16) in;
@@ -12630,9 +12634,7 @@ test "T564.1: compute matrix multiply tiled" {
         \\    matC[id.y * 64u + id.x] = sum;
         \\}
     ;
-    const hlsl = try compileToHlslStage(source, .compute);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "main");
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
 test "T565.1: conditional discard with side effects" {
@@ -12673,7 +12675,8 @@ test "T566.1: texture with bias and lod" {
 
 
 test "T567.1: subgroup ballot and shuffle" {
-    // Tests subgroup ballot and shuffle operations
+    // Subgroup ops require SPIR-V 1.3; rejected at default SPIR-V 1.0.
+    // The flip correctly rejects this shader.
     const source =
         \\#version 450
         \\#extension GL_KHR_shader_subgroup_ballot : enable
@@ -12687,13 +12690,12 @@ test "T567.1: subgroup ballot and shuffle" {
         \\    values[id] = shuffled + float(ballot.x);
         \\}
     ;
-    const hlsl = try compileToHlslStage(source, .compute);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "main");
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
 test "T568.1: quad operations" {
-    // Tests quad swap operations
+    // Quad/subgroup ops require SPIR-V 1.3; rejected at default SPIR-V 1.0.
+    // The flip correctly rejects this shader.
     const source =
         \\#version 450
         \\#extension GL_KHR_shader_subgroup_quad : enable
@@ -12706,9 +12708,7 @@ test "T568.1: quad operations" {
         \\    values[id] = horiz + vert;
         \\}
     ;
-    const hlsl = try compileToHlslStage(source, .compute);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "main");
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
 test "T569.1: compute histogram" {
@@ -13185,7 +13185,8 @@ test "T588.1: motion blur post-process" {
 }
 
 test "T589.1: compute marching cubes table lookup" {
-    // Tests compute with uniform buffer table lookup
+    // 'flat' is a reserved GLSL keyword and cannot be used as a variable name.
+    // glslangValidator -V rejects this. The flip correctly rejects it.
     const source =
         \\#version 450
         \\layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
@@ -13206,9 +13207,7 @@ test "T589.1: compute marching cubes table lookup" {
         \\    }
         \\}
     ;
-    const hlsl = try compileToHlslStage(source, .compute);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "main");
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
 test "T590.1: vertex morph targets" {
