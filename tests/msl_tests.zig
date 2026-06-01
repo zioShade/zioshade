@@ -1996,3 +1996,30 @@ test "msl: imageSize(imageCubeArray) emits get_array_size for the 3rd component"
     try assertContains(msl, "get_array_size");
     try assertContains(msl, "int3");
 }
+
+// ---------------------------------------------------------------------------
+// Vertex input built-ins (gl_VertexIndex / gl_InstanceIndex) — must be threaded
+// as MSL entry-point attributes, NOT leaked as bare undeclared identifiers
+// (which is uncompilable MSL — silent-wrong). Mirrors spirv-cross --msl.
+// ---------------------------------------------------------------------------
+
+test "msl: gl_VertexIndex / gl_InstanceIndex thread as [[vertex_id]]/[[instance_id]]" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 col;
+        \\void main() {
+        \\    gl_Position = vec4(float(gl_VertexIndex), float(gl_InstanceIndex), 0.0, 1.0);
+        \\    col = vec4(1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .vertex);
+    defer alloc.free(msl);
+    // Entry-point parameters carry the MSL builtin attribute + uint type.
+    try assertContains(msl, "uint gl_VertexIndex [[vertex_id]]");
+    try assertContains(msl, "uint gl_InstanceIndex [[instance_id]]");
+    // Forwarded to the helper as a signed int (the SPIR-V variable is int).
+    try assertContains(msl, "int(gl_VertexIndex)");
+    try assertContains(msl, "int(gl_InstanceIndex)");
+    // The helper declares them as signed int params.
+    try assertContains(msl, "int gl_VertexIndex");
+}
