@@ -603,6 +603,38 @@ test "wgsl: geometry stage errors honestly (WGSL has no geometry entry point)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "Geometry") != null);
 }
 
+test "wgsl: scalar isnan lowers to (x != x); isinf errors honestly" {
+    // WGSL has no isNan/isInf builtins. Scalar isnan(x) must lower to (x != x);
+    // isinf has no clean WGSL idiom and must fail loud (not emit isinf(x), which
+    // naga rejects as an undefined identifier — silent-wrong).
+    {
+        const source =
+            \\#version 450
+            \\layout(location=0) in float a;
+            \\layout(location=0) out vec4 o;
+            \\void main() { o = vec4(isnan(a) ? 1.0 : 0.0); }
+        ;
+        const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+        defer alloc.free(spirv);
+        const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+        defer alloc.free(wgsl);
+        try std.testing.expect(std.mem.indexOf(u8, wgsl, "!=") != null);
+        try std.testing.expect(std.mem.indexOf(u8, wgsl, "isnan(") == null);
+        try nagaValidateOrSkip(wgsl, "isnan-scalar");
+    }
+    {
+        const source =
+            \\#version 450
+            \\layout(location=0) in float a;
+            \\layout(location=0) out vec4 o;
+            \\void main() { o = vec4(isinf(a) ? 1.0 : 0.0); }
+        ;
+        const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+        defer alloc.free(spirv);
+        try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // row_major / column_major UBO matrix layout (silent-wrong fix)
 //
