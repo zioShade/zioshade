@@ -4625,6 +4625,11 @@ fn getBinOpSymbol(op: spirv.Op) ?[]const u8 {
         .SGreaterThan => ">",
         .ULessThan => "<",
         .UGreaterThan => ">",
+        // Integer <=/>= variants — previously missing, so they fell through to the
+        // generic fallback which emitted the opcode tag name (e.g. "SLessThanEqual")
+        // as a bare identifier → naga "no definition in scope" (37 corpus shaders).
+        .SLessThanEqual, .ULessThanEqual => "<=",
+        .SGreaterThanEqual, .UGreaterThanEqual => ">=",
         .FOrdLessThan => "<",
         .FOrdGreaterThan => ">",
         .FOrdLessThanEqual => "<=",
