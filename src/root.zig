@@ -105,6 +105,12 @@ pub const SpecOverride = struct {
     value_u32: u32,
 };
 
+/// Per-resource descriptor remap (G6). Re-exported from the backend modules so
+/// consumers can build `HlslCompileOptions.resource_bindings` /
+/// `MslCompileOptions.resource_bindings` without importing the backends directly.
+pub const ResourceBinding = spirv_to_hlsl.ResourceBinding;
+pub const MslResourceBinding = spirv_to_msl.MslResourceBinding;
+
 /// Resource limits for shader compilation.
 pub const ResourceLimits = struct {
     /// Maximum uniform components per stage.
