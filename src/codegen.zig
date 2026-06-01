@@ -493,6 +493,29 @@ const Codegen = struct {
         try self.emitWord(0); // Schema
     }
 
+    /// Whether the module uses GL_EXT/NV_fragment_shader_barycentric, and if so
+    /// whether the NV spelling was used (which only changes the OpExtension
+    /// string — the capability and decorations are the KHR forms either way).
+    const BarycentricUse = struct { used: bool = false, nv: bool = false };
+    fn barycentricUsage(self: *Codegen) BarycentricUse {
+        var bary = BarycentricUse{};
+        for (self.module.globals) |global| {
+            if (global.qualifier.is_pervertex_ext) bary.used = true;
+            if (global.qualifier.is_pervertex_nv) {
+                bary.used = true;
+                bary.nv = true;
+            }
+            if (std.mem.eql(u8, global.name, "gl_BaryCoordEXT") or
+                std.mem.eql(u8, global.name, "gl_BaryCoordNoPerspEXT")) bary.used = true;
+            if (std.mem.eql(u8, global.name, "gl_BaryCoordNV") or
+                std.mem.eql(u8, global.name, "gl_BaryCoordNoPerspNV")) {
+                bary.used = true;
+                bary.nv = true;
+            }
+        }
+        return bary;
+    }
+
     fn emitCapabilities(self: *Codegen) !void {
         // Always emit Shader capability
         try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
@@ -609,6 +632,11 @@ const Codegen = struct {
         if (has_cull_dist) {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.cull_distance));
+        }
+        // FragmentBarycentricKHR — GL_EXT/NV_fragment_shader_barycentric.
+        if (self.barycentricUsage().used) {
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.fragment_barycentric_khr));
         }
 
         // Only emit additional capabilities if the module actually uses them
@@ -1087,6 +1115,18 @@ const Codegen = struct {
         }
         if (has_interlock_ext) {
             try self.emitExtensionString("SPV_EXT_fragment_shader_interlock");
+        }
+        // GL_EXT/NV_fragment_shader_barycentric. The KHR and NV forms share the
+        // same FragmentBarycentricKHR capability and BuiltIn/PerVertexKHR
+        // decorations — only THIS extension string distinguishes them.
+        {
+            const bary = self.barycentricUsage();
+            if (bary.used) {
+                try self.emitExtensionString(if (bary.nv)
+                    "SPV_NV_fragment_shader_barycentric"
+                else
+                    "SPV_KHR_fragment_shader_barycentric");
+            }
         }
     }
 
@@ -3080,6 +3120,17 @@ const Codegen = struct {
             if (std.mem.eql(u8, global.name, "gl_SampleMask")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.sample_mask));
             }
+            // GL_EXT/NV_fragment_shader_barycentric input builtins. glslang
+            // canonicalizes BOTH the EXT and NV spellings to the KHR BuiltIn
+            // values (BaryCoordKHR=5286 / BaryCoordNoPerspKHR=5287). Without
+            // these decorations the variables read garbage instead of the
+            // interpolated barycentric coordinates (silent-wrong).
+            if (std.mem.eql(u8, global.name, "gl_BaryCoordEXT") or std.mem.eql(u8, global.name, "gl_BaryCoordNV")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.bary_coord_khr));
+            }
+            if (std.mem.eql(u8, global.name, "gl_BaryCoordNoPerspEXT") or std.mem.eql(u8, global.name, "gl_BaryCoordNoPerspNV")) {
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.bary_coord_no_persp_khr));
+            }
             // Skip BuiltIn decoration for builtins requiring extra capabilities
             // gl_SampleMaskIn, gl_SamplePosition → SampleRateShading
             // gl_ViewIndex → MultiView
@@ -3109,6 +3160,16 @@ const Codegen = struct {
             // backend can distinguish per-vertex vs per-primitive outputs.)
             if (global.qualifier.is_perprimitive_ext and global.storage_class == .output) {
                 try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.per_primitive_ext));
+            }
+            // Emit PerVertexKHR decoration for pervertexEXT/pervertexNV-qualified
+            // fragment inputs (per-vertex arrays AND per-vertex interface
+            // blocks). Both spellings emit the IDENTICAL PerVertexKHR (5285)
+            // decoration. We deliberately reference `per_vertex_nv` (=5285):
+            // the `per_vertex_khr` enum tag holds a WRONG value (4285) that
+            // exists only to dodge Zig's duplicate-enum-tag error — 5285 is the
+            // real SPIR-V spec value for PerVertexKHR.
+            if ((global.qualifier.is_pervertex_ext or global.qualifier.is_pervertex_nv) and global.storage_class == .input) {
+                try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.per_vertex_nv));
             }
             // Emit NonWritable/NonReadable/Coherent/Restrict for buffer and image variables
             if (global.storage_class == .storage_buffer) {
