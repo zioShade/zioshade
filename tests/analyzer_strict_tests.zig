@@ -166,6 +166,35 @@ test "strict: shared array sized by gl_WorkGroupSize.x is accepted" {
     _ = spirv;
 }
 
+test "strict: local array sized by a spec constant is accepted (OpTypeArray %specconst)" {
+    // RED before this fix: parseLocalVarDecl only recognized int-literal array
+    // sizes, so `int a[N]` (N a spec constant) mis-parsed — the `[N]` desynced
+    // the declaration and the variable was typed as a non-array scalar, so the
+    // later element store failed with ctx=assign_op. The fix captures the size
+    // source-text as size_name (parser) and, at the local var_decl path, folds a
+    // resolvable size to a literal or keeps the spec-constant name so codegen
+    // emits `OpTypeArray %elem %specConstId` (matching glslang). This is the
+    // spec-const-SIZED-array sub-case the global path already handled; the
+    // spec-constant-work-group-size.vk.comp corpus fixture additionally needs
+    // spec-const work-group size + spec-const index folding, so it stays XFAIL.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(constant_id = 0) const int N = 4;
+        \\layout(set = 0, binding = 0) buffer B { int v[]; };
+        \\void main() {
+        \\    int a[N];
+        \\    for (int k = 0; k < N; k++) { a[k] = k * 2; }
+        \\    int s = 0;
+        \\    for (int k = 0; k < N; k++) { s += a[k]; }
+        \\    v[0] = s;
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    _ = spirv;
+}
+
 test "strict: not(bvec) / any(bvec) / all(bvec) builtins are accepted (vec_compare fixture)" {
     // RED: currently fails with ctx=not inner=func_call because `not` is not registered
     // as a GLSL builtin. any/all are registered but not(bvec) → OpLogicalNot is missing.

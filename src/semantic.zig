@@ -2439,7 +2439,7 @@ const Analyzer = struct {
         }
         switch (node.tag) {
             .var_decl => {
-                const ty = node.data.ty orelse .void;
+                var ty = node.data.ty orelse .void;
                 // Reject 64-bit types with a clear named honest error instead of a
                 // misleading UndeclaredIdentifier for the variable name.
                 if (is64BitType(ty)) |type_name| {
@@ -2448,6 +2448,26 @@ const Analyzer = struct {
                     last_error_line = node.loc.line;
                     last_error_column = node.loc.column;
                     return error.SemanticFailed;
+                }
+                // Resolve an expression-based LOCAL array size (mirrors the global-decl
+                // path at the top-level handler). `int a[gl_WorkGroupSize.x]` / `a[N]`
+                // (N a plain int) fold to a literal size; `int a[b]` where `b` is a spec
+                // constant keeps `size_name` so codegen emits `OpTypeArray %elem %b`
+                // (the spec-constant id), matching glslang. Without this, the array stays
+                // size-0/size_name-only and the later element assignment fails as an
+                // UndeclaredIdentifier/assign_op on a non-array lvalue.
+                if (ty == .array and ty.array.size == 0) {
+                    if (ty.array.size_name) |sn| {
+                        if (self.resolveSizeExpr(sn)) |resolved| {
+                            const resolved_ty = try self.alloc.create(ast.Type);
+                            resolved_ty.* = ty.array.base.*;
+                            try self.heap_types.append(self.alloc, resolved_ty);
+                            ty = .{ .array = .{ .base = resolved_ty, .size = resolved } };
+                        }
+                        // else: keep size_name — a spec-constant-sized array is emitted by
+                        // codegen as OpTypeArray %elem %specConstId (falls back to a runtime
+                        // array if the name is not a known spec constant).
+                    }
                 }
                 if (node.data.children.len > 0) {
                     // Has initializer — try SSA path first
