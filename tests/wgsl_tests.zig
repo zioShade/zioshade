@@ -669,6 +669,31 @@ test "wgsl: fragment-shader interlock errors honestly (WGSL has no interlock)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "interlock") != null);
 }
 
+test "wgsl: QCOM block-match errors honestly (WGSL has no QCOM image ops)" {
+    // GL_QCOM_image_processing block-match has no WGSL equivalent. glslpp must
+    // fail loud instead of falling through to the `var v: T;` placeholder, which
+    // produces silent-wrong WGSL that naga rejects ("redefinition of `v`").
+    const source =
+        \\#version 450
+        \\#extension GL_QCOM_image_processing : require
+        \\precision highp float;
+        \\layout(location = 0) in vec4 v_texcoord;
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(set = 0, binding = 0) uniform sampler2D target_samp;
+        \\layout(set = 0, binding = 1) uniform sampler2D ref_samp;
+        \\void main() {
+        \\    uvec2 t = uvec2(v_texcoord.xy);
+        \\    uvec2 r = uvec2(v_texcoord.zw);
+        \\    fragColor = textureBlockMatchSADQCOM(target_samp, t, ref_samp, r, uvec2(4, 4));
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "QCOM") != null);
+}
+
 // ---------------------------------------------------------------------------
 // row_major / column_major UBO matrix layout (silent-wrong fix)
 //
