@@ -16,9 +16,10 @@ glslpp is a **pure-Zig GLSL→SPIR-V compiler and SPIR-V cross-compiler** (HLSL 
 **What's missing relative to a true glslang / SPIRV-Cross drop-in:**
 - Reflection API is **partial** (uniform / sampler enumeration; no full descriptor binding metadata).
 - GLSL **versions / extensions** parsed but only a subset semantically validated (focused on 430 + the extensions wintty uses).
-- WGSL backend has **shallow opcode coverage** vs SPIRV-Cross (~60 vs ~400 opcode handlers).
-- **No specialization constants** (`OpSpecConstant*`), no separate sampler/image (`OpTypeSamplerImage`) lowering, no shader linking beyond `linkSPIRVModules`.
-- Cross-compiler control flow currently requires `OpSelectionMerge` for `if` / `switch`; unstructured CFG emits an empty body with a `glslpp: unstructured branch` marker comment and a stderr warning.
+- WGSL backend coverage has deepened substantially (built-in I/O, control-flow replay, texture ops all naga-gated); a few niche opcodes still honest-error rather than lower.
+- Specialization constants **are** supported (`OpSpecConstant*` / `OpSpecConstantOp`, `--spec-const` override). Separate sampler/image and shader linking beyond `linkSPIRVModules` remain limited.
+- Descriptor **remap** is supported via `resource_bindings` (HLSL register / MSL slot per `(set, binding)`; CLI `--bind set:binding:reg`); UBO **flatten** is not yet implemented.
+- Cross-compiler control flow requires `OpSelectionMerge` / `OpLoopMerge` for `if` / `switch` / loops. **Unstructured CFG now fails loud** (`error.UnstructuredControlFlow`) on every backend rather than emitting a lossy reconstruction (it previously silently dropped `switch` default cases). Full CFG structurization for arbitrary SPIR-V is future work (G2).
 
 If your shaders fall inside the validated set, this should work. If you need full Khronos GLSL coverage or SPIRV-Cross-grade reflection, **use upstream**.
 
@@ -70,8 +71,8 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | WGSL output | ✅ | ✅ | ⚠️ Shallow (60 opcode handlers) |
 | SPIR-V input (pre-compiled) | ✅ Full | ✅ Partial (best-effort) | ⚠️ Assumes glslpp structure |
 | Opcode handler coverage | ~400 opcodes | HLSL: 180, GLSL: 132, MSL: 130, WGSL: 60 | ✅ HLSL strong, ⚠️ WGSL weak |
-| Reflection API | ✅ Full | ❌ None | ❌ Gap |
-| Descriptor set management | ✅ Full | `binding_shift` only | ❌ Gap |
+| Reflection API | ✅ Full | ⚠️ Partial (`reflect`) | ⚠️ Gap |
+| Descriptor set management | ✅ Full | `binding_shift` + per-resource `resource_bindings` remap (HLSL/MSL, CLI `--bind`); no UBO flatten | ⚠️ Partial |
 | Combined image sampler | ✅ | Partial | ⚠️ |
 | UBO/SSBO layout handling | Full (std140, std430, row/column-major) | Basic (std140, std430) | ⚠️ |
 | Specialization constants | ✅ | ❌ | ❌ Gap |
@@ -314,6 +315,6 @@ These are tracked openly so consumers can decide whether glslpp fits their use c
 - **No CI yet.** Conformance numbers come from local `zig build conformance` runs. Cross-platform (Linux / macOS) builds are unverified by automation; a GitHub Actions workflow is being added.
 - **No published head-to-head benchmark against glslang's library form** (`libglslang.a` / `libspirv-cross.a` linked in-process). Current benchmarks compare glslpp library calls vs `glslangValidator` subprocess and so over-state the algorithmic win.
 - **`spirv-val` is the conformance oracle, not glslang reference output.** Some test fixtures in `tests/spirv-cross/` are known to fail reference compilation with `glslangValidator` even though glslpp accepts them — see `docs/REFERENCE_FAILURE_ANALYSIS.md`.
-- **Cross-compiler control flow assumes `OpSelectionMerge`.** Conditional branches and switches without merge information emit a `glslpp: unstructured branch — body elided` placeholder plus an `std.log.warn`. Well-formed SPIR-V coming from glslpp itself always has merge info; the limitation only matters for hand-authored or externally optimized SPIR-V.
+- **Cross-compiler control flow assumes `OpSelectionMerge` / `OpLoopMerge`.** Conditional branches and switches without merge information now **fail loud** with `error.UnstructuredControlFlow` on every backend (GLSL/HLSL/MSL/WGSL) — previously a convergence-guessing heuristic emitted a lossy reconstruction (it could silently drop `switch` default cases). Well-formed SPIR-V from glslpp itself always has merge info; the honest error only affects hand-authored or externally optimized (unstructured) SPIR-V. Full CFG structurization is future work (G2).
 - **C ABI bindings are not provided.** Consumers outside the Zig ecosystem need to write their own FFI layer.
 - **Single-contributor project.** No formal release cadence yet; treat as alpha if you are not the wintty project.
