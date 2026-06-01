@@ -96,7 +96,10 @@ fn glslStd450WgslName(instruction: u32) error{UnsupportedExtInst}![]const u8 {
         31 => "sqrt",
         32 => "inverseSqrt",
         33 => "determinant",
-        34 => "matrixInverse",
+        // 34 (MatrixInverse / GLSL inverse()) intentionally UNMAPPED: WGSL has no
+        // matrix-inverse builtin. Emitting `matrixInverse(m)` is silent-wrong
+        // (naga: "no definition in scope"). Fall through to recordUnsupportedExtInst
+        // for an honest error until an inline WGSL inverse helper is emitted.
         35 => "modf", // ModfStruct
         36 => "modf",
         37 => "min", // FMin
