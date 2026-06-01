@@ -10,7 +10,7 @@ glslpp is a **pure-Zig GLSL→SPIR-V compiler and SPIR-V cross-compiler** (HLSL 
 
 **What works today:**
 - **wintty production use** — every shader wintty ships through GLSL → SPIR-V → HLSL / MSL / WGSL.
-- **Correctness** — 2,080 / 2,087 runnable fixtures pass `spirv-val` (7 known feature-gap failures, not regressions); HLSL outputs validate via DXC; pixel-level rendering matches glslang+SPIRV-Cross for the validated set.
+- **Correctness** — 2,072 / 2,087 runnable fixtures pass `spirv-val`; 15 honestly rejected as XFAIL (known-unsupported constructs, suite exits 0); HLSL outputs validate via DXC; pixel-level rendering matches glslang+SPIRV-Cross for the validated set.
 - **In-process API** — no process spawn, no DLL init, no global state outside `threadlocal` per-thread caches.
 
 **What's missing relative to a true glslang / SPIRV-Cross drop-in:**
@@ -35,7 +35,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Cross-compilers (HLSL, GLSL, MSL, WGSL) | ~12,000 |
 | Optimizer (compact_ids_passes) | ~10,200 |
 | Preprocessor | ~1,800 |
-| `spirv-val` conformance passing | 2,080 / 2,087 runnable (7 known feature-gap fails; `zig build conformance`) |
+| `spirv-val` conformance passing | 2,072 PASS / 15 XFAIL / 8 SKIP — exits 0 (`zig build conformance`) |
 | External DXC SPIR-V fixtures | 47 / 51 compile (4 limited by DXC SM 6.1+ / 2 KB structured-buffer cap) |
 | WGSL stress tests | 470 / 470 |
 | Fuzzer iterations (clean, ad-hoc) | 50,000 (run `zig build fuzz -- --count 50000` to reproduce) |
@@ -56,7 +56,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Mesh/Task shaders | ✅ | 4 pass | ⚠️ Basic |
 | Ray tracing shaders | ✅ | 3 pass | ⚠️ Basic |
 | SPIR-V output | 1.0–1.6 | 1.0–1.6 | ✅ |
-| spirv-val conformance | Reference | 2,080/2,087 runnable pass (7 feature-gap fails) | ✅ |
+| spirv-val conformance | Reference | 2,072 PASS / 15 XFAIL (honest rejections) / 8 SKIP — exits 0 | ✅ |
 | GLSL extensions parsed | 100+ | 9 (subgroup basic/vote/arithmetic/ballot/shuffle, fragment interlock, mesh, ray tracing, null initializer) | ⚠️ Covers wintty needs |
 | Error diagnostics | Rich (line, column, context) | Basic (error enum, no location) | ❌ Gap |
 
@@ -166,7 +166,7 @@ DXC and the Metal compiler are **platform SDK tools** that produce GPU-specific 
 
 ### 3.1 SPIR-V Validation
 
-**2,080 / 2,087** runnable fixtures pass `spirv-val` — the official SPIR-V validator (verified 2026-05-31). 7 known feature-gap failures remain (64-bit int/float types, OpExtInst word-count on new-form texture builtins, `shader_ballot`, `ray_sphere`, `struct-material`); 8 skipped; 2,095 total. These are pre-existing capability gaps, **not regressions**, and the suite exits non-zero while they remain.
+**2,072 / 2,087** runnable fixtures pass `spirv-val` — the official SPIR-V validator (verified 2026-05-31, analyzer fail-loud milestone). 15 known-unsupported fixtures are now **honestly rejected** as `error.SemanticFailed` (XFAIL) instead of silently emitting hollow SPIR-V; 8 skipped; 2,095 total. The suite exits **0**. The 15 XFAIL fixtures cover: 64-bit int/float types (`fp64`, `int64`), OpExtInst new-form texture builtins (`newTexture`), AMD extensions (`gcn_shader`, `shader_ballot`, `nvAtomicFp16Vec`), clock extension (`shader-clock`), ray/type-mismatch (`ray_sphere_test`, `image-query`), and other unmodeled constructs (`extended-arithmetic`, `spec-constant-work-group-size`, `spv.AofA`, `spv.double`, `struct-material`). These are expected honest rejections, not regressions.
 
 ### 3.2 DXC Validation
 
