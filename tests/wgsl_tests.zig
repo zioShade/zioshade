@@ -652,6 +652,23 @@ test "wgsl: textureQueryLod errors honestly (WGSL has no equivalent)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "textureQueryLod") != null);
 }
 
+test "wgsl: fragment-shader interlock errors honestly (WGSL has no interlock)" {
+    // WGSL has no fragment-shader interlock. A shader with the pixel-interlock
+    // execution mode must fail loud, not emit WGSL naga rejects (silent-wrong).
+    const source =
+        \\#version 450
+        \\#extension GL_ARB_fragment_shader_interlock : require
+        \\layout(pixel_interlock_ordered) in;
+        \\layout(location=0) out vec4 o;
+        \\void main() { beginInvocationInterlockARB(); o = vec4(1.0); endInvocationInterlockARB(); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "interlock") != null);
+}
+
 // ---------------------------------------------------------------------------
 // row_major / column_major UBO matrix layout (silent-wrong fix)
 //
