@@ -4424,6 +4424,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try writeInd(w, indent); try w.print("let {s}: {s} = atomicCompareExchangeWeak(&{s}, {s}, {s}).old_value;\n", .{ rn, rt, ptr, cmp, val });
             },
 
+            // QCOM image-processing (GL_QCOM_image_processing: textureWeightedQCOM,
+            // textureBoxFilterQCOM, textureBlockMatch{SAD,SSD}QCOM). WGSL has no
+            // equivalent — fail loud rather than fall through to the placeholder
+            // `var v: T;` below (which produces silent-wrong / redefinition WGSL).
+            .ImageSampleWeightedQCOM, .ImageBoxFilterQCOM, .ImageBlockMatchSSDQCOM, .ImageBlockMatchSADQCOM => {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no QCOM image-processing op ({s})", .{@tagName(inst.op)}) catch null;
+                return error.UnsupportedOp;
+            },
+
             else => {
                 // Try to handle as a simple assignment
                 if (inst.words.len > 2) {
