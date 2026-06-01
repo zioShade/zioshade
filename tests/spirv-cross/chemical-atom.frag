@@ -44,6 +44,7 @@ void main() {
     col += bonds * vec3(0.4, 0.4, 0.5);
     
     // Electron orbit rings
+    float a = atan(uv.y - 0.5, uv.x - 0.5);
     float orbit = smoothstep(0.003, 0.001, abs(length(uv - vec2(0.5, 0.5)) - 0.35));
     float orbit_mask = step(0.0, cos(a * 2.0 + 0.5));
     col += orbit * orbit_mask * vec3(0.15, 0.15, 0.25);

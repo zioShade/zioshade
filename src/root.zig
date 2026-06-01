@@ -341,7 +341,7 @@ pub fn compileToSPIRV(
     };
     defer parser.freeTree(alloc, &root_node);
 
-    var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = true, .stage = options.stage }) catch {
+    var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = true, .fail_on_recorded_errors = true, .stage = options.stage }) catch {
         last_compile_detail = .semantic_failed;
         return error.SemanticFailed;
     };
@@ -508,7 +508,7 @@ pub fn compileToSPIRVNoOpt(
     };
     defer parser.freeTree(alloc, &root_node);
 
-    var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = true, .stage = options.stage }) catch {
+    var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = true, .fail_on_recorded_errors = true, .stage = options.stage }) catch {
         last_compile_detail = .semantic_failed;
         return error.SemanticFailed;
     };
@@ -579,7 +579,7 @@ pub fn compileToSPIRVStrict(
         last_compile_detail = .semantic_failed;
         return error.SemanticFailed;
     };
-    defer module.deinit();
+    module.deinit();
     // Enumeration only cares whether analysis SUCCEEDS; it does not need codegen.
     return &[_]u32{};
 }

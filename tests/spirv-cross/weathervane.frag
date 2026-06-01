@@ -19,7 +19,7 @@ void main() {
     col = mix(col, vec3(0.4, 0.38, 0.35), pole);
     
     // Compass rose at top
-    float rose_center = vec2(0.5, 0.88);
+    vec2 rose_center = vec2(0.5, 0.88);
     float rc = length(uv - rose_center);
     
     // N/S/E/W points
