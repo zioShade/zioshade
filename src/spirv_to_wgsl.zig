@@ -4077,9 +4077,27 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .All => try emitCall(module, names, inst, "all", w, arena, indent),
             .Any => try emitCall(module, names, inst, "any", w, arena, indent),
 
-            // IsInf/IsNan
-            .IsInf => try emitCall(module, names, inst, "isinf", w, arena, indent),
-            .IsNan => try emitCall(module, names, inst, "isnan", w, arena, indent),
+            // IsInf/IsNan — WGSL has NO isInf/isNan builtins (glslpp previously
+            // emitted isinf(x)/isnan(x), which naga rejects as undefined identifiers).
+            .IsNan => {
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const x = names.get(inst.words[3]) orelse "0";
+                if (std.mem.eql(u8, rt, "bool")) {
+                    // Scalar NaN test: x != x is true iff x is NaN (the standard idiom).
+                    try writeInd(w, indent);
+                    try w.print("let {s}: bool = ({s} != {s});\n", .{ result_name, x, x });
+                } else {
+                    // Vector isnan (bvecN) has no clean WGSL form (no componentwise !=).
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no isNan for vector type '{s}'", .{rt}) catch null;
+                    return error.UnsupportedOp;
+                }
+            },
+            .IsInf => {
+                // WGSL has no isInf builtin and no clean idiom (no infinity literal).
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no isInf builtin", .{}) catch null;
+                return error.UnsupportedOp;
+            },
 
             // CompositeInsert
             .CompositeInsert => {
