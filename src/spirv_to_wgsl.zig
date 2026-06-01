@@ -4168,21 +4168,25 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
             },
 
-            // ImageQuerySize
+            // ImageQuerySize — WGSL textureDimensions returns UNSIGNED (u32/vecNu),
+            // but GLSL imageSize/textureSize is SIGNED (int/ivecN). Wrap in the
+            // signed result type so the value matches its declared type (else naga
+            // rejects: "expected vec2<i32>, got vec2<u32>" — silent-wrong).
             .ImageQuerySize => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureDimensions({s});\n", .{ result_name, rt, image });
+                try writeInd(w, indent); try w.print("let {s}: {s} = {s}(textureDimensions({s}));\n", .{ result_name, rt, rt, image });
             },
 
-            // ImageQuerySizeLod
+            // ImageQuerySizeLod — see ImageQuerySize: convert unsigned dims to the
+            // signed GLSL result type.
             .ImageQuerySizeLod => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
                 const lod = names.get(inst.words[4]) orelse "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureDimensions({s}, {s});\n", .{ result_name, rt, image, lod });
+                try writeInd(w, indent); try w.print("let {s}: {s} = {s}(textureDimensions({s}, {s}));\n", .{ result_name, rt, rt, image, lod });
             },
 
             // ImageQueryLevels
