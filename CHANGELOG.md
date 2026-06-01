@@ -8,18 +8,26 @@ All notable changes to glslpp are documented here. The format is loosely based o
 - README rewritten with honest scoping; explicit "this is not a full glslang/SPIRV-Cross drop-in" framing.
 - Conformance numbers updated: 1,894 / 1,894 `spirv-val` fixtures (was 1,811); 47 / 51 DXC fixtures (was 51 / 51); WGSL stress 264 / 264.
 - Code-gen safety: replaced three `@panic` call-sites in `src/codegen.zig` with `std.log.err` + invalid-id fallback so malformed IR no longer crashes the host process.
-- Cross-compiler safety: `spirv_to_{glsl,msl,hlsl}` now `std.log.warn` and emit a labeled `glslpp: unstructured branch — body elided` marker instead of `/* TODO */` when an OpSelectionMerge is missing.
+- Cross-compiler control flow: unstructured CFG (an `OpBranchConditional`/`OpSwitch` with no `OpSelectionMerge`/`OpLoopMerge`) now **fails loud** with `error.UnstructuredControlFlow` on every backend (GLSL/HLSL/MSL/WGSL) instead of a lossy convergence-guessing reconstruction that could silently drop `switch` default cases. glslpp's own SPIR-V always carries merge info; this only affects externally-optimized / hand-authored SPIR-V. Full CFG structurization is future work.
 - Internal: `std.debug.print` in `compact_ids_passes.zig` identity-store elimination demoted to `std.log.debug`.
 - `src/gap_tests.zig` is now wired into `zig build test` via `src/root.zig`.
 
-### Removed
-- Repository hygiene: stripped binaries (`*.exe`, `*.pdb`), SPIR-V scratch dumps (`dump_*.spv`), internal planning artifacts (`HANDOFF.md`, `PLAN.md`, `autoresearch.*`, `docs/plans/`, `docs/superpowers/`), and scratch debugging sources from the repo and all branch history.
+### Fixed (silent-wrong elimination, all oracle-gated)
+- **MSL built-in I/O:** `gl_VertexIndex`/`gl_InstanceIndex` (`[[vertex_id]]`/`[[instance_id]]`), `gl_FrontFacing` (`[[front_facing]]`), `gl_PointSize` (`[[point_size]]`), and the compute IDs (`[[thread_position_in_threadgroup]]` etc.) were emitted as bare undeclared identifiers (uncompilable MSL); now threaded as entry-point attributes (vs `spirv-cross --msl`).
+- **HLSL built-in I/O:** compute IDs → `SV_DispatchThreadID`/`SV_GroupThreadID`/`SV_GroupID`/`SV_GroupIndex`; `SV_VertexID`/`SV_InstanceID` forced to `uint` (dxc-validated).
+- **WGSL:** `vertex_index`/`instance_index` as `u32` (+ `i32` conversion); `textureGather` component as the first argument; constant vector ctor `vec2<u32>(...)` (was GLSL `uintN`); shared-block var renamed to avoid struct-name collision; `OpSelectionMerge`/`OpLoopMerge`/`CompositeExtract`/`Select` handled (or honest-errored) in the switch/loop replay path; unmapped input built-ins (e.g. `gl_PointCoord`) honest-error instead of fabricating `@builtin(position)`; QCOM image ops honest-error. naga-gated; large-corpus REJECTs cut from 152 to a small deep-debug tail.
+- **GLSL backend:** vertex attributes/varyings and fragment input varyings are now declared (`layout(location=N) in/out`); previously only the single fragment color output was declared (glslang-validated).
 
 ### Added
+- **Descriptor remap (G6):** `HlslCompileOptions.resource_bindings` / `MslCompileOptions.resource_bindings` map a SPIR-V `(set, binding)` to an explicit HLSL register / MSL slot (class inferred from type); CLI `--bind set:binding:reg` (repeatable). dxc/spirv-cross-gated.
 - `docs/IMPLEMENTATION_STATUS.md` — renamed and reframed gap analysis with an explicit "Other gaps" section flagging un-published comparisons against `libglslang.a`.
 - `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`.
 - `examples/glsl-to-hlsl.zig` and `examples/reflect-uniforms.zig` runnable demos.
 - `.github/workflows/ci.yml` running `zig build test` and `zig build conformance` on Linux / macOS / Windows.
+
+### Removed
+- Dead `CrossCompileOptions` struct (its `flatten_ubos` field was a phantom no-op; UBO flatten is not yet implemented and is no longer advertised).
+- Repository hygiene: stripped binaries (`*.exe`, `*.pdb`), SPIR-V scratch dumps (`dump_*.spv`), internal planning artifacts (`HANDOFF.md`, `PLAN.md`, `autoresearch.*`, `docs/plans/`, `docs/superpowers/`), and scratch debugging sources from the repo and all branch history.
 
 ## [0.1.0] — initial public release
 
