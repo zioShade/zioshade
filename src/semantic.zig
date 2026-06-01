@@ -4958,8 +4958,20 @@ const Analyzer = struct {
                         }
                         return .{ .ty = ret_ty, .id = result_id };
                     }
-                    // imageSize returns ivec2, needs OpImageQuerySize
+                    // imageSize → OpImageQuerySize; result dims vary by image type.
                     if (std.mem.eql(u8, node.data.name, "imageSize")) {
+                        const size_ty: ast.Type = if (arg_tids.items.len > 0) switch (arg_tids.items[0].ty) {
+                            // 1-component (width only): 1D + buffer
+                            .image1d, .iimage1d, .uimage1d,
+                            .image_buffer, .iimage_buffer, .uimage_buffer => .int,
+                            // 3-component: 2D array, 3D, cube array, 2DMS array
+                            .image2d_array, .iimage2d_array, .uimage2d_array,
+                            .image3d, .iimage3d, .uimage3d,
+                            .image_cube_array, .iimage_cube_array, .uimage_cube_array,
+                            .image2d_ms_array => .ivec3,
+                            // 2-component: 2D, cube, 2DMS (and anything else)
+                            else => .ivec2,
+                        } else .ivec2;
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                         for (arg_tids.items, 0..) |tid, i| {
                             operands[i] = .{ .id = tid.id };
@@ -4969,9 +4981,9 @@ const Analyzer = struct {
                             .result_type = null,
                             .result_id = result_id,
                             .operands = operands,
-                            .ty = .ivec2,
+                            .ty = size_ty,
                         });
-                        return .{ .ty = .ivec2, .id = result_id };
+                        return .{ .ty = size_ty, .id = result_id };
                     }
                     // textureSize(sampler, lod) → varies by sampler type
                     if (std.mem.eql(u8, node.data.name, "textureSize")) {
@@ -4989,6 +5001,7 @@ const Analyzer = struct {
                             .image2d, .iimage2d, .uimage2d, .image2d_ms => .ivec2,
                             .sampler2d_array, .sampler2d_array_shadow, .sampler3d,
                             .sampler_cube_array_shadow,
+                            .sampler2d_ms_array,
                             .isampler2d_array, .usampler2d_array,
                             .isampler_cube_array, .usampler_cube_array,
                             .isampler1d_array, .usampler1d_array,
