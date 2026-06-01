@@ -56,6 +56,91 @@ fn recordUnsupportedExtInst(op: u32) error{UnsupportedExtInst} {
     return error.UnsupportedExtInst;
 }
 
+/// Single source of truth: glslpp's internal GLSL.std.450 opcode number → WGSL
+/// builtin name. Used by BOTH the main emit path and the loop-replay path so the
+/// two cannot drift (they previously had divergent inline switches — the replay
+/// path was missing modf/frexp/ldexp/pack*/unpack*/findILsb/findSMsb). Unmapped
+/// instructions fail loud via recordUnsupportedExtInst (never a silent unknown()).
+fn glslStd450WgslName(instruction: u32) error{UnsupportedExtInst}![]const u8 {
+    return switch (instruction) {
+        1 => "round",
+        2 => "round", // RoundEven
+        3 => "trunc",
+        4 => "abs", // FAbs
+        5 => "abs", // SAbs → abs
+        6 => "sign", // FSign
+        7 => "sign", // SSign → sign
+        8 => "floor",
+        9 => "ceil",
+        10 => "fract",
+        11 => "radians",
+        12 => "degrees",
+        13 => "sin",
+        14 => "cos",
+        15 => "tan",
+        16 => "asin",
+        17 => "acos",
+        18 => "atan",
+        19 => "sinh",
+        20 => "cosh",
+        21 => "tanh",
+        22 => "asinh",
+        23 => "acosh",
+        24 => "atanh",
+        25 => "atan2",
+        26 => "pow",
+        27 => "exp",
+        28 => "log",
+        29 => "exp2",
+        30 => "log2",
+        31 => "sqrt",
+        32 => "inverseSqrt",
+        33 => "determinant",
+        34 => "matrixInverse",
+        35 => "modf", // ModfStruct
+        36 => "modf",
+        37 => "min", // FMin
+        38 => "min", // SMin
+        39 => "min", // UMin
+        40 => "max", // FMax
+        41 => "max", // UMax
+        42 => "max", // SMax
+        43 => "clamp", // FClamp
+        44 => "clamp", // UClamp
+        45 => "clamp", // SClamp
+        46 => "mix",
+        48 => "step",
+        49 => "smoothstep",
+        50 => "fma",
+        51 => "frexp", // FrexpStruct
+        52 => "frexp",
+        53 => "ldexp",
+        // WGSL packing intrinsics use a different name shape than GLSL:
+        //   GLSL packSnorm4x8 → WGSL pack4x8snorm (and so on).
+        54 => "pack4x8snorm",
+        55 => "pack4x8unorm",
+        56 => "pack2x16snorm",
+        57 => "pack2x16unorm",
+        58 => "pack2x16float",
+        60 => "unpack2x16snorm",
+        61 => "unpack2x16unorm",
+        62 => "unpack2x16float",
+        63 => "unpack4x8snorm",
+        64 => "unpack4x8unorm",
+        // Geometric — glslpp numbering starts at 66.
+        66 => "length",
+        67 => "distance",
+        68 => "cross",
+        69 => "normalize",
+        70 => "faceForward",
+        71 => "reflect",
+        72 => "refract",
+        73 => "findILsb",
+        74 => "findSMsb",
+        else => return recordUnsupportedExtInst(instruction),
+    };
+}
+
 /// Options for SPIR-V → WGSL cross-compilation.
 pub const WgslCompileOptions = struct {
     /// Entry point name to compile (default: "main").
@@ -3699,88 +3784,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // instruction is the GLSL opcode
                         const rt = try wgslType(module, inst.words[1], names, arena);
                         const result_name = names.get(inst.words[2]) orelse "v";
-                        const func_name = switch (instruction) {
-                            // glslpp's internal GLSL.std.450 opcode numbering (from semantic.zig)
-                            1 => "round",
-                            2 => "round", // RoundEven
-                            3 => "trunc",
-                            4 => "abs", // FAbs
-                            5 => "abs", // SAbs → abs
-                            6 => "sign", // FSign
-                            7 => "sign", // SSign → sign
-                            8 => "floor",
-                            9 => "ceil",
-                            10 => "fract",
-                            11 => "radians",
-                            12 => "degrees",
-                            13 => "sin",
-                            14 => "cos",
-                            15 => "tan",
-                            16 => "asin",
-                            17 => "acos",
-                            18 => "atan",
-                            19 => "sinh",
-                            20 => "cosh",
-                            21 => "tanh",
-                            22 => "asinh",
-                            23 => "acosh",
-                            24 => "atanh",
-                            25 => "atan2",
-                            26 => "pow",
-                            27 => "exp",
-                            28 => "log",
-                            29 => "exp2",
-                            30 => "log2",
-                            31 => "sqrt",
-                            32 => "inverseSqrt",
-                            33 => "determinant",
-                            34 => "matrixInverse",
-                            35 => "modf", // ModfStruct
-                            36 => "modf",
-                            37 => "min",
-                            38 => "min", // SMin
-                            39 => "min", // UMin
-                            40 => "max",
-                            41 => "max", // UMax
-                            42 => "max", // SMax
-                            43 => "clamp",
-                            44 => "clamp", // UClamp
-                            45 => "clamp", // SClamp
-                            46 => "mix",
-                            48 => "step",
-                            49 => "smoothstep",
-                            50 => "fma",
-                            51 => "frexp", // FrexpStruct
-                            52 => "frexp",
-                            53 => "ldexp",
-                            // WGSL packing intrinsics use a different name shape than GLSL:
-                            //   GLSL packSnorm4x8 → WGSL pack4x8snorm  (and so on)
-                            54 => "pack4x8snorm",
-                            55 => "pack4x8unorm",
-                            56 => "pack2x16snorm",
-                            57 => "pack2x16unorm",
-                            58 => "pack2x16float",
-                            60 => "unpack2x16snorm",
-                            61 => "unpack2x16unorm",
-                            62 => "unpack2x16float",
-                            63 => "unpack4x8snorm",
-                            64 => "unpack4x8unorm",
-                            // Geometric — glslpp numbering starts at 66
-                            66 => "length",
-                            67 => "distance",
-                            68 => "cross",
-                            69 => "normalize",
-                            70 => "faceForward",
-                            71 => "reflect",
-                            72 => "refract",
-                            73 => "findILsb",
-                            74 => "findSMsb",
-                            // Honest failure: emitting `unknown(...)` produces
-                            // invalid WGSL that silently passes as success. Fail
-                            // loudly (naming the instruction) so callers (and
-                            // naga) see a real, actionable error.
-                            else => return recordUnsupportedExtInst(instruction),
-                        };
+                        // Shared name mapping (single source of truth; honest-errors unmapped ops).
+                        const func_name = try glslStd450WgslName(instruction);
                         // Build args
                         var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
                         defer args.deinit(arena);
@@ -4556,21 +4561,10 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                 const instruction = inst.words[4];
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
-                const func_name = switch (instruction) {
-                    1 => "round", 2 => "round", 3 => "trunc", 4 => "abs", 5 => "abs",
-                    6 => "sign", 7 => "sign", 8 => "floor", 9 => "ceil", 10 => "fract",
-                    11 => "radians", 12 => "degrees", 13 => "sin", 14 => "cos", 15 => "tan",
-                    16 => "asin", 17 => "acos", 18 => "atan", 19 => "sinh", 20 => "cosh",
-                    21 => "tanh", 22 => "asinh", 23 => "acosh", 24 => "atanh",
-                    25 => "atan2", 26 => "pow", 27 => "exp", 28 => "log", 29 => "exp2",
-                    30 => "log2", 31 => "sqrt", 32 => "inverseSqrt", 33 => "determinant",
-                    34 => "matrixInverse", 35 => "modf", 37 => "min", 38 => "min", 39 => "min", 40 => "max", 41 => "max", 42 => "max", 43 => "clamp", 44 => "clamp", 45 => "clamp",
-                    46 => "mix", 48 => "step", 49 => "smoothstep", 50 => "fma", 51 => "frexp",
-                    66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
-                    70 => "faceForward", 71 => "reflect", 72 => "refract",
-                    // Honest failure (loop-replay path): see emitBody above.
-                    else => return recordUnsupportedExtInst(instruction),
-                };
+                // Shared name mapping (same source of truth as the main emit path —
+                // previously this replay switch had drifted and was missing
+                // ldexp/pack*/unpack*/findILsb/findSMsb etc.).
+                const func_name = try glslStd450WgslName(instruction);
                 var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
                 defer args.deinit(arena);
                 for (inst.words[5..], 0..) |arg_id, ai| {
@@ -4700,7 +4694,13 @@ fn emitAtomicBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     try writeIndentStatic(w, indent); try w.print("var {s}: {s} = atomic{s}(&{s}, {s});\n", .{ result_name, rt, op, ptr, val });
 }
 
-// Get the WGSL function name for a GLSL.std.450 instruction opcode
+// Get the WGSL function name for a GLSL.std.450 instruction opcode, for the
+// inline-EXPRESSION resolver only. Distinct from glslStd450WgslName (the
+// statement-emit single source of truth): this one returns `null` to DECLINE
+// inlining (the caller then falls back to the statement path, which uses the
+// shared helper). It intentionally omits struct-returning / multi-result ops
+// (modf 35/36, frexp 51/52, ldexp 53, findILsb/MSB 73/74) so they are emitted
+// as statements rather than inlined incorrectly as a single expression.
 fn getExtInstName(instruction: u32) ?[]const u8 {
     return switch (instruction) {
         1 => "round",
