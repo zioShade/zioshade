@@ -214,6 +214,32 @@ test "flip: plain compileToSPIRV still accepts a valid shader" {
     try std.testing.expect(spirv.len > 5);
 }
 
+test "flip: fail-loud rejection after a completed user function leaks nothing" {
+    // Regression guard for the fail-loud path (tolerate_errors=true +
+    // fail_on_recorded_errors=true, as the plain compileToSPIRV API uses).
+    // `helper(float)` analyzes successfully and is appended to Analyzer.functions
+    // with an owned param_ids slice + body; `main` then records an undeclared-
+    // identifier error, so analyzeWithOptions rejects at the fail_on_recorded_errors
+    // gate BEFORE transferring functions to a Module. Cleanup is therefore owned by
+    // Analyzer.deinit, not Module.deinit — if it stopped freeing the completed
+    // function's param_ids/body, testing.allocator would flag the leak right here.
+    // The other fail-loud tests only error inside main() (self.functions stays
+    // empty), so this is the sole guard for the completed-function cleanup path.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\float helper(float x) { return x * 2.0; }
+        \\void main() { o = vec4(helper(1.0), undeclared_xyz, 0.0, 1.0); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    // Pin the rejection to the *semantic* gate (not lex/parse): a function must
+    // have been analyzed and recorded an error for the completed-function cleanup
+    // path to be reachable. This keeps the guard from passing for the wrong reason
+    // if error ordering ever changes.
+    try std.testing.expectEqual(@as(?glslpp.CompileDetail, .semantic_failed), glslpp.last_compile_detail);
+}
+
 test "strict: SSBO block array (buffer {...} name[N]) is accepted" {
     const alloc = std.testing.allocator;
     const src =
