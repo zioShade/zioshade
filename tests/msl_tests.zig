@@ -1938,3 +1938,61 @@ test "T18.26: storing through a row_major matrix is an honest error (not silent-
         return error.TestExpectedError;
     } else |_| {}
 }
+
+// ---------------------------------------------------------------------------
+// Image-query 3-component (ivec3) coverage — regression guard for the rank
+// mismatch where the backend splatted get_width() into all components and
+// never read height/depth/array-size for an int3 result.
+// ---------------------------------------------------------------------------
+
+test "msl: imageSize(image2DArray) emits get_array_size for the 3rd component" {
+    const source =
+        \\#version 450
+        \\layout(rgba8, binding = 0) uniform image2DArray img;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    ivec3 s = imageSize(img);
+        \\    o = vec4(float(s.x), float(s.y), float(s.z), 1.0);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "get_width");
+    try assertContains(msl, "get_height");
+    try assertContains(msl, "get_array_size");
+    try assertContains(msl, "int3");
+}
+
+test "msl: imageSize(image3D) emits get_depth for the 3rd component" {
+    const source =
+        \\#version 450
+        \\layout(rgba8, binding = 0) uniform image3D img;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    ivec3 s = imageSize(img);
+        \\    o = vec4(float(s.x), float(s.y), float(s.z), 1.0);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "get_width");
+    try assertContains(msl, "get_height");
+    try assertContains(msl, "get_depth");
+    try assertContains(msl, "int3");
+}
+
+test "msl: imageSize(imageCubeArray) emits get_array_size for the 3rd component" {
+    const source =
+        \\#version 450
+        \\layout(rgba8, binding = 0) uniform imageCubeArray img;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    ivec3 s = imageSize(img);
+        \\    o = vec4(float(s.x), float(s.y), float(s.z), 1.0);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "get_array_size");
+    try assertContains(msl, "int3");
+}

@@ -1039,7 +1039,7 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
             };
             const int_idx: usize = switch (int_type) { .int => 0, .uint => 1 };
             const dim_idx: usize = switch (dim) {
-                .Dim1D => 0, .Dim2D => 1, .Dim3D => 2,
+                .Dim1D => 0, .Dim2D => if (is_arrayed) 3 else 1, .Dim3D => 2,
                 .DimBuffer => 4, else => 1,
             };
             return scalar_or_vec[int_idx][dim_idx];
@@ -1050,7 +1050,7 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
             "RWTexture2DArray<float4>", "RWBuffer<float4>",
         };
         const dim_idx: usize = switch (dim) {
-            .Dim1D => 0, .Dim2D => 1, .Dim3D => 2,
+            .Dim1D => 0, .Dim2D => if (is_arrayed) 3 else 1, .Dim3D => 2,
             .DimBuffer => 4, else => 1,
         };
         return rw_float_types[dim_idx];
@@ -1093,6 +1093,23 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
         .DimBuffer => "Buffer<float4>",
         else => "Texture2D<float4>",
     };
+}
+
+/// True when the image VALUE `id` resolves to a multisampled OpTypeImage (the
+/// MS operand, `words[6]`, is 1). `Texture2DMS`/`Texture2DMSArray.GetDimensions`
+/// requires an extra `NumberOfSamples` out-param, so the image-size query must
+/// emit one more argument for these types. Resolves the value's result type
+/// (`words[1]`) and unwraps an OpTypeSampledImage. OpTypeImage layout:
+/// `[op, result_id, sampled_type, DIM, DEPTH, ARRAYED, MS, sampled, format]`.
+fn imageValueIsMultisampled(module: *const ParsedModule, image_value_id: u32) bool {
+    const vdef = getDef(module, image_value_id) orelse return false;
+    if (vdef.words.len < 2) return false;
+    var tinst = getDef(module, vdef.words[1]) orelse return false;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(module, tinst.words[2]) orelse return false;
+    }
+    if (tinst.op != .TypeImage or tinst.words.len < 7) return false;
+    return tinst.words[6] == 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -3618,12 +3635,18 @@ fn emitInstruction(
                 tex_name = img_name[0..img_name.len - "_sampler".len];
             }
             const result_name = names.get(inst.words[2]) orelse "v";
-            // Determine dimension from result type
+            // Determine result rank from the result type (1=scalar, 2, or 3).
             const rt_inst = getDef(module, inst.words[1]);
-            const is_scalar = rt_inst != null and rt_inst.?.op != .TypeVector;
-            if (is_scalar) {
+            const rank: u32 = if (rt_inst) |rti| (if (rti.op == .TypeVector and rti.words.len > 3) rti.words[3] else 1) else 1;
+            if (rank <= 1) {
                 try w.print("    uint {s}_w, {s}_levels; {s}.GetDimensions({s}, {s}_w, {s}_levels);\n", .{ result_name, result_name, tex_name, lod, result_name, result_name });
                 try w.print("    {s} {s} = {s}_w;\n", .{ try hlslType(module, inst.words[1], names, alloc), result_name, result_name });
+            } else if (rank == 3) {
+                // 3-component: 3D (w,h,depth) or arrayed (w,h,elements). HLSL
+                // selects the GetDimensions overload by texture type, so the
+                // third out-param carries depth or array length automatically.
+                try w.print("    uint {s}_w, {s}_h, {s}_d, {s}_levels; {s}.GetDimensions({s}, {s}_w, {s}_h, {s}_d, {s}_levels);\n", .{ result_name, result_name, result_name, result_name, tex_name, lod, result_name, result_name, result_name, result_name });
+                try w.print("    int3 {s} = int3({s}_w, {s}_h, {s}_d);\n", .{ result_name, result_name, result_name, result_name });
             } else {
                 try w.print("    uint {s}_w, {s}_h, {s}_levels; {s}.GetDimensions({s}, {s}_w, {s}_h, {s}_levels);\n", .{ result_name, result_name, result_name, tex_name, lod, result_name, result_name, result_name });
                 try w.print("    int2 {s} = int2({s}_w, {s}_h);\n", .{ result_name, result_name, result_name });
@@ -3639,10 +3662,22 @@ fn emitInstruction(
             }
             const result_name = names.get(inst.words[2]) orelse "v";
             const rt_inst = getDef(module, inst.words[1]);
-            const is_scalar = rt_inst != null and rt_inst.?.op != .TypeVector;
-            if (is_scalar) {
+            const rank: u32 = if (rt_inst) |rti| (if (rti.op == .TypeVector and rti.words.len > 3) rti.words[3] else 1) else 1;
+            if (rank <= 1) {
                 try w.print("    uint {s}_w; {s}.GetDimensions({s}_w);\n", .{ result_name, tex_name, result_name });
                 try w.print("    {s} {s} = {s}_w;\n", .{ try hlslType(module, inst.words[1], names, alloc), result_name, result_name });
+            } else if (rank == 3) {
+                // 3-component: 3D (w,h,depth) or arrayed (w,h,elements). The
+                // RWTexture3D/RWTexture2DArray GetDimensions overload fills the
+                // third out-param with depth or array length respectively.
+                // Texture2DMSArray's only overload additionally requires a
+                // NumberOfSamples out-param, so MS arrays query a 4th value.
+                if (imageValueIsMultisampled(module, inst.words[3])) {
+                    try w.print("    uint {s}_w, {s}_h, {s}_d, {s}_samples; {s}.GetDimensions({s}_w, {s}_h, {s}_d, {s}_samples);\n", .{ result_name, result_name, result_name, result_name, tex_name, result_name, result_name, result_name, result_name });
+                } else {
+                    try w.print("    uint {s}_w, {s}_h, {s}_d; {s}.GetDimensions({s}_w, {s}_h, {s}_d);\n", .{ result_name, result_name, result_name, tex_name, result_name, result_name, result_name });
+                }
+                try w.print("    int3 {s} = int3({s}_w, {s}_h, {s}_d);\n", .{ result_name, result_name, result_name, result_name });
             } else {
                 try w.print("    uint {s}_w, {s}_h; {s}.GetDimensions({s}_w, {s}_h);\n", .{ result_name, result_name, tex_name, result_name, result_name });
                 try w.print("    int2 {s} = int2({s}_w, {s}_h);\n", .{ result_name, result_name, result_name });
