@@ -248,14 +248,37 @@ fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
 // ---------------------------------------------------------------------------
 
 /// Options for SPIR-V → HLSL cross-compilation.
+/// Explicit per-resource HLSL register override (descriptor remap, G6). Maps a
+/// SPIR-V (descriptor set, binding) pair to an explicit HLSL register *number*;
+/// the register class (b/t/s/u) is still inferred from the resource type. Takes
+/// precedence over `binding_shift`. Mirrors spirv-cross's
+/// `add_hlsl_resource_binding` for the common single-space case.
+pub const ResourceBinding = struct {
+    set: u32 = 0,
+    binding: u32,
+    register: u32,
+};
+
 pub const HlslCompileOptions = struct {
     /// Shift all descriptor bindings by this amount. -1 remaps binding=1 → register(b0).
     binding_shift: i32 = 0,
+    /// Per-resource register overrides (checked before `binding_shift`).
+    resource_bindings: []const ResourceBinding = &.{},
     /// Target HLSL Shader Model version (50 = 5.0, 60 = 6.0).
     shader_model: u32 = 60,
     /// Entry point name to compile (default: "main").
     entry_point_name: []const u8 = "main",
 };
+
+/// Resolve the HLSL register number for a resource at (set, binding). If an
+/// explicit `resource_bindings` entry matches, its register wins; otherwise
+/// `fallback` (the binding-shift-adjusted value computed per call site) is used.
+fn resolveHlslRegister(options: HlslCompileOptions, set: u32, binding: u32, fallback: u32) u32 {
+    for (options.resource_bindings) |rb| {
+        if (rb.set == set and rb.binding == binding) return rb.register;
+    }
+    return fallback;
+}
 
 pub fn spirvToHLSL(
     alloc: std.mem.Allocator,
@@ -342,9 +365,10 @@ pub fn spirvToHLSL(
 
     // Emit cbuffers
     for (cbuffers.items) |cb| {
-        var binding: i32 = @intCast(cb.binding);
-        binding += options.binding_shift;
-        if (binding < 0) binding = 0;
+        var shifted: i32 = @intCast(cb.binding);
+        shifted += options.binding_shift;
+        if (shifted < 0) shifted = 0;
+        const binding: i32 = @intCast(resolveHlslRegister(options, cb.descriptor_set, cb.binding, @intCast(shifted)));
         // SSBO: emit as RWStructuredBuffer (or RasterizerOrdered for interlock)
         if (cb.is_ssbo) {
             // SSBO: emit as RWStructuredBuffer<StructType> or ByteAddressBuffer
@@ -403,6 +427,9 @@ pub fn spirvToHLSL(
     }
 
     for (textures.items) |tex| {
+        // Resource-binding override wins; otherwise the raw binding (textures
+        // historically don't take binding_shift — preserved for compatibility).
+        const reg = resolveHlslRegister(options, tex.descriptor_set, tex.binding, tex.binding);
         if (tex.is_storage) {
             // Storage images use UAV register space (u#)
             // For interlock shaders, use RasterizerOrdered variants
@@ -415,16 +442,16 @@ pub fn spirvToHLSL(
             if (has_interlock) {
                 var hlsl_type = tex.hlsl_type;
                 if (std.mem.startsWith(u8, hlsl_type, "RW")) hlsl_type = hlsl_type[2..];
-                try w.print("RasterizerOrdered{s} {s} : register(u{d});\n", .{ hlsl_type, tex.name, tex.binding });
+                try w.print("RasterizerOrdered{s} {s} : register(u{d});\n", .{ hlsl_type, tex.name, reg });
             } else {
-                try w.print("{s} {s} : register(u{d});\n", .{ tex.hlsl_type, tex.name, tex.binding });
+                try w.print("{s} {s} : register(u{d});\n", .{ tex.hlsl_type, tex.name, reg });
             }
         } else {
-            try w.print("{s} {s} : register(t{d});\n", .{ tex.hlsl_type, tex.name, tex.binding });
+            try w.print("{s} {s} : register(t{d});\n", .{ tex.hlsl_type, tex.name, reg });
             if (has_dref_gather) {
-                try w.print("SamplerComparisonState {s}_sampler : register(s{d});\n", .{ tex.name, tex.binding });
+                try w.print("SamplerComparisonState {s}_sampler : register(s{d});\n", .{ tex.name, reg });
             } else {
-                try w.print("SamplerState {s}_sampler : register(s{d});\n", .{ tex.name, tex.binding });
+                try w.print("SamplerState {s}_sampler : register(s{d});\n", .{ tex.name, reg });
             }
         }
     }
@@ -696,12 +723,14 @@ const CbufferDecl = struct {
     name: []const u8,
     type_id: u32,
     binding: u32,
+    descriptor_set: u32 = 0,
     is_ssbo: bool = false,
 };
 
 const TextureDecl = struct {
     name: []const u8,
     binding: u32,
+    descriptor_set: u32 = 0,
     hlsl_type: []const u8,
     is_storage: bool = false,
 };
@@ -953,6 +982,7 @@ fn collectResources(
         switch (sc) {
             .Uniform, .StorageBuffer => {
                 const binding = getDecorationValue(decorations, result_id, .binding) orelse 0;
+                const dset = getDecorationValue(decorations, result_id, .descriptor_set) orelse 0;
                 const raw_name = names.get(result_id) orelse "Globals";
                 // Check if this is an SSBO (BufferBlock decoration on struct type, or StorageBuffer class)
                 const is_ssbo = hasDecoration(decorations, pointee_type, .buffer_block) or sc == .StorageBuffer;
@@ -967,12 +997,14 @@ fn collectResources(
                     .name = cb_name,
                     .type_id = pointee_type,
                     .binding = binding,
+                    .descriptor_set = dset,
                     .is_ssbo = is_ssbo,
                 }) catch {};
             },
             .UniformConstant => {
                 const pointee_inst = getDef(module, pointee_type) orelse continue;
                 const binding = getDecorationValue(decorations, result_id, .binding) orelse 0;
+                const dset = getDecorationValue(decorations, result_id, .descriptor_set) orelse 0;
                 const name = names.get(result_id) orelse "tex";
                 var is_storage = false;
                 const hlsl_type = blk: {
@@ -995,6 +1027,7 @@ fn collectResources(
                 textures.append(alloc, .{
                     .name = name,
                     .binding = binding,
+                    .descriptor_set = dset,
                     .hlsl_type = hlsl_type,
                     .is_storage = is_storage,
                 }) catch {};
