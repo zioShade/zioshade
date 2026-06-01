@@ -13617,6 +13617,60 @@ test "hlsl: textureSize (ImageQuerySizeLod)" {
     try assertNotContains(hlsl, "unhandled");
 }
 
+// Image-query 3-component (ivec3) coverage — regression guard for the rank
+// mismatch where the backend emitted int2 against an int3-typed result and
+// never queried the third component (depth for 3D, layer count for arrays).
+test "hlsl: imageSize(image2DArray) emits int3 with 3-component GetDimensions" {
+    const src =
+        \\#version 450
+        \\layout(rgba8, binding = 0) uniform image2DArray img;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec3 s = imageSize(img);
+        \\    fragColor = vec4(float(s.x), float(s.y), float(s.z), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "GetDimensions");
+    try assertContains(hlsl, "int3");
+    try assertNotContains(hlsl, "unhandled");
+}
+
+test "hlsl: imageSize(image3D) emits int3 with depth component" {
+    const src =
+        \\#version 450
+        \\layout(rgba8, binding = 0) uniform image3D img;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec3 s = imageSize(img);
+        \\    fragColor = vec4(float(s.x), float(s.y), float(s.z), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "GetDimensions");
+    try assertContains(hlsl, "int3");
+    try assertNotContains(hlsl, "unhandled");
+}
+
+test "hlsl: textureSize(sampler2DMSArray) emits int3" {
+    const src =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DMSArray tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec3 s = textureSize(tex);
+        \\    fragColor = vec4(float(s.x), float(s.y), float(s.z), 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "GetDimensions");
+    try assertContains(hlsl, "int3");
+    try assertNotContains(hlsl, "unhandled");
+}
+
 test "hlsl: fma (std450 #50)" {
     const src =
         \\#version 450

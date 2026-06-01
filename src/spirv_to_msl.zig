@@ -71,6 +71,31 @@ fn imageTypeIsDepth(m: *const ParsedModule, pointee: Instruction) bool {
     return depth == 1 and dim == 1;
 }
 
+/// Component count of a result type id: 1 for a scalar, else the OpTypeVector
+/// size. OpTypeVector layout: `[op, result_id, component_type, count]`.
+fn typeRank(m: *const ParsedModule, type_id: u32) u32 {
+    const ti = getDef(m, type_id) orelse return 1;
+    if (ti.op == .TypeVector and ti.words.len > 3) return ti.words[3];
+    return 1;
+}
+
+/// True when the image VALUE `id` resolves to an Arrayed OpTypeImage (2D array,
+/// cube array, 2DMS array). Used to choose `get_array_size()` (layer count) vs
+/// `get_depth()` (volume depth) for the third component of an image-size query.
+/// Resolves the value's result type (`words[1]`) and unwraps an
+/// OpTypeSampledImage. OpTypeImage layout:
+/// `[op, result_id, sampled_type, DIM, DEPTH, ARRAYED, ms, sampled, format]`.
+fn imageValueIsArrayed(m: *const ParsedModule, image_value_id: u32) bool {
+    const vdef = getDef(m, image_value_id) orelse return false;
+    if (vdef.words.len < 2) return false;
+    var tinst = getDef(m, vdef.words[1]) orelse return false;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(m, tinst.words[2]) orelse return false;
+    }
+    if (tinst.op != .TypeImage or tinst.words.len < 6) return false;
+    return tinst.words[5] == 1;
+}
+
 /// MSL texture type for a sampled texture parameter. Comparison/shadow samplers
 /// must be `depth2d<float>` (the home of `.sample_compare`/`.gather_compare`);
 /// everything else stays `texture2d<float>`. Only the 2D float case is modelled
@@ -2896,18 +2921,43 @@ fn emitInstruction(
             try w.print("    {s}.write({s}, {s});\n", .{img, texel, coord});
         },
         .ImageQuerySizeLod => {
-            // MSL: texture.get_width/height(level)
+            // MSL: get_width/get_height(level), get_depth(level) for 3D, and
+            // get_array_size() for arrayed textures. Result rank decides how
+            // many components to assemble; the image's Arrayed flag picks
+            // get_array_size() vs get_depth() for the third component.
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const img = names.get(inst.words[3]) orelse "tex";
             const lod = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
-            try w.print("    {s} {s} = {s}.get_width({s});\n", .{rtt, rn, img, lod});
+            const rank = typeRank(m, inst.words[1]);
+            if (rank >= 3) {
+                if (imageValueIsArrayed(m, inst.words[3])) {
+                    try w.print("    {s} {s} = {s}({s}.get_width({s}), {s}.get_height({s}), {s}.get_array_size());\n", .{ rtt, rn, rtt, img, lod, img, lod, img });
+                } else {
+                    try w.print("    {s} {s} = {s}({s}.get_width({s}), {s}.get_height({s}), {s}.get_depth({s}));\n", .{ rtt, rn, rtt, img, lod, img, lod, img, lod });
+                }
+            } else if (rank == 2) {
+                try w.print("    {s} {s} = {s}({s}.get_width({s}), {s}.get_height({s}));\n", .{ rtt, rn, rtt, img, lod, img, lod });
+            } else {
+                try w.print("    {s} {s} = {s}.get_width({s});\n", .{ rtt, rn, img, lod });
+            }
         },
         .ImageQuerySize => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const img = names.get(inst.words[3]) orelse "tex";
-            try w.print("    {s} {s} = {s}.get_width(0);\n", .{rtt, rn, img});
+            const rank = typeRank(m, inst.words[1]);
+            if (rank >= 3) {
+                if (imageValueIsArrayed(m, inst.words[3])) {
+                    try w.print("    {s} {s} = {s}({s}.get_width(), {s}.get_height(), {s}.get_array_size());\n", .{ rtt, rn, rtt, img, img, img });
+                } else {
+                    try w.print("    {s} {s} = {s}({s}.get_width(), {s}.get_height(), {s}.get_depth());\n", .{ rtt, rn, rtt, img, img, img });
+                }
+            } else if (rank == 2) {
+                try w.print("    {s} {s} = {s}({s}.get_width(), {s}.get_height());\n", .{ rtt, rn, rtt, img, img });
+            } else {
+                try w.print("    {s} {s} = {s}.get_width();\n", .{ rtt, rn, img });
+            }
         },
         .Kill => try w.writeAll("    discard_fragment();\n"),
         .Unreachable => {}, // no-op

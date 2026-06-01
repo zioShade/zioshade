@@ -3618,12 +3618,18 @@ fn emitInstruction(
                 tex_name = img_name[0..img_name.len - "_sampler".len];
             }
             const result_name = names.get(inst.words[2]) orelse "v";
-            // Determine dimension from result type
+            // Determine result rank from the result type (1=scalar, 2, or 3).
             const rt_inst = getDef(module, inst.words[1]);
-            const is_scalar = rt_inst != null and rt_inst.?.op != .TypeVector;
-            if (is_scalar) {
+            const rank: u32 = if (rt_inst) |rti| (if (rti.op == .TypeVector and rti.words.len > 3) rti.words[3] else 1) else 1;
+            if (rank <= 1) {
                 try w.print("    uint {s}_w, {s}_levels; {s}.GetDimensions({s}, {s}_w, {s}_levels);\n", .{ result_name, result_name, tex_name, lod, result_name, result_name });
                 try w.print("    {s} {s} = {s}_w;\n", .{ try hlslType(module, inst.words[1], names, alloc), result_name, result_name });
+            } else if (rank == 3) {
+                // 3-component: 3D (w,h,depth) or arrayed (w,h,elements). HLSL
+                // selects the GetDimensions overload by texture type, so the
+                // third out-param carries depth or array length automatically.
+                try w.print("    uint {s}_w, {s}_h, {s}_d, {s}_levels; {s}.GetDimensions({s}, {s}_w, {s}_h, {s}_d, {s}_levels);\n", .{ result_name, result_name, result_name, result_name, tex_name, lod, result_name, result_name, result_name, result_name });
+                try w.print("    int3 {s} = int3({s}_w, {s}_h, {s}_d);\n", .{ result_name, result_name, result_name, result_name });
             } else {
                 try w.print("    uint {s}_w, {s}_h, {s}_levels; {s}.GetDimensions({s}, {s}_w, {s}_h, {s}_levels);\n", .{ result_name, result_name, result_name, tex_name, lod, result_name, result_name, result_name });
                 try w.print("    int2 {s} = int2({s}_w, {s}_h);\n", .{ result_name, result_name, result_name });
@@ -3639,10 +3645,16 @@ fn emitInstruction(
             }
             const result_name = names.get(inst.words[2]) orelse "v";
             const rt_inst = getDef(module, inst.words[1]);
-            const is_scalar = rt_inst != null and rt_inst.?.op != .TypeVector;
-            if (is_scalar) {
+            const rank: u32 = if (rt_inst) |rti| (if (rti.op == .TypeVector and rti.words.len > 3) rti.words[3] else 1) else 1;
+            if (rank <= 1) {
                 try w.print("    uint {s}_w; {s}.GetDimensions({s}_w);\n", .{ result_name, tex_name, result_name });
                 try w.print("    {s} {s} = {s}_w;\n", .{ try hlslType(module, inst.words[1], names, alloc), result_name, result_name });
+            } else if (rank == 3) {
+                // 3-component: 3D (w,h,depth) or arrayed (w,h,elements). The
+                // RWTexture3D/RWTexture2DArray GetDimensions overload fills the
+                // third out-param with depth or array length respectively.
+                try w.print("    uint {s}_w, {s}_h, {s}_d; {s}.GetDimensions({s}_w, {s}_h, {s}_d);\n", .{ result_name, result_name, result_name, tex_name, result_name, result_name, result_name });
+                try w.print("    int3 {s} = int3({s}_w, {s}_h, {s}_d);\n", .{ result_name, result_name, result_name, result_name });
             } else {
                 try w.print("    uint {s}_w, {s}_h; {s}.GetDimensions({s}_w, {s}_h);\n", .{ result_name, result_name, tex_name, result_name, result_name });
                 try w.print("    int2 {s} = int2({s}_w, {s}_h);\n", .{ result_name, result_name, result_name });
