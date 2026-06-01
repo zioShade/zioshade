@@ -4145,11 +4145,11 @@ const Codegen = struct {
         const shrink_type_id = try self.ensureType(shrink_ty);
         const shrink_key: u64 = @as(u64, coord_id) *% 31 +% @as(u64, @intFromEnum(shrink_ty)) + 0x2000;
         const shrunk_coord_id: u32 = if (shrink_ty == .float) blk: {
+            // shrink_ty == .float here, so shrink_type_id is already the float type id.
             if (self.codegen_pure_cache.get(shrink_key)) |cached| break :blk cached;
             const new_id = self.allocId();
-            const float_type_id = try self.ensureType(.float);
             try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.CompositeExtract)));
-            try self.emitWord(float_type_id);
+            try self.emitWord(shrink_type_id);
             try self.emitWord(new_id);
             try self.emitWord(coord_id);
             try self.emitWord(0);
