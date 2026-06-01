@@ -350,7 +350,13 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
                     if (count_inst) |ci2| {
                         if (ci2.op == .Constant and ci2.words.len > 3) count_val = ci2.words[3];
                     }
-                    const elem_name = tryResolveTypeName(module, elem_type_id);
+                    // This composite-constant naming is consumed ONLY by the WGSL
+                    // backend (array<T,N>(...) is WGSL syntax), so the element type
+                    // must use WGSL scalar names — tryResolveTypeName returns the
+                    // GLSL spelling ("float"/"int"/"uint"), which would leak as a
+                    // bare identifier naga rejects ("no definition in scope: float").
+                    const elem_raw = tryResolveTypeName(module, elem_type_id);
+                    const elem_name: []const u8 = if (std.mem.eql(u8, elem_raw, "float")) "f32" else if (std.mem.eql(u8, elem_raw, "int")) "i32" else if (std.mem.eql(u8, elem_raw, "uint")) "u32" else elem_raw; // "bool" is identical in WGSL
                     buf2.writer(alloc).print("array<{s}, {d}>(", .{elem_name, count_val}) catch continue;
                     for (inst.words[3..], 0..) |comp_id, i| {
                         if (i > 0) buf2.writer(alloc).writeAll(", ") catch continue;
