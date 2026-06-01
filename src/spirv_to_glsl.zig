@@ -887,17 +887,25 @@ fn emitFunction(
     var output_var_id: ?u32 = null;
     var input_var_ids = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;
     defer input_var_ids.deinit(alloc);
-    if (is_frag) {
+    // Full list of stage Output variables (for the in/out varying declarations
+    // below). `output_var_id` stays the single fragment primary-color output to
+    // preserve the fragment body's return handling unchanged.
+    var output_var_ids = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;
+    defer output_var_ids.deinit(alloc);
+    if (is_entry) {
         for (m.instructions) |inst| {
             if (inst.op == .Variable and inst.words.len >= 4) {
                 const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                 if (sc == .Output) {
-                    // Prefer user-defined outputs (with location) over builtins
-                    const bi = getDecVal(decs, inst.words[2], .built_in);
-                    if (bi == null) {
-                        output_var_id = inst.words[2];
-                    } else if (output_var_id == null) {
-                        output_var_id = inst.words[2];
+                    output_var_ids.append(alloc, inst.words[2]) catch {};
+                    if (is_frag) {
+                        // Prefer user-defined outputs (with location) over builtins
+                        const bi = getDecVal(decs, inst.words[2], .built_in);
+                        if (bi == null) {
+                            output_var_id = inst.words[2];
+                        } else if (output_var_id == null) {
+                            output_var_id = inst.words[2];
+                        }
                     }
                 } else if (sc == .Input) {
                     input_var_ids.append(alloc, inst.words[2]) catch {};
@@ -1001,24 +1009,41 @@ fn emitFunction(
         }
     }
 
-    // Emit output var declaration before entry function
-    if (is_frag) {
-        if (output_var_id) |ovid| {
-            if (getDef(m, ovid)) |ov| {
-                // Skip built-in outputs (gl_SampleMask, gl_FragDepth, etc.)
-                const builtin_out = getDecVal(decs, ovid, .built_in);
-                if (builtin_out == null or builtin_out.? != @intFromEnum(spirv.BuiltIn.sample_mask)) {
-                    const ot = try glslType(m, ov.words[1], names, alloc);
-                    const on = names.get(ovid) orelse "_fragColor";
-                    const loc = getDecVal(decs, ovid, .location);
-                    if (loc) |l| {
-                        try w.print("layout(location = {d}) out {s} {s};\n\n", .{ l, ot, on });
-                    } else {
-                        try w.print("out {s} {s};\n\n", .{ ot, on });
-                    }
-                }
+    // Emit input/output varying declarations before the entry function, for ALL
+    // stages. Non-builtin inputs → `layout(location=N) in T name;`, non-builtin
+    // outputs → `layout(location=N) out T name;`. Built-ins (gl_Position,
+    // gl_FragCoord, gl_VertexIndex, gl_FragDepth, ...) are predefined in GLSL —
+    // never declared here; builtin INPUTS are aliased to their gl_* name below.
+    // (Previously only the single fragment color output was declared, so vertex
+    // varyings, vertex attributes, and fragment input varyings were emitted as
+    // undeclared identifiers — invalid GLSL.)
+    if (is_entry) {
+        var emitted_any_io = false;
+        for (input_var_ids.items) |ivid| {
+            if (getDecVal(decs, ivid, .built_in) != null) continue;
+            const iv = getDef(m, ivid) orelse continue;
+            const it = try glslType(m, iv.words[1], names, alloc);
+            const in_name = names.get(ivid) orelse continue;
+            if (getDecVal(decs, ivid, .location)) |l| {
+                try w.print("layout(location = {d}) in {s} {s};\n", .{ l, it, in_name });
+            } else {
+                try w.print("in {s} {s};\n", .{ it, in_name });
             }
+            emitted_any_io = true;
         }
+        for (output_var_ids.items) |ovid| {
+            if (getDecVal(decs, ovid, .built_in) != null) continue;
+            const ov = getDef(m, ovid) orelse continue;
+            const ot = try glslType(m, ov.words[1], names, alloc);
+            const on = names.get(ovid) orelse "_out";
+            if (getDecVal(decs, ovid, .location)) |l| {
+                try w.print("layout(location = {d}) out {s} {s};\n", .{ l, ot, on });
+            } else {
+                try w.print("out {s} {s};\n", .{ ot, on });
+            }
+            emitted_any_io = true;
+        }
+        if (emitted_any_io) try w.writeAll("\n");
     }
 
     try w.print("{s} {s}(", .{ rt, func_name });
@@ -1054,9 +1079,11 @@ fn emitFunction(
         try w.print("{s} {s}", .{ pt2, pn });
     }
 
-    // For GLSL entry points: input vars are GLSL builtins (gl_FragCoord etc.),
-    // so we alias them by name instead of passing as parameters.
-    if (is_frag) {
+    // For GLSL entry points: built-in input vars (gl_FragCoord, gl_VertexIndex,
+    // gl_GlobalInvocationID, ...) are predefined; alias them by name so the body
+    // references the GLSL builtin instead of an undeclared identifier. Applies to
+    // every stage (vertex/compute builtins too), not just fragment.
+    if (is_entry) {
         for (input_var_ids.items) |ivid| {
             const iv_name = names.get(ivid) orelse continue;
             // Check if this input has a BuiltIn decoration
