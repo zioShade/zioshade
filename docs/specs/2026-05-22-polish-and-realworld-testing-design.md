@@ -44,14 +44,14 @@ Add `///` doc comments to every public type and function in `src/root.zig`:
 - `GlslCompileOptions` — document `version` (330, 410, 430, 450, 460) and `es` (ESSL mode)
 - `MslCompileOptions` — document `metal_version` (what versions are valid)
 - `WgslCompileOptions` — note it's empty now, future options placeholder
-- `CrossCompileOptions` — either document or remove (currently unused by any public function)
+- `CrossCompileOptions` — ✅ REMOVED (2026-06-01): was unused by any public function and its `flatten_ubos` field did nothing (phantom capability). Per-backend options structs are the real knobs; descriptor remap is `resource_bindings` on HLSL/MSL options.
 - `ResourceLimits` — document what the limits control
 - All public functions — one-line description + parameter docs
 
 ### 2b: Reduce public surface area
 
 Keep as `pub` in root.zig only what users need:
-- ✅ Keep: `Stage`, `SPIRVVersion`, `CompileOptions`, `ResourceLimits`, `CrossCompileOptions`, `Error`
+- ✅ Keep: `Stage`, `SPIRVVersion`, `CompileOptions`, `ResourceLimits`, `Error` (CrossCompileOptions removed 2026-06-01 — dead/phantom)
 - ✅ Keep: `compileToSPIRV`, `compileToSPIRVNoOpt`, `compileToSPIRVWithDiagnostics`, `spirvToHLSL`, `spirvToGLSL`, `spirvToMSL`, `spirvToWGSL`
 - ✅ Keep: `compileGlslToHlsl`, `compileGlslToMsl`, `compileGlslToGlsl`, `compileGlslToGlslVersion`, `compileShadertoyToHlsl`
 - ✅ Keep: `reflectSPIRV`, `reflectGLSL`, `validateSPIRV`, `linkSPIRVModules`, `compileMultiKernel`, `compileToSPIRVWithFusion`
