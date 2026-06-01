@@ -76,6 +76,12 @@ pub fn parse(alloc: std.mem.Allocator, source: [:0]const u8, tokens: []const lex
         try body.append(alloc, node);
     }
 
+    // Fail loudly if the parser saw an unambiguously-broken construct (e.g. a
+    // nested function definition). Returning here lets the `errdefer` above free
+    // `body`, `struct_names`, and the heap-tracked children/types — exactly the
+    // cleanup the success path does below.
+    if (p.fatal_parse_error) return error.UnexpectedToken;
+
     // Free struct_names HashMap keys (dupe'd names) and deinit
     {
         var it = p.struct_names.keyIterator();
@@ -154,6 +160,20 @@ const Parser = struct {
     struct_names: std.StringHashMapUnmanaged(void),
     heap_types: std.ArrayListUnmanaged(*ast.Type) = .empty,
     heap_children: std.ArrayListUnmanaged([]const ast.Node) = .empty,
+    /// Set when the parser encounters a construct that is *unambiguously*
+    /// invalid GLSL (currently: a nested function definition inside a function
+    /// body — see `parseLocalVarDecl`). Error recovery still runs so we can skip
+    /// the malformed text, but a set flag makes `parse()` fail loudly at the end
+    /// so a genuinely-broken shader can never reach codegen as a hollow module.
+    ///
+    /// This is deliberately NOT set on every `synchronize()` recovery: the
+    /// parser legitimately recovers from many *valid-but-unsupported* constructs
+    /// (precision qualifiers on locals, `double`/`int64` types, comment
+    /// line-continuations, …), and failing on those would reject ~700 valid
+    /// conformance shaders. We only fail loudly where we can be certain the
+    /// source itself is broken. The error location is captured via
+    /// `recordErrorLoc`.
+    fatal_parse_error: bool = false,
 
     // ── Navigation ────────────────────────────────────────────
 
@@ -1322,6 +1342,20 @@ const Parser = struct {
             return error.UnexpectedToken;
         }
         _ = self.advance();
+
+        // Nested function definition / prototype: `type identifier (` at
+        // statement scope. GLSL forbids functions inside a function body, and
+        // this token shape is unambiguous — a call is `identifier (`, a
+        // constructor is `type (`, and a real declaration continues with
+        // `= ; [ ,`. glslang rejects this with "unexpected LEFT_BRACE,
+        // expecting SEMICOLON". Mark it fatal so the compile fails loudly
+        // instead of silently dropping the body and emitting a hollow module.
+        if (self.current().tag == .l_paren) {
+            self.recordErrorLoc();
+            self.fatal_parse_error = true;
+            return error.UnexpectedToken;
+        }
+
         // Handle array size suffix: float a[4]
         var local_arr_dims: std.ArrayListUnmanaged(u32) = .empty;
         defer local_arr_dims.deinit(self.alloc);
@@ -2188,6 +2222,30 @@ test "parse function with params" {
     try std.testing.expectEqual(@as(usize, 2), func.data.params.len);
     try std.testing.expectEqualStrings("a", func.data.params[0].name);
     try std.testing.expectEqualStrings("b", func.data.params[1].name);
+}
+
+test "nested function definition fails loud (not silently dropped)" {
+    // GLSL forbids defining a function inside a function body. The parser
+    // recovers from the malformed statement so it can keep scanning, but the
+    // overall parse must surface an error rather than returning a hollow tree.
+    const alloc = std.testing.allocator;
+    const source = "void main() { float f(float x) { return x; } }";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+    try std.testing.expectError(error.UnexpectedToken, parse(alloc, source, tokens));
+}
+
+test "ordinary function-call statement still parses (call vs nested-def)" {
+    // Guard against the nested-function detection misfiring: a call is
+    // `identifier (`, not `type identifier (`, so it must parse fine.
+    const alloc = std.testing.allocator;
+    const source = "void main() { foo(1.0); }";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+    var root = try parse(alloc, source, tokens);
+    defer freeTree(alloc, &root);
+    try std.testing.expectEqual(@as(usize, 1), root.body.len);
+    try std.testing.expectEqual(ast.Node.Tag.function_decl, root.body[0].tag);
 }
 
 test "parse expression precedence" {

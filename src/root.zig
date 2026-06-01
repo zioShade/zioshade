@@ -1152,6 +1152,27 @@ test "compile shader with uniforms" {
     }
 }
 
+test "fail-loud: nested function definition is rejected, not silently dropped" {
+    // GLSL forbids nested function definitions. glslang rejects this with a
+    // syntax error ("unexpected LEFT_BRACE, expecting SEMICOLON"). Before the
+    // parser recorded its error-recovery, glslpp's `synchronize()` silently
+    // discarded the malformed body and emitted a hollow module at exit 0,
+    // defeating the fail-loud contract. compileToSPIRV must surface an error.
+    const alloc = std.testing.allocator;
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float scale=2.0; float f(float x){return x*scale;} o=vec4(f(1.0)); }
+    ;
+    const result = compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    if (result) |words| {
+        defer alloc.free(words);
+        try std.testing.expect(false); // must NOT compile to a hollow module
+    } else |err| {
+        try std.testing.expectEqual(error.ParseFailed, err);
+    }
+}
+
 test "compileToSPIRVWithDiagnostics reports error location" {
     const alloc = std.testing.allocator;
     var diags = std.ArrayListUnmanaged(diagnostic.Diagnostic).empty;
