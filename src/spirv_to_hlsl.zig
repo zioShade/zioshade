@@ -2129,6 +2129,36 @@ fn emitFunction(
         }
     }
 
+    // Compute system-value built-ins. The body references gl_GlobalInvocationID
+    // / gl_LocalInvocationID / gl_WorkGroupID / gl_LocalInvocationIndex by name;
+    // each used one must be an entry parameter with its HLSL SV semantic, else
+    // dxc rejects with "use of undeclared identifier" (silent-wrong). gl_NumWork-
+    // Groups has no direct HLSL system value (needs a constant buffer) and is
+    // intentionally not handled here.
+    if (is_compute) {
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc != .Input) continue;
+            const vid = inst.words[2];
+            const b = getDecorationValue(decorations, vid, .built_in) orelse continue;
+            const bi: spirv.BuiltIn = @enumFromInt(b);
+            const spec: ?struct { ty: []const u8, sem: []const u8 } = switch (bi) {
+                .global_invocation_id => .{ .ty = "uint3", .sem = "SV_DispatchThreadID" },
+                .local_invocation_id => .{ .ty = "uint3", .sem = "SV_GroupThreadID" },
+                .workgroup_id => .{ .ty = "uint3", .sem = "SV_GroupID" },
+                .local_invocation_index => .{ .ty = "uint", .sem = "SV_GroupIndex" },
+                else => null,
+            };
+            if (spec) |s| {
+                const nm = names.get(vid) orelse continue;
+                if (!first_input) try w.writeAll(", ");
+                first_input = false;
+                try w.print("{s} {s} : {s}", .{ s.ty, nm, s.sem });
+            }
+        }
+    }
+
     const has_mrt = is_fragment and output_vars.items.len > 1;
 
     // For MRT: emit struct return type with SV_Target semantics
