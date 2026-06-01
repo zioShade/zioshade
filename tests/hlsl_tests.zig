@@ -14334,3 +14334,36 @@ test "descriptor remap: empty resource_bindings preserves default registers" {
     // No remap → default register from the binding number.
     try assertContains(hlsl, "register(b2)");
 }
+
+fn stripMerge(a: std.mem.Allocator, spirv: []const u32) ![]u32 {
+    var out = try std.ArrayList(u32).initCapacity(a, spirv.len);
+    errdefer out.deinit(a);
+    try out.appendSlice(a, spirv[0..5]);
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc: usize = spirv[i] >> 16;
+        const op: u32 = spirv[i] & 0xFFFF;
+        if (wc == 0 or i + wc > spirv.len) break;
+        if (op != 247 and op != 246) try out.appendSlice(a, spirv[i .. i + wc]);
+        i += wc;
+    }
+    return out.toOwnedSlice(a);
+}
+
+test "hlsl: unstructured CFG (stripped OpSelectionMerge) errors honestly" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) flat in int sel;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec4 c = vec4(0.0);
+        \\    switch (sel) { case 0: c = vec4(1.0); break; case 1: c = vec4(0.5); break; default: c = vec4(0.2); break; }
+        \\    o = c;
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const stripped = try stripMerge(alloc, spirv);
+    defer alloc.free(stripped);
+    try std.testing.expectError(error.UnstructuredControlFlow, glslpp.spirvToHLSL(alloc, stripped, .{ .shader_model = 60 }));
+}
