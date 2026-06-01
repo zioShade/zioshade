@@ -233,6 +233,11 @@ test "flip: fail-loud rejection after a completed user function leaks nothing" {
         \\void main() { o = vec4(helper(1.0), undeclared_xyz, 0.0, 1.0); }
     ;
     try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    // Pin the rejection to the *semantic* gate (not lex/parse): a function must
+    // have been analyzed and recorded an error for the completed-function cleanup
+    // path to be reachable. This keeps the guard from passing for the wrong reason
+    // if error ordering ever changes.
+    try std.testing.expectEqual(@as(?glslpp.CompileDetail, .semantic_failed), glslpp.last_compile_detail);
 }
 
 test "strict: SSBO block array (buffer {...} name[N]) is accepted" {
