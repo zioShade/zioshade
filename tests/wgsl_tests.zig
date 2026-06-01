@@ -583,6 +583,26 @@ test "WGSL: unmapped ext-inst error names the GLSL.std.450 instruction" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "76") != null);
 }
 
+test "wgsl: geometry stage errors honestly (WGSL has no geometry entry point)" {
+    // WGSL has only vertex/fragment/compute entry points. A geometry shader must
+    // fail loud with a named error, not emit WGSL that naga rejects (silent-wrong).
+    const source =
+        \\#version 450
+        \\layout(triangles) in;
+        \\layout(triangle_strip, max_vertices = 3) out;
+        \\void main() {
+        \\    for (int i = 0; i < 3; i++) { gl_Position = gl_in[i].gl_Position; EmitVertex(); }
+        \\    EndPrimitive();
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .geometry, .spirv_version = .@"1.5" });
+    defer alloc.free(spirv);
+
+    try std.testing.expectError(error.UnsupportedStage, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "Geometry") != null);
+}
+
 // ---------------------------------------------------------------------------
 // row_major / column_major UBO matrix layout (silent-wrong fix)
 //
