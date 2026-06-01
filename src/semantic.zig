@@ -8115,6 +8115,28 @@ test "semantic: undeclared identifier" {
     try testing.expect(result == error.UndeclaredIdentifier or result == error.SemanticFailed);
 }
 
+test "semantic: deinit frees block TypeDef.members on error path (no leak)" {
+    // Regression guard for the error-path member-slice free in Analyzer.deinit().
+    // A uniform block makes collectTopLevel dupe a TypeDef.members slice into
+    // self.types. When analysis later fails (here an undeclared identifier in
+    // main), the error propagates and `defer analyzer.deinit()` runs WITHOUT a
+    // Module ever being created — so only deinit() can free those members.
+    // deinit() must free them (mirroring ir.Module.deinit()) or testing.allocator's
+    // leak check fails. Without that free the leak shows up at the `dupe` in
+    // collectTopLevel; this test fixes the coverage gap that let it ship unguarded.
+    const source =
+        \\#version 450
+        \\layout(set=0, binding=0) uniform UBO { vec4 color; float scale; } ubo;
+        \\void main(){ float y = x; }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    const result = analyze(testing.allocator, &root);
+    try testing.expect(result == error.UndeclaredIdentifier or result == error.SemanticFailed);
+}
+
 test "semantic: builtin gl_FragCoord available" {
     const source = "void main() { vec4 pos = gl_FragCoord; }";
     const tokens = try lexer.tokenize(testing.allocator, source);
