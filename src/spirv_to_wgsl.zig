@@ -4694,7 +4694,13 @@ fn emitAtomicBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     try writeIndentStatic(w, indent); try w.print("var {s}: {s} = atomic{s}(&{s}, {s});\n", .{ result_name, rt, op, ptr, val });
 }
 
-// Get the WGSL function name for a GLSL.std.450 instruction opcode
+// Get the WGSL function name for a GLSL.std.450 instruction opcode, for the
+// inline-EXPRESSION resolver only. Distinct from glslStd450WgslName (the
+// statement-emit single source of truth): this one returns `null` to DECLINE
+// inlining (the caller then falls back to the statement path, which uses the
+// shared helper). It intentionally omits struct-returning / multi-result ops
+// (modf 35/36, frexp 51/52, ldexp 53, findILsb/MSB 73/74) so they are emitted
+// as statements rather than inlined incorrectly as a single expression.
 fn getExtInstName(instruction: u32) ?[]const u8 {
     return switch (instruction) {
         1 => "round",
