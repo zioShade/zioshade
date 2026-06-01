@@ -2056,3 +2056,21 @@ test "msl: gl_PointSize becomes a [[point_size]] main0_out field" {
     // Body store resolves through the output struct.
     try assertContains(msl, "out.gl_PointSize = 4.0");
 }
+
+test "msl: compute built-ins thread as kernel parameter attributes" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x=8) in;
+        \\layout(std430, binding=0) buffer B { uint data[]; };
+        \\void main() {
+        \\    data[gl_GlobalInvocationID.x] =
+        \\        gl_LocalInvocationID.x + gl_WorkGroupID.x + gl_LocalInvocationIndex;
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "uint3 gl_GlobalInvocationID [[thread_position_in_grid]]");
+    try assertContains(msl, "uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]]");
+    try assertContains(msl, "uint3 gl_WorkGroupID [[threadgroup_position_in_grid]]");
+    try assertContains(msl, "uint gl_LocalInvocationIndex [[thread_index_in_threadgroup]]");
+}
