@@ -14275,3 +14275,21 @@ test "compute built-ins map to HLSL SV semantics on the entry signature" {
     try assertContains(hlsl, "gl_WorkGroupID : SV_GroupID");
     try assertContains(hlsl, "gl_LocalInvocationIndex : SV_GroupIndex");
 }
+
+test "vertex gl_VertexIndex/gl_InstanceIndex use uint for SV_VertexID/SV_InstanceID" {
+    // dxc requires SV_VertexID / SV_InstanceID to be uint; glslang types
+    // gl_VertexIndex / gl_InstanceIndex as signed int. Emitting `int` makes dxc
+    // reject ("SV_VertexID must be uint") — a silent-wrong output.
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 col;
+        \\void main() {
+        \\    gl_Position = vec4(float(gl_VertexIndex), float(gl_InstanceIndex), 0.0, 1.0);
+        \\    col = vec4(1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "uint gl_VertexIndex : SV_VertexID");
+    try assertContains(hlsl, "uint gl_InstanceIndex : SV_InstanceID");
+}
