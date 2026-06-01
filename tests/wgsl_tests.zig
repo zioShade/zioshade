@@ -763,6 +763,34 @@ test "wgsl: constant unsigned vector uses WGSL vec constructor, not GLSL uintN" 
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "uvec2") == null);
 }
 
+test "wgsl: unsupported op in switch/loop replay path errors honestly" {
+    // A cross-vector OpVectorShuffle inside a switch reaches the switch/loop
+    // replay path (emitSimpleInstruction). Ops with no case there must fail loud,
+    // not fall to the old fallback that emitted `<OpcodeName>(args)` (a call to a
+    // non-existent WGSL function — naga reject, silent-wrong).
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 a;
+        \\layout(location = 1) in vec4 b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec4 c = vec4(0.0);
+        \\    int m = int(a.x) % 3;
+        \\    switch (m) {
+        \\        case 0: c = vec4(a.xy, b.zw); break;
+        \\        case 1: c = b.wzyx; break;
+        \\        default: c = a; break;
+        \\    }
+        \\    o = c;
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "replay") != null);
+}
+
 test "wgsl: textureGather emits the component as the first argument" {
     // WGSL: textureGather(component, texture, sampler, coords). The GLSL order
     // (tex, sampler, coords, component) makes naga read the texture where it

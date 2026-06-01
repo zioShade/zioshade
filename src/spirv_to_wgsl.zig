@@ -4851,17 +4851,13 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                 try emitCall(module, names, inst, maybe_conv.?, w, arena, indent);
                 return;
             }
-            // Generic: emit as function call using opcode name
-            if (inst.words.len < 3) return; // safety: need at least type + result
-            const rt = try wgslType(module, inst.words[1], names, arena);
-            const result_name = names.get(inst.words[2]) orelse "v";
-            var args = std.ArrayList(u8).initCapacity(arena, 64) catch return;
-            defer args.deinit(arena);
-            for (inst.words[3..], 0..) |arg_id, ai| {
-                if (ai > 0) try args.appendSlice(arena, ", ");
-                try args.appendSlice(arena, names.get(arg_id) orelse "0");
-            }
-            try writeIndentStatic(w, indent); try w.print("var {s}: {s} = {s}({s});\n", .{ result_name, rt, @tagName(inst.op), args.items });
+            // No mapping for this op in the switch/loop replay path. The old
+            // fallback emitted `var <name>: T = <OpcodeName>(args)` — a call to a
+            // non-existent WGSL function (e.g. `VectorShuffle(...)`), which naga
+            // always rejects (silent-wrong). Fail loud instead. (No naga-passing
+            // shader can reach here: the leaked opcode name is never valid WGSL.)
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unsupported op '{s}' in switch/loop replay path", .{@tagName(inst.op)}) catch null;
+            return error.UnsupportedOp;
         },
     }
 }
