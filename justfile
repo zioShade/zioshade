@@ -62,6 +62,12 @@ oracle-diff: test-conformance test-cross-compare test-realworld
     @echo ""
     @echo "Backend oracle differentials: ALL PASSED (spirv-val + SPIRV-Cross + naga)"
 
+# large-corpus WGSL<->naga differential: every conformance fixture -> WGSL -> naga.
+# Reports naga PASS / REJECT (divergences to fix) / honest-unsupported. Slow
+# (naga subprocess per fixture); run on demand, not in `ci`.
+wgsl-naga:
+    @bash tools/wgsl_naga_sweep.sh
+
 # run tests with verbose output
 test-verbose:
     {{zig}} build test --summary all 2>&1 | grep -E "passed|failed|leaked|error:"
