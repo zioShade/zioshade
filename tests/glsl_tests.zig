@@ -1739,3 +1739,52 @@ test "fragment shader declares input varyings (not just the color output)" {
     try assertContains(glsl, "layout(location = 0) in vec2 uv;");
     try assertContains(glsl, "layout(location = 0) out vec4 o;");
 }
+
+/// Strip OpSelectionMerge (247) / OpLoopMerge (246) instructions from a SPIR-V
+/// word stream, producing an *unstructured* module (the kind external optimizers
+/// or hand-authored SPIR-V can yield). Used to test that the backend fails loud
+/// rather than emitting a lossy reconstruction.
+fn stripMergeInstructions(a: std.mem.Allocator, spirv: []const u32) ![]u32 {
+    var out = try std.ArrayList(u32).initCapacity(a, spirv.len);
+    errdefer out.deinit(a);
+    try out.appendSlice(a, spirv[0..5]); // header (magic, version, gen, bound, schema)
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc: usize = spirv[i] >> 16;
+        const op: u32 = spirv[i] & 0xFFFF;
+        if (wc == 0 or i + wc > spirv.len) break;
+        if (op != 247 and op != 246) try out.appendSlice(a, spirv[i .. i + wc]);
+        i += wc;
+    }
+    return out.toOwnedSlice(a);
+}
+
+test "GLSL: unstructured CFG (stripped OpSelectionMerge) errors honestly" {
+    // glslpp's own SPIR-V always carries merge info, so the structured switch
+    // compiles. Stripping OpSelectionMerge yields unstructured SPIR-V; the
+    // backend must fail loud (error.UnstructuredControlFlow) rather than emit a
+    // lossy reconstruction that silently drops the default case (silent-wrong).
+    const source =
+        \\#version 450
+        \\layout(location = 0) flat in int sel;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec4 c = vec4(0.0);
+        \\    switch (sel) {
+        \\        case 0: c = vec4(1.0); break;
+        \\        case 1: c = vec4(0.5); break;
+        \\        default: c = vec4(0.2); break;
+        \\    }
+        \\    o = c;
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    // Structured input compiles fine.
+    const ok = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    alloc.free(ok);
+    // Unstructured input fails loud.
+    const stripped = try stripMergeInstructions(alloc, spirv);
+    defer alloc.free(stripped);
+    try std.testing.expectError(error.UnstructuredControlFlow, glslpp.spirvToGLSL(alloc, stripped, .{ .version = 430 }));
+}
