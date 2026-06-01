@@ -2023,3 +2023,20 @@ test "msl: gl_VertexIndex / gl_InstanceIndex thread as [[vertex_id]]/[[instance_
     // The helper declares them as signed int params.
     try assertContains(msl, "int gl_VertexIndex");
 }
+
+test "msl: gl_FrontFacing threads as bool [[front_facing]]" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main() {
+        \\    o = gl_FrontFacing ? vec4(1.0,0.0,0.0,1.0) : vec4(0.0,1.0,0.0,1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    // Entry-point parameter carries the MSL builtin attribute + bool type.
+    try assertContains(msl, "bool gl_FrontFacing [[front_facing]]");
+    // Threaded into the helper as a bool (no int cast — it is already bool).
+    try assertContains(msl, "bool gl_FrontFacing)");
+    try assertNotContains(msl, "int(gl_FrontFacing)");
+}

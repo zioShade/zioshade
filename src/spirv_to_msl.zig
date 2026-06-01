@@ -1336,13 +1336,25 @@ fn builtinOf(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), 
 /// A SPIR-V Input built-in that maps to an MSL entry-point parameter attribute
 /// (e.g. gl_VertexIndex → `uint gl_VertexIndex [[vertex_id]]`). `name` is the
 /// identifier the shader body references (kept stable through `names`).
-const InBuiltin = struct { var_id: u32, name: []const u8, attr: []const u8 };
+/// `entry_ty` is the MSL type required on the [[attr]] parameter; `impl_ty` is
+/// the type the body expects (matches the SPIR-V variable). When they differ
+/// (vertex_id/instance_id are uint at the boundary but signed int in the body)
+/// `cast_to_int` forwards an `int(...)`-wrapped copy to the helper.
+const InBuiltin = struct {
+    var_id: u32,
+    name: []const u8,
+    attr: []const u8,
+    entry_ty: []const u8,
+    impl_ty: []const u8,
+    cast_to_int: bool,
+};
 
 /// Collect Input OpVariables decorated with a built-in that needs to be threaded
 /// as an MSL entry-point parameter. These built-ins carry no SPIR-V Location, so
 /// they are absent from the stage-in struct; without explicit threading the body
 /// references them as undeclared identifiers (uncompilable MSL — silent-wrong).
-/// `is_vertex` selects the vertex-stage set (VertexIndex/InstanceIndex).
+/// `is_vertex` selects the vertex set (VertexIndex/InstanceIndex) vs the fragment
+/// set (FrontFacing).
 fn collectInputBuiltins(
     m: *const ParsedModule,
     decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
@@ -1357,14 +1369,24 @@ fn collectInputBuiltins(
         if (sc != .Input) continue;
         const vid = inst.words[2];
         const bi = builtinOf(decs, vid) orelse continue;
-        const attr: ?[]const u8 = if (is_vertex) switch (bi) {
-            @intFromEnum(spirv.BuiltIn.vertex_index) => "vertex_id",
-            @intFromEnum(spirv.BuiltIn.instance_index) => "instance_id",
+        const ib: ?InBuiltin = if (is_vertex) switch (bi) {
+            @intFromEnum(spirv.BuiltIn.vertex_index) => .{ .var_id = vid, .name = "", .attr = "vertex_id", .entry_ty = "uint", .impl_ty = "int", .cast_to_int = true },
+            @intFromEnum(spirv.BuiltIn.instance_index) => .{ .var_id = vid, .name = "", .attr = "instance_id", .entry_ty = "uint", .impl_ty = "int", .cast_to_int = true },
             else => null,
-        } else null;
-        if (attr) |a| {
+        } else switch (bi) {
+            @intFromEnum(spirv.BuiltIn.front_facing) => .{ .var_id = vid, .name = "", .attr = "front_facing", .entry_ty = "bool", .impl_ty = "bool", .cast_to_int = false },
+            else => null,
+        };
+        if (ib) |entry| {
             const nm = names.get(vid) orelse continue;
-            out.append(alloc, .{ .var_id = vid, .name = nm, .attr = a }) catch {};
+            out.append(alloc, .{
+                .var_id = vid,
+                .name = nm,
+                .attr = entry.attr,
+                .entry_ty = entry.entry_ty,
+                .impl_ty = entry.impl_ty,
+                .cast_to_int = entry.cast_to_int,
+            }) catch {};
         }
     }
 }
@@ -1741,6 +1763,13 @@ fn emitFunction(
             if (names.fetchPut(si.var_id, aliased) catch null) |old| alloc.free(old.value);
         }
 
+        // Fragment input built-ins (gl_FrontFacing → bool [[front_facing]]). Like
+        // the vertex case, these carry no Location and would otherwise leak as
+        // undeclared identifiers. Threaded as an entry-point param + helper arg.
+        var frag_in_builtins = std.ArrayList(InBuiltin).initCapacity(alloc, 2) catch return error.OutOfMemory;
+        defer frag_in_builtins.deinit(alloc);
+        collectInputBuiltins(m, decs, names, &frag_in_builtins, alloc, false);
+
         // Helper function signature: void mainImage(thread float4& out, float2 fragCoord, ...)
         try w.writeAll("void ");
         try w.writeAll(func_name);
@@ -1783,6 +1812,13 @@ fn emitFunction(
         if (stage_inputs.items.len > 0) {
             if (!first_param) try w.writeAll(", ");
             try w.writeAll("main0_in in");
+            first_param = false;
+        }
+
+        // Fragment input built-ins by value (impl_ty matches the SPIR-V type).
+        for (frag_in_builtins.items) |ib| {
+            if (!first_param) try w.writeAll(", ");
+            try w.print("{s} {s}", .{ ib.impl_ty, ib.name });
             first_param = false;
         }
 
@@ -1834,6 +1870,12 @@ fn emitFunction(
                 first_param = false;
             }
         }
+        // Fragment input built-ins as MSL entry-point attributes (front_facing).
+        for (frag_in_builtins.items) |ib| {
+            if (!first_param) try w.writeAll(", ");
+            try w.print("{s} {s} [[{s}]]", .{ ib.entry_ty, ib.name, ib.attr });
+            first_param = false;
+        }
         if (!first_param) try w.writeAll(", ");
         try w.writeAll("float4 gl_FragCoord [[position]])");
 
@@ -1856,6 +1898,11 @@ fn emitFunction(
         }
         // Pass the stage-in struct last, matching the `_impl` signature order.
         if (stage_inputs.items.len > 0) try w.writeAll(", in");
+        // Forward fragment input built-ins (after the stage-in struct, matching
+        // the helper signature order). front_facing is bool — no cast needed.
+        for (frag_in_builtins.items) |ib| {
+            if (ib.cast_to_int) try w.print(", int({s})", .{ib.name}) else try w.print(", {s}", .{ib.name});
+        }
         try w.writeAll(");\n    return out;\n}\n");
         return;
     }
@@ -2017,10 +2064,10 @@ fn emitFunction(
             try w.print("{s} {s}, sampler {s}Smplr", .{ mslTextureType(tex), tex.name, tex.name });
             first_param = false;
         }
-        // Input built-ins by value, signed (matches the SPIR-V variable type).
+        // Input built-ins by value (impl_ty matches the SPIR-V variable type).
         for (vtx_in_builtins.items) |ib| {
             if (!first_param) try w.writeAll(", ");
-            try w.print("int {s}", .{ib.name});
+            try w.print("{s} {s}", .{ ib.impl_ty, ib.name });
             first_param = false;
         }
         try w.writeAll(")\n{\n");
@@ -2052,7 +2099,7 @@ fn emitFunction(
         // Input built-ins as MSL entry-point attributes (uint vertex_id/instance_id).
         for (vtx_in_builtins.items) |ib| {
             if (!first_param) try w.writeAll(", ");
-            try w.print("uint {s} [[{s}]]", .{ ib.name, ib.attr });
+            try w.print("{s} {s} [[{s}]]", .{ ib.entry_ty, ib.name, ib.attr });
             first_param = false;
         }
         try w.writeAll(")\n{\n    main0_out out = {};\n    ");
@@ -2077,11 +2124,11 @@ fn emitFunction(
             try w.print("{s}, {s}Smplr", .{ tex.name, tex.name });
             first_arg = false;
         }
-        // Forward each input built-in to the helper as a signed `int(...)` copy
-        // (the MSL builtin is `uint`; the SPIR-V variable is signed int).
+        // Forward each input built-in to the helper, casting uint→int where the
+        // body expects the signed SPIR-V type (vertex_id/instance_id).
         for (vtx_in_builtins.items) |ib| {
             if (!first_arg) try w.writeAll(", ");
-            try w.print("int({s})", .{ib.name});
+            if (ib.cast_to_int) try w.print("int({s})", .{ib.name}) else try w.print("{s}", .{ib.name});
             first_arg = false;
         }
         try w.writeAll(");\n    return out;\n}\n");
