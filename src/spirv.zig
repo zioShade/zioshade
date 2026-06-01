@@ -305,6 +305,12 @@ pub const Capability = enum(u32) {
     multi_view = 4439,
     shader_layer = 69,
     shader_viewport_index = 70,
+    /// `FragmentBarycentricKHR` — GL_EXT/NV_fragment_shader_barycentric.
+    /// glslang emits this same capability for BOTH the KHR and NV extensions;
+    /// only the OpExtension string differs. (FragmentBarycentricNV is an alias
+    /// of the same value 5284.) NOTE: 5284 is the CAPABILITY; do not confuse it
+    /// with the BaryCoordKHR *BuiltIn* (5286) or PerVertexKHR *Decoration* (5285).
+    fragment_barycentric_khr = 5284,
     _,
 };
 
