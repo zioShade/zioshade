@@ -669,6 +669,22 @@ test "wgsl: fragment-shader interlock errors honestly (WGSL has no interlock)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "interlock") != null);
 }
 
+test "wgsl: unmapped input built-in (gl_PointCoord) errors honestly" {
+    // gl_PointCoord has no WGSL @builtin. It must fail loud — previously it hit
+    // an `else => \"position\"` fallback that fabricated a bogus
+    // @builtin(position): vec2f (naga reject, silent-wrong).
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(gl_PointCoord, 0.0, 1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "@builtin") != null);
+}
+
 test "wgsl: vertex input without explicit location is still emitted as a param" {
     // `in vec4 inV;` (no layout location) must become an `@location(N)` entry
     // parameter; previously inputs lacking a Location decoration were dropped,
