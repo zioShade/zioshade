@@ -310,11 +310,18 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
             const type_inst = getDef(module, type_id);
             if (type_inst) |ti| {
                 if (ti.op == .TypeVector) {
-                    const scalar_type = tryResolveTypeName(module, ti.words[2]);
+                    const scalar_raw = tryResolveTypeName(module, ti.words[2]);
                     const count = ti.words[3];
+                    // This composite-constant naming is consumed ONLY by the WGSL
+                    // backend, so the constructor must use WGSL syntax. tryResolve-
+                    // TypeName returns the GLSL scalar spelling; emit the WGSL
+                    // vector form `vec{N}<wgsl_scalar>(...)`. Previously this used
+                    // the GLSL spelling `{scalar}{N}(` (e.g. `uint2(`), which naga
+                    // rejects (leaks as an undefined identifier).
+                    const wgsl_scalar: []const u8 = if (std.mem.eql(u8, scalar_raw, "float")) "f32" else if (std.mem.eql(u8, scalar_raw, "int")) "i32" else if (std.mem.eql(u8, scalar_raw, "uint")) "u32" else scalar_raw;
                     var buf = std.ArrayList(u8).initCapacity(alloc, 64) catch continue;
                     defer buf.deinit(alloc);
-                    buf.writer(alloc).print("{s}{d}(", .{scalar_type, count}) catch continue;
+                    buf.writer(alloc).print("vec{d}<{s}>(", .{count, wgsl_scalar}) catch continue;
                     for (inst.words[3..], 0..) |comp_id, i| {
                         if (i > 0) buf.writer(alloc).writeAll(", ") catch continue;
                         const comp_name = names.get(comp_id) orelse "0.0";

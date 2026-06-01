@@ -669,6 +669,28 @@ test "wgsl: fragment-shader interlock errors honestly (WGSL has no interlock)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "interlock") != null);
 }
 
+test "wgsl: constant unsigned vector uses WGSL vec constructor, not GLSL uintN" {
+    // A uvec2 constant composite must render as `vec2<u32>(...)`, not the GLSL
+    // spelling `uint2(...)` / `uvec2i(...)` which naga rejects as an undefined
+    // identifier.
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 v;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    uvec2 a = uvec2(v) & uvec2(7u, 15u);
+        \\    o = vec4(vec2(a), 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "vec2<u32>(7u, 15u)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "uint2(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "uvec2") == null);
+}
+
 test "wgsl: nested switch does not leak OpSelectionMerge as a value" {
     // A nested switch drives the switch/loop replay path. OpSelectionMerge (a
     // structured-control-flow hint with no result id) must be skipped there, not
