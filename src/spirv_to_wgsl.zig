@@ -4721,6 +4721,70 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                 if (try names.fetchPut(result_id, expr)) |old| alloc.free(old.value);
             }
         },
+        .CompositeExtract => {
+            // Build a type-aware access expression (vec swizzle / struct member /
+            // array index) and store it inline in `names`, emitting NO statement
+            // — mirroring the main emit path. Without this case the replay path
+            // fell to the generic fallback, leaking `var <expr>: T =
+            // CompositeExtract(...)` (the opcode name as a call AND an access
+            // expression used as a `var` name) which naga rejects.
+            if (inst.words.len < 4) return;
+            const result_id = inst.words[2];
+            const composite = names.get(inst.words[3]) orelse "c";
+            var expr = std.ArrayList(u8).initCapacity(alloc, 64) catch return;
+            errdefer expr.deinit(alloc);
+            expr.appendSlice(alloc, composite) catch return;
+            var current_type: ?u32 = resolveTypeOf(module, inst.words[3]);
+            if (current_type == null) {
+                const comp_def = getDef(module, inst.words[3]);
+                if (comp_def) |cd| {
+                    if (cd.words.len > 1) {
+                        const rt_inst = getDef(module, cd.words[1]);
+                        if (rt_inst) |rti| {
+                            current_type = if (rti.op == .TypePointer and rti.words.len > 3) rti.words[3] else cd.words[1];
+                        }
+                    }
+                }
+            }
+            for (inst.words[4..]) |idx| {
+                if (current_type) |ct| {
+                    const ct_inst = getDef(module, ct);
+                    if (ct_inst) |cti| {
+                        if (cti.op == .TypeStruct) {
+                            var mname_buf: [32]u8 = undefined;
+                            const mname = getMemberName(module, ct, idx, &mname_buf);
+                            expr.print(alloc, ".{s}", .{mname}) catch return;
+                            current_type = if (idx + 2 < cti.words.len) cti.words[idx + 2] else null;
+                            continue;
+                        } else if (cti.op == .TypeVector) {
+                            const sw = switch (idx) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" };
+                            expr.appendSlice(alloc, sw) catch return;
+                            current_type = if (cti.words.len > 2) cti.words[2] else null;
+                            continue;
+                        } else if (cti.op == .TypeMatrix or cti.op == .TypeArray) {
+                            expr.print(alloc, "[{d}]", .{idx}) catch return;
+                            current_type = if (cti.words.len > 2) cti.words[2] else null;
+                            continue;
+                        }
+                    }
+                }
+                expr.print(alloc, "[{d}]", .{idx}) catch return;
+            }
+            const owned = expr.toOwnedSlice(alloc) catch return;
+            if (try names.fetchPut(result_id, owned)) |old| alloc.free(old.value);
+        },
+        .Select => {
+            // WGSL `select(false, true, cond)`. Without this case the replay path
+            // leaked the opcode name as a call (`Select(...)`), which naga rejects.
+            if (inst.words.len < 6) return;
+            const rt = try wgslType(module, inst.words[1], names, arena);
+            const result_name = names.get(inst.words[2]) orelse "v";
+            const cond = names.get(inst.words[3]) orelse "c";
+            const true_val = names.get(inst.words[4]) orelse "t";
+            const false_val = names.get(inst.words[5]) orelse "f";
+            try writeIndentStatic(w, indent);
+            try w.print("let {s}: {s} = select({s}, {s}, {s});\n", .{ result_name, rt, false_val, true_val, cond });
+        },
         .Bitcast => {
             const rt = try wgslType(module, inst.words[1], names, arena);
             const result_name = names.get(inst.words[2]) orelse "v";
