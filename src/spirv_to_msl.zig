@@ -1399,6 +1399,39 @@ fn collectInputBuiltins(
     }
 }
 
+/// Collect compute-stage Input built-ins that map to MSL kernel parameter
+/// attributes (gl_LocalInvocationID → `uint3 [[thread_position_in_threadgroup]]`,
+/// etc.). gl_GlobalInvocationID is emitted unconditionally by the compute entry
+/// path, so it is intentionally excluded here to avoid a duplicate parameter.
+/// Like the other built-ins these carry no Location; without explicit threading
+/// the kernel body references them as undeclared identifiers (silent-wrong).
+fn collectComputeBuiltins(
+    m: *const ParsedModule,
+    decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
+    names: *std.AutoHashMap(u32, []const u8),
+    out: *std.ArrayList(InBuiltin),
+    alloc: std.mem.Allocator,
+) void {
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc != .Input) continue;
+        const vid = inst.words[2];
+        const bi = builtinOf(decs, vid) orelse continue;
+        const spec: ?struct { ty: []const u8, attr: []const u8 } = switch (bi) {
+            @intFromEnum(spirv.BuiltIn.local_invocation_id) => .{ .ty = "uint3", .attr = "thread_position_in_threadgroup" },
+            @intFromEnum(spirv.BuiltIn.workgroup_id) => .{ .ty = "uint3", .attr = "threadgroup_position_in_grid" },
+            @intFromEnum(spirv.BuiltIn.num_workgroups) => .{ .ty = "uint3", .attr = "threadgroups_per_grid" },
+            @intFromEnum(spirv.BuiltIn.local_invocation_index) => .{ .ty = "uint", .attr = "thread_index_in_threadgroup" },
+            else => null,
+        };
+        if (spec) |s| {
+            const nm = names.get(vid) orelse continue;
+            out.append(alloc, .{ .var_id = vid, .name = nm, .attr = s.attr, .entry_ty = s.ty, .impl_ty = s.ty, .cast_to_int = false }) catch {};
+        }
+    }
+}
+
 /// Compute natural byte size of a SPIR-V scalar/vector type.
 fn typeNatSize(m: *const ParsedModule, type_id: u32) u32 {
     const inst = getDef(m, type_id) orelse return 4;
@@ -1969,6 +2002,17 @@ fn emitFunction(
         // Thread position
         if (!first_param) try w.writeAll(", ");
         try w.writeAll("uint3 gl_GlobalInvocationID [[thread_position_in_grid]]");
+
+        // Other compute built-ins (gl_LocalInvocationID/gl_WorkGroupID/
+        // gl_NumWorkGroups/gl_LocalInvocationIndex) as additional kernel params
+        // with their MSL attribute. Without this they leak as undeclared
+        // identifiers in the body (uncompilable MSL — silent-wrong).
+        var cs_builtins = std.ArrayList(InBuiltin).initCapacity(alloc, 4) catch return error.OutOfMemory;
+        defer cs_builtins.deinit(alloc);
+        collectComputeBuiltins(m, decs, names, &cs_builtins, alloc);
+        for (cs_builtins.items) |ib| {
+            try w.print(", {s} {s} [[{s}]]", .{ ib.entry_ty, ib.name, ib.attr });
+        }
 
         try w.writeAll(")\n{\n");
 
