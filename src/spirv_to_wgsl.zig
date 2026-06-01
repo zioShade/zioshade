@@ -1077,6 +1077,22 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         } else return error.EntryPointNotFound;
     }
 
+    // WGSL has only vertex / fragment / compute entry points. Geometry,
+    // tessellation, mesh/task and ray-tracing stages cannot be represented at
+    // all — fail loud with a named error rather than emit WGSL that naga rejects
+    // (the silent-wrong this milestone forbids).
+    switch (module.execution_model) {
+        .Vertex, .Fragment, .GLCompute => {},
+        else => {
+            last_error_detail = std.fmt.bufPrint(
+                &last_error_detail_buf,
+                "WGSL has no '{s}' entry point (WGSL supports only vertex/fragment/compute)",
+                .{@tagName(module.execution_model)},
+            ) catch null;
+            return error.UnsupportedStage;
+        },
+    }
+
     var names = std.AutoHashMap(u32, []const u8).init(alloc);
     defer {
         var it = names.iterator();
