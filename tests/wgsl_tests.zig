@@ -811,3 +811,27 @@ test "wgsl: non-square row_major UBO matrix is an honest error (not silent-wrong
         glslpp.spirvToWGSL(alloc, spirv, .{}),
     );
 }
+
+test "wgsl: gl_VertexIndex/gl_InstanceIndex emit u32 @builtin with i32 conversion" {
+    // WGSL mandates u32 for vertex_index/instance_index, but glslang types them
+    // as signed i32. Emitting i32 makes naga reject the entry point. We emit a
+    // u32 parameter and a converting `let ...: i32 = i32(...)` for body uses.
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 col;
+        \\void main() {
+        \\    gl_Position = vec4(float(gl_VertexIndex), float(gl_InstanceIndex), 0.0, 1.0);
+        \\    col = vec4(1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@builtin(vertex_index) gl_VertexIndex_b: u32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@builtin(instance_index) gl_InstanceIndex_b: u32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "let gl_VertexIndex: i32 = i32(gl_VertexIndex_b);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "let gl_InstanceIndex: i32 = i32(gl_InstanceIndex_b);") != null);
+    // The invalid signed builtin must NOT appear.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@builtin(vertex_index) gl_VertexIndex: i32") == null);
+}

@@ -1969,6 +1969,15 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         try w.print("{s}\nfn main(", .{entry_stage});
     }
 
+    // WGSL mandates `u32` for the vertex_index / instance_index built-ins, but
+    // glslang types gl_VertexIndex / gl_InstanceIndex as signed i32 (which naga
+    // rejects: "Built-in type for VertexIndex is invalid. Found Sint"). For each
+    // such param we emit a `u32` parameter under a `_b` name and inject a
+    // converting `let <name>: i32 = i32(<name>_b);` at the body start so signed
+    // uses in the body stay valid. Collected here, emitted after the `{`.
+    const BuiltinCoercion = struct { name: []const u8, src: []const u8 };
+    var builtin_coercions = std.ArrayList(BuiltinCoercion).initCapacity(arena, 2) catch return error.OutOfMemory;
+
     // Input parameters
     for (input_vars.items, 0..) |iv, i| {
         if (i > 0) try w.writeAll(", ");
@@ -2003,7 +2012,17 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 .layer => "view_index",
                 else => "position",
             };
-            try w.print("@builtin({s}) {s}: {s}", .{ builtin_name, var_name, type_name });
+            const needs_u32 = switch (bi) {
+                .vertex_id, .instance_id, .vertex_index, .instance_index => true,
+                else => false,
+            };
+            if (needs_u32 and std.mem.eql(u8, type_name, "i32")) {
+                const pname = try std.fmt.allocPrint(arena, "{s}_b", .{var_name});
+                try w.print("@builtin({s}) {s}: u32", .{ builtin_name, pname });
+                try builtin_coercions.append(arena, .{ .name = var_name, .src = pname });
+            } else {
+                try w.print("@builtin({s}) {s}: {s}", .{ builtin_name, var_name, type_name });
+            }
         } else {
             const loc = getDecVal(&decorations, iv.id, .location) orelse i;
             try w.print("@location({d}) {s}: {s}", .{ loc, var_name, type_name });
@@ -2053,6 +2072,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
     } else {
         try w.writeAll(") {\n");
+    }
+
+    // Inject u32→i32 conversions for vertex_index/instance_index built-ins so
+    // the (signed) body references resolve while the parameter stays WGSL-legal.
+    for (builtin_coercions.items) |c| {
+        try w.print("    let {s}: i32 = i32({s});\n", .{ c.name, c.src });
     }
 
     // Pre-scan: detect simple output variable pattern (single store before return)
