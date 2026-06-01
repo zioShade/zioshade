@@ -2925,6 +2925,14 @@ fn emitInstruction(
             // get_array_size() for arrayed textures. Result rank decides how
             // many components to assemble; the image's Arrayed flag picks
             // get_array_size() vs get_depth() for the third component.
+            //
+            // NOTE: the emitted query EXPRESSION is correct (verified vs the
+            // spirv-cross oracle), but get_depth()/get_array_size() are members
+            // of texture3d/texture2d_array/texturecube_array — not the
+            // texture2d<float> this backend currently hardcodes for every
+            // texture (see mslTextureType / TextureDecl). Full compilation of
+            // non-2D image-size queries therefore awaits the deferred,
+            // backend-wide texture-type modeling.
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const img = names.get(inst.words[3]) orelse "tex";

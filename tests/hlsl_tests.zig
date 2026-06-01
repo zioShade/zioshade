@@ -13632,6 +13632,9 @@ test "hlsl: imageSize(image2DArray) emits int3 with 3-component GetDimensions" {
     ;
     const hlsl = try compileToHlsl(src);
     defer alloc.free(hlsl);
+    // Correct declaration (RWTexture2DArray, not RWTexture2D) so the 3-arg
+    // GetDimensions(w,h,elements) overload exists and the result is int3.
+    try assertContains(hlsl, "RWTexture2DArray");
     try assertContains(hlsl, "GetDimensions");
     try assertContains(hlsl, "int3");
     try assertNotContains(hlsl, "unhandled");
@@ -13649,12 +13652,13 @@ test "hlsl: imageSize(image3D) emits int3 with depth component" {
     ;
     const hlsl = try compileToHlsl(src);
     defer alloc.free(hlsl);
+    try assertContains(hlsl, "RWTexture3D");
     try assertContains(hlsl, "GetDimensions");
     try assertContains(hlsl, "int3");
     try assertNotContains(hlsl, "unhandled");
 }
 
-test "hlsl: textureSize(sampler2DMSArray) emits int3" {
+test "hlsl: textureSize(sampler2DMSArray) emits int3 with samples out-param" {
     const src =
         \\#version 450
         \\layout(binding = 0) uniform sampler2DMSArray tex;
@@ -13666,7 +13670,11 @@ test "hlsl: textureSize(sampler2DMSArray) emits int3" {
     ;
     const hlsl = try compileToHlsl(src);
     defer alloc.free(hlsl);
+    // Texture2DMSArray's only GetDimensions overload requires the extra
+    // NumberOfSamples out-param; without it DXC rejects the 3-arg call.
+    try assertContains(hlsl, "Texture2DMSArray");
     try assertContains(hlsl, "GetDimensions");
+    try assertContains(hlsl, "_samples");
     try assertContains(hlsl, "int3");
     try assertNotContains(hlsl, "unhandled");
 }
