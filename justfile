@@ -43,6 +43,25 @@ enumerate-fp:
 strict-gate:
     {{zig}} build strict-gate --summary all
 
+# ── backend oracle differentials ─────────────────────────────────────
+# Every backend output is checked against its reference oracle:
+#   SPIR-V → spirv-val   (conformance)        HLSL → dxc            (validate-dxc)
+#   GLSL/HLSL/MSL structural → spirv-cross    (test-cross-compare)
+#   WGSL → naga                               (test-realworld)
+
+# cross-compiler structural differential: glslpp output vs SPIRV-Cross
+test-cross-compare:
+    {{zig}} build test-cross-compare --summary all
+
+# validate glslpp WGSL output against naga (real-world shader corpus)
+test-realworld:
+    {{zig}} build test-realworld --summary all
+
+# all backend oracle differentials in one gate (spirv-val + SPIRV-Cross + naga)
+oracle-diff: test-conformance test-cross-compare test-realworld
+    @echo ""
+    @echo "Backend oracle differentials: ALL PASSED (spirv-val + SPIRV-Cross + naga)"
+
 # run tests with verbose output
 test-verbose:
     {{zig}} build test --summary all 2>&1 | grep -E "passed|failed|leaked|error:"
@@ -79,8 +98,8 @@ check:
 
 # ── full CI pipeline ─────────────────────────────────────────────────
 
-# run everything CI would run
-ci: test test-hlsl validate-dxc strict-gate
+# run everything CI would run (incl. backend oracle differentials)
+ci: test test-hlsl validate-dxc strict-gate oracle-diff
     @echo ""
     @echo "═══════════════════════════════════════"
     @echo "  CI PASSED — all gates green"
