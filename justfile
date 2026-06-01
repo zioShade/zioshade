@@ -90,6 +90,18 @@ validate-dxc: generate-outputs
 generate-outputs:
     {{zig}} run -ODebug --dep glslpp -Mroot=tools/dump_crt_hlsl.zig -Mglslpp=src/root.zig
 
+# ── fuzzing ──────────────────────────────────────────────────────────
+
+# run the structured-GLSL fuzzer (ReleaseFast). Default 100k iters; override:
+#   just fuzz 1000000
+fuzz count="100000":
+    {{zig}} build fuzz -Doptimize=ReleaseFast -- --count {{count}}
+
+# robustness milestone: ≥1M fuzz iterations must be 100% clean (0 fail).
+# Verified clean at 1,000,000 iters (seed 1) — see CHANGELOG.
+fuzz-million:
+    {{zig}} build fuzz -Doptimize=ReleaseFast -- --count 1000000 --seed 1
+
 # ── benchmarks ───────────────────────────────────────────────────────
 
 # run wintty shader benchmark (ReleaseFast, 50 iterations)
