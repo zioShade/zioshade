@@ -19,7 +19,15 @@
 //!   tests/conformance/stress/vec_compare.frag    → fixture repaired (was ES-legacy gl_FragColor)
 //!   tests/conformance/stress/wgsl_global_const.frag → fixture repaired (u_val was undeclared)
 //!   tests/conformance/stress/wgsl_saturate.frag  → fixture repaired (saturate() is HLSL, now clamp)
+//!   imageSize/textureSize dims → fixed (imageSize was always ivec2;
+//!     textureSize(sampler2DMSArray) defaulted to ivec2). Fixture image_query_dims.frag.
 //!   (enumerate-fp: 28 → 25 candidates)
+//!
+//! KNOWN REMAINING BLOCKER (separate, larger fix):
+//!   tests/spirv-cross/image-query.desktop.frag still a candidate because the parser
+//!   collapses float samplerCubeArray → .sampler_cube (parser.zig:702), dropping the
+//!   array rank (silent-wrong: wrong SPIR-V image type + ivec2 textureSize). Needs a
+//!   distinct .sampler_cube_array type threaded through codegen — tracked for follow-up.
 //!
 //! GROUP A — glslang ACCEPTS, glslpp can represent → FALSE-POSITIVE (Task 1, model):
 //!   fixture                                       | ctx             | notes
@@ -124,6 +132,37 @@ test "strict: not() on a non-boolean operand fails loud (no silent-wrong)" {
         \\void main() { bool b = true; o = vec4(float(not(b))); }
     ;
     try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, bad_scalar, .{ .stage = .fragment }));
+}
+
+test "strict: imageSize/textureSize result dims match operand rank (no false-positive)" {
+    const alloc = std.testing.allocator;
+    // imageSize previously always returned ivec2 (TypeMismatch for 1D/buffer/array/3D);
+    // textureSize(sampler2DMSArray) previously defaulted to ivec2. glslang -V accepts.
+    const src =
+        \\#version 450
+        \\layout(r32f, binding = 0) uniform image1D i1;
+        \\layout(r32f, binding = 1) uniform image2DArray i2a;
+        \\layout(r32f, binding = 2) uniform image3D i3;
+        \\layout(r32f, binding = 3) uniform imageBuffer ib;
+        \\layout(r32f, binding = 4) uniform imageCubeArray ica;
+        \\layout(binding = 5) uniform sampler2DMSArray smsa;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    int a = imageSize(i1);
+        \\    ivec3 c = imageSize(i2a);
+        \\    ivec3 d = imageSize(i3);
+        \\    int e = imageSize(ib);
+        \\    ivec3 f = imageSize(ica);
+        \\    ivec3 g = textureSize(smsa);
+        \\    o = vec4(float(a + e), float(c.x + d.x), float(f.x + g.x), 1.0);
+        \\}
+    ;
+    const probe = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(probe);
+    // Codegen must emit OpImageQuerySize (104) / OpImageQuerySizeLod (103), not OpUndef.
+    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expect(!containsOpcode(spirv, 1)); // no OpUndef
 }
 
 /// Scan a SPIR-V module for an instruction with the given opcode (low 16 bits of
