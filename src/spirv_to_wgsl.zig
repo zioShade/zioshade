@@ -1102,6 +1102,26 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         },
     }
 
+    // WGSL has no fragment-shader interlock (GL_ARB/EXT_fragment_shader_interlock:
+    // beginInvocationInterlockARB/endInvocationInterlockARB). Detect the interlock
+    // execution mode (PixelInterlock{Ordered,Unordered}EXT 5366/5367,
+    // SampleInterlock{Ordered,Unordered}EXT 5368/5369) and fail loud rather than
+    // emit WGSL that naga rejects. Compare the raw mode value (not @enumFromInt) so
+    // an unknown vendor mode can never panic.
+    for (module.instructions) |einst| {
+        if (einst.op == .ExecutionMode and einst.words.len >= 3) {
+            const mode_val = einst.words[2];
+            if (mode_val >= 5366 and mode_val <= 5369) {
+                last_error_detail = std.fmt.bufPrint(
+                    &last_error_detail_buf,
+                    "WGSL has no fragment-shader interlock (GL_ARB_fragment_shader_interlock)",
+                    .{},
+                ) catch null;
+                return error.UnsupportedOp;
+            }
+        }
+    }
+
     var names = std.AutoHashMap(u32, []const u8).init(alloc);
     defer {
         var it = names.iterator();
