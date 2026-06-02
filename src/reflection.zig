@@ -46,6 +46,12 @@ pub const Resource = struct {
     size: u32 = 0,
     members: []const Member = &.{},
 
+    /// Descriptor array dimension: 0 if the resource is not an array (the common
+    /// case), else the fixed element count (e.g. `uniform sampler2D tex[4]` → 4).
+    /// Runtime-sized resource arrays report 0 (unknown). The reported `type_id`,
+    /// kind, members and `image_format` describe the ELEMENT type, not the array.
+    array_size: u32 = 0,
+
     // ── Image-specific (populated only for storage_images / subpass_inputs / separate_images / sampled_images) ──
     /// Image format qualifier (e.g. `.rgba8`) for storage images. `null` otherwise.
     image_format: ?ImageFormat = null,
@@ -123,6 +129,8 @@ const TInfo = struct {
     pointee_type_id: u32 = 0,
     member_type_ids: []const u32 = &.{},
     byte_size: u32 = 0,
+    /// For `.array`: the OpConstant id giving the (fixed) element count, 0 if runtime.
+    array_len_id: u32 = 0,
 
     // Image-specific (only set when kind == .image, from OpTypeImage operands).
     /// Image dimensionality per SPIR-V `Dim` enum: 1=1D, 2=2D, 3=3D, 4=Cube, 5=Rect, 6=SubpassData, 7=Buffer.
@@ -153,6 +161,8 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
     defer types.deinit();
     var moffs = std.AutoHashMap(u64, u32).init(alloc); // key = memberKey(struct_id, idx)
     defer moffs.deinit();
+    var const_u32 = std.AutoHashMap(u32, u32).init(alloc); // OpConstant id → 32-bit value (for array lengths)
+    defer const_u32.deinit();
 
     var entry_points = std.ArrayList(EntryPoint).initCapacity(alloc, 4) catch return ShaderResources{};
     defer entry_points.deinit(alloc);
@@ -277,12 +287,15 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             27 => { // OpTypeSampledImage
                 if (wc >= 3) try types.put(spirv_words[pos + 1], .{ .kind = .sampled_image, .element_type_id = spirv_words[pos + 2] });
             },
-            28 => { // OpTypeArray
-                if (wc >= 3) {
-                    var info = TInfo{ .kind = .array, .element_type_id = spirv_words[pos + 2] };
+            28 => { // OpTypeArray %result %elemType %lengthConst
+                if (wc >= 4) {
+                    var info = TInfo{ .kind = .array, .element_type_id = spirv_words[pos + 2], .array_len_id = spirv_words[pos + 3] };
                     if (types.get(spirv_words[pos + 2])) |t| info.byte_size = t.byte_size;
                     try types.put(spirv_words[pos + 1], info);
                 }
+            },
+            43 => { // OpConstant %type %result %value...  (track scalar ints for array lengths)
+                if (wc >= 4) try const_u32.put(spirv_words[pos + 2], spirv_words[pos + 3]);
             },
             30 => { // OpTypeStruct
                 if (wc >= 2) {
@@ -364,7 +377,18 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
     for (variables.items) |v| {
         const d = decos.get(v.id) orelse Deco{};
         const nm = names.get(v.id) orelse "";
-        const pointee = resolvePointee(&types, v.type_id);
+        // Resolve through the pointer, then "de-array" a descriptor array
+        // (`sampler2D tex[4]`, `Block blocks[2]`): classify by the ELEMENT type and
+        // report the fixed count in `array_size`. Without this, an array of storage
+        // images would mis-bucket to sampled_images via the classifier's `else`.
+        var pointee = resolvePointee(&types, v.type_id);
+        var array_size: u32 = 0;
+        if (types.get(pointee)) |pi| {
+            if (pi.kind == .array) {
+                array_size = if (pi.array_len_id != 0) (const_u32.get(pi.array_len_id) orelse 0) else 0;
+                pointee = pi.element_type_id;
+            }
+        }
         const tk = resolveKind(&types, pointee);
         const pointee_info: ?TInfo = types.get(pointee);
 
@@ -382,35 +406,41 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             .location = d.location,
             .type_id = pointee,
             .size = if (pointee_info) |t| t.byte_size else 0,
+            .array_size = array_size,
             .image_format = img_format,
         };
 
-        switch (v.sc) {
-            2 => { // Uniform
+        // Opaque resources (samplers / images / accel structs) are routed by their
+        // (de-arrayed) TYPE, not the storage class — glslpp emits sampler ARRAYS
+        // with the `Uniform` (2) class rather than `UniformConstant` (0), so keying
+        // purely on the storage class would mis-bucket a `sampler2D tex[4]` as a UBO.
+        const is_opaque = switch (tk) {
+            .sampled_image, .image, .sampler, .acceleration_structure => true,
+            else => false,
+        };
+        if (is_opaque and (v.sc == 0 or v.sc == 2)) {
+            switch (tk) {
+                .sampled_image => try sampled.append(alloc, res),
+                .image => {
+                    const ti = pointee_info orelse TInfo{};
+                    if (ti.image_dim == 6) { // SubpassData
+                        try subpass.append(alloc, res);
+                    } else if (ti.image_sampled == 2) { // storage image
+                        try stor_img.append(alloc, res);
+                    } else {
+                        try sep_img.append(alloc, res);
+                    }
+                },
+                .sampler => try sep_samp.append(alloc, res),
+                .acceleration_structure => try accels.append(alloc, res),
+                else => unreachable,
+            }
+        } else switch (v.sc) {
+            2 => { // Uniform (block)
                 const td = decos.get(pointee) orelse Deco{};
                 if (td.is_buffer_block) try ssbos.append(alloc, res) else try ubos.append(alloc, res);
             },
             12 => try ssbos.append(alloc, res), // StorageBuffer
-            0 => { // UniformConstant
-                switch (tk) {
-                    .sampled_image => try sampled.append(alloc, res),
-                    .image => {
-                        // Distinguish storage image / subpass input / separate image
-                        // based on the underlying OpTypeImage Dim and Sampled operands.
-                        const ti = pointee_info orelse TInfo{};
-                        if (ti.image_dim == 6) { // SubpassData
-                            try subpass.append(alloc, res);
-                        } else if (ti.image_sampled == 2) { // storage image
-                            try stor_img.append(alloc, res);
-                        } else {
-                            try sep_img.append(alloc, res);
-                        }
-                    },
-                    .sampler => try sep_samp.append(alloc, res),
-                    .acceleration_structure => try accels.append(alloc, res),
-                    else => try sampled.append(alloc, res),
-                }
-            },
             1 => try ins.append(alloc, res), // Input
             3 => try outs.append(alloc, res), // Output
             9 => try pcs.append(alloc, res), // PushConstant
