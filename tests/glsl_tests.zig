@@ -1788,3 +1788,74 @@ test "GLSL: unstructured CFG (stripped OpSelectionMerge) errors honestly" {
     defer alloc.free(stripped);
     try std.testing.expectError(error.UnstructuredControlFlow, glslpp.spirvToGLSL(alloc, stripped, .{ .version = 430 }));
 }
+
+// ---------------------------------------------------------------------------
+// CFG structurization (G2) — end-to-end: strip a structured shader's merge
+// instructions (making it unstructured), structurize it back, and confirm the
+// backend produces the SAME GLSL as the original. Proves the recovery pass.
+// ---------------------------------------------------------------------------
+
+fn stripMergeInstrs(al: std.mem.Allocator, words: []const u32) ![]u32 {
+    var out = std.ArrayList(u32).empty;
+    errdefer out.deinit(al);
+    try out.appendSlice(al, words[0..5]);
+    var i: usize = 5;
+    while (i < words.len) {
+        const hw = words[i];
+        const wc: usize = hw >> 16;
+        const op: u16 = @truncate(hw & 0xFFFF);
+        if (op != 246 and op != 247) try out.appendSlice(al, words[i .. i + wc]); // skip LoopMerge/SelectionMerge
+        i += wc;
+    }
+    return out.toOwnedSlice(al);
+}
+
+test "G2: structurizeModule is a byte-identical no-op on already-structured SPIR-V" {
+    const src =
+        \\#version 450
+        \\layout(location=0) in float t;
+        \\layout(location=0) out vec4 o;
+        \\void main() {
+        \\    vec3 c = vec3(0.0);
+        \\    if (t > 0.5) { c = vec3(1.0,0.0,0.0); } else { c = vec3(0.0,1.0,0.0); }
+        \\    o = vec4(c, 1.0);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const out = try glslpp.cfg_structurize.structurizeModule(alloc, spv);
+    defer alloc.free(out);
+    try std.testing.expectEqualSlices(u32, spv, out); // no-op: nothing to recover
+}
+
+test "G2: strip merges → structurize → backend GLSL matches the original" {
+    const src =
+        \\#version 450
+        \\layout(location=0) in float t;
+        \\layout(location=0) out vec4 o;
+        \\void main() {
+        \\    vec3 c = vec3(0.0);
+        \\    if (t > 0.5) { c = vec3(1.0,0.0,0.0); } else { c = vec3(0.0,1.0,0.0); }
+        \\    o = vec4(c, 1.0);
+        \\}
+    ;
+    const spv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // Ground truth: GLSL from the structured SPIR-V.
+    const glsl_orig = try glslpp.spirvToGLSL(alloc, spv, .{ .version = 450 });
+    defer alloc.free(glsl_orig);
+
+    // Make it unstructured by stripping the merge instructions.
+    const stripped = try stripMergeInstrs(alloc, spv);
+    defer alloc.free(stripped);
+    try std.testing.expect(stripped.len < spv.len); // something was removed
+
+    // Recover structure, then cross-compile — must reproduce the original GLSL.
+    const restructured = try glslpp.cfg_structurize.structurizeModule(alloc, stripped);
+    defer alloc.free(restructured);
+    const glsl_recovered = try glslpp.spirvToGLSL(alloc, restructured, .{ .version = 450 });
+    defer alloc.free(glsl_recovered);
+
+    try std.testing.expectEqualStrings(glsl_orig, glsl_recovered);
+}
