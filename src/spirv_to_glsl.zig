@@ -300,7 +300,12 @@ pub const GlslCompileOptions = struct {
 
 // Use shared parse cache from root (avoids circular import — cache is passed via allocator context)
 pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: GlslCompileOptions) ![]const u8 {
-    var module = try parseModule(alloc, spirv_words);
+    // G2: recover OpSelectionMerge for unstructured-but-reducible SPIR-V. No-op
+    // (byte-identical copy) on already-structured input; on failure fall back to
+    // the original words so the backend's own honest-error path is unchanged.
+    const _norm = @import("cfg_structurize.zig").structurizeModule(alloc, spirv_words) catch null;
+    defer if (_norm) |n| alloc.free(n);
+    var module = try parseModule(alloc, _norm orelse spirv_words);
     defer module.deinit(alloc);
 
     // Override entry point if requested

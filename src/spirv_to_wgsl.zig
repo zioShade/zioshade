@@ -1074,7 +1074,12 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
 // Public API
 // ---------------------------------------------------------------------------
 
-pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: WgslCompileOptions) ![]const u8 {
+pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, options: WgslCompileOptions) ![]const u8 {
+    // G2: recover OpSelectionMerge for unstructured-but-reducible SPIR-V (no-op on
+    // structured input; fall back to the original on failure — see spirvToGLSL).
+    const _norm = @import("cfg_structurize.zig").structurizeModule(alloc, spirv_words_in) catch null;
+    defer if (_norm) |n| alloc.free(n);
+    const spirv_words = _norm orelse spirv_words_in;
     last_error_detail = null; // clear any detail from a prior compile on this thread
     var module = try common.parseModule(alloc, spirv_words);
     defer module.deinit(alloc);
