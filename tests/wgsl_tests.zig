@@ -741,6 +741,23 @@ test "wgsl: shared block var is renamed to avoid struct-name collision" {
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<workgroup> blk_wg:") != null);
 }
 
+test "wgsl: gl_Layer / gl_ViewportIndex error honestly (no WGSL built-in)" {
+    // WGSL has no layer/viewport-index built-in. A shader using gl_Layer (BuiltIn
+    // Layer) must fail loud, not leak `gl_Layer` as an undeclared identifier or
+    // misclassify it as a @location varying (naga reject).
+    const source =
+        \\#version 450
+        \\#extension GL_ARB_shader_viewport_layer_array : require
+        \\layout(location=0) out vec4 color;
+        \\void main() { color = vec4(float(gl_Layer)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "layer") != null);
+}
+
 test "wgsl: constant unsigned vector uses WGSL vec constructor, not GLSL uintN" {
     // A uvec2 constant composite must render as `vec2<u32>(...)`, not the GLSL
     // spelling `uint2(...)` / `uvec2i(...)` which naga rejects as an undefined
