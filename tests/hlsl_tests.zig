@@ -3607,7 +3607,12 @@ test "T72.1: multiple render targets" {
     try assertContains(hlsl, "float4");
 }
 
-test "T72.2: array of samplers" {
+test "T72.2: array of samplers honest-errors (HLSL backend lacks support)" {
+    // The HLSL backend does not yet support descriptor sampler arrays (the
+    // Texture/SamplerState split needs the index relocated across both). It must
+    // fail loud, not emit dxc-invalid output. (Previously this test rubber-stamped
+    // broken output — `v.Sample(v, ...)` with an undeclared `tex` — by only
+    // checking it "contains float4". The GLSL backend DOES support sampler arrays.)
     const source =
         \\#version 450
         \\layout(binding = 0) uniform sampler2D tex[2];
@@ -3617,10 +3622,9 @@ test "T72.2: array of samplers" {
         \\    fragColor = texture(tex[0], vec2(0.5));
         \\}
     ;
-    const hlsl = try compileToHlsl(source);
-    defer alloc.free(hlsl);
-    // Array of samplers produces valid HLSL even if not perfect
-    try assertContains(hlsl, "float4");
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
 }
 
 test "T73.1: GLSL std.450 trig functions (sin, cos, tan)" {
