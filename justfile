@@ -90,6 +90,10 @@ validate-dxc: generate-outputs
 generate-outputs:
     {{zig}} run -ODebug --dep glslpp -Mroot=tools/dump_crt_hlsl.zig -Mglslpp=src/root.zig
 
+# regenerate docs/STATUS.md (single source of truth) from a real conformance run
+status:
+    @bash tools/gen_status.sh
+
 # ── fuzzing ──────────────────────────────────────────────────────────
 
 # run the structured-GLSL fuzzer (ReleaseFast). Default 100k iters; override:
