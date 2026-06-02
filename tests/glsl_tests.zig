@@ -1860,3 +1860,9 @@ test "G2: strip merges → structurize → backend GLSL matches the original" {
 
     try std.testing.expectEqualStrings(glsl_orig, glsl_recovered);
 }
+
+// NOTE: a LOOP strip-and-recover round-trip is intentionally absent — loop-merge
+// recovery is not yet composed into structurizeModule (a loop's break-conditional
+// is mis-handled by loop-unaware selection recovery; see cfg_structurize.zig).
+// Unstructured loops keep honest-erroring (trustworthy interim). The loop-merge
+// recovery + splice primitives are unit-tested in src/cfg_structurize.zig.

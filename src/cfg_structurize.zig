@@ -163,9 +163,18 @@ pub fn structurizeModule(alloc: std.mem.Allocator, words: []const u32) ![]u32 {
         }
     }
 
-    const insertions = try recoverSelectionMerges(alloc, module.instructions[lo..hi]);
-    defer alloc.free(insertions);
-    return spliceSelectionMerges(alloc, words, insertions);
+    // Selection-merge recovery only. NOTE: loop-merge recovery (recoverLoopMerges
+    // / spliceLoopMerges exist + are unit-tested) is intentionally NOT composed
+    // here yet: a loop's break-conditional is a conditional header WITHOUT its own
+    // OpSelectionMerge, so loop-unaware selection recovery mis-handles it once the
+    // OpLoopMerge is absent. Composing them correctly needs loop-AWARE selection
+    // recovery (skip break-conditionals whose merge is a loop merge). Until that
+    // lands, unstructured loops keep honest-erroring downstream — the trustworthy
+    // interim (valid Shader SPIR-V is always structured, so this is malformed-input
+    // robustness, never a real shader path).
+    const sel_ins = try recoverSelectionMerges(alloc, module.instructions[lo..hi]);
+    defer alloc.free(sel_ins);
+    return spliceSelectionMerges(alloc, words, sel_ins);
 }
 
 /// A loop-merge insertion: header block gets `OpLoopMerge %merge %continue None`.
@@ -679,6 +688,51 @@ pub fn spliceSelectionMerges(alloc: std.mem.Allocator, words: []const u32, inser
     return out.toOwnedSlice(alloc);
 }
 
+/// Apply recovered loop insertions: splice `OpLoopMerge %merge %continue None`
+/// immediately before the terminator of each loop header block. Returns a NEW
+/// owned word stream (a copy when there are no insertions). Pure.
+pub fn spliceLoopMerges(alloc: std.mem.Allocator, words: []const u32, insertions: []const LoopInsertion) ![]u32 {
+    if (words.len < 5 or words[0] != spirv.MAGIC) return error.InvalidSpirv;
+
+    const M = struct { merge: u32, cont: u32 };
+    var map = std.AutoHashMap(u32, M).init(alloc);
+    defer map.deinit();
+    for (insertions) |ins| try map.put(ins.header_label, .{ .merge = ins.merge_label, .cont = ins.continue_label });
+
+    var out = std.ArrayList(u32).empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, words[0..5]);
+
+    const LOOP = @intFromEnum(spirv.Op.LoopMerge);
+    const LABEL = @intFromEnum(spirv.Op.Label);
+    const BR = @intFromEnum(spirv.Op.Branch);
+    const BRC = @intFromEnum(spirv.Op.BranchConditional);
+    const SWITCH = @intFromEnum(spirv.Op.Switch);
+
+    var i: usize = 5;
+    var cur_label: u32 = 0;
+    while (i < words.len) {
+        const hw = words[i];
+        const wc: usize = hw >> 16;
+        const op: u16 = @truncate(hw & 0xFFFF);
+        if (wc == 0 or i + wc > words.len) return error.InvalidSpirv;
+
+        if (op == LABEL and wc >= 2) {
+            cur_label = words[i + 1];
+        } else if (op == BR or op == BRC or op == SWITCH) {
+            if (map.get(cur_label)) |m| {
+                try out.append(alloc, (@as(u32, 4) << 16) | @as(u32, LOOP));
+                try out.append(alloc, m.merge);
+                try out.append(alloc, m.cont);
+                try out.append(alloc, 0); // LoopControl = None
+            }
+        }
+        try out.appendSlice(alloc, words[i .. i + wc]);
+        i += wc;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 // ---------------------------------------------------------------------------
 // Tests — hand-built CFGs with known dominator / loop / reducibility answers.
 // ---------------------------------------------------------------------------
@@ -894,6 +948,38 @@ test "splice: inserts OpSelectionMerge before the header terminator; no-op copie
             try testing.expectEqual(@as(u32, 0), out[k + 2]); // SelectionControl None
             // immediately followed by the BranchConditional it guards
             try testing.expectEqual((@as(u32, 4) << 16) | BRC, out[k + 3]);
+            found = true;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "splice-loop: inserts OpLoopMerge %merge %continue before the header terminator" {
+    const a = testing.allocator;
+    const L: u32 = @intFromEnum(spirv.Op.Label);
+    const BR: u32 = @intFromEnum(spirv.Op.Branch);
+    const RET: u32 = @intFromEnum(spirv.Op.Return);
+    const LOOP: u32 = @intFromEnum(spirv.Op.LoopMerge);
+    // header %2 ends in OpBranch %3 (no OpLoopMerge); minimal stream.
+    const words = [_]u32{
+        spirv.MAGIC, 0x10000, 0, 10, 0,
+        (2 << 16) | L,  2, // %2 header
+        (2 << 16) | BR, 3, // OpBranch %3 (header terminator)
+        (2 << 16) | L,  3,
+        (1 << 16) | RET,
+    };
+    const ins = [_]LoopInsertion{.{ .header_label = 2, .merge_label = 5, .continue_label = 4 }};
+    const out = try spliceLoopMerges(a, &words, &ins);
+    defer a.free(out);
+    try testing.expectEqual(words.len + 4, out.len); // one 4-word OpLoopMerge added
+    var found = false;
+    for (out, 0..) |w, k| {
+        if ((w & 0xFFFF) == LOOP) {
+            try testing.expectEqual((@as(u32, 4) << 16) | LOOP, w);
+            try testing.expectEqual(@as(u32, 5), out[k + 1]); // merge
+            try testing.expectEqual(@as(u32, 4), out[k + 2]); // continue
+            try testing.expectEqual(@as(u32, 0), out[k + 3]); // LoopControl None
+            try testing.expectEqual((@as(u32, 2) << 16) | BR, out[k + 4]); // before the OpBranch
             found = true;
         }
     }
