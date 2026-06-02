@@ -2153,6 +2153,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // Pre-scan: detect simple output variable pattern (single store before return)
     // If output var is stored to exactly once, we can return the value directly
     var direct_return_value: ?[]const u8 = null;
+    var direct_return_id: ?u32 = null;
     var depth_return_value: ?[]const u8 = null;
     var mrt_return_values = std.ArrayList(struct { var_name: []const u8, value: []const u8 }).initCapacity(arena, 4) catch return error.OutOfMemory;
     var skip_output_var_decl = false;
@@ -2160,6 +2161,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         const ov = output_var_id.?;
         var store_count: usize = 0;
         var last_stored_value: ?[]const u8 = null;
+        var last_stored_id: ?u32 = null;
         // Scan function body for stores to the output variable
         var sci: usize = entry_func_idx.? + 1;
         while (sci < module.instructions.len) : (sci += 1) {
@@ -2168,6 +2170,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             if (si.op == .Store and si.words.len >= 3 and si.words[1] == ov) {
                 store_count += 1;
                 last_stored_value = names.get(si.words[2]);
+                last_stored_id = si.words[2];
             }
             // Track depth output stores
             if (depth_output_var_id != null and si.op == .Store and si.words.len >= 3 and si.words[1] == depth_output_var_id.?) {
@@ -2185,7 +2188,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         }
         if (store_count == 1 and last_stored_value != null) {
-            direct_return_value = last_stored_value.?;
+            // Dupe into the arena: `last_stored_value` aliases an entry in the
+            // mutable `names` map, which a later rewrite (fetchPut frees the old
+            // value) can invalidate — leaving direct_return_value dangling (it
+            // surfaced as `return \xAA\xAA`, freed-memory fill, for `o = -(-x)`).
+            direct_return_value = arena.dupe(u8, last_stored_value.?) catch last_stored_value.?;
+            direct_return_id = last_stored_id;
             skip_output_var_decl = true;
         }
         // MRT: check all output vars have exactly 1 store
@@ -2227,6 +2235,15 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
 
     // Emit function body
     try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays);
+
+    // Re-resolve the direct-return value AFTER emitBody: a passthrough store
+    // (`o = x`, or `o = -(-x)` after double-negate folding) feeds an OpLoad
+    // whose result emitBody inlines to the *source* name (e.g. `vIn`) and never
+    // emits as a `let`. The name captured pre-emitBody (`v6`) is therefore
+    // undefined in the output; re-reading names[id] now yields the inlined name.
+    if (direct_return_id) |drid| {
+        if (names.get(drid)) |nm| direct_return_value = arena.dupe(u8, nm) catch nm;
+    }
 
     // Return output var
     if (use_frag_depth_struct) {
