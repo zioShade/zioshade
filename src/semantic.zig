@@ -1961,7 +1961,7 @@ const Analyzer = struct {
                 const storage_class: ir.SPIRVStorageClass = switch (node.tag) {
                     .in_decl => .input,
                     .out_decl => .output,
-                    .uniform_decl => if (ty.isSampler()) .uniform_constant else .uniform,
+                    .uniform_decl => if (ty.isSamplerOrArrayOf()) .uniform_constant else .uniform,
                     .var_decl => if (node.data.qualifier != null and node.data.qualifier.?.is_shared) .workgroup else if (node.data.qualifier != null and node.data.qualifier.?.is_task_payload_shared) .task_payload_workgroup else if (node.data.qualifier != null and node.data.qualifier.?.is_ray_payload) .ray_payload else if (node.data.qualifier != null and node.data.qualifier.?.is_incoming_ray_payload) .incoming_ray_payload else if (node.data.qualifier != null and node.data.qualifier.?.is_hit_attribute) .hit_attribute else if (node.data.qualifier != null and node.data.qualifier.?.is_callable_data) .callable_data else if (node.data.qualifier != null and node.data.qualifier.?.is_incoming_callable_data) .incoming_callable_data else .private,
                     else => .private,
                 };
