@@ -57,7 +57,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Mesh/Task shaders | ✅ | 4 pass | ⚠️ Basic |
 | Ray tracing shaders | ✅ | 3 pass | ⚠️ Basic |
 | SPIR-V output | 1.0–1.6 | 1.0–1.6 | ✅ |
-| spirv-val conformance | Reference | 2,072 PASS / 15 XFAIL (honest rejections) / 8 SKIP — exits 0 | ✅ |
+| spirv-val conformance | Reference | 2,074 PASS / 15 XFAIL (honest rejections) / 8 SKIP — exits 0 | ✅ |
 | GLSL extensions parsed | 100+ | 9 (subgroup basic/vote/arithmetic/ballot/shuffle, fragment interlock, mesh, ray tracing, null initializer) | ⚠️ Covers wintty needs |
 | Error diagnostics | Rich (line, column, context) | Basic (error enum, no location) | ❌ Gap |
 
@@ -68,14 +68,14 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | HLSL output | SM 5.0+ | SM 6.0 | ✅ DXC validates 47/51 |
 | MSL output | 2.0+ | Metal 2.0+ | ✅ |
 | GLSL output | 110, 140, 150, 300 es, 330, 410, 430, 450, 460 | 430 | ⚠️ Single version |
-| WGSL output | ✅ | ✅ | ⚠️ Shallow (60 opcode handlers) |
+| WGSL output | ✅ | ✅ | ⚠️ ~60 opcode handlers; naga-validated, honest-errors unsupported constructs (recursion, multisample arrays, layer/viewport, geometry/tess/ray stages); cross-function I/O, frexp/modf struct-return, loop phi, passthrough-return all naga-clean |
 | SPIR-V input (pre-compiled) | ✅ Full | ✅ Partial (best-effort) | ⚠️ Assumes glslpp structure |
 | Opcode handler coverage | ~400 opcodes | HLSL: 180, GLSL: 132, MSL: 130, WGSL: 60 | ✅ HLSL strong, ⚠️ WGSL weak |
 | Reflection API | ✅ Full | ⚠️ Partial (`reflect`) | ⚠️ Gap |
 | Descriptor set management | ✅ Full | `binding_shift` + per-resource `resource_bindings` remap (HLSL/MSL, CLI `--bind`); no UBO flatten | ⚠️ Partial |
 | Combined image sampler | ✅ | Partial | ⚠️ |
 | UBO/SSBO layout handling | Full (std140, std430, row/column-major) | Basic (std140, std430) | ⚠️ |
-| Specialization constants | ✅ | ❌ | ❌ Gap |
+| Specialization constants | ✅ | `layout(constant_id=N) const` → `OpDecorate SpecId` + `OpSpecConstant` (spirv-val clean); CLI `--spec-const ID=VAL` override; WGSL `@id(N) override`; HLSL `[[vk::constant_id(N)]]` | ✅ |
 | Separate sampler/image | ✅ | Partial | ⚠️ |
 
 ### 1.4 Optimizer Passes
