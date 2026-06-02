@@ -2246,11 +2246,22 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         var store_count: usize = 0;
         var last_stored_value: ?[]const u8 = null;
         var last_stored_id: ?u32 = null;
+        // Whether the output variable is READ back (loaded or access-chained) in
+        // the body. The direct-return optimization replaces the output var with a
+        // returned value and skips declaring it — but if the body reads the output
+        // (e.g. partial writes `result.xy=…; result.zw=…` with a `result.z` read,
+        // or any load of the output), those references would be undefined. In that
+        // case we must declare it as a local `var` (zero-initialised) and return
+        // it normally rather than direct-return.
+        var output_is_read = false;
         // Scan function body for stores to the output variable
         var sci: usize = entry_func_idx.? + 1;
         while (sci < module.instructions.len) : (sci += 1) {
             const si = module.instructions[sci];
             if (si.op == .FunctionEnd) break;
+            if ((si.op == .Load or si.op == .AccessChain or si.op == .CopyObject) and si.words.len > 3 and si.words[3] == ov) {
+                output_is_read = true;
+            }
             if (si.op == .Store and si.words.len >= 3 and si.words[1] == ov) {
                 store_count += 1;
                 last_stored_value = names.get(si.words[2]);
@@ -2272,7 +2283,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 }
             }
         }
-        if (store_count == 1 and last_stored_value != null) {
+        if (store_count == 1 and last_stored_value != null and !output_is_read) {
             // Dupe into the arena: `last_stored_value` aliases an entry in the
             // mutable `names` map, which a later rewrite (fetchPut frees the old
             // value) can invalidate — leaving direct_return_value dangling (it
