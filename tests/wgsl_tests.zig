@@ -1290,3 +1290,42 @@ test "wgsl: frexp/modf emit WGSL struct-return form (not the illegal pointer for
     try std.testing.expect(std.mem.indexOf(u8, wgsl, ".whole") != null);
     try assertNoUndeclaredVTemp(wgsl);
 }
+
+test "wgsl: a stage input used in a helper function is promoted to var<private>" {
+    // WGSL @location inputs are entry-point parameters, not module globals, so a
+    // helper that reads one would emit an undefined identifier. The input must be
+    // promoted to a module-scope var<private>, bridged from the entry parameter.
+    // (spec: docs/specs/2026-06-02-wgsl-cross-function-io.md)
+    const source: [:0]const u8 =
+        "#version 450\n" ++
+        "layout(location=0) in vec2 uv;\n" ++
+        "layout(location=0) out vec4 fragColor;\n" ++
+        "float effect(vec2 p) { return length(p + uv); }\n" ++
+        "void main(){ fragColor = vec4(effect(vec2(0.5))); }\n";
+    // NoOpt so the helper is not inlined away — guarantees a genuine
+    // cross-function reference to the input for this test.
+    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The input is a module-scope private global, bridged from a renamed param.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<private> uv: vec2f;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "uv_in: vec2f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "uv = uv_in;") != null);
+    try assertNoUndeclaredVTemp(wgsl);
+}
+
+test "wgsl: a shader with NO cross-function input is unchanged (no spurious var<private>)" {
+    // Gate check: when no input is used in a helper, nothing is promoted.
+    const source: [:0]const u8 =
+        "#version 450\n" ++
+        "layout(location=0) in vec2 uv;\n" ++
+        "layout(location=0) out vec4 fragColor;\n" ++
+        "void main(){ fragColor = vec4(uv, 0.0, 1.0); }\n";
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<private> uv") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "uv_in") == null);
+}
