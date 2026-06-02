@@ -2155,7 +2155,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     var direct_return_value: ?[]const u8 = null;
     var direct_return_id: ?u32 = null;
     var depth_return_value: ?[]const u8 = null;
-    var mrt_return_values = std.ArrayList(struct { var_name: []const u8, value: []const u8 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var depth_return_id: ?u32 = null;
+    var mrt_return_values = std.ArrayList(struct { var_name: []const u8, value: []const u8, value_id: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
     var skip_output_var_decl = false;
     if (!use_vertex_struct and output_var_id != null) {
         const ov = output_var_id.?;
@@ -2175,6 +2176,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             // Track depth output stores
             if (depth_output_var_id != null and si.op == .Store and si.words.len >= 3 and si.words[1] == depth_output_var_id.?) {
                 depth_return_value = names.get(si.words[2]);
+                depth_return_id = si.words[2];
             }
             // Track MRT output stores
             if (use_frag_mrt_struct and si.op == .Store and si.words.len >= 3) {
@@ -2182,7 +2184,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                     if (si.words[1] == ovid) {
                         const vn = names.get(ovid) orelse continue;
                         const val = names.get(si.words[2]) orelse continue;
-                        try mrt_return_values.append(arena, .{ .var_name = vn, .value = val });
+                        try mrt_return_values.append(arena, .{ .var_name = vn, .value = val, .value_id = si.words[2] });
                     }
                 }
             }
@@ -2243,6 +2245,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // undefined in the output; re-reading names[id] now yields the inlined name.
     if (direct_return_id) |drid| {
         if (names.get(drid)) |nm| direct_return_value = arena.dupe(u8, nm) catch nm;
+    }
+    // Same passthrough hazard for the depth and MRT return paths.
+    if (depth_return_id) |drid| {
+        if (names.get(drid)) |nm| depth_return_value = arena.dupe(u8, nm) catch nm;
+    }
+    for (mrt_return_values.items) |*rv| {
+        if (names.get(rv.value_id)) |nm| rv.value = arena.dupe(u8, nm) catch nm;
     }
 
     // Return output var
