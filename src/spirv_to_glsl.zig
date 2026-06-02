@@ -12,7 +12,7 @@ const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
 const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32 };
-const TextureDecl = struct { name: []const u8, binding: u32, is_storage: bool = false, format_str: []const u8 = "rgba8f", dim_str: []const u8 = "2D", is_uint: bool = false, is_int: bool = false };
+const TextureDecl = struct { name: []const u8, binding: u32, is_storage: bool = false, format_str: []const u8 = "rgba8f", dim_str: []const u8 = "2D", is_uint: bool = false, is_int: bool = false, array_size: u32 = 0 };
 
 // ---- Helpers ----
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction { if (id >= m.id_defs.len) return null; const i = m.id_defs[id] orelse return null; if (i >= m.instructions.len) return null; return m.instructions[i]; }
@@ -399,12 +399,14 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
     for (textures.items) |tex| {
         const tex_shifted = common.applyBindingShift(tex.binding, options.binding_shift);
+        // Descriptor-array suffix, e.g. `[4]` for `uniform sampler2D tex[4]`.
+        const arr: []const u8 = if (tex.array_size > 0) (std.fmt.allocPrint(aa, "[{d}]", .{tex.array_size}) catch "") else "";
         if (tex.is_storage) {
             const itype = if (std.mem.eql(u8, tex.dim_str, "Buffer")) (if (tex.is_uint) "uimageBuffer" else if (tex.is_int) "iimageBuffer" else "imageBuffer") else std.fmt.allocPrint(aa, "{s}image{s}", .{if (tex.is_uint) "u" else if (tex.is_int) "i" else "", tex.dim_str}) catch "image2D";
-            try w.print("layout(binding = {d}, {s}) uniform {s} {s};\n", .{tex_shifted, tex.format_str, itype, tex.name});
+            try w.print("layout(binding = {d}, {s}) uniform {s} {s}{s};\n", .{tex_shifted, tex.format_str, itype, tex.name, arr});
         } else {
             const stype = if (tex.is_uint) std.fmt.allocPrint(aa, "usampler{s}", .{tex.dim_str}) catch "usampler2D" else if (tex.is_int) std.fmt.allocPrint(aa, "isampler{s}", .{tex.dim_str}) catch "isampler2D" else if (std.mem.eql(u8, tex.dim_str, "2D")) "sampler2D" else std.fmt.allocPrint(aa, "sampler{s}", .{tex.dim_str}) catch "sampler2D";
-            try w.print("layout(binding = {d}) uniform {s} {s};\n", .{tex_shifted, stype, tex.name});
+            try w.print("layout(binding = {d}) uniform {s} {s}{s};\n", .{tex_shifted, stype, tex.name, arr});
         }
     }
     if (textures.items.len > 0) try w.writeAll("\n");
@@ -797,7 +799,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pt = pi.words[3];
         switch (sc) {
             .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding}) catch {}; },
-            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const name = names.get(rid) orelse "tex"; switch(pei.op){ .TypeSampledImage=>{ const si_img = if (pei.words.len > 2) getDef(m, pei.words[2]) else null; const si_st = if (si_img != null and si_img.?.words.len > 2) getDef(m, si_img.?.words[2]) else null; const si_uint = si_st != null and si_st.?.op == .TypeInt and si_st.?.words.len > 3 and si_st.?.words[3] == 0; const si_int = si_st != null and si_st.?.op == .TypeInt and si_st.?.words.len > 3 and si_st.?.words[3] != 0; const si_dim: []const u8 = blk: { if (si_img != null and si_img.?.words.len > 3) { break :blk switch(si_img.?.words[3]) { 0 => "1D", 1 => "2D", 2 => "3D", 3 => "Cube", 4 => "Rect", 5 => "Buffer", 6 => "SubpassData", else => "2D" }; } break :blk "2D"; }; tex.append(alloc,.{.name=name,.binding=binding,.is_uint=si_uint,.is_int=si_int,.dim_str=si_dim}) catch {};}, .TypeImage=>{ const sampled: u32 = if (pei.words.len > 7) pei.words[7] else 0; const is_storage = sampled == 2; const st_inst = if (pei.words.len > 2) getDef(m, pei.words[2]) else null; const is_uint = st_inst != null and st_inst.?.op == .TypeInt and st_inst.?.words.len > 3 and st_inst.?.words[3] == 0; const is_int = st_inst != null and st_inst.?.op == .TypeInt and st_inst.?.words.len > 3 and st_inst.?.words[3] != 0; const fmt: []const u8 = blk: { if (pei.words.len > 8) { break :blk switch(pei.words[8]) { 0 => "rgba8f", 1 => "rgba32f", 2 => "rgba16f", 3 => "r32f", 4 => "rgba8", 5 => "rgba8_snorm", 6 => "rg32f", 7 => "rg16f", 8 => "r11f_g11f_b10f", 9 => "r16f", 10 => "rgba16", 11 => "rgb10_a2", 12 => "rg8", 13 => "rg8_snorm", 14 => "r8", 15 => "r8_snorm", 16 => "rgba16_snorm", 17 => "rgba32i", 18 => "rgba16i", 19 => "rgba8i", 20 => "rg32i", 21 => "rg16i", 22 => "rg8i", 23 => "r32i", 24 => "rgba32ui", 25 => "rgba16ui", 26 => "rgba8ui", 27 => "rg32ui", 28 => "rg16ui", 29 => "rg8ui", 30...33 => "r32ui", else => "rgba8f" }; } break :blk "rgba8f"; }; const dim: []const u8 = blk: { if (pei.words.len > 3) { break :blk switch(pei.words[3]) { 0 => "1D", 1 => "2D", 2 => "3D", 3 => "Cube", 4 => "Rect", 5 => "Buffer", 6 => "SubpassData", else => "2D" }; } break :blk "2D"; }; tex.append(alloc,.{.name=name,.binding=binding,.is_storage=is_storage,.format_str=fmt,.dim_str=dim,.is_uint=is_uint,.is_int=is_int}) catch {};}, else=>{}} },
+            .UniformConstant => { var pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const name = names.get(rid) orelse "tex"; var arr_sz: u32 = 0; if (pei.op == .TypeArray and pei.words.len > 3) { const li = getDef(m, pei.words[3]); arr_sz = if (li != null and li.?.op == .Constant and li.?.words.len > 3) li.?.words[3] else 0; pei = getDef(m, pei.words[2]) orelse continue; } switch(pei.op){ .TypeSampledImage=>{ const si_img = if (pei.words.len > 2) getDef(m, pei.words[2]) else null; const si_st = if (si_img != null and si_img.?.words.len > 2) getDef(m, si_img.?.words[2]) else null; const si_uint = si_st != null and si_st.?.op == .TypeInt and si_st.?.words.len > 3 and si_st.?.words[3] == 0; const si_int = si_st != null and si_st.?.op == .TypeInt and si_st.?.words.len > 3 and si_st.?.words[3] != 0; const si_dim: []const u8 = blk: { if (si_img != null and si_img.?.words.len > 3) { break :blk switch(si_img.?.words[3]) { 0 => "1D", 1 => "2D", 2 => "3D", 3 => "Cube", 4 => "Rect", 5 => "Buffer", 6 => "SubpassData", else => "2D" }; } break :blk "2D"; }; tex.append(alloc,.{.name=name,.binding=binding,.is_uint=si_uint,.is_int=si_int,.dim_str=si_dim,.array_size=arr_sz}) catch {};}, .TypeImage=>{ const sampled: u32 = if (pei.words.len > 7) pei.words[7] else 0; const is_storage = sampled == 2; const st_inst = if (pei.words.len > 2) getDef(m, pei.words[2]) else null; const is_uint = st_inst != null and st_inst.?.op == .TypeInt and st_inst.?.words.len > 3 and st_inst.?.words[3] == 0; const is_int = st_inst != null and st_inst.?.op == .TypeInt and st_inst.?.words.len > 3 and st_inst.?.words[3] != 0; const fmt: []const u8 = blk: { if (pei.words.len > 8) { break :blk switch(pei.words[8]) { 0 => "rgba8f", 1 => "rgba32f", 2 => "rgba16f", 3 => "r32f", 4 => "rgba8", 5 => "rgba8_snorm", 6 => "rg32f", 7 => "rg16f", 8 => "r11f_g11f_b10f", 9 => "r16f", 10 => "rgba16", 11 => "rgb10_a2", 12 => "rg8", 13 => "rg8_snorm", 14 => "r8", 15 => "r8_snorm", 16 => "rgba16_snorm", 17 => "rgba32i", 18 => "rgba16i", 19 => "rgba8i", 20 => "rg32i", 21 => "rg16i", 22 => "rg8i", 23 => "r32i", 24 => "rgba32ui", 25 => "rgba16ui", 26 => "rgba8ui", 27 => "rg32ui", 28 => "rg16ui", 29 => "rg8ui", 30...33 => "r32ui", else => "rgba8f" }; } break :blk "rgba8f"; }; const dim: []const u8 = blk: { if (pei.words.len > 3) { break :blk switch(pei.words[3]) { 0 => "1D", 1 => "2D", 2 => "3D", 3 => "Cube", 4 => "Rect", 5 => "Buffer", 6 => "SubpassData", else => "2D" }; } break :blk "2D"; }; tex.append(alloc,.{.name=name,.binding=binding,.is_storage=is_storage,.format_str=fmt,.dim_str=dim,.is_uint=is_uint,.is_int=is_int,.array_size=arr_sz}) catch {};}, else=>{}} },
             else => {},
         }
     }
@@ -1706,6 +1708,16 @@ fn emitInstruction(
                     }
                     if (sc == .Output and is_frag) is_oload = true;
                     if (sc == .Input and is_frag) is_oload = true;
+                }
+            }
+            // A load whose RESULT type is opaque (sampler/image) — e.g. an element
+            // of a sampler ARRAY accessed via OpAccessChain (`tex[2]`) — passes the
+            // access expression straight through as the sampler for `texture(...)`,
+            // exactly like a scalar sampler load. Without this the element is wrongly
+            // materialized into a `vec4` temp.
+            if (!is_tex) {
+                if (getDef(m, inst.words[1])) |ltv| {
+                    if (ltv.op == .TypeSampledImage or ltv.op == .TypeSampler or ltv.op == .TypeImage) is_tex = true;
                 }
             }
             if (is_oload or is_tex) {
