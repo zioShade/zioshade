@@ -4,6 +4,9 @@ All notable changes to glslpp are documented here. The format is loosely based o
 
 ## [Unreleased]
 
+### Added
+- **Lib-vs-lib benchmark (`just lib-bench`):** links SPIRV-Cross in-process (C API, Vulkan SDK static libs) and times glslpp vs SPIRV-Cross on the same SPIR-V → GLSL/HLSL/MSL — an honest comparison (no subprocess). glslpp is ~1.4–1.6× faster on the median cell (parity on a trivial GLSL shader, up to ~2.6× on math/control-flow-heavy MSL; machine-relative).
+
 ## [0.1.0] - 2026-06-02
 
 First tagged release. **Alpha / pre-1.0 — the public API (`src/root.zig`) is not

@@ -108,6 +108,12 @@ fuzz-million:
 bench:
     {{zig}} build bench
 
+# lib-vs-lib: glslpp vs SPIRV-Cross, both IN-PROCESS, same SPIR-V → GLSL/HLSL/MSL
+# (honest comparison; needs the Vulkan SDK spirv-cross libs). Override iters:
+#   just lib-bench 2000
+lib-bench count="1000":
+    {{zig}} build lib-bench -- --iters {{count}}
+
 # ── lint / check ─────────────────────────────────────────────────────
 
 # check compilation without building (fast syntax/type check)
