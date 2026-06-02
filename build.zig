@@ -686,6 +686,39 @@ pub fn build(b: *std.Build) void {
     const run_bench = b.addRunArtifact(bench_exe);
     bench_step.dependOn(&run_bench.step);
 
+    // Library-vs-library benchmark: glslpp vs SPIRV-Cross, both in-process,
+    // cross-compiling the same SPIR-V. Requires the Vulkan SDK's spirv-cross
+    // static C-API libs; the prebuilt .libs are MSVC, so this exe targets the
+    // msvc ABI (glslpp is pure Zig and recompiles cleanly for it).
+    //   zig build lib-bench [-Dvulkan-sdk=<path>] -- --iters 2000
+    const lib_bench_step = b.step("lib-bench", "Benchmark glslpp vs SPIRV-Cross (in-process, SPIR-V→GLSL/HLSL/MSL)");
+    const vk_sdk = b.option([]const u8, "vulkan-sdk", "Vulkan SDK root (for spirv-cross libs/headers)") orelse "C:/VulkanSDK/1.4.341.1";
+    const spvc_inc = b.fmt("{s}/Include/spirv_cross", .{vk_sdk});
+    const spvc_lib = b.fmt("{s}/Lib", .{vk_sdk});
+    const msvc_target = b.resolveTargetQuery(.{ .os_tag = .windows, .abi = .msvc });
+    const glslpp_msvc = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = msvc_target,
+        .optimize = .ReleaseFast,
+    });
+    const lib_bench_mod = b.createModule(.{
+        .root_source_file = b.path("tools/lib_bench.zig"),
+        .target = msvc_target,
+        .optimize = .ReleaseFast,
+    });
+    lib_bench_mod.addImport("glslpp", glslpp_msvc);
+    lib_bench_mod.addIncludePath(.{ .cwd_relative = spvc_inc });
+    const lib_bench_exe = b.addExecutable(.{ .name = "lib-bench", .root_module = lib_bench_mod });
+    lib_bench_exe.linkLibC();
+    lib_bench_exe.addLibraryPath(.{ .cwd_relative = spvc_lib });
+    for ([_][]const u8{
+        "spirv-cross-c",    "spirv-cross-core", "spirv-cross-glsl", "spirv-cross-hlsl",
+        "spirv-cross-msl",  "spirv-cross-cpp",  "spirv-cross-reflect", "spirv-cross-util",
+    }) |l| lib_bench_exe.linkSystemLibrary(l);
+    const run_lib_bench = b.addRunArtifact(lib_bench_exe);
+    if (b.args) |a| for (a) |arg| run_lib_bench.addArg(arg);
+    lib_bench_step.dependOn(&run_lib_bench.step);
+
     // Tool: dump SPIR-V binary — run with: zig build dump-spv
     const dump_spv_step = b.step("dump-spv", "Compile GLSL to SPIR-V binary");
     const dump_spv_mod = b.createModule(.{
