@@ -737,6 +737,21 @@ pub fn build(b: *std.Build) void {
     }
     dump_spv_step.dependOn(&run_dump_spv.step);
 
+    // Tools migrated to Zig 0.15.2 + wired so they stay buildable (regression
+    // guard): cross-validate (glslpp vs SPIRV-Cross dumps) and bench-wintty.
+    inline for (.{
+        .{ "cross-validate", "tools/cross_validate.zig", "Dump glslpp HLSL/GLSL/MSL/SPIR-V for a shader" },
+        .{ "bench-wintty", "tools/bench_wintty.zig", "Benchmark the wintty CRT shader (50 iters)" },
+    }) |t| {
+        const step = b.step(t[0], t[2]);
+        const mod = b.createModule(.{ .root_source_file = b.path(t[1]), .target = target, .optimize = optimize });
+        mod.addImport("glslpp", glslpp_mod);
+        const exe = b.addExecutable(.{ .name = t[0], .root_module = mod });
+        const run = b.addRunArtifact(exe);
+        if (b.args) |a| for (a) |arg| run.addArg(arg);
+        step.dependOn(&run.step);
+    }
+
     // DXC HLSL validation — run with: zig build validate-hlsl
     // Requires dxc.exe on PATH (from Vulkan SDK or Windows SDK)
     const validate_hlsl_step = b.step("validate-hlsl", "Validate wintty shader HLSL output with DXC");

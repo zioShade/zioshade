@@ -1,15 +1,13 @@
 const std = @import("std");
 const glslpp = @import("glslpp");
 
-pub fn main(init: std.process.Init) !void {
-    const alloc = init.gpa;
-    const io = init.io;
-    const cwd = std.Io.Dir.cwd();
+pub fn main() !void {
+    const alloc = std.heap.page_allocator; // short-lived CLI; OS reclaims on exit
 
-    const prefix = try cwd.readFileAlloc(io, "tests/wintty/shadertoy_prefix.glsl", alloc, .limited(1024 * 1024));
+    const prefix = try std.fs.cwd().readFileAlloc(alloc, "tests/wintty/shadertoy_prefix.glsl", 1024 * 1024);
     defer alloc.free(prefix);
 
-    const crt = try cwd.readFileAlloc(io, "tests/wintty/test_crt.glsl", alloc, .limited(1024 * 1024));
+    const crt = try std.fs.cwd().readFileAlloc(alloc, "tests/wintty/test_crt.glsl", 1024 * 1024);
     defer alloc.free(crt);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -37,15 +35,12 @@ pub fn main(init: std.process.Init) !void {
     var spirv_size: usize = 0;
 
     for (0..iterations) |_| {
-        const start = std.Io.Clock.Timestamp.now(io, .awake);
+        var timer = std.time.Timer.start() catch unreachable;
         const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
         defer alloc.free(spirv);
         const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
         defer alloc.free(hlsl);
-        const end = std.Io.Clock.Timestamp.now(io, .awake);
-
-        const dur = start.durationTo(end);
-        const elapsed: u64 = @intCast(dur.raw.nanoseconds);
+        const elapsed: u64 = timer.read();
         total_ns += elapsed;
         min_ns = @min(min_ns, elapsed);
         max_ns = @max(max_ns, elapsed);
