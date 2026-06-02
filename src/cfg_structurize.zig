@@ -30,6 +30,10 @@ pub const Cfg = struct {
 /// strip-and-recover validation (does `computePostDom` re-derive `merge`?).
 pub const SelMerge = struct { header: usize, merge: usize };
 
+/// A recorded structured loop (from an existing `OpLoopMerge`): header, merge,
+/// continue block indices. Ground truth for the loop strip-and-recover check.
+pub const LoopMergeRec = struct { header: usize, merge: usize, cont: usize };
+
 /// A CFG built from a SPIR-V function body, plus the block↔label mapping and the
 /// merge blocks the body's `OpSelectionMerge`s actually named. Caller owns it
 /// (`deinit`).
@@ -39,6 +43,7 @@ pub const SpirvCfg = struct {
     succ_store: [][]usize, // backing storage for cfg.succ entries
     succ_view: [][]const usize, // the slice cfg.succ points at
     sel_merges: []SelMerge, // headers that ALREADY carry an OpSelectionMerge
+    loop_merges: []LoopMergeRec, // headers that ALREADY carry an OpLoopMerge
     cond_headers: []usize, // blocks ending in OpBranchConditional / OpSwitch
     alloc: std.mem.Allocator,
 
@@ -48,11 +53,17 @@ pub const SpirvCfg = struct {
         self.alloc.free(self.succ_view);
         self.alloc.free(self.block_label);
         self.alloc.free(self.sel_merges);
+        self.alloc.free(self.loop_merges);
         self.alloc.free(self.cond_headers);
     }
 
     fn hasMerge(self: *const SpirvCfg, header: usize) bool {
         for (self.sel_merges) |m| if (m.header == header) return true;
+        return false;
+    }
+
+    fn hasLoopMerge(self: *const SpirvCfg, header: usize) bool {
+        for (self.loop_merges) |m| if (m.header == header) return true;
         return false;
     }
 };
@@ -157,6 +168,99 @@ pub fn structurizeModule(alloc: std.mem.Allocator, words: []const u32) ![]u32 {
     return spliceSelectionMerges(alloc, words, insertions);
 }
 
+/// A loop-merge insertion: header block gets `OpLoopMerge %merge %continue None`.
+pub const LoopInsertion = struct { header_label: u32, merge_label: u32, continue_label: u32 };
+
+/// Decide the `OpLoopMerge`s needed to structurize loop headers that lack them.
+/// For each natural loop (back-edge target dominating its single latch) computes
+/// continue = the latch and merge = the loop's unique exit target. Pure; returns
+/// `error.UnstructuredControlFlow` for shapes a simple structured loop cannot
+/// express: irreducible CFG, multiple latches, multiple distinct exit targets, or
+/// an exit-less (infinite) loop with no merge block. Phase 3 of the spec.
+pub fn recoverLoopMerges(alloc: std.mem.Allocator, insts: []const Instruction) ![]LoopInsertion {
+    var sc = try buildCfgFromBody(alloc, insts);
+    defer sc.deinit();
+    var dom = try analyze(alloc, sc.cfg);
+    defer dom.deinit(alloc);
+
+    // No-op fast path before any reducibility judgement (see recoverSelectionMerges).
+    var needs = false;
+    for (0..sc.cfg.n) |h| {
+        if (dom.is_loop_header[h] and !sc.hasLoopMerge(h)) {
+            needs = true;
+            break;
+        }
+    }
+    if (!needs) return alloc.alloc(LoopInsertion, 0);
+    if (!dom.reducible) return error.UnstructuredControlFlow;
+
+    const n = sc.cfg.n;
+    var preds = try alloc.alloc(std.ArrayList(usize), n);
+    defer {
+        for (preds) |*p| p.deinit(alloc);
+        alloc.free(preds);
+    }
+    for (preds) |*p| p.* = std.ArrayList(usize).empty;
+    for (0..n) |u| for (sc.cfg.succ[u]) |v| try preds[v].append(alloc, u);
+
+    const in_loop = try alloc.alloc(bool, n);
+    defer alloc.free(in_loop);
+    var stack = std.ArrayList(usize).empty;
+    defer stack.deinit(alloc);
+    var out = std.ArrayList(LoopInsertion).empty;
+    errdefer out.deinit(alloc);
+
+    for (0..n) |h| {
+        if (!dom.is_loop_header[h] or sc.hasLoopMerge(h)) continue;
+
+        // Continue block = the single latch (back-edge source dominated by h).
+        var latch: ?usize = null;
+        for (preds[h].items) |p| {
+            if (dom.dominates(h, p)) {
+                if (latch != null) return error.UnstructuredControlFlow; // multi-latch
+                latch = p;
+            }
+        }
+        const lt = latch orelse return error.UnstructuredControlFlow;
+
+        // Natural loop body: nodes that reach the latch without passing through h.
+        @memset(in_loop, false);
+        in_loop[h] = true;
+        in_loop[lt] = true;
+        stack.clearRetainingCapacity();
+        try stack.append(alloc, lt);
+        while (stack.items.len > 0) {
+            const x = stack.items[stack.items.len - 1];
+            stack.items.len -= 1;
+            for (preds[x].items) |p| {
+                if (p == h or in_loop[p]) continue;
+                in_loop[p] = true;
+                try stack.append(alloc, p);
+            }
+        }
+
+        // Merge block = the loop's unique exit target.
+        var merge: ?usize = null;
+        for (0..n) |u| {
+            if (!in_loop[u]) continue;
+            for (sc.cfg.succ[u]) |v| {
+                if (!in_loop[v]) {
+                    if (merge) |m| {
+                        if (m != v) return error.UnstructuredControlFlow; // multiple exits
+                    } else merge = v;
+                }
+            }
+        }
+        const mg = merge orelse return error.UnstructuredControlFlow; // exit-less loop
+        try out.append(alloc, .{
+            .header_label = sc.block_label[h],
+            .merge_label = sc.block_label[mg],
+            .continue_label = sc.block_label[lt],
+        });
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 /// Build a `Cfg` from a SPIR-V function body (`insts` = the instructions from the
 /// first `OpLabel` through the terminators, e.g. a single function). Blocks start
 /// at `OpLabel`; successors come from the terminator (`OpBranch` /
@@ -188,6 +292,8 @@ pub fn buildCfgFromBody(alloc: std.mem.Allocator, insts: []const Instruction) !S
     }
     var sel = std.ArrayList(SelMerge).empty;
     errdefer sel.deinit(alloc);
+    var loops = std.ArrayList(LoopMergeRec).empty;
+    errdefer loops.deinit(alloc);
     var cond = std.ArrayList(usize).empty;
     errdefer cond.deinit(alloc);
 
@@ -198,26 +304,40 @@ pub fn buildCfgFromBody(alloc: std.mem.Allocator, insts: []const Instruction) !S
         }
     }.f;
 
-    // Pass 2: walk blocks, fill successors + record selection merges.
+    // Pass 2: walk blocks, fill successors + record selection/loop merges.
     var cur: ?usize = null;
     var pending_merge: ?u32 = null; // merge label from an OpSelectionMerge in cur block
+    var pending_loop: ?[2]u32 = null; // {merge, continue} from an OpLoopMerge in cur block
     var tmp = std.ArrayList(usize).empty;
     defer tmp.deinit(alloc);
+
+    const recLoop = struct {
+        fn f(a: std.mem.Allocator, ix: *const std.AutoHashMap(u32, usize), list: *std.ArrayList(LoopMergeRec), header: usize, pl: ?[2]u32) !void {
+            if (pl) |lm| {
+                if (ix.get(lm[0])) |mi| if (ix.get(lm[1])) |ci| try list.append(a, .{ .header = header, .merge = mi, .cont = ci });
+            }
+        }
+    }.f;
 
     for (insts) |ins| {
         switch (ins.op) {
             .Label => {
                 cur = idx_of.get(ins.words[1]).?;
                 pending_merge = null;
+                pending_loop = null;
             },
             .SelectionMerge => {
                 if (ins.words.len >= 2) pending_merge = ins.words[1];
+            },
+            .LoopMerge => {
+                if (ins.words.len >= 3) pending_loop = .{ ins.words[1], ins.words[2] };
             },
             .Branch => {
                 if (cur) |b| {
                     tmp.clearRetainingCapacity();
                     if (ins.words.len >= 2) if (idx_of.get(ins.words[1])) |t| try tmp.append(alloc, t);
                     try setSucc(alloc, succ_store, assigned, b, tmp.items);
+                    try recLoop(alloc, &idx_of, &loops, b, pending_loop);
                     cur = null;
                 }
             },
@@ -231,6 +351,7 @@ pub fn buildCfgFromBody(alloc: std.mem.Allocator, insts: []const Instruction) !S
                     try setSucc(alloc, succ_store, assigned, b, tmp.items);
                     try cond.append(alloc, b);
                     if (pending_merge) |m| if (idx_of.get(m)) |mi| try sel.append(alloc, .{ .header = b, .merge = mi });
+                    try recLoop(alloc, &idx_of, &loops, b, pending_loop);
                     cur = null;
                 }
             },
@@ -280,6 +401,7 @@ pub fn buildCfgFromBody(alloc: std.mem.Allocator, insts: []const Instruction) !S
         .succ_store = succ_store,
         .succ_view = succ_view,
         .sel_merges = try sel.toOwnedSlice(alloc),
+        .loop_merges = try loops.toOwnedSlice(alloc),
         .cond_headers = try cond.toOwnedSlice(alloc),
         .alloc = alloc,
     };
@@ -776,6 +898,36 @@ test "splice: inserts OpSelectionMerge before the header terminator; no-op copie
         }
     }
     try testing.expect(found);
+}
+
+test "recover-loop: natural loop → header/merge/continue recovered" {
+    // CFG:  %1 entry→%2 ; %2 header→%3 ; %3 body→cond(%4 continue, %5 merge) ;
+    //       %4 continue→%2 (back-edge) ; %5 merge→return.  No OpLoopMerge present.
+    // Expect: header=%2, continue=%4 (latch), merge=%5 (unique exit target).
+    const a = testing.allocator;
+    const l1 = [_]u32{ 0, 1 };
+    const b12 = [_]u32{ 0, 2 };
+    const l2 = [_]u32{ 0, 2 };
+    const b23 = [_]u32{ 0, 3 };
+    const l3 = [_]u32{ 0, 3 };
+    const brc = [_]u32{ 0, 99, 4, 5 }; // body: cond ? %4(continue) : %5(merge)
+    const l4 = [_]u32{ 0, 4 };
+    const b42 = [_]u32{ 0, 2 }; // continue → header (back-edge)
+    const l5 = [_]u32{ 0, 5 };
+    const ret = [_]u32{0};
+    const insts = [_]Instruction{
+        .{ .op = .Label, .words = &l1 },           .{ .op = .Branch, .words = &b12 },
+        .{ .op = .Label, .words = &l2 },           .{ .op = .Branch, .words = &b23 },
+        .{ .op = .Label, .words = &l3 },           .{ .op = .BranchConditional, .words = &brc },
+        .{ .op = .Label, .words = &l4 },           .{ .op = .Branch, .words = &b42 },
+        .{ .op = .Label, .words = &l5 },           .{ .op = .Return, .words = &ret },
+    };
+    const ins = try recoverLoopMerges(a, &insts);
+    defer a.free(ins);
+    try testing.expectEqual(@as(usize, 1), ins.len);
+    try testing.expectEqual(@as(u32, 2), ins[0].header_label);
+    try testing.expectEqual(@as(u32, 5), ins[0].merge_label);
+    try testing.expectEqual(@as(u32, 4), ins[0].continue_label);
 }
 
 test "recover: arm returns early → honest-error (no structured merge)" {
