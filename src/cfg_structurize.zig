@@ -74,6 +74,21 @@ pub fn recoverSelectionMerges(alloc: std.mem.Allocator, insts: []const Instructi
     var sc = try buildCfgFromBody(alloc, insts);
     defer sc.deinit();
 
+    // No-op fast path FIRST (and critically, before any reducibility judgement):
+    // if every conditional header already carries an OpSelectionMerge, there is
+    // nothing to recover — return empty regardless of CFG shape. This guarantees
+    // already-structured (e.g. glslpp-native) input is never rejected, so wiring
+    // this pass in cannot regress a currently-compiling shader.
+    var needs = false;
+    for (sc.cond_headers) |h| {
+        if (!sc.hasMerge(h)) {
+            needs = true;
+            break;
+        }
+    }
+    if (!needs) return alloc.alloc(Insertion, 0);
+
+    // Genuine recovery required → now demand a reducible CFG.
     var dom = try analyze(alloc, sc.cfg);
     defer dom.deinit(alloc);
     if (!dom.reducible) return error.UnstructuredControlFlow;
@@ -85,7 +100,12 @@ pub fn recoverSelectionMerges(alloc: std.mem.Allocator, insts: []const Instructi
     errdefer out.deinit(alloc);
     for (sc.cond_headers) |h| {
         if (sc.hasMerge(h)) continue; // already structured
-        if (dom.is_loop_header[h]) continue; // loop merge = Phase 3
+        if (dom.is_loop_header[h]) {
+            // An unstructured LOOP header (back-edge target without a merge) needs
+            // an OpLoopMerge, not a selection merge — that's Phase 3. Until then,
+            // refuse loudly rather than emit a half-structured module.
+            return error.UnstructuredControlFlow;
+        }
         const m = ipdom[h];
         if (m == EXIT or m == Analysis.NONE) {
             // successors don't reconverge on a real block (e.g. an arm returns) →
@@ -96,6 +116,45 @@ pub fn recoverSelectionMerges(alloc: std.mem.Allocator, insts: []const Instructi
         try out.append(alloc, .{ .header_label = sc.block_label[h], .merge_label = sc.block_label[m] });
     }
     return out.toOwnedSlice(alloc);
+}
+
+/// End-to-end selection-merge structurization of a whole SPIR-V module: recover
+/// the missing `OpSelectionMerge`s for the entry function's selection headers and
+/// splice them in. Returns a NEW owned word stream (a copy when nothing needs
+/// recovery — so already-structured input round-trips byte-identically and wiring
+/// this in cannot change existing output). Propagates `error.UnstructuredControl-
+/// Flow` for shapes that cannot be structured (irreducible, early-exit arms,
+/// unstructured loops).
+///
+/// Operates on the entry function's body. (Helper functions with unstructured CFG
+/// are a later refinement; if they lack merges the backend still honest-errors.)
+pub fn structurizeModule(alloc: std.mem.Allocator, words: []const u32) ![]u32 {
+    var module = try common.parseModule(alloc, words);
+    defer module.deinit(alloc);
+
+    // Slice the entry function's instructions: OpFunction whose result id is the
+    // entry point … OpFunctionEnd. Falls back to all instructions (single-fn).
+    const entry_id = module.entry_point_id;
+    var lo: usize = 0;
+    var hi: usize = module.instructions.len;
+    if (entry_id) |eid| {
+        var k: usize = 0;
+        var found = false;
+        while (k < module.instructions.len) : (k += 1) {
+            const ins = module.instructions[k];
+            if (!found and ins.op == .Function and ins.words.len >= 3 and ins.words[2] == eid) {
+                lo = k;
+                found = true;
+            } else if (found and ins.op == .FunctionEnd) {
+                hi = k + 1;
+                break;
+            }
+        }
+    }
+
+    const insertions = try recoverSelectionMerges(alloc, module.instructions[lo..hi]);
+    defer alloc.free(insertions);
+    return spliceSelectionMerges(alloc, words, insertions);
 }
 
 /// Build a `Cfg` from a SPIR-V function body (`insts` = the instructions from the

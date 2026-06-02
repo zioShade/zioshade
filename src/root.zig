@@ -4,6 +4,10 @@ const std = @import("std");
 pub const diagnostic = @import("diagnostic.zig");
 pub const reflection = @import("reflection.zig");
 pub const spirv = @import("spirv.zig");
+/// CFG structurization (G2): recover OpSelectionMerge for unstructured-but-
+/// reducible SPIR-V. `structurizeModule(words) -> words` is a no-op on already-
+/// structured input. See docs/specs/2026-06-02-cfg-structurization.md.
+pub const cfg_structurize = @import("cfg_structurize.zig");
 pub const compat = @import("compat.zig");
 
 // Internal modules — not part of the public API
@@ -1105,7 +1109,7 @@ test {
     _ = spirv;
     _ = parser;
     _ = semantic;
-    _ = @import("cfg_structurize.zig");
+    _ = cfg_structurize;
     // gap_tests.zig is intentionally NOT imported here. It contains markers
     // for known unimplemented features that fail on purpose; run it
     // standalone with `zig test src/gap_tests.zig` to audit the gap list.
