@@ -292,6 +292,24 @@ pub fn spirvToHLSL(
     var module = try parseModule(alloc, _norm orelse spirv_words);
     defer module.deinit(alloc);
 
+    // Descriptor sampler/image ARRAYS (`uniform sampler2D tex[4]`) are not yet
+    // supported by the HLSL backend (the Texture/SamplerState split needs the
+    // index relocated across both). Fail loud rather than emit broken output —
+    // the GLSL backend does support them.
+    for (module.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc != .UniformConstant) continue;
+        const ptr = getDef(&module, inst.words[1]) orelse continue;
+        if (ptr.op != .TypePointer or ptr.words.len < 4) continue;
+        const pe = getDef(&module, ptr.words[3]) orelse continue;
+        if (pe.op == .TypeArray and pe.words.len >= 3) {
+            if (getDef(&module, pe.words[2])) |el| {
+                if (el.op == .TypeSampledImage or el.op == .TypeSampler or el.op == .TypeImage) return error.UnsupportedSamplerArray;
+            }
+        }
+    }
+
     // Override entry point if requested
     if (!std.mem.eql(u8, options.entry_point_name, "main")) {
         if (findEntryPoint(&module, options.entry_point_name)) |ep_id| {

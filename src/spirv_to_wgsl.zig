@@ -1147,6 +1147,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
+    // Descriptor sampler/image ARRAYS not yet supported by the WGSL backend
+    // (would need binding_array) — fail loud rather than emit broken output.
+    if (common.hasOpaqueArrayResource(&module)) {
+        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL backend does not yet support descriptor sampler/image arrays", .{}) catch null;
+        return error.UnsupportedSamplerArray;
+    }
+
     var names = std.AutoHashMap(u32, []const u8).init(alloc);
     defer {
         var it = names.iterator();

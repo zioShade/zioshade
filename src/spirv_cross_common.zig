@@ -218,6 +218,25 @@ pub fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
     return module.instructions[idx];
 }
 
+/// True if the module declares a `UniformConstant` resource that is an ARRAY of an
+/// opaque type (sampler / image / sampled-image) — e.g. `uniform sampler2D tex[4]`.
+/// Backends that don't yet support descriptor arrays use this to honest-error
+/// rather than emit broken output. (The GLSL backend DOES support them.)
+pub fn hasOpaqueArrayResource(module: *const ParsedModule) bool {
+    for (module.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc != .UniformConstant) continue;
+        const ptr = getDef(module, inst.words[1]) orelse continue;
+        if (ptr.op != .TypePointer or ptr.words.len < 4) continue;
+        const pe = getDef(module, ptr.words[3]) orelse continue;
+        if (pe.op != .TypeArray or pe.words.len < 3) continue;
+        const el = getDef(module, pe.words[2]) orelse continue;
+        if (el.op == .TypeSampledImage or el.op == .TypeSampler or el.op == .TypeImage) return true;
+    }
+    return false;
+}
+
 pub fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(module, id) orelse return null;
     return switch (inst.op) {

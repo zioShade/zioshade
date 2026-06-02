@@ -772,6 +772,10 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     var module = try parseModule(alloc, _norm orelse spirv_words);
     defer module.deinit(alloc);
 
+    // Descriptor sampler/image ARRAYS not yet supported by the MSL backend — fail
+    // loud rather than emit broken output (the GLSL backend supports them).
+    if (common.hasOpaqueArrayResource(&module)) return error.UnsupportedSamplerArray;
+
     // Override entry point if requested
     if (!std.mem.eql(u8, options.entry_point_name, "main")) {
         if (findEntryPoint(&module, options.entry_point_name)) |ep_id| {
