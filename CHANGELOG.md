@@ -4,6 +4,17 @@ All notable changes to glslpp are documented here. The format is loosely based o
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-02
+
+First tagged release. **Alpha / pre-1.0 — the public API (`src/root.zig`) is not
+yet stable and MAY change in any `0.x` bump** (per SemVer §4). Current trust
+baseline: `spirv-val` conformance **2074 PASS / 0 FAIL / 8 SKIP / 15 XFAIL**
+(`just test-conformance`, exits 0); analyzer fail-loud keystone complete (zero
+false-positives, no silent-wrong); every backend oracle-gated (spirv-val /
+glslangValidator / dxc / spirv-cross / naga); structured-GLSL fuzzer clean over
+**1,000,000 iterations** (`just fuzz-million`). Not a full glslang / SPIRV-Cross
+drop-in — see `docs/IMPLEMENTATION_STATUS.md` for the honest gap analysis.
+
 ### Changed
 - README rewritten with honest scoping; explicit "this is not a full glslang/SPIRV-Cross drop-in" framing.
 - Conformance numbers updated: 1,894 / 1,894 `spirv-val` fixtures (was 1,811); 47 / 51 DXC fixtures (was 51 / 51); WGSL stress 264 / 264.
