@@ -38,7 +38,8 @@ pub const SpirvCfg = struct {
     block_label: []u32, // block index → OpLabel result id
     succ_store: [][]usize, // backing storage for cfg.succ entries
     succ_view: [][]const usize, // the slice cfg.succ points at
-    sel_merges: []SelMerge,
+    sel_merges: []SelMerge, // headers that ALREADY carry an OpSelectionMerge
+    cond_headers: []usize, // blocks ending in OpBranchConditional / OpSwitch
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *SpirvCfg) void {
@@ -47,8 +48,55 @@ pub const SpirvCfg = struct {
         self.alloc.free(self.succ_view);
         self.alloc.free(self.block_label);
         self.alloc.free(self.sel_merges);
+        self.alloc.free(self.cond_headers);
+    }
+
+    fn hasMerge(self: *const SpirvCfg, header: usize) bool {
+        for (self.sel_merges) |m| if (m.header == header) return true;
+        return false;
     }
 };
+
+/// A merge-info insertion the structurizer would synthesize: block `header`
+/// (currently lacking an `OpSelectionMerge`) gets `OpSelectionMerge %merge_label`.
+pub const Insertion = struct { header_label: u32, merge_label: u32 };
+
+/// Decide the `OpSelectionMerge`s needed to structurize the selection headers of a
+/// function body that lacks them. Pure: computes the insertions (header→merge),
+/// or returns `error.UnstructuredControlFlow` if any conditional header cannot be
+/// given a structured merge (irreducible CFG, or a header whose successors do not
+/// reconverge on a real block — ipdom is the function EXIT, e.g. an early-return
+/// arm). Does NOT mutate; the caller (a later phase) applies the insertions.
+///
+/// Headers that already carry an `OpSelectionMerge` and loop headers are left
+/// alone (loop merges are recovered separately, Phase 3). Caller owns the result.
+pub fn recoverSelectionMerges(alloc: std.mem.Allocator, insts: []const Instruction) ![]Insertion {
+    var sc = try buildCfgFromBody(alloc, insts);
+    defer sc.deinit();
+
+    var dom = try analyze(alloc, sc.cfg);
+    defer dom.deinit(alloc);
+    if (!dom.reducible) return error.UnstructuredControlFlow;
+
+    const ipdom = try computePostDom(alloc, sc.cfg);
+    defer alloc.free(ipdom);
+
+    var out = std.ArrayList(Insertion).empty;
+    errdefer out.deinit(alloc);
+    for (sc.cond_headers) |h| {
+        if (sc.hasMerge(h)) continue; // already structured
+        if (dom.is_loop_header[h]) continue; // loop merge = Phase 3
+        const m = ipdom[h];
+        if (m == EXIT or m == Analysis.NONE) {
+            // successors don't reconverge on a real block (e.g. an arm returns) →
+            // not a plain structured if/switch; refuse rather than guess. The
+            // errdefer frees `out`.
+            return error.UnstructuredControlFlow;
+        }
+        try out.append(alloc, .{ .header_label = sc.block_label[h], .merge_label = sc.block_label[m] });
+    }
+    return out.toOwnedSlice(alloc);
+}
 
 /// Build a `Cfg` from a SPIR-V function body (`insts` = the instructions from the
 /// first `OpLabel` through the terminators, e.g. a single function). Blocks start
@@ -81,6 +129,8 @@ pub fn buildCfgFromBody(alloc: std.mem.Allocator, insts: []const Instruction) !S
     }
     var sel = std.ArrayList(SelMerge).empty;
     errdefer sel.deinit(alloc);
+    var cond = std.ArrayList(usize).empty;
+    errdefer cond.deinit(alloc);
 
     const setSucc = struct {
         fn f(a: std.mem.Allocator, store: [][]usize, asn: []bool, b: usize, items: []const usize) !void {
@@ -120,6 +170,7 @@ pub fn buildCfgFromBody(alloc: std.mem.Allocator, insts: []const Instruction) !S
                         if (idx_of.get(ins.words[3])) |f| try tmp.append(alloc, f);
                     }
                     try setSucc(alloc, succ_store, assigned, b, tmp.items);
+                    try cond.append(alloc, b);
                     if (pending_merge) |m| if (idx_of.get(m)) |mi| try sel.append(alloc, .{ .header = b, .merge = mi });
                     cur = null;
                 }
@@ -141,6 +192,7 @@ pub fn buildCfgFromBody(alloc: std.mem.Allocator, insts: []const Instruction) !S
                         }
                     }
                     try setSucc(alloc, succ_store, assigned, b, tmp.items);
+                    try cond.append(alloc, b);
                     if (pending_merge) |m| if (idx_of.get(m)) |mi| try sel.append(alloc, .{ .header = b, .merge = mi });
                     cur = null;
                 }
@@ -169,6 +221,7 @@ pub fn buildCfgFromBody(alloc: std.mem.Allocator, insts: []const Instruction) !S
         .succ_store = succ_store,
         .succ_view = succ_view,
         .sel_merges = try sel.toOwnedSlice(alloc),
+        .cond_headers = try cond.toOwnedSlice(alloc),
         .alloc = alloc,
     };
 }
@@ -543,6 +596,60 @@ test "adapter+recover: if-else body — CFG built and ipdom re-derives the merge
     const ipdom = try computePostDom(a, sc.cfg);
     defer a.free(ipdom);
     try testing.expectEqual(sc.sel_merges[0].merge, ipdom[sc.sel_merges[0].header]);
+}
+
+test "recover: if-else WITHOUT a merge → synthesizes header→merge insertion" {
+    // Same if-else as above but with NO OpSelectionMerge (the unstructured case).
+    // recoverSelectionMerges must propose `OpSelectionMerge %4` on header %1.
+    const a = testing.allocator;
+    const lbl1 = [_]u32{ 0, 1 };
+    const brc = [_]u32{ 0, 99, 2, 3 };
+    const lbl2 = [_]u32{ 0, 2 };
+    const br2 = [_]u32{ 0, 4 };
+    const lbl3 = [_]u32{ 0, 3 };
+    const br3 = [_]u32{ 0, 4 };
+    const lbl4 = [_]u32{ 0, 4 };
+    const ret = [_]u32{0};
+    const insts = [_]Instruction{
+        .{ .op = .Label, .words = &lbl1 },
+        .{ .op = .BranchConditional, .words = &brc },
+        .{ .op = .Label, .words = &lbl2 },
+        .{ .op = .Branch, .words = &br2 },
+        .{ .op = .Label, .words = &lbl3 },
+        .{ .op = .Branch, .words = &br3 },
+        .{ .op = .Label, .words = &lbl4 },
+        .{ .op = .Return, .words = &ret },
+    };
+    const ins = try recoverSelectionMerges(a, &insts);
+    defer a.free(ins);
+    try testing.expectEqual(@as(usize, 1), ins.len);
+    try testing.expectEqual(@as(u32, 1), ins[0].header_label);
+    try testing.expectEqual(@as(u32, 4), ins[0].merge_label);
+}
+
+test "recover: arm returns early → honest-error (no structured merge)" {
+    // if (cond) { ... -> 4 } else { return }.  The arms do not reconverge on a
+    // real block, so this is not a plain if-with-merge → honest-error, never guess.
+    const a = testing.allocator;
+    const lbl1 = [_]u32{ 0, 1 };
+    const brc = [_]u32{ 0, 99, 2, 3 };
+    const lbl2 = [_]u32{ 0, 2 };
+    const br2 = [_]u32{ 0, 4 };
+    const lbl3 = [_]u32{ 0, 3 };
+    const ret3 = [_]u32{0};
+    const lbl4 = [_]u32{ 0, 4 };
+    const ret4 = [_]u32{0};
+    const insts = [_]Instruction{
+        .{ .op = .Label, .words = &lbl1 },
+        .{ .op = .BranchConditional, .words = &brc },
+        .{ .op = .Label, .words = &lbl2 },
+        .{ .op = .Branch, .words = &br2 },
+        .{ .op = .Label, .words = &lbl3 },
+        .{ .op = .Return, .words = &ret3 },
+        .{ .op = .Label, .words = &lbl4 },
+        .{ .op = .Return, .words = &ret4 },
+    };
+    try testing.expectError(error.UnstructuredControlFlow, recoverSelectionMerges(a, &insts));
 }
 
 test "postdom: loop — immediate post-dom is the next in-loop block, not the merge" {
