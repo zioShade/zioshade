@@ -1058,3 +1058,38 @@ test "wgsl: gl_VertexIndex/gl_InstanceIndex emit u32 @builtin with i32 conversio
     // The invalid signed builtin must NOT appear.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@builtin(vertex_index) gl_VertexIndex: i32") == null);
 }
+
+test "wgsl: passthrough fragment store emits a defined return identifier (not freed-memory garbage)" {
+    // Regression: `o = vIn` (and `o = -(-vIn)` after double-negate folding)
+    // feeds an OpLoad whose result emitBody inlines to the source name (`vIn`)
+    // and never emits as a `let`. The direct-return optimization captured the
+    // load's *pre-emitBody* generated name (`v6`), producing `return v6;` where
+    // v6 is undefined — and worse, an aliased+freed slice surfaced as
+    // `return \xAA\xAA;` (freed-memory fill). Both are silent-wrong; naga rejects.
+    const passthrough: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec4 vIn;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vIn; }
+    ;
+    const double_negate: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec4 vIn;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = -(-vIn); }
+    ;
+    inline for (.{ passthrough, double_negate }) |source| {
+        const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+        defer alloc.free(spirv);
+        const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+        defer alloc.free(wgsl);
+        // The return value must be the in-scope input identifier, never an
+        // undefined generated name or freed-memory bytes.
+        try std.testing.expect(std.mem.indexOf(u8, wgsl, "return vIn;") != null);
+        // The freed-memory fill byte (0xAA) must never appear: it is the
+        // signature of the use-after-free this guards against. (The header
+        // comment legitimately contains a UTF-8 `→`, so a blanket ASCII-only
+        // check would be wrong.)
+        for (wgsl) |c| try std.testing.expect(c != 0xAA);
+    }
+}
