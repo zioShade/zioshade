@@ -293,3 +293,24 @@ test "reflection M2.5: acceleration_structures populated for accelerationStructu
     try std.testing.expectEqual(@as(usize, 1), res.acceleration_structures.len);
     try std.testing.expectEqualStrings("topLevel", res.acceleration_structures[0].name);
 }
+
+test "reflectSPIRV reports descriptor array_size (sampler2D tex[4])" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex[4];
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texture(tex[2], uv); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    // Array sampler classified by its ELEMENT type (sampled image), with the
+    // fixed dimension reported in array_size.
+    try std.testing.expectEqual(@as(usize, 1), res.sampled_images.len);
+    try std.testing.expectEqual(@as(u32, 4), res.sampled_images[0].array_size);
+    // A non-array resource reports array_size 0.
+    try std.testing.expect(res.outputs.len >= 1);
+    try std.testing.expectEqual(@as(u32, 0), res.outputs[0].array_size);
+}
