@@ -1122,6 +1122,26 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
     }
 
+    // WGSL has no layer / viewport-index built-in (gl_Layer / gl_ViewportIndex —
+    // SPIR-V BuiltIn Layer=9 / ViewportIndex=10, used for layered / multi-viewport
+    // rendering). A shader that reads or writes them must fail loud, not leak the
+    // identifier (naga reject) or misclassify it as a `@location` varying.
+    for (module.instructions) |dinst| {
+        if (dinst.op == .Decorate and dinst.words.len >= 4 and
+            dinst.words[2] == @intFromEnum(spirv.Decoration.built_in))
+        {
+            const bi = dinst.words[3];
+            if (bi == 9 or bi == 10) {
+                last_error_detail = std.fmt.bufPrint(
+                    &last_error_detail_buf,
+                    "WGSL has no {s} built-in",
+                    .{if (bi == 9) "layer (gl_Layer)" else "viewport-index (gl_ViewportIndex)"},
+                ) catch null;
+                return error.UnsupportedOp;
+            }
+        }
+    }
+
     var names = std.AutoHashMap(u32, []const u8).init(alloc);
     defer {
         var it = names.iterator();
