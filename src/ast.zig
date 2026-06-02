@@ -339,6 +339,18 @@ pub const Type = union(enum) {
         };
     }
 
+    /// True for an opaque/sampler/image type OR an array (recursively) whose base
+    /// is one. A descriptor array like `sampler2D tex[4]` must use UniformConstant
+    /// storage just like a scalar sampler — keying only on `isSampler()` would put
+    /// the array in `Uniform` storage, which makes every backend mis-handle it
+    /// (it gets classified as a uniform block / UBO).
+    pub fn isSamplerOrArrayOf(self: Type) bool {
+        return switch (self) {
+            .array => |a| a.base.isSamplerOrArrayOf(),
+            else => self.isSampler(),
+        };
+    }
+
     /// True for combined image-sampler types (need OpImage extraction)
     pub fn isCombinedSampler(self: Type) bool {
         return switch (self) {
