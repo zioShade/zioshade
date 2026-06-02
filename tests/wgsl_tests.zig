@@ -1229,6 +1229,18 @@ fn assertNoUndeclaredVTemp(wgsl: []const u8) !void {
         var e = i;
         while (e < wgsl.len and isIdent(wgsl[e])) e += 1;
         const name = wgsl[i..e];
+        // A `vN:` token is a declaration site (function parameter or typed
+        // binding), not a use — record it as declared and move on.
+        var j = e;
+        while (j < wgsl.len and wgsl[j] == ' ') j += 1;
+        if (j < wgsl.len and wgsl[j] == ':') {
+            if (!declared.contains(name)) {
+                const owned = try alloc.dupe(u8, name);
+                if ((try declared.fetchPut(owned, {})) != null) alloc.free(owned);
+            }
+            i = e - 1;
+            continue;
+        }
         if (!declared.contains(name)) {
             std.debug.print("undeclared WGSL temp referenced: {s}\n", .{name});
             return error.UndeclaredTemp;
@@ -1256,5 +1268,25 @@ test "wgsl: a loop without phis does not inherit a previous loop's phi update (s
     defer alloc.free(spirv);
     const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
+    try assertNoUndeclaredVTemp(wgsl);
+}
+
+test "wgsl: frexp/modf emit WGSL struct-return form (not the illegal pointer form)" {
+    // GLSL frexp(x, out e)/modf(x, out i) lower to GLSL.std.450 Frexp/Modf
+    // (pointer form). WGSL frexp(x)/modf(x) take ONE arg and return a struct:
+    // frexp -> {fract, exp}, modf -> {fract, whole}. Emitting `frexp(x, ptr)`
+    // was a naga reject ("too many arguments") AND dropped the exponent.
+    const source: [:0]const u8 =
+        "#version 310 es\nprecision mediump float;\n" ++
+        "layout(location=0) out float FragColor;\nlayout(location=0) in float v0;\n" ++
+        "void main(){\n  int e0; float f0 = frexp(v0, e0);\n  float r0; float m0 = modf(v0, r0);\n  FragColor = f0 + m0 + float(e0) + r0;\n}\n";
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // Struct-return fields must be used; no 2-arg builtin call.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, ".fract") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, ".exp") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, ".whole") != null);
     try assertNoUndeclaredVTemp(wgsl);
 }
