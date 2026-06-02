@@ -2115,7 +2115,9 @@ fn stripMerge(a: std.mem.Allocator, spirv: []const u32) ![]u32 {
     return out.toOwnedSlice(a);
 }
 
-test "msl: unstructured CFG (stripped OpSelectionMerge) errors honestly" {
+test "msl: unstructured switch (stripped OpSelectionMerge) is recovered (G2)" {
+    // G2: CFG structurization recovers the stripped merge so the switch compiles
+    // faithfully — output identical to the structured original (default kept).
     const source =
         \\#version 450
         \\layout(location = 0) flat in int sel;
@@ -2128,7 +2130,11 @@ test "msl: unstructured CFG (stripped OpSelectionMerge) errors honestly" {
     ;
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
+    const ok = try glslpp.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(ok);
     const stripped = try stripMerge(alloc, spirv);
     defer alloc.free(stripped);
-    try std.testing.expectError(error.UnstructuredControlFlow, glslpp.spirvToMSL(alloc, stripped, .{}));
+    const recovered = try glslpp.spirvToMSL(alloc, stripped, .{});
+    defer alloc.free(recovered);
+    try std.testing.expectEqualStrings(ok, recovered);
 }

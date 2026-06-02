@@ -765,7 +765,11 @@ fn resolveMslSlot(bindings: []const MslResourceBinding, binding_shift: i32, set:
 }
 
 pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: MslCompileOptions) ![]const u8 {
-    var module = try parseModule(alloc, spirv_words);
+    // G2: recover OpSelectionMerge for unstructured-but-reducible SPIR-V (no-op on
+    // structured input; fall back to the original on failure — see spirvToGLSL).
+    const _norm = @import("cfg_structurize.zig").structurizeModule(alloc, spirv_words) catch null;
+    defer if (_norm) |n| alloc.free(n);
+    var module = try parseModule(alloc, _norm orelse spirv_words);
     defer module.deinit(alloc);
 
     // Override entry point if requested

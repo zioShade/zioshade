@@ -1759,11 +1759,12 @@ fn stripMergeInstructions(a: std.mem.Allocator, spirv: []const u32) ![]u32 {
     return out.toOwnedSlice(a);
 }
 
-test "GLSL: unstructured CFG (stripped OpSelectionMerge) errors honestly" {
-    // glslpp's own SPIR-V always carries merge info, so the structured switch
-    // compiles. Stripping OpSelectionMerge yields unstructured SPIR-V; the
-    // backend must fail loud (error.UnstructuredControlFlow) rather than emit a
-    // lossy reconstruction that silently drops the default case (silent-wrong).
+test "GLSL: unstructured switch (stripped OpSelectionMerge) is recovered (G2)" {
+    // Stripping OpSelectionMerge yields unstructured SPIR-V. Pre-G2 the backend
+    // honest-errored (better than the original silent-wrong that dropped the
+    // default case). With CFG structurization (G2) the merge is now RECOVERED and
+    // the switch compiles FAITHFULLY — identical to the structured original, i.e.
+    // the default case is preserved.
     const source =
         \\#version 450
         \\layout(location = 0) flat in int sel;
@@ -1780,13 +1781,13 @@ test "GLSL: unstructured CFG (stripped OpSelectionMerge) errors honestly" {
     ;
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    // Structured input compiles fine.
-    const ok = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 });
-    alloc.free(ok);
-    // Unstructured input fails loud.
+    const ok = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 }); // structured original
+    defer alloc.free(ok);
     const stripped = try stripMergeInstructions(alloc, spirv);
     defer alloc.free(stripped);
-    try std.testing.expectError(error.UnstructuredControlFlow, glslpp.spirvToGLSL(alloc, stripped, .{ .version = 430 }));
+    const recovered = try glslpp.spirvToGLSL(alloc, stripped, .{ .version = 430 });
+    defer alloc.free(recovered);
+    try std.testing.expectEqualStrings(ok, recovered); // faithful recovery — default not dropped
 }
 
 // ---------------------------------------------------------------------------
