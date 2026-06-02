@@ -1866,3 +1866,22 @@ test "G2: strip merges → structurize → backend GLSL matches the original" {
 // is mis-handled by loop-unaware selection recovery; see cfg_structurize.zig).
 // Unstructured loops keep honest-erroring (trustworthy interim). The loop-merge
 // recovery + splice primitives are unit-tested in src/cfg_structurize.zig.
+
+test "GLSL: sampler array (sampler2D tex[N]) declares + indexes correctly" {
+    // Regression: a descriptor sampler array was mis-handled — the frontend put it
+    // in Uniform storage (→ classified as a UBO) and the backend neither declared
+    // it nor kept the element as a sampler. Now: `uniform sampler2D tex[4];` +
+    // `texture(tex[2], uv)` (glslang-valid).
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex[4];
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texture(tex[2], uv); }
+    ;
+    const glsl = try compileToGlslStage(source, .fragment);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "uniform sampler2D tex[4];");
+    try assertContains(glsl, "texture(tex[2], uv)");
+    try assertNotContains(glsl, "uniform tex"); // not mis-emitted as a UBO block
+}
