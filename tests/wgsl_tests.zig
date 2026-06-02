@@ -1093,3 +1093,40 @@ test "wgsl: passthrough fragment store emits a defined return identifier (not fr
         for (wgsl) |c| try std.testing.expect(c != 0xAA);
     }
 }
+
+test "wgsl: MRT passthrough stores emit defined identifiers (not freed-memory garbage)" {
+    // Same hazard as the single-output direct return, but on the multi-render-
+    // target path: `o0 = vIn; o1 = vIn;` captured each stored value's name
+    // pre-emitBody, surfacing as `return FragmentOutput(\xAA\xAA, \xAA\xAA);`.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec4 vIn;
+        \\layout(location=0) out vec4 o0;
+        \\layout(location=1) out vec4 o1;
+        \\void main(){ o0 = vIn; o1 = vIn; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "return FragmentOutput(vIn, vIn);") != null);
+    for (wgsl) |c| try std.testing.expect(c != 0xAA);
+}
+
+test "wgsl: gl_FragDepth passthrough store emits a defined identifier (not freed-memory garbage)" {
+    // The frag-depth return path shared the same pre-emitBody name capture:
+    // `gl_FragDepth = d;` (a passthrough load) surfaced as a \xAA depth operand.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in float d;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(1.0); gl_FragDepth = d; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // depth operand must be the in-scope input `d`, not an undefined name.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, ", d);") != null);
+    for (wgsl) |c| try std.testing.expect(c != 0xAA);
+}
