@@ -451,6 +451,53 @@ pub fn computePostDom(alloc: std.mem.Allocator, cfg: Cfg) ![]usize {
     return ipdom;
 }
 
+/// Apply recovered `insertions` to a SPIR-V word stream: splice an
+/// `OpSelectionMerge %merge None` immediately before the terminator of each named
+/// header block. Returns a NEW owned word stream (a copy even when there are no
+/// insertions, so the caller frees uniformly). Pure: never mutates `words`.
+///
+/// The result is structured SPIR-V the existing backends accept unchanged; it
+/// must remain `spirv-val`-clean (the splice only adds well-formed
+/// `OpSelectionMerge`s whose merge ids reference existing blocks).
+pub fn spliceSelectionMerges(alloc: std.mem.Allocator, words: []const u32, insertions: []const Insertion) ![]u32 {
+    if (words.len < 5 or words[0] != spirv.MAGIC) return error.InvalidSpirv;
+
+    var map = std.AutoHashMap(u32, u32).init(alloc);
+    defer map.deinit();
+    for (insertions) |ins| try map.put(ins.header_label, ins.merge_label);
+
+    var out = std.ArrayList(u32).empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, words[0..5]); // SPIR-V header (magic, version, gen, bound, schema)
+
+    const SEL = @intFromEnum(spirv.Op.SelectionMerge);
+    const LABEL = @intFromEnum(spirv.Op.Label);
+    const BRC = @intFromEnum(spirv.Op.BranchConditional);
+    const SWITCH = @intFromEnum(spirv.Op.Switch);
+
+    var i: usize = 5;
+    var cur_label: u32 = 0;
+    while (i < words.len) {
+        const hw = words[i];
+        const wc: usize = hw >> 16;
+        const op: u16 = @truncate(hw & 0xFFFF);
+        if (wc == 0 or i + wc > words.len) return error.InvalidSpirv;
+
+        if (op == LABEL and wc >= 2) {
+            cur_label = words[i + 1];
+        } else if (op == BRC or op == SWITCH) {
+            if (map.get(cur_label)) |merge| {
+                try out.append(alloc, (@as(u32, 3) << 16) | @as(u32, SEL));
+                try out.append(alloc, merge);
+                try out.append(alloc, 0); // SelectionControl = None
+            }
+        }
+        try out.appendSlice(alloc, words[i .. i + wc]);
+        i += wc;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 // ---------------------------------------------------------------------------
 // Tests — hand-built CFGs with known dominator / loop / reducibility answers.
 // ---------------------------------------------------------------------------
@@ -625,6 +672,51 @@ test "recover: if-else WITHOUT a merge → synthesizes header→merge insertion"
     try testing.expectEqual(@as(usize, 1), ins.len);
     try testing.expectEqual(@as(u32, 1), ins[0].header_label);
     try testing.expectEqual(@as(u32, 4), ins[0].merge_label);
+}
+
+test "splice: inserts OpSelectionMerge before the header terminator; no-op copies" {
+    const a = testing.allocator;
+    const L: u32 = @intFromEnum(spirv.Op.Label);
+    const BRC: u32 = @intFromEnum(spirv.Op.BranchConditional);
+    const BR: u32 = @intFromEnum(spirv.Op.Branch);
+    const RET: u32 = @intFromEnum(spirv.Op.Return);
+    const SEL: u32 = @intFromEnum(spirv.Op.SelectionMerge);
+    // Minimal SPIR-V: 5-word header + an if-else body with NO OpSelectionMerge.
+    const words = [_]u32{
+        spirv.MAGIC, 0x10000, 0, 10, 0, // header
+        (2 << 16) | L,   1, // OpLabel %1
+        (4 << 16) | BRC, 99, 2, 3, // OpBranchConditional %99 %2 %3
+        (2 << 16) | L,   2,
+        (2 << 16) | BR,  4,
+        (2 << 16) | L,   3,
+        (2 << 16) | BR,  4,
+        (2 << 16) | L,   4,
+        (1 << 16) | RET,
+    };
+    // No-op: empty insertions → byte-identical copy.
+    const same = try spliceSelectionMerges(a, &words, &.{});
+    defer a.free(same);
+    try testing.expectEqualSlices(u32, &words, same);
+
+    // Insert OpSelectionMerge %4 on header %1.
+    const ins = [_]Insertion{.{ .header_label = 1, .merge_label = 4 }};
+    const out = try spliceSelectionMerges(a, &words, &ins);
+    defer a.free(out);
+    try testing.expectEqual(words.len + 3, out.len); // one 3-word OpSelectionMerge added
+
+    // Locate the spliced OpSelectionMerge and check its operands + position.
+    var found = false;
+    for (out, 0..) |w, k| {
+        if ((w & 0xFFFF) == SEL) {
+            try testing.expectEqual((@as(u32, 3) << 16) | SEL, w);
+            try testing.expectEqual(@as(u32, 4), out[k + 1]); // merge label
+            try testing.expectEqual(@as(u32, 0), out[k + 2]); // SelectionControl None
+            // immediately followed by the BranchConditional it guards
+            try testing.expectEqual((@as(u32, 4) << 16) | BRC, out[k + 3]);
+            found = true;
+        }
+    }
+    try testing.expect(found);
 }
 
 test "recover: arm returns early → honest-error (no structured merge)" {
