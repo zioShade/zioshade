@@ -1191,3 +1191,70 @@ test "wgsl: non-recursive nested function calls still compile (no false recursio
     defer alloc.free(wgsl);
     try std.testing.expect(wgsl.len > 0);
 }
+
+// Naming-independent scope check: every `vN` temp referenced in the WGSL must be
+// declared somewhere (let/var). Catches the undefined-identifier silent-wrong
+// class — e.g. a loop-carried phi update leaking into a later loop where its
+// value temp is out of scope (`v18 = v23` with v23 never declared).
+fn assertNoUndeclaredVTemp(wgsl: []const u8) !void {
+    const isIdent = struct {
+        fn f(c: u8) bool {
+            return std.ascii.isAlphanumeric(c) or c == '_';
+        }
+    }.f;
+    var declared = std.StringHashMap(void).init(alloc);
+    defer {
+        var it = declared.keyIterator();
+        while (it.next()) |k| alloc.free(k.*);
+        declared.deinit();
+    }
+    inline for (.{ "let ", "var " }) |kw| {
+        var idx: usize = 0;
+        while (std.mem.indexOfPos(u8, wgsl, idx, kw)) |p| {
+            idx = p + kw.len;
+            var e = idx;
+            while (e < wgsl.len and isIdent(wgsl[e])) e += 1;
+            const name = wgsl[idx..e];
+            if (name.len >= 2 and name[0] == 'v' and std.ascii.isDigit(name[1])) {
+                const owned = try alloc.dupe(u8, name);
+                if ((try declared.fetchPut(owned, {})) != null) alloc.free(owned);
+            }
+        }
+    }
+    var i: usize = 0;
+    while (i < wgsl.len) : (i += 1) {
+        if (wgsl[i] != 'v') continue;
+        if (i > 0 and isIdent(wgsl[i - 1])) continue;
+        if (i + 1 >= wgsl.len or !std.ascii.isDigit(wgsl[i + 1])) continue;
+        var e = i;
+        while (e < wgsl.len and isIdent(wgsl[e])) e += 1;
+        const name = wgsl[i..e];
+        if (!declared.contains(name)) {
+            std.debug.print("undeclared WGSL temp referenced: {s}\n", .{name});
+            return error.UndeclaredTemp;
+        }
+        i = e - 1;
+    }
+}
+
+test "wgsl: a loop without phis does not inherit a previous loop's phi update (scope leak)" {
+    // Two consecutive loops: the second must not re-emit the first's loop-carried
+    // back-edge update (which references a value temp scoped to the first loop).
+    // Regression for the stale `pending_phi_start` phi-range mis-attribution.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out float o;
+        \\void main(){
+        \\  float a = 0.0;
+        \\  for (int i = 0; i < 4; i++) { a += float(i); }
+        \\  int k = 0;
+        \\  for (; k < 5; k++) { a += 1.0; }
+        \\  o = a + float(k);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertNoUndeclaredVTemp(wgsl);
+}

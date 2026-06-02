@@ -2484,8 +2484,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     }
     var loop_stack = std.ArrayList(struct { merge: u32, cont: u32, header: u32, phi_start: usize, phi_end: usize }).initCapacity(arena, 4) catch return;
     defer loop_stack.deinit(arena);
-    // Track phi range for pending loop (Phi processed before LoopMerge)
+    // Track phi range for pending loop (Phi processed before LoopMerge).
+    // `phi_group_open` is set at the FIRST loop-header phi of a loop and cleared
+    // at that loop's LoopMerge. This makes multi-phi loop headers include ALL
+    // their phis (not just the last), and — crucially — gives loops with NO phis
+    // an EMPTY range instead of inheriting the previous loop's trailing phi
+    // update (which leaked e.g. `j = j+4` into unrelated later loops, referencing
+    // an out-of-scope `vN` that naga rejects).
     var pending_phi_start: usize = 0;
+    var phi_group_open: bool = false;
 
     // Deferred instruction range for loop header instructions
     // Instructions between Phi and LoopMerge must be emitted INSIDE the loop
@@ -3123,8 +3130,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     loop_header_label = header;
                     in_loop = true;
                     in_continue_block = false;
-                    const phi_start = pending_phi_start;
+                    // A loop with no header phis must get an EMPTY range, not the
+                    // stale `pending_phi_start` from a previous loop.
+                    const phi_start = if (phi_group_open) pending_phi_start else phi_updates.items.len;
                     const phi_end = phi_updates.items.len;
+                    phi_group_open = false;
                     try loop_stack.append(arena, .{ .merge = merge, .cont = cont, .header = header, .phi_start = phi_start, .phi_end = phi_end });
                     try writeInd(w, indent); try w.writeAll("loop {\n");
                     indent += 1;
@@ -3193,8 +3203,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             if (module.instructions[pk].op == .FunctionEnd or module.instructions[pk].op == .Label) break;
                         }
                     }
-                    if (lm_follows) {
-                        pending_phi_start = phi_updates.items.len; // mark start BEFORE adding
+                    if (lm_follows and !phi_group_open) {
+                        // First loop-header phi of this loop: open the group once so
+                        // ALL of the header's phis are captured (set BEFORE adding).
+                        pending_phi_start = phi_updates.items.len;
+                        phi_group_open = true;
                     }
                     if (inst.words.len >= 7) {
                         phi_updates.appendAssumeCapacity(.{ .result_id = inst.words[2], .value_id = inst.words[5] });
