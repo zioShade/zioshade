@@ -198,6 +198,55 @@ pub fn analyze(alloc: std.mem.Allocator, cfg: Cfg) !Analysis {
     return tmp;
 }
 
+/// Sentinel returned by `computePostDom` for a block whose only post-dominator is
+/// the (virtual) function exit — i.e. its successors do not reconverge on a real
+/// block before the function returns. For a selection header this means the
+/// construct is NOT a simple structured `if`-with-merge (e.g. one arm returns),
+/// so merge-info recovery must honest-error rather than guess (spec §4).
+pub const EXIT = std.math.maxInt(usize) - 1;
+
+/// Immediate post-dominator of every block, in the original block numbering.
+/// `ipdom[b]` is the nearest block that lies on every path from `b` to the
+/// function exit; `EXIT` if that is only the virtual exit; `Analysis.NONE` if `b`
+/// cannot reach any exit. Implemented as forward dominators on the reverse CFG
+/// rooted at a synthetic exit node — so it reuses `analyze` and shares its
+/// correctness. Pure: never mutates input. Caller owns the returned slice.
+pub fn computePostDom(alloc: std.mem.Allocator, cfg: Cfg) ![]usize {
+    const n = cfg.n;
+    const vexit = n; // synthetic exit node index
+
+    // Reverse adjacency, plus virtual-exit → every sink (block with no real succ).
+    var rsucc = try alloc.alloc(std.ArrayList(usize), n + 1);
+    defer {
+        for (rsucc) |*r| r.deinit(alloc);
+        alloc.free(rsucc);
+    }
+    for (rsucc) |*r| r.* = std.ArrayList(usize).empty;
+    for (0..n) |b| {
+        if (cfg.succ[b].len == 0) {
+            // sink (OpReturn / OpKill / OpUnreachable): exit flows here in reverse
+            try rsucc[vexit].append(alloc, b);
+        }
+        for (cfg.succ[b]) |s| {
+            try rsucc[s].append(alloc, b); // reverse edge s -> b
+        }
+    }
+
+    const rslices = try alloc.alloc([]const usize, n + 1);
+    defer alloc.free(rslices);
+    for (0..n + 1) |i| rslices[i] = rsucc[i].items;
+
+    var ar = try analyze(alloc, .{ .n = n + 1, .entry = vexit, .succ = rslices });
+    defer ar.deinit(alloc);
+
+    const ipdom = try alloc.alloc(usize, n);
+    for (0..n) |b| {
+        const id = ar.idom[b];
+        ipdom[b] = if (id == Analysis.NONE) Analysis.NONE else if (id == vexit) EXIT else id;
+    }
+    return ipdom;
+}
+
 // ---------------------------------------------------------------------------
 // Tests — hand-built CFGs with known dominator / loop / reducibility answers.
 // ---------------------------------------------------------------------------
@@ -262,4 +311,47 @@ test "cfg: unreachable block has no dominator and is ignored" {
     try testing.expect(a.reducible);
     try testing.expectEqual(Analysis.NONE, a.idom[2]);
     try testing.expect(!a.dominates(0, 2)); // unreachable: dominates() is false
+}
+
+test "postdom: diamond merge post-dominates the header (= structured merge block)" {
+    // 0 -> {1,2} -> 3.  Block 3 is where both arms reconverge → the if-merge.
+    const succ = [_][]const usize{ &.{ 1, 2 }, &.{3}, &.{3}, &.{} };
+    const ipdom = try computePostDom(testing.allocator, buildCfg(4, &succ, 0));
+    defer testing.allocator.free(ipdom);
+    try testing.expectEqual(@as(usize, 3), ipdom[0]); // header's merge = block 3
+    try testing.expectEqual(@as(usize, 3), ipdom[1]);
+    try testing.expectEqual(@as(usize, 3), ipdom[2]);
+    try testing.expectEqual(EXIT, ipdom[3]); // 3 reconverges only at the exit
+}
+
+test "postdom: straight line — each block's ipdom is the next" {
+    const succ = [_][]const usize{ &.{1}, &.{2}, &.{} };
+    const ipdom = try computePostDom(testing.allocator, buildCfg(3, &succ, 0));
+    defer testing.allocator.free(ipdom);
+    try testing.expectEqual(@as(usize, 1), ipdom[0]);
+    try testing.expectEqual(@as(usize, 2), ipdom[1]);
+    try testing.expectEqual(EXIT, ipdom[2]);
+}
+
+test "postdom: arm returns early → header ipdom is EXIT (NOT a simple merge)" {
+    // 0 -> {1,2}; 1 -> 3 ; 2 -> return (sink).  Paths from 0 do NOT reconverge on
+    // a real block, so ipdom[0] == EXIT — the signal that this is not expressible
+    // as a plain if-with-merge and merge recovery must honest-error.
+    const succ = [_][]const usize{ &.{ 1, 2 }, &.{3}, &.{}, &.{} };
+    const ipdom = try computePostDom(testing.allocator, buildCfg(4, &succ, 0));
+    defer testing.allocator.free(ipdom);
+    try testing.expectEqual(EXIT, ipdom[0]);
+}
+
+test "postdom: loop — immediate post-dom is the next in-loop block, not the merge" {
+    // 0 -> 1 -> 2 -> {1 (back), 3} -> end.  Every path from header 1 to exit goes
+    // 1 -> 2 (1's only successor) -> ... -> 3, so the IMMEDIATE post-dom of 1 is 2,
+    // and ipdom[2] == 3. The loop *merge/break* target (3) is NOT simply
+    // ipdom[header] — loop-merge derivation (the break-edge convergence) is the
+    // nuanced Phase 3 case; selection-merge (Phase 2) is the clean ipdom[header].
+    const succ = [_][]const usize{ &.{1}, &.{2}, &.{ 1, 3 }, &.{} };
+    const ipdom = try computePostDom(testing.allocator, buildCfg(4, &succ, 0));
+    defer testing.allocator.free(ipdom);
+    try testing.expectEqual(@as(usize, 2), ipdom[1]);
+    try testing.expectEqual(@as(usize, 3), ipdom[2]); // exiting block's ipdom = break target
 }
