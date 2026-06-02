@@ -1343,6 +1343,46 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
 
     if (entry_func_idx == null) return error.NoEntryPoint;
 
+    // Cross-function I/O (spec docs/specs/2026-06-02-wgsl-cross-function-io.md):
+    // WGSL @location inputs are entry-point parameters, NOT module globals, so a
+    // *helper* function that reads a stage input would reference an undefined
+    // identifier (naga reject — the largest undef-identifier bucket). Detect
+    // location (non-builtin) inputs that are loaded inside a non-entry function;
+    // those get promoted to a module-scope `var<private>` bridged from the entry
+    // parameter. Gated precisely: if none qualify, every emission path below is
+    // byte-identical to before (zero regression risk).
+    var promoted_inputs = std.AutoHashMap(u32, void).init(arena);
+    {
+        var input_id_set = std.AutoHashMap(u32, void).init(arena);
+        for (input_vars.items) |iv| {
+            if (iv.builtin == null) input_id_set.put(iv.id, {}) catch {};
+        }
+        if (input_id_set.count() > 0) {
+            var cur_fn: u32 = 0;
+            var in_entry = false;
+            for (module.instructions) |inst| {
+                if (inst.op == .Function and inst.words.len >= 3) {
+                    cur_fn = inst.words[2];
+                    in_entry = (module.entry_point_id != null and cur_fn == module.entry_point_id.?);
+                } else if (inst.op == .FunctionEnd) {
+                    cur_fn = 0;
+                    in_entry = false;
+                } else if (cur_fn != 0 and !in_entry) {
+                    // Pointer operand positions: Load/AccessChain base = words[3],
+                    // Store target = words[1].
+                    const ptr_id: ?u32 = switch (inst.op) {
+                        .Load, .AccessChain, .CopyObject => if (inst.words.len > 3) inst.words[3] else null,
+                        .Store => if (inst.words.len > 1) inst.words[1] else null,
+                        else => null,
+                    };
+                    if (ptr_id) |pid| {
+                        if (input_id_set.contains(pid)) promoted_inputs.put(pid, {}) catch {};
+                    }
+                }
+            }
+        }
+    }
+
     // Collect cbuffers and textures
     var cbuffers = std.ArrayList(struct { name: []const u8, type_id: u32, binding: u32, is_ssbo: bool, result_id: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
     var textures = std.ArrayList(struct { name: []const u8, binding: u32, image_type_id: u32, is_storage: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
@@ -1422,6 +1462,23 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         }
         try w.print("var<private> {s}: {s};\n", .{ name, rt });
+    }
+
+    // Promoted cross-function inputs: emit each as a module-scope var<private>
+    // (the entry wrapper copies the @location parameter into it; see param
+    // emission + body-start copy below). Helper functions then reference the
+    // global by its existing name, which is now in scope.
+    if (promoted_inputs.count() > 0) {
+        for (input_vars.items) |iv| {
+            if (!promoted_inputs.contains(iv.id)) continue;
+            const name = names.get(iv.id) orelse continue;
+            var actual_type = iv.type_id;
+            if (getDef(&module, iv.type_id)) |pi| {
+                if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3];
+            }
+            const rt = wgslType(&module, actual_type, &names, arena) catch continue;
+            try w.print("var<private> {s}: {s};\n", .{ name, rt });
+        }
     }
 
     // Detect SSBO struct fields that are the target of OpAtomic* ops.
@@ -2055,6 +2112,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // uses in the body stay valid. Collected here, emitted after the `{`.
     const BuiltinCoercion = struct { name: []const u8, src: []const u8 };
     var builtin_coercions = std.ArrayList(BuiltinCoercion).initCapacity(arena, 2) catch return error.OutOfMemory;
+    // Promoted cross-function inputs: the entry parameter is renamed `<name>_in`
+    // and the body copies it into the module-scope `var<private> <name>` global.
+    const InputCopy = struct { global: []const u8, param: []const u8 };
+    var input_copies = std.ArrayList(InputCopy).initCapacity(arena, 2) catch return error.OutOfMemory;
 
     // Input parameters
     for (input_vars.items, 0..) |iv, i| {
@@ -2105,7 +2166,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         } else {
             const loc = getDecVal(&decorations, iv.id, .location) orelse i;
-            try w.print("@location({d}) {s}: {s}", .{ loc, var_name, type_name });
+            if (promoted_inputs.contains(iv.id)) {
+                // Bridge: param `<name>_in` → module-scope `var<private> <name>`.
+                const pname = try std.fmt.allocPrint(arena, "{s}_in", .{var_name});
+                try w.print("@location({d}) {s}: {s}", .{ loc, pname, type_name });
+                try input_copies.append(arena, .{ .global = var_name, .param = pname });
+            } else {
+                try w.print("@location({d}) {s}: {s}", .{ loc, var_name, type_name });
+            }
         }
     }
 
@@ -2158,6 +2226,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // the (signed) body references resolve while the parameter stays WGSL-legal.
     for (builtin_coercions.items) |c| {
         try w.print("    let {s}: i32 = i32({s});\n", .{ c.name, c.src });
+    }
+    // Copy promoted-input parameters into their module-scope var<private> globals
+    // BEFORE any body statement reads them (var<private> is zero-initialised).
+    for (input_copies.items) |c| {
+        try w.print("    {s} = {s};\n", .{ c.global, c.param });
     }
 
     // Pre-scan: detect simple output variable pattern (single store before return)
