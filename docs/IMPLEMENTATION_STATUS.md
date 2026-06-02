@@ -10,7 +10,7 @@ glslpp is a **pure-Zig GLSL→SPIR-V compiler and SPIR-V cross-compiler** (HLSL 
 
 **What works today:**
 - **wintty production use** — every shader wintty ships through GLSL → SPIR-V → HLSL / MSL / WGSL.
-- **Correctness** — 2,072 / 2,087 runnable fixtures pass `spirv-val`; 15 honestly rejected as XFAIL (known-unsupported constructs, suite exits 0); HLSL outputs validate via DXC; pixel-level rendering matches glslang+SPIRV-Cross for the validated set.
+- **Correctness** — every conformance fixture's SPIR-V is validated with `spirv-val`; known-unsupported constructs are honestly rejected as XFAIL (the suite exits 0). **Authoritative counts: [`docs/STATUS.md`](STATUS.md)**, generated from a real run by `just status` (never hand-edited, so they cannot go stale). HLSL outputs validate via DXC; pixel-level rendering matches glslang+SPIRV-Cross for the validated set.
 - **In-process API** — no process spawn, no DLL init, no global state outside `threadlocal` per-thread caches.
 
 **What's missing relative to a true glslang / SPIRV-Cross drop-in:**
