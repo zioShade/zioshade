@@ -1160,3 +1160,34 @@ test "wgsl: heavily-used immutable input load inlines to its name in inline expr
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "v9 -") == null);
     for (wgsl) |c| try std.testing.expect(c != 0xAA);
 }
+
+test "wgsl: direct recursion is an honest error (WGSL forbids recursion)" {
+    // WGSL disallows any call-graph cycle. A recursive function must fail loud,
+    // not emit a self-calling WGSL function that naga rejects.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\int fib(int n) { if (n < 2) return n; return fib(n-1) + fib(n-2); }
+        \\void main(){ o = vec4(float(fib(5))); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedRecursion, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
+test "wgsl: non-recursive nested function calls still compile (no false recursion flag)" {
+    // Guard against the recursion detector over-firing on a normal call chain.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\vec2 inner(vec2 p) { return p * 2.0; }
+        \\vec2 outer(vec2 p) { return inner(p) + p; }
+        \\void main(){ o = vec4(outer(uv), 0.0, 1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(wgsl.len > 0);
+}
