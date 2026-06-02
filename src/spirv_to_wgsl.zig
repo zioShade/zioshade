@@ -4017,27 +4017,47 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // instruction is the GLSL opcode
                         const rt = try wgslType(module, inst.words[1], names, arena);
                         const result_name = names.get(inst.words[2]) orelse "v";
-                        // Shared name mapping (single source of truth; honest-errors unmapped ops).
-                        const func_name = try glslStd450WgslName(instruction);
-                        // Build args
-                        var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
-                        defer args.deinit(arena);
-                        for (inst.words[5..], 0..) |arg_id, ai| {
-                            if (ai > 0) try args.appendSlice(arena, ", ");
-                            try args.appendSlice(arena, names.get(arg_id) orelse "0");
+                        // GLSL.std.450 Frexp (51) / Modf (35) are POINTER-form: the
+                        // result is the significand/fractional part and the 2nd
+                        // operand is an out-pointer for the exponent/integer part.
+                        // WGSL has no pointer form — frexp(x)/modf(x) RETURN a struct
+                        // ({fract, exp} / {fract, whole}). Emit a temp, then bind the
+                        // result to `.fract` and the out-pointer's variable to the
+                        // second field. (Emitting the old `frexp(x, ptr)` was a naga
+                        // reject — "too many arguments" — and dropped the exponent.)
+                        if (instruction == 51 or instruction == 35) {
+                            const x = names.get(inst.words[5]) orelse "0";
+                            const builtin = if (instruction == 51) "frexp" else "modf";
+                            const second_field = if (instruction == 51) "exp" else "whole";
+                            const tmp = std.fmt.allocPrint(arena, "{s}_sm", .{result_name}) catch "_sm";
+                            try writeInd(w, indent); try w.print("let {s} = {s}({s});\n", .{ tmp, builtin, x });
+                            if (inst.words.len > 6) {
+                                if (names.get(inst.words[6])) |ptr_name| {
+                                    try writeInd(w, indent); try w.print("{s} = {s}.{s};\n", .{ ptr_name, tmp, second_field });
+                                }
+                            }
+                            try writeInd(w, indent); try w.print("let {s}: {s} = {s}.fract;\n", .{ result_name, rt, tmp });
+                        } else {
+                            // Shared name mapping (single source of truth; honest-errors unmapped ops).
+                            const func_name = try glslStd450WgslName(instruction);
+                            // Build args
+                            var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
+                            defer args.deinit(arena);
+                            for (inst.words[5..], 0..) |arg_id, ai| {
+                                if (ai > 0) try args.appendSlice(arena, ", ");
+                                try args.appendSlice(arena, names.get(arg_id) orelse "0");
+                            }
+                            // Map GLSL.std.450 names to WGSL equivalents
+                            const wgsl_name = if (std.mem.eql(u8, func_name, "faceForward"))
+                                "faceForward"
+                            else if (std.mem.eql(u8, func_name, "findILsb"))
+                                "firstTrailingBit"
+                            else if (std.mem.eql(u8, func_name, "findSMsb") or std.mem.eql(u8, func_name, "findUMsb"))
+                                "firstLeadingBit"
+                            else
+                                func_name;
+                            try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, wgsl_name, args.items });
                         }
-                        // Map GLSL.std.450 names to WGSL equivalents
-                        const wgsl_name = if (std.mem.eql(u8, func_name, "faceForward"))
-                            "faceForward"
-                        else if (std.mem.eql(u8, func_name, "findILsb"))
-                            "firstTrailingBit"
-                        else if (std.mem.eql(u8, func_name, "findSMsb") or std.mem.eql(u8, func_name, "findUMsb"))
-                            "firstLeadingBit"
-                        else if (std.mem.eql(u8, func_name, "modf"))
-                            "frexp" // WGSL frexp returns struct
-                        else
-                            func_name;
-                        try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, wgsl_name, args.items });
                     }
                 }
             },
