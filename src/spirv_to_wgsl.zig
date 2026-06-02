@@ -2556,8 +2556,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         while (it.next()) |entry| {
             if (entry.value_ptr.* == .Load or entry.value_ptr.* == .CopyObject) {
                 const result_id = entry.key_ptr.*;
-                const uses = use_count.get(result_id) orelse 0;
-                if (uses <= 6) { // Allow up to 5 actual uses for name propagation
+                // Immutable loads (pointers that are NOT store targets — inputs,
+                // uniforms, push-constants, spec-consts) are inlined to the source
+                // name at ANY use count: the value can't change, so substitution is
+                // value-equivalent. A prior `uses <= 6` cap left heavily-used loads
+                // (e.g. an input read in many branches) neither inlined NOR emitted
+                // as a `let`, so inline expressions referenced an undefined `vN`
+                // (naga-rejected silent-wrong). Store-target loads are still skipped
+                // below to preserve load-before-store semantics.
+                {
                     // Find the source pointer for this load
                     const load_inst = getDef(module, result_id) orelse continue;
                     if (load_inst.words.len > 3) {
