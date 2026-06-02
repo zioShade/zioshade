@@ -1329,3 +1329,24 @@ test "wgsl: a shader with NO cross-function input is unchanged (no spurious var<
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<private> uv") == null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "uv_in") == null);
 }
+
+test "wgsl: an output read back in the body is declared as a local var (not direct-returned)" {
+    // Partial writes + read-back of the output (e.g. modf.legacy's
+    // `result.xy=…; result.zw=…` with `result.z` reads) must declare the output
+    // as a zero-initialised `var` and return it — the direct-return optimization
+    // would skip the declaration and leave the read referencing an undefined name.
+    const source: [:0]const u8 =
+        "#version 450\n" ++
+        "layout(location=0) in vec2 v;\n" ++
+        "layout(location=0) out vec4 o;\n" ++
+        "void main(){ o.xy = v; o.zw = o.xy + o.zw; }\n";
+    // NoOpt so the output read-back is preserved for the test.
+    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The output is a declared local var and is returned (not a bare reconstruction).
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "var o: vec4f;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "return o;") != null);
+    try nagaValidateOrSkip(wgsl, "output-readback");
+}
