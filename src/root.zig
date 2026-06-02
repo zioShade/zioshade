@@ -1105,6 +1105,7 @@ test {
     _ = spirv;
     _ = parser;
     _ = semantic;
+    _ = @import("cfg_structurize.zig");
     // gap_tests.zig is intentionally NOT imported here. It contains markers
     // for known unimplemented features that fail on purpose; run it
     // standalone with `zig test src/gap_tests.zig` to audit the gap list.
