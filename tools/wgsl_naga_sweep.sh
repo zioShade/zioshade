@@ -58,7 +58,11 @@ for dir in $SUITES; do
       fi
       continue
     fi
-    if "$NAGA" "$TMP" >/dev/null 2>&1; then
+    # Retry once on failure: a REAL naga rejection is deterministic and fails
+    # both times, but a transient Windows file/AV/spawn race (which jittered the
+    # raw count run-to-run) typically succeeds on the retry. This keeps the count
+    # dependable without ever masking a genuine divergence.
+    if "$NAGA" "$TMP" >/dev/null 2>&1 || "$NAGA" "$TMP" >/dev/null 2>&1; then
       pass=$((pass+1))
     else
       nfail=$((nfail+1))
