@@ -3,7 +3,7 @@
 
 # glslpp status
 
-Generated: `2026-06-02T06:52:40Z` · commit `aafe7ae8`
+Generated: `2026-06-02T07:18:59Z` · commit `9c5fffa1`
 
 ## Conformance (`zig build conformance` — every fixture's SPIR-V validated with spirv-val)
 
