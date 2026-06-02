@@ -1130,3 +1130,33 @@ test "wgsl: gl_FragDepth passthrough store emits a defined identifier (not freed
     try std.testing.expect(std.mem.indexOf(u8, wgsl, ", d);") != null);
     for (wgsl) |c| try std.testing.expect(c != 0xAA);
 }
+
+test "wgsl: heavily-used immutable input load inlines to its name in inline expressions" {
+    // Regression: an input read in many branches (>6 uses) was NOT inlined to its
+    // source name by the load-inlining pass (a `uses <= 6` cap) AND never emitted
+    // as a `let`, so inline expressions referenced an undefined `vN` — e.g. a
+    // nested if/else chain produced `(v9 - 0.25) * 4.0` where `v9` is never
+    // declared (naga: "no definition in scope for identifier: `v9`").
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in float u;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float result;
+        \\    if (u < 0.25) { result = u * 4.0; }
+        \\    else if (u < 0.5) { result = 1.0 - (u - 0.25) * 4.0; }
+        \\    else if (u < 0.75) { result = (u - 0.5) * 4.0; }
+        \\    else { result = 1.0 - (u - 0.75) * 4.0; }
+        \\    fragColor = vec4(result, result * 0.5, result * 0.25, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The immutable input `u` must appear in the arithmetic; no undefined `v9`.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "(u - 0.25)") != null);
+    // No bare reference to an undefined load temp like `v9 ` (the input is `u`).
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "v9 -") == null);
+    for (wgsl) |c| try std.testing.expect(c != 0xAA);
+}
