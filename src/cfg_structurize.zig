@@ -13,6 +13,9 @@
 //! adapter is added in Phase 2 when the recovered merge info is actually emitted.
 
 const std = @import("std");
+const common = @import("spirv_cross_common.zig");
+const spirv = @import("spirv.zig");
+const Instruction = common.Instruction;
 
 /// A control-flow graph: `n` blocks numbered `0..n`, `entry` is the start block,
 /// `succ[b]` lists the successor block indices of block `b`.
@@ -21,6 +24,154 @@ pub const Cfg = struct {
     entry: usize,
     succ: []const []const usize,
 };
+
+/// A recorded structured selection (from an existing `OpSelectionMerge`): the
+/// header block and the merge block it names. Used as ground truth by the
+/// strip-and-recover validation (does `computePostDom` re-derive `merge`?).
+pub const SelMerge = struct { header: usize, merge: usize };
+
+/// A CFG built from a SPIR-V function body, plus the block↔label mapping and the
+/// merge blocks the body's `OpSelectionMerge`s actually named. Caller owns it
+/// (`deinit`).
+pub const SpirvCfg = struct {
+    cfg: Cfg,
+    block_label: []u32, // block index → OpLabel result id
+    succ_store: [][]usize, // backing storage for cfg.succ entries
+    succ_view: [][]const usize, // the slice cfg.succ points at
+    sel_merges: []SelMerge,
+    alloc: std.mem.Allocator,
+
+    pub fn deinit(self: *SpirvCfg) void {
+        for (self.succ_store) |s| self.alloc.free(s);
+        self.alloc.free(self.succ_store);
+        self.alloc.free(self.succ_view);
+        self.alloc.free(self.block_label);
+        self.alloc.free(self.sel_merges);
+    }
+};
+
+/// Build a `Cfg` from a SPIR-V function body (`insts` = the instructions from the
+/// first `OpLabel` through the terminators, e.g. a single function). Blocks start
+/// at `OpLabel`; successors come from the terminator (`OpBranch` /
+/// `OpBranchConditional` / `OpSwitch`; `OpReturn`/`OpKill`/`OpUnreachable` = sink).
+/// Existing `OpSelectionMerge`s are recorded (as ground truth) but their edges are
+/// NOT added to the CFG — the CFG is the raw branch graph, exactly what the
+/// recovery pass sees for unstructured input. Pure; never mutates input.
+pub fn buildCfgFromBody(alloc: std.mem.Allocator, insts: []const Instruction) !SpirvCfg {
+    // Pass 1: enumerate blocks (OpLabel result ids), in order.
+    var labels = std.ArrayList(u32).empty;
+    errdefer labels.deinit(alloc);
+    var idx_of = std.AutoHashMap(u32, usize).init(alloc);
+    defer idx_of.deinit();
+    for (insts) |ins| {
+        if (ins.op == .Label and ins.words.len >= 2) {
+            try idx_of.put(ins.words[1], labels.items.len);
+            try labels.append(alloc, ins.words[1]);
+        }
+    }
+    const n = labels.items.len;
+
+    const succ_store = try alloc.alloc([]usize, n);
+    const assigned = try alloc.alloc(bool, n);
+    @memset(assigned, false);
+    defer alloc.free(assigned);
+    errdefer {
+        for (0..n) |i| if (assigned[i]) alloc.free(succ_store[i]);
+        alloc.free(succ_store);
+    }
+    var sel = std.ArrayList(SelMerge).empty;
+    errdefer sel.deinit(alloc);
+
+    const setSucc = struct {
+        fn f(a: std.mem.Allocator, store: [][]usize, asn: []bool, b: usize, items: []const usize) !void {
+            store[b] = try a.dupe(usize, items);
+            asn[b] = true;
+        }
+    }.f;
+
+    // Pass 2: walk blocks, fill successors + record selection merges.
+    var cur: ?usize = null;
+    var pending_merge: ?u32 = null; // merge label from an OpSelectionMerge in cur block
+    var tmp = std.ArrayList(usize).empty;
+    defer tmp.deinit(alloc);
+
+    for (insts) |ins| {
+        switch (ins.op) {
+            .Label => {
+                cur = idx_of.get(ins.words[1]).?;
+                pending_merge = null;
+            },
+            .SelectionMerge => {
+                if (ins.words.len >= 2) pending_merge = ins.words[1];
+            },
+            .Branch => {
+                if (cur) |b| {
+                    tmp.clearRetainingCapacity();
+                    if (ins.words.len >= 2) if (idx_of.get(ins.words[1])) |t| try tmp.append(alloc, t);
+                    try setSucc(alloc, succ_store, assigned, b, tmp.items);
+                    cur = null;
+                }
+            },
+            .BranchConditional => {
+                if (cur) |b| {
+                    tmp.clearRetainingCapacity();
+                    if (ins.words.len >= 4) {
+                        if (idx_of.get(ins.words[2])) |t| try tmp.append(alloc, t);
+                        if (idx_of.get(ins.words[3])) |f| try tmp.append(alloc, f);
+                    }
+                    try setSucc(alloc, succ_store, assigned, b, tmp.items);
+                    if (pending_merge) |m| if (idx_of.get(m)) |mi| try sel.append(alloc, .{ .header = b, .merge = mi });
+                    cur = null;
+                }
+            },
+            .Switch => {
+                if (cur) |b| {
+                    tmp.clearRetainingCapacity();
+                    // words[2] = default label, then (literal, label) pairs from words[3].
+                    if (ins.words.len >= 3) if (idx_of.get(ins.words[2])) |d| try tmp.append(alloc, d);
+                    var w: usize = 4;
+                    while (w < ins.words.len) : (w += 2) {
+                        if (idx_of.get(ins.words[w])) |t| {
+                            var seen = false;
+                            for (tmp.items) |e| if (e == t) {
+                                seen = true;
+                                break;
+                            };
+                            if (!seen) try tmp.append(alloc, t);
+                        }
+                    }
+                    try setSucc(alloc, succ_store, assigned, b, tmp.items);
+                    if (pending_merge) |m| if (idx_of.get(m)) |mi| try sel.append(alloc, .{ .header = b, .merge = mi });
+                    cur = null;
+                }
+            },
+            .Return, .ReturnValue, .Kill, .Unreachable => {
+                if (cur) |b| {
+                    try setSucc(alloc, succ_store, assigned, b, &.{});
+                    cur = null;
+                }
+            },
+            else => {},
+        }
+    }
+    // Any block without an explicit terminator (malformed SPIR-V) → sink.
+    for (0..n) |b| {
+        if (!assigned[b]) try setSucc(alloc, succ_store, assigned, b, &.{});
+    }
+
+    const succ_view = try alloc.alloc([]const usize, n);
+    errdefer alloc.free(succ_view);
+    for (0..n) |b| succ_view[b] = succ_store[b];
+
+    return .{
+        .cfg = .{ .n = n, .entry = 0, .succ = succ_view },
+        .block_label = try labels.toOwnedSlice(alloc),
+        .succ_store = succ_store,
+        .succ_view = succ_view,
+        .sel_merges = try sel.toOwnedSlice(alloc),
+        .alloc = alloc,
+    };
+}
 
 /// Result of `analyze` — owned by the caller via `arena`/allocator passed in.
 pub const Analysis = struct {
@@ -341,6 +492,57 @@ test "postdom: arm returns early → header ipdom is EXIT (NOT a simple merge)" 
     const ipdom = try computePostDom(testing.allocator, buildCfg(4, &succ, 0));
     defer testing.allocator.free(ipdom);
     try testing.expectEqual(EXIT, ipdom[0]);
+}
+
+test "adapter+recover: if-else body — CFG built and ipdom re-derives the merge" {
+    // Hand-built SPIR-V body for: if (cond) {then} else {else} ; merge ; return.
+    // Labels: 1=entry 2=then 3=else 4=merge → block indices 0,1,2,3.
+    // words[0] is the (ignored) opcode header; operands follow.
+    const a = testing.allocator;
+    const lbl1 = [_]u32{ 0, 1 };
+    const selm = [_]u32{ 0, 4, 0 }; // OpSelectionMerge merge=4 control=0
+    const brc = [_]u32{ 0, 99, 2, 3 }; // OpBranchConditional cond=99 true=2 false=3
+    const lbl2 = [_]u32{ 0, 2 };
+    const br2 = [_]u32{ 0, 4 };
+    const lbl3 = [_]u32{ 0, 3 };
+    const br3 = [_]u32{ 0, 4 };
+    const lbl4 = [_]u32{ 0, 4 };
+    const ret = [_]u32{0};
+    const insts = [_]Instruction{
+        .{ .op = .Label, .words = &lbl1 },
+        .{ .op = .SelectionMerge, .words = &selm },
+        .{ .op = .BranchConditional, .words = &brc },
+        .{ .op = .Label, .words = &lbl2 },
+        .{ .op = .Branch, .words = &br2 },
+        .{ .op = .Label, .words = &lbl3 },
+        .{ .op = .Branch, .words = &br3 },
+        .{ .op = .Label, .words = &lbl4 },
+        .{ .op = .Return, .words = &ret },
+    };
+
+    var sc = try buildCfgFromBody(a, &insts);
+    defer sc.deinit();
+
+    try testing.expectEqual(@as(usize, 4), sc.cfg.n);
+    // entry(0) → {then(1), else(2)}
+    try testing.expectEqual(@as(usize, 2), sc.cfg.succ[0].len);
+    try testing.expectEqual(@as(usize, 1), sc.cfg.succ[0][0]);
+    try testing.expectEqual(@as(usize, 2), sc.cfg.succ[0][1]);
+    // then(1) → {merge(3)} ; else(2) → {merge(3)} ; merge(3) → sink
+    try testing.expectEqual(@as(usize, 3), sc.cfg.succ[1][0]);
+    try testing.expectEqual(@as(usize, 3), sc.cfg.succ[2][0]);
+    try testing.expectEqual(@as(usize, 0), sc.cfg.succ[3].len);
+
+    // Ground truth: the body's OpSelectionMerge named header=0, merge=3.
+    try testing.expectEqual(@as(usize, 1), sc.sel_merges.len);
+    try testing.expectEqual(@as(usize, 0), sc.sel_merges[0].header);
+    try testing.expectEqual(@as(usize, 3), sc.sel_merges[0].merge);
+
+    // STRIP-AND-RECOVER: computePostDom (which never saw the OpSelectionMerge)
+    // must re-derive the same merge block as the recorded ground truth.
+    const ipdom = try computePostDom(a, sc.cfg);
+    defer a.free(ipdom);
+    try testing.expectEqual(sc.sel_merges[0].merge, ipdom[sc.sel_merges[0].header]);
 }
 
 test "postdom: loop — immediate post-dom is the next in-loop block, not the merge" {
