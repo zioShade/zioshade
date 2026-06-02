@@ -1154,6 +1154,16 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         return error.UnsupportedSamplerArray;
     }
 
+    // WGSL forbids recursion — direct OR mutual (the spec disallows any cycle in
+    // the call graph). Lenient front-ends can hand us a recursive SPIR-V call
+    // graph; emitting it produces WGSL functions that call themselves, which naga
+    // rejects ("declaration of `f` is recursive"). Fail loud rather than emit
+    // illegal WGSL (the silent-wrong this backend forbids).
+    if (callGraphHasCycle(&module, alloc)) {
+        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL forbids recursion (a direct or mutual function-call cycle)", .{}) catch null;
+        return error.UnsupportedRecursion;
+    }
+
     var names = std.AutoHashMap(u32, []const u8).init(alloc);
     defer {
         var it = names.iterator();
@@ -5216,6 +5226,67 @@ fn resolveOperandExpr(module: *const ParsedModule, names: *const std.AutoHashMap
     // Only use pre-built inline expressions (from the pre-scan)
     if (inline_exprs.get(id)) |expr| return expr;
     return names.get(id) orelse "v";
+}
+
+// Detect a cycle in the OpFunctionCall graph (direct or mutual recursion).
+// WGSL forbids recursion of any kind, so a cycle means the module cannot be
+// represented and must be honest-errored rather than emitted. Returns true if
+// any reachable cycle exists. Conservative: allocation failures return false
+// (the worst case is naga catching the recursion downstream, never silent-wrong
+// acceptance of something this missed).
+fn callGraphHasCycle(module: *const ParsedModule, alloc: std.mem.Allocator) bool {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var adj = std.AutoHashMap(u32, std.ArrayListUnmanaged(u32)).init(a);
+    var cur: u32 = 0;
+    for (module.instructions) |inst| {
+        switch (inst.op) {
+            .Function => if (inst.words.len >= 3) {
+                cur = inst.words[2];
+                const gop = adj.getOrPut(cur) catch return false;
+                if (!gop.found_existing) gop.value_ptr.* = .{};
+            },
+            .FunctionEnd => cur = 0,
+            .FunctionCall => if (inst.words.len >= 4 and cur != 0) {
+                const gop = adj.getOrPut(cur) catch return false;
+                if (!gop.found_existing) gop.value_ptr.* = .{};
+                gop.value_ptr.append(a, inst.words[3]) catch return false;
+            },
+            else => {},
+        }
+    }
+
+    // Iterative DFS with white(absent)/gray(1)/black(2) coloring; a gray
+    // back-edge is a cycle.
+    var color = std.AutoHashMap(u32, u8).init(a);
+    var it = adj.keyIterator();
+    while (it.next()) |kp| {
+        if ((color.get(kp.*) orelse 0) != 0) continue;
+        const Frame = struct { node: u32, i: usize };
+        var stack = std.ArrayListUnmanaged(Frame){};
+        stack.append(a, .{ .node = kp.*, .i = 0 }) catch return false;
+        color.put(kp.*, 1) catch return false;
+        while (stack.items.len > 0) {
+            const top = &stack.items[stack.items.len - 1];
+            const neighbors: []const u32 = if (adj.get(top.node)) |list| list.items else &.{};
+            if (top.i < neighbors.len) {
+                const nb = neighbors[top.i];
+                top.i += 1;
+                const c = color.get(nb) orelse 0;
+                if (c == 1) return true; // gray back-edge → cycle
+                if (c == 0) {
+                    color.put(nb, 1) catch return false;
+                    stack.append(a, .{ .node = nb, .i = 0 }) catch return false;
+                }
+            } else {
+                color.put(top.node, 2) catch return false;
+                _ = stack.pop();
+            }
+        }
+    }
+    return false;
 }
 
 // Check if an expression contains operators and needs parentheses
