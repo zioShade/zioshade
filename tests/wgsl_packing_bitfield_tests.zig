@@ -13,13 +13,19 @@ fn compileWgsl(alloc: std.mem.Allocator, src: [:0]const u8, stage: glslpp.Stage)
 
 // ── M4.1: packing ──
 
+// The gl_Position write in these vertex shaders is load-bearing: WGSL requires
+// every vertex entry to return a @builtin(position), and the backend fails loud
+// (error.UnsupportedOp) on a vertex shader that lacks one rather than fabricate
+// it (see spirv_to_wgsl.zig honest-error guard). These tests only care about the
+// packSnorm2x16/packHalf2x16 → pack2x16snorm/pack2x16float name mapping, but the
+// shader must still be lowerable to exercise it.
 test "M4.1 WGSL: packSnorm2x16 emits pack2x16snorm" {
     const alloc = std.testing.allocator;
     const wgsl = try compileWgsl(alloc,
         \\#version 450
         \\layout(location = 0) in vec2 uv;
         \\layout(location = 0) flat out uint packed_uv;
-        \\void main() { packed_uv = packSnorm2x16(uv); }
+        \\void main() { packed_uv = packSnorm2x16(uv); gl_Position = vec4(uv, 0.0, 1.0); }
     , .vertex);
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "pack2x16snorm") != null);
@@ -31,7 +37,7 @@ test "M4.1 WGSL: packHalf2x16 emits pack2x16float" {
         \\#version 450
         \\layout(location = 0) in vec2 uv;
         \\layout(location = 0) flat out uint packed_uv;
-        \\void main() { packed_uv = packHalf2x16(uv); }
+        \\void main() { packed_uv = packHalf2x16(uv); gl_Position = vec4(uv, 0.0, 1.0); }
     , .vertex);
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "pack2x16float") != null);
