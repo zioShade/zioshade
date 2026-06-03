@@ -450,20 +450,29 @@ fn firstInst(spv: []const u32, opcode: u32) ?[]const u32 {
 
 const OP_VECTOR_SHUFFLE: u32 = 79;
 
-/// Return just the component-selector words of the first OpVectorShuffle that
-/// has exactly `want` selectors (word count == 5 + want). A swizzle
-/// compound-assign on a vecN emits TWO shuffles — a narrow extract of the
-/// swizzled lanes, then a wide write-back that rebuilds the full N-wide vector.
-/// Selecting on width picks the write-back over the extract.
-/// Layout: [op|wc] [resType] [resId] [vec1] [vec2] [comp...].
-fn shuffleComponentsOfWidth(spv: []const u32, want: usize) ?[]const u32 {
+/// Return the component-selector words of the first `n`-wide OpVectorShuffle
+/// that MERGES both operands — i.e. at least one selector picks from the second
+/// operand (index >= n, the computed values) and at least one keeps from the
+/// first (index < n, the original vector). A swizzle compound-assign on a vecN
+/// emits two shuffles: a narrow extract of the swizzled lanes (width == swizzle
+/// length, all selectors < n), then this wide write-back. Matching the merge
+/// pattern — rather than width alone — pins the write-back even if the fixture
+/// later grows an unrelated n-wide read-swizzle (which would be a pure permute
+/// of one operand, never a mix). Layout: [op|wc] resType resId vec1 vec2 comp...
+fn mergeShuffleSelectors(spv: []const u32, n: u32) ?[]const u32 {
     var i: usize = 5;
     while (i < spv.len) {
         const wc = spv[i] >> 16;
         const op = spv[i] & 0xFFFF;
         if (wc == 0) break;
-        if (op == OP_VECTOR_SHUFFLE and wc == 5 + want and i + wc <= spv.len) {
-            return spv[i + 5 .. i + wc];
+        if (op == OP_VECTOR_SHUFFLE and wc == 5 + n and i + wc <= spv.len) {
+            const sel = spv[i + 5 .. i + wc];
+            var from_second = false;
+            var from_first = false;
+            for (sel) |s| {
+                if (s >= n) from_second = true else from_first = true;
+            }
+            if (from_second and from_first) return sel;
         }
         i += wc;
     }
@@ -483,7 +492,9 @@ test "swizzle compound-assign write-back: partial swizzle on vec4 (v.xy *= 2.0)"
     // SPIR-V (so spirv-val/conformance never flag it) but wrong-valued — exactly
     // the class of error this exact-selector check exists to catch. `vin` is a
     // shader input so the shuffle is never constant-folded, and NoOpt codegen
-    // keeps the analyzer's exact selectors.
+    // keeps the analyzer's exact selectors. This is the stronger exact-selector
+    // companion to the pattern-based guard in analyzer_strict_tests.zig
+    // ("strict: partial swizzle compound-assign writes the correct components").
     const source =
         \\#version 430
         \\layout(location = 0) in vec4 vin;
@@ -492,7 +503,7 @@ test "swizzle compound-assign write-back: partial swizzle on vec4 (v.xy *= 2.0)"
     ;
     const spv = try glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const comps = shuffleComponentsOfWidth(spv, 4) orelse return error.NoWriteBackShuffle;
+    const comps = mergeShuffleSelectors(spv, 4) orelse return error.NoWriteBackShuffle;
     try std.testing.expectEqualSlices(u32, &[_]u32{ 4, 5, 2, 3 }, comps);
 }
 
@@ -508,7 +519,7 @@ test "swizzle compound-assign write-back: partial swizzle on vec4 (col.rgb *= 0.
     ;
     const spv = try glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const comps = shuffleComponentsOfWidth(spv, 4) orelse return error.NoWriteBackShuffle;
+    const comps = mergeShuffleSelectors(spv, 4) orelse return error.NoWriteBackShuffle;
     try std.testing.expectEqualSlices(u32, &[_]u32{ 4, 5, 6, 3 }, comps);
 }
 
