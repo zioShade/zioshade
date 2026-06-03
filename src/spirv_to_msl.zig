@@ -1631,6 +1631,29 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
             try w.print("    {s} {s}[{d}];\n", .{et, mname, lv});
             continue;
         } }
+        // Runtime (flexible) array member `T m[]` — SPIR-V OpTypeRuntimeArray.
+        // Emit it as `T m[1]` (the spirv-cross convention): a scalar `T m;`
+        // would be invalid the moment the body indexes `m[i]` (silent-wrong).
+        if (mti) |mi2| { if (mi2.op == .TypeRuntimeArray and mi2.words.len > 2) {
+            const elem_type_id = mi2.words[2];
+            const stride = getDecVal(decs, mt_id, .array_stride);
+            // Resolve the element type. Scalars/vectors may need std140/std430
+            // widening; structs and anything the packed/widened resolver rejects
+            // (e.g. `Foo data[]` — a runtime array OF a struct) fall back to the
+            // plain element-type name (`mslType`), which spirv-cross also uses
+            // (`Foo data[1];`). The fallback prevents this branch from turning a
+            // previously-emitted shader into an UnsupportedUboMemberLayout error.
+            const et: []const u8 = blk: {
+                const widened = if (stride) |s|
+                    mslWidenedElementType(m, elem_type_id, s, mat_stride, names, alloc)
+                else
+                    mslPackedType(m, elem_type_id, names, alloc);
+                if (widened) |w_ok| break :blk w_ok else |_| {}
+                break :blk mslType(m, elem_type_id, names, alloc) catch "float";
+            };
+            try w.print("    {s} {s}[1];\n", .{et, mname});
+            continue;
+        } }
         const mt = try mslUboMemberType(m, mt_id, this_off, next_off, mat_stride, names, alloc);
         try w.print("    {s} {s};\n", .{mt, mname});
     }
@@ -2020,7 +2043,13 @@ fn emitFunction(
             for (storage_buffers.items) |sb| {
                 if (!first_param) try w.writeAll(", ");
                 const sb_b = resolveMslSlot(resource_bindings, binding_shift, sb.descriptor_set, sb.binding);
-                try w.print("device {s}* {s} [[buffer({d})]]", .{sb.name, sb.name, sb_b});
+                // Reference (`device T&`), NOT pointer (`device T*`): the body's
+                // access-chain emitter uses `.member` (dot), which is only valid
+                // on a reference — a pointer needs `->`. This mirrors the working
+                // uniform-buffer pattern (`constant T& name_1`). Emitting a
+                // pointer here produced invalid MSL (`.` on a pointer) for every
+                // SSBO shader — silent-wrong. See docs/specs/2026-06-02-msl-ssbo-correctness.md.
+                try w.print("device {s}& {s} [[buffer({d})]]", .{sb.name, sb.name, sb_b});
                 first_param = false;
             }
             for (cbuffers.items) |cb| {
@@ -2060,10 +2089,11 @@ fn emitFunction(
                 try w.print("    {s} {s} = set{d}.{s};\n", .{ mslTextureType(tex), tex.name, tex.descriptor_set, tex.name });
                 try w.print("    sampler {s}Smplr = set{d}.{s}Smplr;\n", .{ tex.name, tex.descriptor_set, tex.name });
             }
-            // SSBO: body emitter expects `Name` as a `device Buf*` (deref'd
-            // via `Name->_mK`). Mirror the same pointer shape from the set.
+            // SSBO: the body emitter accesses members via `Name.member` (dot),
+            // so bind `Name` as a reference. The argument-buffer set field is a
+            // `device Buf*` pointer, so dereference it: `device Buf& Name = *set.Name;`.
             for (storage_buffers.items) |sb| {
-                try w.print("    device {s}* {s} = set{d}.{s};\n", .{ sb.name, sb.name, sb.descriptor_set, sb.name });
+                try w.print("    device {s}& {s} = *set{d}.{s};\n", .{ sb.name, sb.name, sb.descriptor_set, sb.name });
             }
         }
 
