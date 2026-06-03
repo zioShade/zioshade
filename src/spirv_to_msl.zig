@@ -182,7 +182,12 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     if (ti) |tinst| {
                         if (tinst.op == .TypeVector) { cur_type = tinst.words[2]; }
                         else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur_type = tinst.words[val + 2]; }
-                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                        // TypeRuntimeArray's element type is words[2], same as TypeArray.
+                        // Omitting it dropped cur_type to null after a runtime-array
+                        // index, so a following struct-member index emitted `[0]`
+                        // instead of `.m` (e.g. SSBO `data[i].m` -> `data[i][0]`,
+                        // silent-wrong). Advancing to the element keeps member names.
+                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix or tinst.op == .TypeRuntimeArray) { cur_type = tinst.words[2]; }
                         else { cur_type = null; }
                     }
                 }
@@ -225,7 +230,12 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     if (ti) |tinst| {
                         if (tinst.op == .TypeVector) { cur_type = tinst.words[2]; }
                         else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur_type = tinst.words[val + 2]; }
-                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                        // TypeRuntimeArray's element type is words[2], same as TypeArray.
+                        // Omitting it dropped cur_type to null after a runtime-array
+                        // index, so a following struct-member index emitted `[0]`
+                        // instead of `.m` (e.g. SSBO `data[i].m` -> `data[i][0]`,
+                        // silent-wrong). Advancing to the element keeps member names.
+                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix or tinst.op == .TypeRuntimeArray) { cur_type = tinst.words[2]; }
                         else { cur_type = null; }
                     }
                 }
@@ -492,12 +502,33 @@ fn writeAccessExprPlain(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                     if (ti) |tinst| {
                         if (tinst.op == .TypeVector) { cur_type = tinst.words[2]; }
                         else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur_type = tinst.words[val + 2]; }
-                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
+                        // TypeRuntimeArray's element type is words[2], same as TypeArray.
+                        // Omitting it dropped cur_type to null after a runtime-array
+                        // index, so a following struct-member index emitted `[0]`
+                        // instead of `.m` (e.g. SSBO `data[i].m` -> `data[i][0]`,
+                        // silent-wrong). Advancing to the element keeps member names.
+                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix or tinst.op == .TypeRuntimeArray) { cur_type = tinst.words[2]; }
                         else { cur_type = null; }
                     }
                 }
-            } else { try w.print("[{s}]", .{names.get(index_id) orelse "i"}); }
-        } else { try w.print("[{s}]", .{names.get(index_id) orelse "i"}); }
+            } else { try w.print("[{s}]", .{names.get(index_id) orelse "i"}); advanceArrayElem(m, &cur_type); }
+        } else { try w.print("[{s}]", .{names.get(index_id) orelse "i"}); advanceArrayElem(m, &cur_type); }
+    }
+}
+
+/// Advance `cur_type` past a NON-constant (variable) access-chain index. A
+/// variable index only ever indexes an array/runtime-array/matrix/vector (a
+/// struct member index is always a constant), so the element type is `words[2]`
+/// regardless of the index value. Without this, `cur_type` froze on the array
+/// type and a following struct-member index emitted `[0]` instead of `.m`.
+fn advanceArrayElem(m: *const ParsedModule, cur_type: *?u32) void {
+    if (cur_type.*) |tid| {
+        if (getDef(m, tid)) |tinst| {
+            cur_type.* = switch (tinst.op) {
+                .TypeVector, .TypeArray, .TypeMatrix, .TypeRuntimeArray => tinst.words[2],
+                else => null,
+            };
+        }
     }
 }
 

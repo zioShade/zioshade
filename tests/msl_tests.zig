@@ -185,6 +185,27 @@ test "SSBO with a runtime array of structs still emits (no UnsupportedUboMemberL
     try assertContains(msl, "Foo items[1]");
 }
 
+test "struct member after a VARIABLE array index emits .member, not [N] (silent-wrong)" {
+    // Regression: the access-chain emitter only advanced cur_type for CONSTANT
+    // indices, so after a variable array index (`arr[i]`) cur_type froze on the
+    // array type and the following struct-member index emitted `[0]`/`[1]`
+    // (numeric subscript on a struct — invalid MSL) instead of `.field`.
+    const source =
+        \\#version 450
+        \\struct Light { vec3 color; float intensity; };
+        \\layout(std140, binding=0) uniform U { Light lights[4]; } u;
+        \\layout(location=0) flat in int idx;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(u.lights[idx].color * u.lights[idx].intensity, 1.0); }
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    try assertContains(msl, ".color");
+    try assertContains(msl, ".intensity");
+    // The buggy numeric-subscript-on-struct form must NOT appear.
+    try assertNotContains(msl, "[idx][0]");
+}
+
 test "T3.4: texture binding attribute" {
     const source =
         \\#version 430
