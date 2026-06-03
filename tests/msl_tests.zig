@@ -146,6 +146,45 @@ test "T3.3: buffer binding attribute" {
     try assertContains(msl, "[[buffer(");
 }
 
+test "SSBO emitted as a device reference with a sized runtime array (valid MSL, not silent-wrong)" {
+    // Regression: SSBOs were emitted `device T* name` (pointer) but the body
+    // accesses members with `.` — invalid C++/MSL (a pointer needs `->`). And a
+    // runtime array `T[]` was emitted as a scalar `T;` then indexed `[0]`. Both
+    // are silent-wrong (invalid MSL, exit 0). spirv-cross uses `device T&` + `T[1]`.
+    const source =
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430, binding=0) buffer Buf { uint cnt; float vals[]; } data;
+        \\void main(){ data.cnt = 5u; data.vals[0] = 1.0; }
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    // Reference, not pointer (the body's `.` access is only valid on a reference).
+    try assertContains(msl, "device data& data");
+    try assertNotContains(msl, "device data* data");
+    // Runtime array is sized `[1]` (so `vals[0]` is valid), never a bare scalar.
+    try assertContains(msl, "vals[1]");
+}
+
+test "SSBO with a runtime array of structs still emits (no UnsupportedUboMemberLayout)" {
+    // The runtime-array sizing fix must fall back to the plain element type for
+    // struct elements (`Foo data[1]`), not throw — else a previously-emitting
+    // shader regresses to an honest error.
+    const source =
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\struct Foo { vec4 a; vec4 b; };
+        \\layout(std430, binding=0) buffer SSBO { Foo items[]; } s;
+        \\void main(){ s.items[0].a = vec4(1.0); }
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    // (glslpp names the buffer struct after the instance, `s`.) The point is it
+    // emits as a reference and the struct-of array element is sized, not thrown.
+    try assertContains(msl, "device s& s");
+    try assertContains(msl, "Foo items[1]");
+}
+
 test "T3.4: texture binding attribute" {
     const source =
         \\#version 430
