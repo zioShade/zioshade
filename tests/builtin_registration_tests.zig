@@ -448,6 +448,70 @@ fn firstInst(spv: []const u32, opcode: u32) ?[]const u32 {
     return null;
 }
 
+const OP_VECTOR_SHUFFLE: u32 = 79;
+
+/// Return just the component-selector words of the first OpVectorShuffle that
+/// has exactly `want` selectors (word count == 5 + want). A swizzle
+/// compound-assign on a vecN emits TWO shuffles — a narrow extract of the
+/// swizzled lanes, then a wide write-back that rebuilds the full N-wide vector.
+/// Selecting on width picks the write-back over the extract.
+/// Layout: [op|wc] [resType] [resId] [vec1] [vec2] [comp...].
+fn shuffleComponentsOfWidth(spv: []const u32, want: usize) ?[]const u32 {
+    var i: usize = 5;
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        const op = spv[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == OP_VECTOR_SHUFFLE and wc == 5 + want and i + wc <= spv.len) {
+            return spv[i + 5 .. i + wc];
+        }
+        i += wc;
+    }
+    return null;
+}
+
+test "swizzle compound-assign write-back: partial swizzle on vec4 (v.xy *= 2.0)" {
+    // Regression guard for the swizzle write-back shuffle (semantic.zig
+    // .compound_assign). The OpVectorShuffle that merges the computed swizzled
+    // lanes back into the base vector addresses its SECOND operand (the computed
+    // values) starting at n = len(base vector), NOT at swizzle_len. For
+    // `v.xy *= 2.0` on a vec4 the base vector (operand 0) occupies selector
+    // indices 0..3, so the computed vec2 (operand 1) lives at indices 4,5.
+    // Correct write-back selectors are [4,5,2,3]: x,y from the computed vec2
+    // (4,5); z,w kept from the original (2,3). A swizzle_len-based offset (=2)
+    // would instead emit [2,3,2,3] → result (z,w,z,w): structurally valid
+    // SPIR-V (so spirv-val/conformance never flag it) but wrong-valued — exactly
+    // the class of error this exact-selector check exists to catch. `vin` is a
+    // shader input so the shuffle is never constant-folded, and NoOpt codegen
+    // keeps the analyzer's exact selectors.
+    const source =
+        \\#version 430
+        \\layout(location = 0) in vec4 vin;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { vec4 v = vin; v.xy *= 2.0; o = v; }
+    ;
+    const spv = try glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const comps = shuffleComponentsOfWidth(spv, 4) orelse return error.NoWriteBackShuffle;
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 4, 5, 2, 3 }, comps);
+}
+
+test "swizzle compound-assign write-back: partial swizzle on vec4 (col.rgb *= 0.8)" {
+    // `col.rgb *= 0.8` on a vec4 → correct write-back selectors [4,5,6,3]
+    // (r,g,b from the computed vec3 at 4,5,6; a kept from the original at 3).
+    // A swizzle_len-based offset would emit [3,4,5,3] → (col.w, r', g', col.w).
+    const source =
+        \\#version 430
+        \\layout(location = 0) in vec4 vin;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { vec4 col = vin; col.rgb *= 0.8; o = col; }
+    ;
+    const spv = try glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const comps = shuffleComponentsOfWidth(spv, 4) orelse return error.NoWriteBackShuffle;
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 4, 5, 6, 3 }, comps);
+}
+
 /// Resolve the literal value of an `OpConstant` (32-bit) with the given id.
 fn constValue(spv: []const u32, id: u32) ?u32 {
     var i: usize = 5;
