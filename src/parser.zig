@@ -10,6 +10,12 @@ pub const Error = error{
 };
 
 pub fn parse(alloc: std.mem.Allocator, source: [:0]const u8, tokens: []const lexer.Token) Error!ast.Root {
+    // Clear the error-context threadlocals so a stale message from a previous
+    // compile (e.g. this parse's nested-function detail) can never bleed into a
+    // later, unrelated parse failure. `recordErrorLoc` still sets line/column.
+    semantic.last_error_ctx = "";
+    semantic.last_error_inner = "";
+
     var p = Parser{
         .alloc = alloc,
         .source = source,
@@ -171,17 +177,52 @@ const Parser = struct {
     /// (precision qualifiers on locals, `double`/`int64` types, comment
     /// line-continuations, …), and failing on those would reject ~700 valid
     /// conformance shaders. We only fail loudly where we can be certain the
-    /// source itself is broken. The error location is captured via
-    /// `recordErrorLoc`.
+    /// source itself is broken.
+    ///
+    /// Scope note: this catches the one statement shape that is *unambiguously*
+    /// invalid (a nested function definition). Other genuinely-broken statements
+    /// (e.g. `float x = ;`) still recover silently, because the parser cannot
+    /// reliably tell "broken" from "valid-but-unsupported" without a full
+    /// grammar + oracle. Widening the net is future work. The error location is
+    /// captured via `recordErrorLoc`.
     fatal_parse_error: bool = false,
 
     // ── Navigation ────────────────────────────────────────────
 
     /// Record the current token's location as the error position.
     fn recordErrorLoc(self: *Parser) void {
+        // Once a fatal parse error is pinned, keep its location: error recovery
+        // (synchronize) keeps scanning and would otherwise overwrite the pin
+        // with a later, unrelated recovery position.
+        if (self.fatal_parse_error) return;
         const tok = self.current();
         semantic.last_error_line = tok.loc.line;
         semantic.last_error_column = tok.loc.column;
+    }
+
+    /// Assuming `current()` is the `(` that opens a parameter list at statement
+    /// scope, scan to the matching `)` and report whether a `{` body follows.
+    /// `type identifier ( … ) {` is a nested function *definition* (illegal in
+    /// GLSL); `type identifier ( … ) ;` is a local prototype (legal — glslang
+    /// accepts it). Pure lookahead; does not advance the parser.
+    fn nestedFunctionBodyFollows(self: *Parser) bool {
+        var depth: usize = 0;
+        var i = self.pos;
+        while (i < self.tokens.len) : (i += 1) {
+            switch (self.tokens[i].tag) {
+                .l_paren => depth += 1,
+                .r_paren => {
+                    depth -= 1;
+                    if (depth == 0) {
+                        const j = i + 1;
+                        return j < self.tokens.len and self.tokens[j].tag == .l_brace;
+                    }
+                },
+                .eof => return false,
+                else => {},
+            }
+        }
+        return false;
     }
 
     fn current(self: *Parser) lexer.Token {
@@ -1343,15 +1384,21 @@ const Parser = struct {
         }
         _ = self.advance();
 
-        // Nested function definition / prototype: `type identifier (` at
-        // statement scope. GLSL forbids functions inside a function body, and
-        // this token shape is unambiguous — a call is `identifier (`, a
-        // constructor is `type (`, and a real declaration continues with
-        // `= ; [ ,`. glslang rejects this with "unexpected LEFT_BRACE,
-        // expecting SEMICOLON". Mark it fatal so the compile fails loudly
-        // instead of silently dropping the body and emitting a hollow module.
-        if (self.current().tag == .l_paren) {
+        // Nested function definition: `type identifier ( … ) {` at statement
+        // scope. GLSL forbids defining a function inside a function body, and
+        // glslang rejects it with "unexpected LEFT_BRACE, expecting SEMICOLON".
+        // Mark it fatal so the compile fails loudly instead of silently dropping
+        // the body and emitting a hollow module.
+        //
+        // We must NOT fire on a *prototype* (`type identifier ( … ) ;`): a local
+        // function declaration is legal GLSL (glslang accepts `int g();` inside
+        // a body). `nestedFunctionBodyFollows` distinguishes them by looking for
+        // the `{` body; a prototype (or any other shape) falls through to the
+        // existing handling, which recovers exactly as before.
+        if (self.current().tag == .l_paren and self.nestedFunctionBodyFollows()) {
             self.recordErrorLoc();
+            semantic.last_error_ctx = "nested function definition";
+            semantic.last_error_inner = "nested function definitions are not allowed in GLSL";
             self.fatal_parse_error = true;
             return error.UnexpectedToken;
         }
@@ -2229,15 +2276,41 @@ test "nested function definition fails loud (not silently dropped)" {
     // recovers from the malformed statement so it can keep scanning, but the
     // overall parse must surface an error rather than returning a hollow tree.
     const alloc = std.testing.allocator;
-    const source = "void main() { float f(float x) { return x; } }";
+    const source =
+        \\void main() {
+        \\    float f(float x) { return x; }
+        \\}
+    ;
     const tokens = try lexer.tokenize(alloc, source);
     defer alloc.free(tokens);
+    semantic.last_error_line = 0;
     try std.testing.expectError(error.UnexpectedToken, parse(alloc, source, tokens));
+    // The diagnostic must pin the nested-function line (line 2), proving the
+    // error came from the nested-function path and that continued recovery did
+    // not overwrite the location with the closing-brace line (3).
+    try std.testing.expectEqual(@as(u32, 2), semantic.last_error_line);
+}
+
+test "local function prototype does not fail loud (valid GLSL)" {
+    // A local prototype `type identifier ( … ) ;` is legal GLSL (glslang
+    // accepts `float g(float x);` inside a body). It must NOT trip the
+    // nested-function fail-loud — only a `{` body is a (forbidden) definition.
+    // (glslpp doesn't yet parse local prototypes faithfully; it recovers and
+    // drops the statement. The point here is only that it does NOT fail loud.)
+    const alloc = std.testing.allocator;
+    const source = "void main() { float g(float x); }";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+    var root = try parse(alloc, source, tokens); // must NOT return an error
+    defer freeTree(alloc, &root);
+    try std.testing.expectEqual(@as(usize, 1), root.body.len);
+    try std.testing.expectEqual(ast.Node.Tag.function_decl, root.body[0].tag);
 }
 
 test "ordinary function-call statement still parses (call vs nested-def)" {
     // Guard against the nested-function detection misfiring: a call is
-    // `identifier (`, not `type identifier (`, so it must parse fine.
+    // `identifier (`, not `type identifier (`, so it must parse fine AND the
+    // call statement must survive in the body (not be silently dropped).
     const alloc = std.testing.allocator;
     const source = "void main() { foo(1.0); }";
     const tokens = try lexer.tokenize(alloc, source);
@@ -2245,7 +2318,10 @@ test "ordinary function-call statement still parses (call vs nested-def)" {
     var root = try parse(alloc, source, tokens);
     defer freeTree(alloc, &root);
     try std.testing.expectEqual(@as(usize, 1), root.body.len);
-    try std.testing.expectEqual(ast.Node.Tag.function_decl, root.body[0].tag);
+    const func = root.body[0];
+    try std.testing.expectEqual(ast.Node.Tag.function_decl, func.tag);
+    try std.testing.expectEqual(@as(usize, 1), func.data.children.len);
+    try std.testing.expectEqual(ast.Node.Tag.expr_stmt, func.data.children[0].tag);
 }
 
 test "parse expression precedence" {
