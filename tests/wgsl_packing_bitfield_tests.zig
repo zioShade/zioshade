@@ -72,6 +72,87 @@ test "M4.1 WGSL: packUnorm2x16 + unpackUnorm2x16 round-trip emits both intrinsic
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "unpack2x16unorm") != null);
 }
 
+// ── Integer user-defined IO must be @interpolate(flat) ──
+//
+// WGSL requires any integer-typed (scalar/vector of i32/u32) user-defined vertex
+// output or fragment input to carry @interpolate(flat): perspective/linear
+// interpolation of integers is undefined, so wgpu/Dawn reject a pipeline whose
+// integer varying lacks it. GLSL already forces such varyings `flat` (lowered to
+// a SPIR-V Flat decoration), so the source intent survives into SPIR-V. The
+// attribute is, however, ILLEGAL on vertex *inputs* (attributes are fetched, not
+// interpolated), so an integer/float vertex attribute must stay bare.
+test "WGSL: integer vertex output carries @interpolate(flat)" {
+    const alloc = std.testing.allocator;
+    const wgsl = try compileWgsl(alloc,
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) flat out uint packed_uv;
+        \\void main() { packed_uv = packSnorm2x16(uv); gl_Position = vec4(uv, 0.0, 1.0); }
+    , .vertex);
+    defer alloc.free(wgsl);
+    // The u32 output field is flat-interpolated (field-specific match so a
+    // future regression that mis-targets the attribute is caught)...
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@interpolate(flat) packed_uv: u32") != null);
+    // ...while the vec2f vertex-attribute input stays bare (interpolation
+    // attributes are illegal on vertex inputs).
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(0) uv: vec2f") != null);
+}
+
+test "WGSL: integer fragment input carries @interpolate(flat)" {
+    const alloc = std.testing.allocator;
+    const wgsl = try compileWgsl(alloc,
+        \\#version 450
+        \\layout(location = 0) flat in uint packed_uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(unpackHalf2x16(packed_uv), 0.0, 1.0); }
+    , .fragment);
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@interpolate(flat) packed_uv: u32") != null);
+}
+
+test "WGSL: integer-vector fragment input carries @interpolate(flat)" {
+    // Exercises isIntegerWgslType's vector arm (ivec2 -> vec2i): the most
+    // error-prone part of the fix (the type-name list), untouched by the scalar
+    // `uint` cases above.
+    const alloc = std.testing.allocator;
+    const wgsl = try compileWgsl(alloc,
+        \\#version 450
+        \\layout(location = 0) flat in ivec2 cell;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(float(cell.x), float(cell.y), 0.0, 1.0); }
+    , .fragment);
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@interpolate(flat) cell: vec2i") != null);
+}
+
+test "WGSL: flat-qualified float varying carries @interpolate(flat)" {
+    // A `flat`-qualified FLOAT varying is non-integer, so this passes ONLY via
+    // the SPIR-V Flat-decoration arm of the `hasDec(.flat) or isIntegerWgslType`
+    // condition — guarding that branch independently of integer-type detection.
+    const alloc = std.testing.allocator;
+    const wgsl = try compileWgsl(alloc,
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) flat out float weight;
+        \\void main() { weight = uv.x; gl_Position = vec4(uv, 0.0, 1.0); }
+    , .vertex);
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@interpolate(flat) weight: f32") != null);
+}
+
+test "WGSL: smooth float varying is NOT given @interpolate(flat)" {
+    const alloc = std.testing.allocator;
+    const wgsl = try compileWgsl(alloc,
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec2 texCoord;
+        \\void main() { texCoord = uv; gl_Position = vec4(uv, 0.0, 1.0); }
+    , .vertex);
+    defer alloc.free(wgsl);
+    // A default (smooth) float varying must not gain an interpolation attribute.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@interpolate") == null);
+}
+
 // ── M4.2: bitfield ──
 //
 // glslpp's semantic layer doesn't accept `bitfieldInsert`/`bitfieldExtract`
