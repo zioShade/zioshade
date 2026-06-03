@@ -68,6 +68,15 @@ oracle-diff: test-conformance test-cross-compare test-realworld
 wgsl-naga:
     @bash tools/wgsl_naga_sweep.sh
 
+# large-corpus MSL silent-wrong INVARIANT sweep — the MSL analog of wgsl-naga.
+# No Metal compiler runs on Windows, so instead of validating we assert
+# zero-false-positive invariants every valid MSL must satisfy (e.g. a pointer
+# param `device T* name` must never be accessed as `name.` — the silent-wrong
+# class fixed in PR #129). Emits MSL for every fixture; exits non-zero on any
+# violation. Run on demand. (Proven: reports 73 violations pre-#129, 0 after.)
+msl-lint:
+    @bash tools/msl_invariant_sweep.sh
+
 # run tests with verbose output
 test-verbose:
     {{zig}} build test --summary all 2>&1 | grep -E "passed|failed|leaked|error:"
