@@ -626,6 +626,24 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
     };
 }
 
+/// Whether a WGSL type name (as produced by `wgslType`) is an integer scalar or
+/// vector. WGSL forbids perspective/linear interpolation of such user-defined
+/// IO, so any integer vertex output / fragment input MUST carry
+/// `@interpolate(flat)` or downstream consumers (wgpu/Dawn) reject the pipeline.
+/// `wgslType` spells integer vectors with the canonical short names
+/// (vec2i/vec3i/vec4i, vec2u/vec3u/vec4u), never the `vecN<i32>` long form.
+fn isIntegerWgslType(type_name: []const u8) bool {
+    const names = [_][]const u8{
+        "i32",   "u32",
+        "vec2i", "vec3i", "vec4i",
+        "vec2u", "vec3u", "vec4u",
+    };
+    for (names) |n| {
+        if (std.mem.eql(u8, type_name, n)) return true;
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Decoration helpers
 // ---------------------------------------------------------------------------
@@ -2018,7 +2036,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     // Emit VertexOutput struct if vertex shader has multiple outputs
-    var vertex_output_fields = std.ArrayList(struct { name: []const u8, type_name: []const u8, builtin: ?[]const u8, location: ?u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var vertex_output_fields = std.ArrayList(struct { name: []const u8, type_name: []const u8, builtin: ?[]const u8, location: ?u32, flat: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
     // Detect depth output for fragment shaders
     var use_frag_depth_struct = false;
     var use_frag_mrt_struct = false;
@@ -2060,7 +2078,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                     else => null,
                 };
             }
-            try vertex_output_fields.append(arena, .{ .name = var_name, .type_name = type_name, .builtin = bi_name, .location = loc_val });
+            // Integer varyings (or any GLSL `flat`-qualified one, lowered to a
+            // SPIR-V Flat decoration) require @interpolate(flat); builtins are
+            // not user-interpolated, so they never carry it.
+            const needs_flat = bi_name == null and
+                (hasDec(&decorations, ovid, .flat) or isIntegerWgslType(type_name));
+            try vertex_output_fields.append(arena, .{ .name = var_name, .type_name = type_name, .builtin = bi_name, .location = loc_val, .flat = needs_flat });
         }
     }
 
@@ -2081,13 +2104,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         try w.writeAll("struct VertexOutput {\n");
         var auto_loc: u32 = 0;
         for (vertex_output_fields.items) |field| {
+            const interp: []const u8 = if (field.flat) "@interpolate(flat) " else "";
             if (field.builtin) |bi| {
                 try w.print("    @builtin({s}) {s}: {s},\n", .{ bi, field.name, field.type_name });
             } else if (field.location) |loc| {
                 auto_loc = loc + 1;
-                try w.print("    @location({d}) {s}: {s},\n", .{ loc, field.name, field.type_name });
+                try w.print("    @location({d}) {s}{s}: {s},\n", .{ loc, interp, field.name, field.type_name });
             } else {
-                try w.print("    @location({d}) {s}: {s},\n", .{ auto_loc, field.name, field.type_name });
+                try w.print("    @location({d}) {s}{s}: {s},\n", .{ auto_loc, interp, field.name, field.type_name });
                 auto_loc += 1;
             }
         }
@@ -2166,13 +2190,21 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         } else {
             const loc = getDecVal(&decorations, iv.id, .location) orelse i;
+            // Fragment INPUTS that are integer-typed (or GLSL `flat`-qualified)
+            // need @interpolate(flat). Vertex inputs are attributes (fetched, not
+            // interpolated), so the attribute is illegal there — guard on stage.
+            const interp: []const u8 = if (is_fragment and
+                (hasDec(&decorations, iv.id, .flat) or isIntegerWgslType(type_name)))
+                "@interpolate(flat) "
+            else
+                "";
             if (promoted_inputs.contains(iv.id)) {
                 // Bridge: param `<name>_in` → module-scope `var<private> <name>`.
                 const pname = try std.fmt.allocPrint(arena, "{s}_in", .{var_name});
-                try w.print("@location({d}) {s}: {s}", .{ loc, pname, type_name });
+                try w.print("@location({d}) {s}{s}: {s}", .{ loc, interp, pname, type_name });
                 try input_copies.append(arena, .{ .global = var_name, .param = pname });
             } else {
-                try w.print("@location({d}) {s}: {s}", .{ loc, var_name, type_name });
+                try w.print("@location({d}) {s}{s}: {s}", .{ loc, interp, var_name, type_name });
             }
         }
     }
@@ -2211,7 +2243,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 try w.print(") -> @builtin({s}) {s} {{\n", .{ bi_name, type_name });
             } else {
                 const loc = getDecVal(&decorations, ov, .location) orelse 0;
-                try w.print(") -> @location({d}) {s} {{\n", .{ loc, type_name });
+                const interp: []const u8 = if (hasDec(&decorations, ov, .flat) or isIntegerWgslType(type_name))
+                    "@interpolate(flat) "
+                else
+                    "";
+                try w.print(") -> @location({d}) {s}{s} {{\n", .{ loc, interp, type_name });
             }
         } else {
             // Multiple outputs — emit struct return type
