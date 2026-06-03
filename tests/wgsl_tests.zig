@@ -1350,3 +1350,19 @@ test "wgsl: an output read back in the body is declared as a local var (not dire
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "return o;") != null);
     try nagaValidateOrSkip(wgsl, "output-readback");
 }
+
+test "wgsl: clip-distance is an honest error, not a naga-invalid @location array" {
+    // gl_ClipDistance is an array<f32,N> built-in; WGSL only allows numeric
+    // scalars/vectors as user entry-point I/O (naga rejects the array), and
+    // glslpp previously emitted `@location(N) gl_ClipDistance: array<f32,8>`
+    // — naga-invalid (silent-wrong). It must fail loud instead.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[1]; };
+        \\layout(location=0) in vec4 p;
+        \\void main(){ gl_Position = p; gl_ClipDistance[0] = p.x; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}

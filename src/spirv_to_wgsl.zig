@@ -1127,20 +1127,30 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
-    // WGSL has no layer / viewport-index built-in (gl_Layer / gl_ViewportIndex —
-    // SPIR-V BuiltIn Layer=9 / ViewportIndex=10, used for layered / multi-viewport
-    // rendering). A shader that reads or writes them must fail loud, not leak the
-    // identifier (naga reject) or misclassify it as a `@location` varying.
+    // Built-ins with no representable standard-WGSL entry-point I/O form must fail
+    // loud, not leak the identifier (naga reject) or get misclassified as a
+    // `@location` varying:
+    //   Layer=9 / ViewportIndex=10  — layered / multi-viewport rendering.
+    //   ClipDistance=3 / CullDistance=4 — `array<f32,N>` built-ins; WGSL only
+    //     allows numeric scalars/vectors as user I/O (naga: "The type [..]
+    //     cannot be used for user-defined entry point inputs or outputs"), and
+    //     `gl_CullDistance` has no WGSL analogue at all. We previously emitted
+    //     `@location(N) gl_ClipDistance: array<f32, 8>`, which naga rejects.
     for (module.instructions) |dinst| {
         if (dinst.op == .Decorate and dinst.words.len >= 4 and
             dinst.words[2] == @intFromEnum(spirv.Decoration.built_in))
         {
             const bi = dinst.words[3];
-            if (bi == 9 or bi == 10) {
+            if (bi == 9 or bi == 10 or bi == 3 or bi == 4) {
                 last_error_detail = std.fmt.bufPrint(
                     &last_error_detail_buf,
                     "WGSL has no {s} built-in",
-                    .{if (bi == 9) "layer (gl_Layer)" else "viewport-index (gl_ViewportIndex)"},
+                    .{switch (bi) {
+                        9 => "layer (gl_Layer)",
+                        10 => "viewport-index (gl_ViewportIndex)",
+                        3 => "clip-distance (gl_ClipDistance) array",
+                        else => "cull-distance (gl_CullDistance) array",
+                    }},
                 ) catch null;
                 return error.UnsupportedOp;
             }
