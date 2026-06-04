@@ -1366,3 +1366,27 @@ test "wgsl: clip-distance is an honest error, not a naga-invalid @location array
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
+
+test "wgsl: constant array of vectors uses array<vecN<T>,M>, not the scalar elem type" {
+    // A `const vec3 pal[3]` lowered to an OpConstantComposite array previously
+    // emitted `array<f32, 3>(vec3<f32>(...), ...)` — the element type was the
+    // vector's SCALAR, a type mismatch naga rejects. The element must be the
+    // full `vec3<f32>`.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\    const vec3 pal[4] = vec3[4](vec3(1.0,0.0,0.0), vec3(0.0,1.0,0.0), vec3(0.0,0.0,1.0), vec3(1.0,1.0,0.0));
+        \\    int idx = clamp(int(gl_FragCoord.x) / 64, 0, 3);
+        \\    o = vec4(pal[idx], 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // Element type is the vector (vec3f / vec3<f32>), never a bare scalar array.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "array<vec3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "array<f32, 4>(") == null);
+    try nagaValidateOrSkip(wgsl, "const-array-of-vec");
+}

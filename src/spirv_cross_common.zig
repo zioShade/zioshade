@@ -378,11 +378,27 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
                     }
                     // This composite-constant naming is consumed ONLY by the WGSL
                     // backend (array<T,N>(...) is WGSL syntax), so the element type
-                    // must use WGSL scalar names — tryResolveTypeName returns the
-                    // GLSL spelling ("float"/"int"/"uint"), which would leak as a
-                    // bare identifier naga rejects ("no definition in scope: float").
-                    const elem_raw = tryResolveTypeName(module, elem_type_id);
-                    const elem_name: []const u8 = if (std.mem.eql(u8, elem_raw, "float")) "f32" else if (std.mem.eql(u8, elem_raw, "int")) "i32" else if (std.mem.eql(u8, elem_raw, "uint")) "u32" else elem_raw; // "bool" is identical in WGSL
+                    // must use WGSL names — tryResolveTypeName returns the GLSL
+                    // spelling ("float"/"int"/"uint"), which would leak as a bare
+                    // identifier naga rejects ("no definition in scope: float").
+                    // A VECTOR element (e.g. `vec3 palette[4]`) must spell the full
+                    // `vecN<scalar>`, not just the scalar — emitting `array<f32, 4>`
+                    // for a vec3[4] is a type mismatch naga rejects (the args are
+                    // `vec3<f32>(...)`). Matrix elements are rare; fall back to the
+                    // resolved name.
+                    var elem_buf: [32]u8 = undefined;
+                    const elem_inst = getDef(module, elem_type_id);
+                    const elem_name: []const u8 = blk2: {
+                        if (elem_inst) |ei| {
+                            if (ei.op == .TypeVector and ei.words.len > 3) {
+                                const comp_raw = tryResolveTypeName(module, ei.words[2]);
+                                const ws: []const u8 = if (std.mem.eql(u8, comp_raw, "float")) "f32" else if (std.mem.eql(u8, comp_raw, "int")) "i32" else if (std.mem.eql(u8, comp_raw, "uint")) "u32" else comp_raw;
+                                break :blk2 std.fmt.bufPrint(&elem_buf, "vec{d}<{s}>", .{ ei.words[3], ws }) catch "f32";
+                            }
+                        }
+                        const elem_raw = tryResolveTypeName(module, elem_type_id);
+                        break :blk2 if (std.mem.eql(u8, elem_raw, "float")) "f32" else if (std.mem.eql(u8, elem_raw, "int")) "i32" else if (std.mem.eql(u8, elem_raw, "uint")) "u32" else elem_raw; // "bool" is identical in WGSL
+                    };
                     buf2.writer(alloc).print("array<{s}, {d}>(", .{elem_name, count_val}) catch continue;
                     for (inst.words[3..], 0..) |comp_id, i| {
                         if (i > 0) buf2.writer(alloc).writeAll(", ") catch continue;
