@@ -166,17 +166,70 @@ test "strict: shared array sized by gl_WorkGroupSize.x is accepted" {
     _ = spirv;
 }
 
-test "strict: local array sized by a spec constant is accepted (OpTypeArray %specconst)" {
+// Shared fixture: a single-dimension local array sized by ONE spec constant.
+const SPEC_SIZED_ARRAY_SRC =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(constant_id = 0) const int N = 4;
+    \\layout(set = 0, binding = 0) buffer B { int v[]; };
+    \\void main() {
+    \\    int a[N];
+    \\    for (int k = 0; k < N; k++) { a[k] = k * 2; }
+    \\    int s = 0;
+    \\    for (int k = 0; k < N; k++) { s += a[k]; }
+    \\    v[0] = s;
+    \\}
+;
+
+test "strict: local array sized by a spec constant is accepted by the analyzer" {
     // RED before this fix: parseLocalVarDecl only recognized int-literal array
     // sizes, so `int a[N]` (N a spec constant) mis-parsed — the `[N]` desynced
     // the declaration and the variable was typed as a non-array scalar, so the
-    // later element store failed with ctx=assign_op. The fix captures the size
-    // source-text as size_name (parser) and, at the local var_decl path, folds a
-    // resolvable size to a literal or keeps the spec-constant name so codegen
-    // emits `OpTypeArray %elem %specConstId` (matching glslang). This is the
-    // spec-const-SIZED-array sub-case the global path already handled; the
-    // spec-constant-work-group-size.vk.comp corpus fixture additionally needs
-    // spec-const work-group size + spec-const index folding, so it stays XFAIL.
+    // later element store failed with ctx=assign_op.
+    const alloc = std.testing.allocator;
+    const spirv = try glslpp.compileToSPIRVStrict(alloc, SPEC_SIZED_ARRAY_SRC, .{ .stage = .compute });
+    _ = spirv;
+}
+
+test "codegen: spec-const-sized local array emits OpTypeArray %specConstId (not a baked literal)" {
+    // compileToSPIRVStrict skips codegen, so it cannot verify the array LENGTH
+    // operand. Run the full pipeline and assert the OpTypeArray length references
+    // the spec-constant's result id — NOT a folded literal (which would ignore
+    // pipeline overrides = silent-wrong). This guards the silent-wrong/regression
+    // adjacent cases (multi-dim drop, const-int runtime-array) found in review.
+    const alloc = std.testing.allocator;
+    const spirv = try glslpp.compileToSPIRV(alloc, SPEC_SIZED_ARRAY_SRC, .{ .stage = .compute });
+    defer alloc.free(spirv);
+
+    // Find the spec constant's result id via `OpDecorate <id> SpecId k` (op 71, decoration 1).
+    var spec_const_id: ?u32 = null;
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc: usize = spirv[i] >> 16;
+        const op: u32 = spirv[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == 71 and wc >= 4 and spirv[i + 2] == 1) spec_const_id = spirv[i + 1];
+        i += wc;
+    }
+    try std.testing.expect(spec_const_id != null);
+
+    // Find OpTypeArray (op 28): [hdr] result elemType lengthId. Assert lengthId is the spec const id.
+    var array_len_is_spec_const = false;
+    i = 5;
+    while (i < spirv.len) {
+        const wc: usize = spirv[i] >> 16;
+        const op: u32 = spirv[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == 28 and wc == 4 and spirv[i + 3] == spec_const_id.?) array_len_is_spec_const = true;
+        i += wc;
+    }
+    try std.testing.expect(array_len_is_spec_const);
+}
+
+test "strict: multi-dim spec-const-sized local array is an honest error (not silent-wrong)" {
+    // A nested `int a[N][2]` with N a spec constant is NOT modeled (codegen only
+    // handles a kept size_name on the OUTER, single dimension). It must fail loud
+    // rather than silently drop the array and constant-fold its uses.
     const alloc = std.testing.allocator;
     const src =
         \\#version 450
@@ -184,15 +237,32 @@ test "strict: local array sized by a spec constant is accepted (OpTypeArray %spe
         \\layout(constant_id = 0) const int N = 4;
         \\layout(set = 0, binding = 0) buffer B { int v[]; };
         \\void main() {
-        \\    int a[N];
-        \\    for (int k = 0; k < N; k++) { a[k] = k * 2; }
-        \\    int s = 0;
-        \\    for (int k = 0; k < N; k++) { s += a[k]; }
-        \\    v[0] = s;
+        \\    int a[N][2];
+        \\    a[0][0] = 5; a[1][1] = 7;
+        \\    v[0] = a[0][0] + a[1][1];
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
-    _ = spirv;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
+}
+
+test "strict: const-int-sized local array is an honest error (not an invalid runtime array)" {
+    // `const int M = 4; int a[M];` — glslpp does not fold a plain `const int` name
+    // to its literal, so it cannot emit a valid sized array. Keeping the size_name
+    // would make codegen emit a Function-storage OpTypeRuntimeArray, which is
+    // invalid Vulkan SPIR-V (VUID-04680). Fail loud instead of emitting it.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\const int M = 4;
+        \\layout(set = 0, binding = 0) buffer B { int v[]; };
+        \\void main() {
+        \\    int a[M];
+        \\    a[0] = 3;
+        \\    v[0] = a[0];
+        \\}
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
 }
 
 test "strict: not(bvec) / any(bvec) / all(bvec) builtins are accepted (vec_compare fixture)" {

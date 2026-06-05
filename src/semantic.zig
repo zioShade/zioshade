@@ -2449,24 +2449,57 @@ const Analyzer = struct {
                     last_error_column = node.loc.column;
                     return error.SemanticFailed;
                 }
-                // Resolve an expression-based LOCAL array size (mirrors the global-decl
-                // path at the top-level handler). `int a[gl_WorkGroupSize.x]` / `a[N]`
-                // (N a plain int) fold to a literal size; `int a[b]` where `b` is a spec
-                // constant keeps `size_name` so codegen emits `OpTypeArray %elem %b`
-                // (the spec-constant id), matching glslang. Without this, the array stays
-                // size-0/size_name-only and the later element assignment fails as an
-                // UndeclaredIdentifier/assign_op on a non-array lvalue.
-                if (ty == .array and ty.array.size == 0) {
+                // Resolve an expression-based LOCAL array size. Three outcomes, in order:
+                //   (1) `gl_WorkGroupSize.*` / integer literal → fold to a concrete literal
+                //       size (codegen emits OpTypeArray %elem %uintN).
+                //   (2) a SINGLE-dimension array sized by a known SPEC CONSTANT → keep
+                //       size_name so codegen emits OpTypeArray %elem %specConstId (matches
+                //       glslang; the array length tracks pipeline-time overrides).
+                //   (3) anything else (plain `const int` name we cannot fold, a multi-
+                //       dimension spec-const array, arithmetic on builtins, an unknown
+                //       identifier) → honest error. We must NOT keep size_name here: for a
+                //       Function-storage local, codegen's fallback would emit an
+                //       OpTypeRuntimeArray (invalid Vulkan SPIR-V, VUID-04680) or drop the
+                //       array entirely (silent-wrong). Failing loud preserves correctness.
+                if (ty == .array and ty.array.size == 0 and ty.array.base.* != .array) {
+                    // SINGLE-dimension local array with a non-literal size.
                     if (ty.array.size_name) |sn| {
+                        const trimmed = std.mem.trim(u8, sn, " \t");
                         if (self.resolveSizeExpr(sn)) |resolved| {
                             const resolved_ty = try self.alloc.create(ast.Type);
                             resolved_ty.* = ty.array.base.*;
                             try self.heap_types.append(self.alloc, resolved_ty);
                             ty = .{ .array = .{ .base = resolved_ty, .size = resolved } };
+                        } else if (self.spec_constants.contains(trimmed)) {
+                            // (2) keep size_name as-is — single-dim spec-const-sized array;
+                            // codegen emits OpTypeArray %elem %specConstId.
+                        } else {
+                            // (3) a plain `const int` name we cannot fold, or an unknown
+                            // identifier: keeping size_name would emit an invalid
+                            // Function-storage OpTypeRuntimeArray. Fail loud.
+                            last_error_ctx = "array-size-constant-expression";
+                            last_error_inner = trimmed;
+                            last_error_line = node.loc.line;
+                            last_error_column = node.loc.column;
+                            return error.SemanticFailed;
                         }
-                        // else: keep size_name — a spec-constant-sized array is emitted by
-                        // codegen as OpTypeArray %elem %specConstId (falls back to a runtime
-                        // array if the name is not a known spec constant).
+                    }
+                } else if (ty == .array and ty.array.base.* == .array) {
+                    // MULTI-dimensional local array: only all-literal sizes are modeled.
+                    // A non-literal dimension (spec const / expression) at any level is
+                    // not emittable here — the codegen path keeps a single outer
+                    // size_name only — so it must fail loud rather than silently drop
+                    // the array and constant-fold its uses (the parser also attaches a
+                    // multi-dim size_name to the wrong dimension).
+                    var cur = ty;
+                    while (cur == .array) : (cur = cur.array.base.*) {
+                        if (cur.array.size == 0 or cur.array.size_name != null) {
+                            last_error_ctx = "array-size-constant-expression";
+                            last_error_inner = if (cur.array.size_name) |s| s else "multidim-unsized";
+                            last_error_line = node.loc.line;
+                            last_error_column = node.loc.column;
+                            return error.SemanticFailed;
+                        }
                     }
                 }
                 if (node.data.children.len > 0) {
