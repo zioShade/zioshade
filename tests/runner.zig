@@ -38,6 +38,9 @@ const KNOWN_UNSUPPORTED = [_][]const u8{
     "tests/spirv-cross/ray_sphere_test.frag",
     "tests/spirv-cross/shader-clock.frag",
     "tests/spirv-cross/shader_ballot.comp",
+    // Still fails after the local spec-const-SIZED-array fix: also uses a
+    // spec-const work-group size (local_size_x_id) and a spec-const index
+    // expression `arr[1 - a]` whose folding emits a dangling id. Separate gaps.
     "tests/spirv-cross/spec-constant-work-group-size.vk.comp",
     "tests/spirv-cross/struct-material.frag",
 };
