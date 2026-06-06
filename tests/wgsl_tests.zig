@@ -1367,6 +1367,22 @@ test "wgsl: clip-distance is an honest error, not a naga-invalid @location array
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
 
+test "wgsl: dual-source blending (two outputs at one @location) is an honest error" {
+    // GLSL `layout(location=0, index=0/1)` dual-source blending → WGSL needs
+    // @blend_src, but glslpp's SPIR-V drops the Index decoration, so the backend
+    // can't tell src0 from src1. Emitting two @location(0) is naga-invalid
+    // ("Multiple bindings at location 0"); fail loud instead.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0, index=0) out vec4 c0;
+        \\layout(location=0, index=1) out vec4 c1;
+        \\void main(){ c0 = vec4(1.0); c1 = vec4(2.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
 test "wgsl: depth-only fragment declares -> FragmentOutput return type" {
     // A shader writing only gl_FragDepth (no color output) returns
     // `FragmentOutput(...)` from its body, so the signature must declare the
