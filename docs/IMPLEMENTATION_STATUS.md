@@ -67,7 +67,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 |------------|-------------|--------|--------|
 | HLSL output | SM 5.0+ | SM 6.0 | ✅ DXC validates 47/51 |
 | MSL output | 2.0+ | Metal 2.0+ | ✅ |
-| GLSL output | 110, 140, 150, 300 es, 330, 410, 430, 450, 460 | 430 | ⚠️ Single version |
+| GLSL output | 110, 140, 150, 300 es, 330, 410, 430, 450, 460 | 330, 400, 410, 420, 430 (default), 440, 450, 460 | ✅ Selectable desktop range; 420pack guard + location gating at < 420 / 330; honest-error on unsupported version & ESSL (#169) |
 | WGSL output | ✅ | ✅ | ✅ naga-validated; stage I/O **interface blocks** (in + out), cross-function I/O, frexp/modf struct-return, loop phi, passthrough-return, scalar geometric builtins, vector shifts, array-element/struct construction all naga-clean. Honest-errors the genuinely-unrepresentable: recursion, multisample/sampler arrays, layer/viewport/clip-cull/point-size built-ins, dual-source blending, ARM tensors, ray queries, geometry/tess stages |
 | SPIR-V input (pre-compiled) | ✅ Full | ✅ Partial (best-effort) | ⚠️ Assumes glslpp structure |
 | Opcode handler coverage | ~400 opcodes | HLSL: 180, GLSL: 132, MSL: 130, WGSL: 60 | ✅ HLSL strong, ⚠️ WGSL weak |
@@ -261,7 +261,7 @@ wintty compiles ~10 shaders at startup:
 
 | # | Gap | Impact | Effort |
 |---|-----|--------|--------|
-| G4 | **GLSL version flexibility** | Backend hardcodes #version 430. Should support 330, 410, 450, etc. | Small (parameter + header generation) |
+| ~~G4~~ | ~~**GLSL version flexibility**~~ | ✅ **DONE (#169).** Selectable desktop version 330–460 (default 430). 420pack extension guard at < 420; `layout(location=)` gating on varyings at 330; honest-error (`UnsupportedGlslVersion` / `EsslUnsupported`) on unsupported version / ESSL. glslangValidator-acceptance + spirv-cross structural tests. | ~~Small~~ |
 | G5 | **WGSL backend depth** | Only 60 opcode handlers vs 130–180 for others. Complex shaders won't cross-compile. | Medium (fill missing handlers) |
 | G6 | **Descriptor set / binding management** | SPIRV-Cross can remap descriptor sets, flatten UBOs, merge sets. glslpp has `binding_shift` only. | Large (new subsystem) |
 | G7 | **Specialization constants** | Required for Vulkan pipeline caching and optimization. | Medium (new codegen path) |
@@ -285,7 +285,7 @@ wintty compiles ~10 shaders at startup:
 
 1. **G3 (Diagnostics)** — Quick win, high impact for developer experience. Track source locations through parser→semantic→codegen.
 
-2. **G4 (GLSL version flexibility)** — Small change, unblocks projects that need specific GLSL versions.
+2. ~~**G4 (GLSL version flexibility)**~~ — ✅ DONE (#169). Selectable desktop version 330–460 with honest-error on unsupported / ESSL.
 
 3. **G1 (Reflection API)** — Largest gap. Implement as a separate module that analyzes the SPIR-V binary to extract resources, bindings, types.
 
