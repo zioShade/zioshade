@@ -252,15 +252,16 @@ test "G1: reflectGLSL matches reflectSPIRV for same source" {
 // G4: GLSL version flexibility — correctness tests
 // =============================================================================
 
-test "G4: GLSL 300 output contains #version 300" {
+test "G4: GLSL 300 (ESSL) is rejected with an honest error" {
+    // #169: 300 is OpenGL ES Shading Language, which glslpp intentionally does NOT
+    // emit. Requesting it must fail loudly rather than silently produce an invalid
+    // or wrong-dialect #version. Mirrors the honest-error gate in root.zig.
     const alloc = std.testing.allocator;
-    const glsl = try glslpp.compileGlslToGlslVersion(alloc,
+    try std.testing.expectError(error.UnsupportedGlslVersion, glslpp.compileGlslToGlslVersion(alloc,
         \\#version 430
         \\layout(location = 0) out vec4 FragColor;
         \\void main() { FragColor = vec4(1.0); }
-    , .fragment, 300);
-    defer alloc.free(glsl);
-    try std.testing.expect(std.mem.indexOf(u8, glsl, "#version 300") != null);
+    , .fragment, 300));
 }
 
 test "G4: GLSL 330 output contains #version 330" {

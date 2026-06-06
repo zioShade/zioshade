@@ -1452,6 +1452,28 @@ test "GLSL backend outputs #version 460" {
     try std.testing.expect(std.mem.indexOf(u8, glsl_out2, "#version 460") != null);
 }
 
+test "GLSL backend rejects unsupported version (honest-error)" {
+    const alloc = std.testing.allocator;
+    const spv = try compileToSPIRV(alloc,
+        \\#version 430
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = vec4(1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expectError(error.UnsupportedGlslVersion, spirvToGLSL(alloc, spv, .{ .version = 999 }));
+}
+
+test "GLSL backend rejects ESSL (out of scope, honest-error)" {
+    const alloc = std.testing.allocator;
+    const spv = try compileToSPIRV(alloc,
+        \\#version 430
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = vec4(1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expectError(error.EsslUnsupported, spirvToGLSL(alloc, spv, .{ .es = true }));
+}
+
 test "compileGlslToGlslVersion outputs requested version" {
     const alloc = std.testing.allocator;
     const glsl_v450 = try compileGlslToGlslVersion(alloc,
