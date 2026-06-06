@@ -45,18 +45,15 @@ drop-in — see `docs/IMPLEMENTATION_STATUS.md` for the honest gap analysis.
 - **Fuzzing milestone:** the structured-GLSL fuzzer is clean over **1,000,000 iterations** (0 fail / 0 crash, seed 1). Reproduce with `just fuzz-million` (or `just fuzz <count>`).
 - `docs/IMPLEMENTATION_STATUS.md` — renamed and reframed gap analysis with an explicit "Other gaps" section flagging un-published comparisons against `libglslang.a`.
 - `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`.
-- `examples/glsl-to-hlsl.zig` and `examples/reflect-uniforms.zig` runnable demos.
+- `examples/glsl_to_hlsl.zig` and `examples/reflect_uniforms.zig` runnable demos.
 - `.github/workflows/ci.yml` running `zig build test` and `zig build conformance` on Linux / macOS / Windows.
 
 ### Removed
 - Dead `CrossCompileOptions` struct (its `flatten_ubos` field was a phantom no-op; UBO flatten is not yet implemented and is no longer advertised).
 - Repository hygiene: stripped binaries (`*.exe`, `*.pdb`), SPIR-V scratch dumps (`dump_*.spv`), internal planning artifacts (`HANDOFF.md`, `PLAN.md`, `autoresearch.*`, `docs/plans/`, `docs/superpowers/`), and scratch debugging sources from the repo and all branch history.
 
-## [0.1.0] — initial public release
-
+### What works (initial public release)
 First publicly-tagged release. Extracted from the wintty project after the C++ glslang + SPIRV-Cross migration was completed.
-
-### What works
 - GLSL → SPIR-V (`compileToSPIRV`) for GLSL 430-class fragment / vertex / compute shaders; SPIR-V 1.0 through 1.6 output.
 - SPIR-V → HLSL (SM 6.0), GLSL (430), MSL (2.0+), WGSL (shallow, frag/vert/comp).
 - Partial reflection (`reflectSPIRV`) — uniform / sampler enumeration.
@@ -64,5 +61,5 @@ First publicly-tagged release. Extracted from the wintty project after the C++ g
 - Kernel fusion and SPIR-V module linking.
 - 1,894 `spirv-val` conformance fixtures passing.
 
-### Known gaps
+### Known gaps (at initial public release)
 See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md). Headline items: no specialization constants, single GLSL output version, shallow WGSL backend, control flow requires `OpSelectionMerge`, no CI yet.
