@@ -437,3 +437,115 @@ test "reflection G1: SSBO runtime tail array + readonly/writeonly + block_size" 
     try std.testing.expectEqual(@as(u32, 0), results.array_dim);
     try std.testing.expectEqual(@as(u32, 16), results.array_stride);
 }
+
+// ── #171 review: block_size must account for array length/stride and matrix
+// column padding for a trailing array/matrix member. Expected literals from
+// `spirv-cross <fixture>.spv --reflect` (the oracle). ──
+
+test "reflection #171: UBO block_size with trailing sized array (float tail[4])" {
+    // Oracle (spirv-cross --reflect): std140
+    //   head: offset 0
+    //   tail: offset 16, array[4], array_stride 16
+    //   block_size 80  (16 + 16*4)
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(std140, binding = 0) uniform A { vec4 head; float tail[4]; };
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = head + vec4(tail[0]); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
+    try std.testing.expectEqual(@as(u32, 80), res.uniform_buffers[0].block_size);
+}
+
+test "reflection #171: SSBO block_size with trailing sized array (float tail[5])" {
+    // Oracle (spirv-cross --reflect): std430
+    //   head: offset 0
+    //   tail: offset 16, array[5], array_stride 4
+    //   block_size 36  (16 + 4*5)
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { vec4 head; float tail[5]; };
+        \\void main() { tail[0] = head.x; }
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.storage_buffers.len);
+    try std.testing.expectEqual(@as(u32, 36), res.storage_buffers[0].block_size);
+}
+
+test "reflection #171: UBO block_size with trailing mat3" {
+    // Oracle (spirv-cross --reflect): std140
+    //   head: offset 0
+    //   m:    offset 16, matrix_stride 16  (mat3 occupies 3 cols * 16-byte stride)
+    //   block_size 64  (16 + 16*3)
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(std140, binding = 0) uniform D { vec4 head; mat3 m; };
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = head + vec4(m[0], 1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
+    try std.testing.expectEqual(@as(u32, 64), res.uniform_buffers[0].block_size);
+}
+
+test "reflection #171: UBO block_size with trailing multidim array (float md[2][3])" {
+    // Oracle (spirv-cross --reflect): std140
+    //   head: offset 0
+    //   md:   offset 16, array[3,2] (inner-first), array_stride 48 (OUTER stride)
+    //   block_size 112  (16 + 48*2)
+    // The member's SPIR-V type is the OUTER OpTypeArray: array_dim = 2 (outer
+    // count), array_stride = 48 (outer stride). extent = stride * outer_count.
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(std140, binding = 0) uniform C { vec4 head; float md[2][3]; };
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = head + vec4(md[0][0]); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
+    try std.testing.expectEqual(@as(u32, 112), res.uniform_buffers[0].block_size);
+}
+
+test "reflection #171: per-member row_major / column_major flags" {
+    // Adversarial review confirmed the path works; this locks it in.
+    // Oracle (spirv-cross --reflect): rm member is row-major, cm is column-major.
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(std140, binding = 0) uniform M {
+        \\    layout(row_major) mat4 rm;
+        \\    layout(column_major) mat4 cm;
+        \\};
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = rm[0] + cm[0]; }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
+    const ubo = res.uniform_buffers[0];
+    try std.testing.expectEqual(@as(usize, 2), ubo.members.len);
+
+    var rm: ?glslpp.reflection.Member = null;
+    var cm: ?glslpp.reflection.Member = null;
+    for (ubo.members) |m| {
+        if (std.mem.eql(u8, m.name, "rm")) rm = m;
+        if (std.mem.eql(u8, m.name, "cm")) cm = m;
+    }
+    try std.testing.expectEqual(true, (rm orelse return error.MissingRm).is_row_major);
+    try std.testing.expectEqual(false, (cm orelse return error.MissingCm).is_row_major);
+}

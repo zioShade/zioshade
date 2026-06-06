@@ -79,8 +79,11 @@ pub const Resource = struct {
     default_value_u32: u32 = 0,
 
     // ── Block-layout metadata (uniform_buffers / storage_buffers / push_constants) ──
-    /// Total size of the block's fixed part, derived as
-    /// `last_member.offset + last_member.size` (NOT a std140/std430 recompute).
+    /// Total size of the block's fixed part, computed as the max over all members
+    /// of `member.offset + member_extent`, where member_extent accounts for array
+    /// length*ArrayStride and matrix column*MatrixStride padding (see
+    /// `memberExtent`). This is NOT a std140/std430 recompute — every input is
+    /// read from the SPIR-V decoration/type tables; it only combines them.
     /// A block whose only/last member is a runtime array is legitimately 0.
     block_size: u32 = 0,
     /// True if the resource variable carries `NonWritable` (Decoration 24),
@@ -591,13 +594,24 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             }
             res.members = members.items;
 
-            // block_size = last member's offset + its fixed size. Read BACK from the
-            // decoration table; never a std140/std430 recompute. A trailing runtime
-            // array contributes size 0, so a runtime-only/writeonly block reports 0.
-            if (members.items.len > 0) {
-                const last = members.items[members.items.len - 1];
-                res.block_size = last.offset + last.size;
+            // block_size = max over all members of (offset + member_extent).
+            // Computed from member offsets + per-member extents, NOT a recompute of
+            // the std140/std430 rules: every input (offset, ArrayStride,
+            // MatrixStride, array length, matrix column count) is read from the
+            // SPIR-V decoration/type tables. The extent accounts for array
+            // length*stride and matrix column*stride padding, which `member.size`
+            // (the array ELEMENT byte_size, or colvec*cols for a matrix) does not.
+            // A trailing runtime array contributes its offset only (extent 0), so a
+            // runtime-only / writeonly block legitimately reports 0.
+            //
+            // `max` (rather than "last declared member") is robust against
+            // out-of-declaration-order members; member offsets are authoritative.
+            var bsz: u32 = 0;
+            for (members.items, ti.member_type_ids) |m, mid| {
+                const end = m.offset + memberExtent(&types, &astrides, &const_u32, m, mid);
+                if (end > bsz) bsz = end;
             }
+            res.block_size = bsz;
         }
     }
 
@@ -630,6 +644,42 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
         .specialization_constants = spec_list.toOwnedSlice(alloc) catch &.{},
         .entry_points = entry_points.toOwnedSlice(alloc) catch &.{},
     };
+}
+
+/// Byte extent a member occupies within its block, used to derive block_size.
+/// Unlike `member.size` (the array ELEMENT byte_size, or colvec*cols for a
+/// matrix), this accounts for array length*stride and matrix column*stride
+/// padding. All formulae verified against `spirv-cross --reflect`:
+///   - sized array  → ArrayStride * outer_length  (multidim: the OUTER stride
+///                    already spans the inner dims, so outer_stride*outer_count
+///                    is the full extent — e.g. float md[2][3] std140:
+///                    48 * 2 = 96, block_size 16+96 = 112)
+///   - runtime array → 0 (the unsized tail contributes no fixed size)
+///   - matrix       → MatrixStride * columns  (mat3 std140: 16 * 3 = 48)
+///   - scalar/vector/struct/other → member.size (struct byte_size for nested
+///     structs is a sum of member byte_sizes; sufficient for the common case —
+///     a tightly-packed nested-struct TAIL can still under/over-count if the
+///     struct has its own internal std140 padding; tracked as follow-up #177).
+fn memberExtent(
+    types: *const std.AutoHashMap(u32, TInfo),
+    astrides: *const std.AutoHashMap(u32, u32),
+    const_u32: *const std.AutoHashMap(u32, u32),
+    m: Member,
+    mid: u32,
+) u32 {
+    const t = types.get(mid) orelse return m.size;
+    if (t.kind == .array) {
+        if (t.is_runtime) return 0; // unsized tail contributes nothing fixed
+        const stride = astrides.get(mid) orelse 0;
+        const len = if (t.array_len_id != 0) (const_u32.get(t.array_len_id) orelse 0) else 0;
+        if (stride != 0 and len != 0) return stride * len;
+        return m.size;
+    }
+    if (t.kind == .matrix and m.matrix_stride != 0) {
+        // component_count on a matrix TInfo is the column count (set at OpTypeMatrix).
+        return m.matrix_stride * t.component_count;
+    }
+    return m.size;
 }
 
 fn resolvePointee(types: *const std.AutoHashMap(u32, TInfo), type_id: u32) u32 {
