@@ -304,7 +304,21 @@ pub const GlslCompileOptions = struct {
 };
 
 // Use shared parse cache from root (avoids circular import — cache is passed via allocator context)
+/// Desktop GLSL versions glslpp can emit. ESSL is intentionally excluded (#169).
+fn isSupportedGlslVersion(v: u32) bool {
+    return switch (v) {
+        330, 400, 410, 420, 430, 440, 450, 460 => true,
+        else => false,
+    };
+}
+
 pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: GlslCompileOptions) ![]const u8 {
+    // #169 (G4): honest-error before doing any work. ESSL is out of scope; the
+    // `es` field must not be silently ignored. Only the supported desktop set is
+    // accepted — anything else is a hard error rather than an invalid #version.
+    if (options.es) return error.EsslUnsupported;
+    if (!isSupportedGlslVersion(options.version)) return error.UnsupportedGlslVersion;
+
     // G2: recover OpSelectionMerge for unstructured-but-reducible SPIR-V. No-op
     // (byte-identical copy) on already-structured input; on failure fall back to
     // the original words so the backend's own honest-error path is unchanged.
@@ -360,7 +374,21 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
 
     const is_compute = module.execution_model == .GLCompute;
 
-    try w.print("#version {d}\n\n", .{options.version});
+    try w.print("#version {d}\n", .{options.version});
+
+    // #169 (G4) Tier 2: at versions < 420, `layout(binding=)` on UBOs/samplers is
+    // only legal with GL_ARB_shading_language_420pack. glslang predefines this
+    // extension at 330/410, so guarding it makes our binding= output validate.
+    // Emit the guard verbatim (matches spirv-cross at versions <= 410).
+    if (options.version < 420) {
+        try w.writeAll(
+            \\#ifdef GL_ARB_shading_language_420pack
+            \\#extension GL_ARB_shading_language_420pack : require
+            \\#endif
+            \\
+        );
+    }
+    try w.writeAll("\n");
 
     // For compute shaders: emit local_size and SSBO declarations
     if (is_compute) {
@@ -600,8 +628,8 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     defer { var it = out_param_info.iterator(); while(it.next())|e| e.value_ptr.deinit(aa); out_param_info.deinit(); }
     detectOutParams(&module, entry_id, &out_param_info, aa);
 
-    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info); }
-    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info);
+    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, options.version); }
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, options.version);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -892,6 +920,7 @@ fn emitFunction(
     alloc: std.mem.Allocator,
     is_entry: bool,
     opi: *const std.AutoHashMap(u32, std.ArrayList(usize)),
+    version: u32,
 ) !void {
     const fi = getDef(m, func_id) orelse return;
     if (fi.op != .Function or fi.words.len < 5) return;
@@ -1046,11 +1075,16 @@ fn emitFunction(
             // emit it whenever present (never fabricate — only what the SPIR-V
             // says). Applies symmetrically to flat vertex outputs below.
             const flat_q: []const u8 = if (hasDec(decs, ivid, .flat)) "flat " else "";
-            if (getDecVal(decs, ivid, .location)) |l| {
+            // #169 (G4) Tier 3: at version 330 glslang rejects `layout(location=)`
+            // on a fragment INPUT varying (only vertex inputs may carry it). Drop
+            // the qualifier there; keep it at >= 410 and for vertex inputs.
+            const drop_loc = version == 330 and m.execution_model == .Fragment;
+            if (!drop_loc) if (getDecVal(decs, ivid, .location)) |l| {
                 try w.print("layout(location = {d}) {s}in {s} {s};\n", .{ l, flat_q, it, in_name });
-            } else {
-                try w.print("{s}in {s} {s};\n", .{ flat_q, it, in_name });
-            }
+                emitted_any_io = true;
+                continue;
+            };
+            try w.print("{s}in {s} {s};\n", .{ flat_q, it, in_name });
             emitted_any_io = true;
         }
         for (output_var_ids.items) |ovid| {
@@ -1061,11 +1095,16 @@ fn emitFunction(
             // Mirror the input side: a `flat out` (e.g. integer varying from a
             // vertex stage) carries an `OpDecorate … Flat`; preserve it.
             const flat_q: []const u8 = if (hasDec(decs, ovid, .flat)) "flat " else "";
-            if (getDecVal(decs, ovid, .location)) |l| {
+            // #169 (G4) Tier 3: at version 330 glslang rejects `layout(location=)`
+            // on a vertex OUTPUT varying (only fragment outputs may carry it). Drop
+            // it there; keep it at >= 410 and for fragment outputs.
+            const drop_loc = version == 330 and m.execution_model == .Vertex;
+            if (!drop_loc) if (getDecVal(decs, ovid, .location)) |l| {
                 try w.print("layout(location = {d}) {s}out {s} {s};\n", .{ l, flat_q, ot, on });
-            } else {
-                try w.print("{s}out {s} {s};\n", .{ flat_q, ot, on });
-            }
+                emitted_any_io = true;
+                continue;
+            };
+            try w.print("{s}out {s} {s};\n", .{ flat_q, ot, on });
             emitted_any_io = true;
         }
         if (emitted_any_io) try w.writeAll("\n");
