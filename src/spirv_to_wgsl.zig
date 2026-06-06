@@ -4065,14 +4065,19 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .FMod => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
             .UMod, .SRem, .SMod, .FRem => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
             .ShiftLeftLogical, .ShiftRightLogical => {
-                // WGSL requires shift amount to be u32
+                // WGSL requires the shift AMOUNT to be u32-typed with the SAME
+                // vector dimension as the base: `vecN<T> << vecN<u32>` (a scalar
+                // `u32(...)` on a vec2 amount is rejected — "cannot cast a
+                // vec2<u32> to a u32"). Derive the coercion type from the result
+                // (= base) type.
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const lhs_raw = resolveOperandExpr(module, names, &inline_exprs, inst.words[3], arena, 0);
                 const rhs_raw = resolveOperandExpr(module, names, &inline_exprs, inst.words[4], arena, 0);
                 const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
                 const op_str: []const u8 = if (inst.op == .ShiftLeftLogical) "<<" else ">>";
-                try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s} {s} u32({s});\n", .{ result_name, rt, lhs, op_str, rhs_raw });
+                const shift_cast: []const u8 = if (std.mem.startsWith(u8, rt, "vec2")) "vec2<u32>" else if (std.mem.startsWith(u8, rt, "vec3")) "vec3<u32>" else if (std.mem.startsWith(u8, rt, "vec4")) "vec4<u32>" else "u32";
+                try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s} {s} {s}({s});\n", .{ result_name, rt, lhs, op_str, shift_cast, rhs_raw });
             },
             .ShiftRightArithmetic => try emitBinOp(module, names, &inline_exprs, inst, ">>", w, arena, indent),
             .FNegate, .SNegate => {
