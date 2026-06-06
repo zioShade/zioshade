@@ -2198,3 +2198,138 @@ test "msl: unstructured switch (stripped OpSelectionMerge) is recovered (G2)" {
     defer alloc.free(recovered);
     try std.testing.expectEqualStrings(ok, recovered);
 }
+
+// ---------------------------------------------------------------------------
+// Array constant declaration (no undeclared-identifier silent-wrong)
+//
+// An array `OpConstantComposite` (a function-local `const T a[N]` or a
+// module-scope `const T a[N]` lowered to a Private OpVariable with a constant
+// initializer) must be emitted as a module-scope Metal constant
+// (`constant T name[N] = {…};`) so a runtime index `a[i]` resolves to a
+// DECLARED identifier. The previous backend referenced the array composite /
+// Private var by an undeclared name (`a[i]` → `vN[i]` with no `vN` anywhere,
+// or a local `T v[N]; v = vC;` array-copy of an undeclared `vC`) — both are
+// silent-wrong: glslpp exits 0 but the MSL does not compile in Metal.
+//
+// Oracle: spirv-cross --msl promotes both to module scope as
+// `constant spvUnsafeArray<T,N> _k = …;` indexed `_k[i]`.
+// ---------------------------------------------------------------------------
+
+/// Verify the MSL declares a module-scope `constant T name[…] = {…};` array and
+/// that `name` is indexed somewhere after the declaration (i.e. the runtime
+/// index resolves to the declared constant, not an undeclared identifier).
+fn assertConstArrayDeclaredAndIndexed(msl: []const u8) !void {
+    const decl_kw = "constant ";
+    const start = std.mem.indexOf(u8, msl, decl_kw) orelse {
+        std.debug.print("No module-scope `constant` array declaration in:\n{s}\n", .{msl});
+        return error.NoConstantDecl;
+    };
+    const bracket = std.mem.indexOfPos(u8, msl, start, "[") orelse return error.NoArrayDecl;
+    // The declared name is the token immediately before the `[`.
+    var ns = bracket;
+    while (ns > start and msl[ns - 1] != ' ') ns -= 1;
+    const name = msl[ns..bracket];
+    if (name.len == 0) return error.EmptyConstName;
+    const decl_end = std.mem.indexOfPos(u8, msl, bracket, "= {") orelse {
+        std.debug.print("`constant` array declaration is not brace-initialized in:\n{s}\n", .{msl});
+        return error.ConstNotBraceInitialized;
+    };
+    const idx_pat = try std.fmt.allocPrint(alloc, "{s}[", .{name});
+    defer alloc.free(idx_pat);
+    if (std.mem.indexOfPos(u8, msl, decl_end, idx_pat) == null) {
+        std.debug.print("Declared constant `{s}` is never indexed in:\n{s}\n", .{ name, msl });
+        return error.ConstNotIndexed;
+    }
+}
+
+test "msl: function-local const array indexed at runtime is declared (no undeclared identifier)" {
+    // `int(gl_FragCoord.x) & 3` avoids the orthogonal integer-`flat`-input rule.
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out float FragColor;
+        \\void main()
+        \\{
+        \\    const float lut[4] = float[](10.0, 20.0, 30.0, 40.0);
+        \\    int i = int(gl_FragCoord.x) & 3;
+        \\    FragColor = lut[i];
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "10.0, 20.0, 30.0, 40.0");
+    try assertConstArrayDeclaredAndIndexed(msl);
+}
+
+test "msl: module-scope const array indexed at runtime is declared (no undeclared identifier)" {
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out float FragColor;
+        \\const float LUT[4] = float[](10.0, 20.0, 30.0, 40.0);
+        \\void main()
+        \\{
+        \\    int i = int(gl_FragCoord.x) & 3;
+        \\    FragColor = LUT[i];
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "10.0, 20.0, 30.0, 40.0");
+    try assertConstArrayDeclaredAndIndexed(msl);
+}
+
+test "msl: mutated local array initialized from a constant is brace-initialized (not array-copied)" {
+    // A local array that is partially written cannot be promoted to a module
+    // constant; the constant initializer is folded into the declaration as a
+    // brace initializer (`T a[N] = {…};`) so it remains a mutable local without
+    // an invalid C-array copy (`a = vC;`).
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out float FragColor;
+        \\void main()
+        \\{
+        \\    vec4 foo[4] = vec4[](vec4(0.0), vec4(1.0), vec4(8.0), vec4(5.0));
+        \\    int i = int(gl_FragCoord.x) & 3;
+        \\    if (i > 2) foo[1].z = 20.0;
+        \\    FragColor = foo[i].z;
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // Declaration is brace-initialized in place (`T a[4] = {…};`) …
+    try assertContains(msl, "[4] = {");
+    // … not a bare uninitialized array decl (`T a[4];`) followed by an invalid
+    // whole-array copy assignment (`a = vC;`), which is the pre-fix silent-wrong.
+    try assertNotContains(msl, "[4];");
+}
+
+test "msl: local array partially written via an unmerged nested chain is NOT promoted (write not dropped)" {
+    // A whole-element read (`tmp = foo[i]`) makes the `foo[i]` access chain have a
+    // non-AccessChain (Load) user, so the optimizer does NOT flatten the nested
+    // chain of the member write `foo[i].z = …` (it stays a two-level chain rooted
+    // at the intermediate `foo[i]` chain, not directly at `foo`). The mutation
+    // analysis must still see this as a partial write and keep `foo` a mutable
+    // local — promoting it to a read-only `constant` would silently drop the
+    // store (and write to the `constant` address space).
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out float FragColor;
+        \\void main()
+        \\{
+        \\    vec4 foo[4] = vec4[](vec4(0.0), vec4(1.0), vec4(8.0), vec4(5.0));
+        \\    int i = int(gl_FragCoord.x) & 3;
+        \\    vec4 tmp = foo[i];
+        \\    foo[i].z = 20.0;
+        \\    FragColor = tmp.x + foo[i].z;
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The partial write survives …
+    try assertContains(msl, "= 20.0");
+    // … and `foo` is NOT promoted to a module-scope read-only constant.
+    try assertNotContains(msl, "constant float4");
+}

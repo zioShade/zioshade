@@ -728,6 +728,122 @@ fn constantLiteral(alloc: std.mem.Allocator, type_inst: Instruction, literal_wor
     return std.fmt.allocPrint(alloc, "{d}", .{literal_words[0]});
 }
 
+/// Classification of a Function-storage array `OpVariable` initialized by a
+/// single whole-variable `OpStore` of a constant.
+const LocalConstArray = struct {
+    /// The initializer `OpConstant`/`OpConstantComposite` id.
+    init_id: u32,
+    /// true → the variable is also partially written (e.g. `a[1].z = …`) or
+    /// escapes by pointer, so it must stay a mutable local (the initializer is
+    /// folded into the declaration as a brace initializer). false → the variable
+    /// is read-only and is promoted to a module-scope `constant`.
+    mutated: bool,
+};
+
+/// Follow a pointer id through any chain of `OpAccessChain`/`OpCopyObject`
+/// down to its root and report whether that root is `var_id`. Used to detect a
+/// partial write to (or pointer escape of) a variable even when the store goes
+/// through a *nested* access chain — `mergeAccessChains` flattens most nested
+/// chains, but skips an intermediate chain that has a non-AccessChain user
+/// (e.g. a whole-element Load), which would otherwise hide the mutation.
+fn pointerRootsAt(m: *const ParsedModule, start_id: u32, var_id: u32) bool {
+    var id = start_id;
+    var guard: u32 = 0;
+    while (guard < 64) : (guard += 1) {
+        if (id == var_id) return true;
+        const inst = getDef(m, id) orelse return false;
+        switch (inst.op) {
+            .AccessChain, .CopyObject => {
+                if (inst.words.len < 4) return false;
+                id = inst.words[3];
+            },
+            else => return false,
+        }
+    }
+    return false;
+}
+
+/// Classify a Function array `OpVariable` that is initialized by exactly one
+/// whole-variable `OpStore` of a `Constant`/`ConstantComposite`. Returns null
+/// for anything else (not a Function array var, multiple whole stores, or a
+/// whole store of a non-constant). A whole-array copy assignment `a = vC;` is
+/// invalid in Metal (C arrays are not assignable), so the backend must NOT emit
+/// the init store verbatim — it either promotes the variable to a module-scope
+/// `constant` (read-only) or brace-initializes it in place (mutated).
+fn analyzeLocalConstArray(m: *const ParsedModule, var_inst: Instruction) ?LocalConstArray {
+    if (var_inst.op != .Variable or var_inst.words.len < 4) return null;
+    const sc: spirv.StorageClass = @enumFromInt(var_inst.words[3]);
+    if (sc != .Function) return null;
+    const ptr = getDef(m, var_inst.words[1]) orelse return null;
+    if (ptr.op != .TypePointer or ptr.words.len < 4) return null;
+    const pointee = getDef(m, ptr.words[3]) orelse return null;
+    if (pointee.op != .TypeArray) return null;
+    const var_id = var_inst.words[2];
+
+    var init_id: ?u32 = null;
+    var whole_stores: u32 = 0;
+    var mutated = false;
+    for (m.instructions) |inst| {
+        switch (inst.op) {
+            .Store => {
+                if (inst.words.len < 3) continue;
+                const dst = inst.words[1];
+                if (dst == var_id) {
+                    whole_stores += 1;
+                    const val = getDef(m, inst.words[2]) orelse return null;
+                    switch (val.op) {
+                        .Constant, .ConstantComposite, .ConstantTrue, .ConstantFalse => init_id = inst.words[2],
+                        else => return null, // whole store of a non-constant → not ours
+                    }
+                } else if (pointerRootsAt(m, dst, var_id)) {
+                    // A store through a (possibly nested) access chain rooted at
+                    // the variable is a partial write → the variable is mutated.
+                    mutated = true;
+                }
+            },
+            // The variable escaping by pointer (passed to a function, or a
+            // CopyMemory target) could mutate it; conservatively keep it a
+            // mutable local rather than promoting.
+            .FunctionCall => {
+                if (inst.words.len > 4) for (inst.words[4..]) |a| {
+                    if (a == var_id) mutated = true;
+                };
+            },
+            .CopyMemory => {
+                if (inst.words.len >= 2 and inst.words[1] == var_id) mutated = true;
+            },
+            else => {},
+        }
+    }
+    if (whole_stores != 1) return null;
+    const iid = init_id orelse return null;
+    return .{ .init_id = iid, .mutated = mutated };
+}
+
+/// Write an array/struct constant's brace initializer, recursively inlining
+/// nested array/struct composites (`{ { … }, { … } }`). Scalar constants and
+/// vector composites use their precomputed name (`"10.0"`, `"float4(0.0)"`).
+fn writeMslConstInit(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), w: anytype, id: u32) !void {
+    const inst = getDef(m, id) orelse {
+        try w.writeAll(names.get(id) orelse "0");
+        return;
+    };
+    if (inst.op == .ConstantComposite and inst.words.len > 3) {
+        if (getDef(m, inst.words[1])) |t| {
+            if (t.op == .TypeArray or t.op == .TypeStruct) {
+                try w.writeAll("{ ");
+                for (inst.words[3..], 0..) |cid, i| {
+                    if (i > 0) try w.writeAll(", ");
+                    try writeMslConstInit(m, names, w, cid);
+                }
+                try w.writeAll(" }");
+                return;
+            }
+        }
+    }
+    try w.writeAll(names.get(id) orelse "0");
+}
+
 fn getDecVal(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, dec: spirv.Decoration) ?u32 {
     const list = decs.get(id) orelse return null;
     for (list.items) |e| { if (e.decoration == dec and e.extra.len > 0) return e.extra[0]; }
@@ -840,6 +956,22 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
 
     collectNames(aa, &module, &names);
     try collectDecorations(aa, &module, &decs);
+
+    // Promote read-only const arrays so a runtime index resolves to a declared
+    // module-scope `constant` (emitted below): alias each const-initialized
+    // Private global (Design A) AND each read-only function-local const array to
+    // its initializer constant's name. Metal cannot copy a C array (`a = vC;`),
+    // so promotion (or in-place brace init for mutated locals) is mandatory —
+    // otherwise the index reads an undeclared identifier (silent-wrong).
+    common.aliasConstInitializedPrivateVars(aa, &module, &names);
+    for (module.instructions) |inst| {
+        if (inst.op != .Variable) continue;
+        const info = analyzeLocalConstArray(&module, inst) orelse continue;
+        if (info.mutated) continue;
+        const cname = names.get(info.init_id) orelse continue;
+        const dup = aa.dupe(u8, cname) catch continue;
+        if (names.fetchPut(inst.words[2], dup) catch null) |old| aa.free(old.value);
+    }
 
     var member_offsets = std.AutoHashMap(MemberKey, u32).init(aa);
     defer member_offsets.deinit();
@@ -1104,6 +1236,58 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         try w.print("constant {s} {s} = {s} {s} {s};\n", .{ type_str, name, op0, op, op1 });
     }
     try w.writeAll("\n");
+
+    // Module-scope array constants. Each array `OpConstantComposite` referenced
+    // by name — i.e. the initializer of a promoted read-only function-local
+    // const array OR of a const-initialized Private global — is emitted as a
+    // Metal `constant T name[dims] = {…};`. Metal requires the `constant`
+    // address space for a program-scope array referenced from a function.
+    // Nested array/struct constituents are inlined into the brace initializer.
+    // Composites consumed only as a mutated local's in-place initializer are NOT
+    // named here (they are brace-initialized at the declaration instead).
+    {
+        var named_consts = std.AutoHashMap(u32, void).init(aa);
+        defer named_consts.deinit();
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable) continue;
+            if (analyzeLocalConstArray(&module, inst)) |info| {
+                if (!info.mutated) named_consts.put(info.init_id, {}) catch {};
+            }
+            if (common.constInitializedPrivateVar(&module, inst)) |init_id| named_consts.put(init_id, {}) catch {};
+        }
+        var emitted_const_array = false;
+        for (module.instructions) |inst| {
+            if (inst.op != .ConstantComposite or inst.words.len <= 3) continue;
+            const rid = inst.words[2];
+            if (!named_consts.contains(rid)) continue;
+            const type_inst = getDef(&module, inst.words[1]) orelse continue;
+            if (type_inst.op != .TypeArray) continue;
+            // Walk nested TypeArray dimensions, collecting the base element type.
+            var dims = std.ArrayList(u32).initCapacity(aa, 2) catch continue;
+            defer dims.deinit(aa);
+            const outer_len = getDef(&module, type_inst.words[3]);
+            dims.append(aa, if (outer_len) |ld| ld.words[3] else 1) catch {};
+            var elem_id = type_inst.words[2];
+            var inner = getDef(&module, elem_id);
+            while (inner) |inn| {
+                if (inn.op == .TypeArray and inn.words.len > 3) {
+                    const ild = getDef(&module, inn.words[3]);
+                    dims.append(aa, if (ild) |l| l.words[3] else 1) catch {};
+                    elem_id = inn.words[2];
+                    inner = getDef(&module, elem_id);
+                } else break;
+            }
+            const base_type = mslType(&module, elem_id, &names, aa) catch "float";
+            const name = names.get(rid) orelse continue;
+            try w.print("constant {s} {s}", .{ base_type, name });
+            for (dims.items) |d| try w.print("[{d}]", .{d});
+            try w.writeAll(" = ");
+            try writeMslConstInit(&module, &names, w, rid);
+            try w.writeAll(";\n");
+            emitted_const_array = true;
+        }
+        if (emitted_const_array) try w.writeAll("\n");
+    }
 
     // Emit struct declarations for types used as local variables
     var local_structs_msl = std.AutoHashMap(u32, void).init(aa);
@@ -2699,6 +2883,19 @@ fn emitInstruction(
             }
             if (sc == .Input or sc == .Output or sc == .Uniform or sc == .UniformConstant or sc == .Workgroup) return;
             const ri = inst.words[2];
+            // Const-initialized array local: read-only → promoted to a
+            // module-scope `constant` (no local decl; reads resolve via the
+            // alias). Mutated → brace-initialize in place so it stays a mutable
+            // local without an invalid C-array copy of the initializer.
+            if (analyzeLocalConstArray(m, inst)) |info| {
+                if (!info.mutated) return;
+                const tn = try mslType(m, inst.words[1], names, alloc);
+                const arr = try mslGetArraySuffix(m, inst.words[1]);
+                try w.print("    {s} {s}{s} = ", .{ tn, names.get(ri) orelse "var", arr });
+                try writeMslConstInit(m, names, w, info.init_id);
+                try w.writeAll(";\n");
+                return;
+            }
             const tn = try mslType(m, inst.words[1], names, alloc);
             const arr = try mslGetArraySuffix(m, inst.words[1]);
             try w.print("    {s} {s}{s};\n", .{tn, names.get(ri) orelse "var", arr});
@@ -2727,6 +2924,17 @@ fn emitInstruction(
         },
         .Store => {
             if (inst.words.len < 3) return;
+            // Skip the whole-array initializer store of a const-array local: the
+            // values are materialized at module scope (promoted) or folded into
+            // the declaration (brace-initialized). Emitting `a = vC;` would be an
+            // invalid C-array copy in Metal.
+            if (getDef(m, inst.words[1])) |dst| {
+                if (dst.op == .Variable) {
+                    if (analyzeLocalConstArray(m, dst)) |info| {
+                        if (inst.words[2] == info.init_id) return;
+                    }
+                }
+            }
             // A store THROUGH a row_major matrix would need a transposed scatter
             // (you cannot assign through `transpose(...)`). Fail loudly rather
             // than emit a plain store to the wrong, transposed locations.
