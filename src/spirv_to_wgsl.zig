@@ -2288,10 +2288,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     // Return type
-    if (is_fragment and output_vars.items.len > 0 and output_var_id != null) {
-        if (use_frag_depth_struct or use_frag_mrt_struct) {
-            try w.writeAll(") -> FragmentOutput {\n");
-        } else {
+    if (is_fragment and (use_frag_depth_struct or use_frag_mrt_struct)) {
+        // The body returns `FragmentOutput(...)`, so the signature MUST declare
+        // the return type — even for a depth-ONLY shader (no color output, so
+        // output_var_id is null). Omitting it left `fn main()` returning a value
+        // → naga "Returning Some where None is expected".
+        try w.writeAll(") -> FragmentOutput {\n");
+    } else if (is_fragment and output_vars.items.len > 0 and output_var_id != null) {
+        {
             const ov = output_var_id.?;
             const ptr_inst = getDef(&module, getDef(&module, ov).?.words[1]);
             var actual_type: u32 = undefined;
