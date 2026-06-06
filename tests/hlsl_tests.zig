@@ -13937,16 +13937,23 @@ test "HLSL: barycentric-nv from SPIR-V binary" {
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "SV_Barycentrics") != null);
 }
 
-test "HLSL: SSBO struct forward declaration from SPIR-V binary" {
+test "HLSL: single-array-member SSBO unwraps to RWStructuredBuffer<elem> (dxc 2048-byte limit)" {
+    // `buffer UBO { float4 results[1024]; }` must lower to
+    // `RWStructuredBuffer<float4>` (the buffer IS the array), matching
+    // spirv-cross — NOT `RWStructuredBuffer<UBO>` with a 16 KB element, which dxc
+    // rejects ("structured buffer elements cannot be larger than 2048 bytes").
+    // (This test previously asserted the dxc-INVALID `struct UBO` /
+    // `RWStructuredBuffer<UBO>` form — it was rubber-stamping a silent-wrong.)
     const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/complex-expression-in-access-chain.spv", 1024 * 1024);
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
     const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
-    // Check that UBO struct is forward-declared for SSBO
-    try std.testing.expect(std.mem.indexOf(u8, hlsl, "struct UBO") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hlsl, "RWStructuredBuffer<UBO>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "RWStructuredBuffer<float4>") != null);
+    // The wrapper struct must NOT be declared, and the access is flattened.
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "RWStructuredBuffer<UBO>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "].results[") == null);
 }
 
 // SSBO whose struct is exactly `struct { runtime_array<T> }` must drop the
