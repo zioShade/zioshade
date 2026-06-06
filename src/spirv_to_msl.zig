@@ -725,8 +725,15 @@ fn mslValueType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u3
     const inst = getDef(m, type_id) orelse return mslType(m, type_id, names, alloc);
     if (inst.op == .TypeArray and inst.words.len > 3) {
         const elem = try mslValueType(m, inst.words[2], names, alloc);
-        const len_def = getDef(m, inst.words[3]);
-        const n: u32 = if (len_def) |ld| (if (ld.words.len > 3) ld.words[3] else 1) else 1;
+        // B5: read the length constant honestly. A `spvUnsafeArray<T, Num>` needs
+        // a concrete compile-time `Num`. Only a plain `OpConstant` (scalar int
+        // literal at words[3]) gives that. A spec-constant length, an
+        // `OpSpecConstantOp`-computed length, or a missing/zero-word def must NOT
+        // silently default to 1 (a silent-wrong sizing); fail loud instead.
+        // Deferred to a frontend fix — see deblasis/glslpp#173.
+        const len_def = getDef(m, inst.words[3]) orelse return error.UnresolvableArrayLength;
+        if (len_def.op != .Constant or len_def.words.len <= 3) return error.UnresolvableArrayLength;
+        const n: u32 = len_def.words[3];
         return std.fmt.allocPrint(alloc, "spvUnsafeArray<{s}, {d}>", .{ elem, n });
     }
     return mslType(m, type_id, names, alloc);
@@ -750,10 +757,12 @@ fn arrayLoadedAsValue(m: *const ParsedModule, id: u32) bool {
 }
 
 /// True if `var_inst` is a Function-storage array `OpVariable` that is the
-/// destination of a whole-array `OpStore` whose value is an `OpLoad` of another
-/// array (a whole-array value copy, e.g. `float local[N] = LUT;`). These locals
+/// destination of a whole-array `OpStore` whose value is itself a whole-array
+/// VALUE — a whole-array `OpLoad`, or an `OpSelect`/`OpCopyObject` of array type
+/// (e.g. `float local[N] = LUT;` or `float la[N] = cond ? A : B;`). These locals
 /// must be declared as `spvUnsafeArray<…>` so the copy is a legal struct
-/// assignment rather than an illegal C-array copy.
+/// assignment rather than an illegal C-array copy. The store VALUE's result type
+/// is confirmed to be a `TypeArray` (B3) so a scalar store never matches.
 fn localArrayValueCopyDest(m: *const ParsedModule, var_inst: Instruction) bool {
     if (var_inst.op != .Variable or var_inst.words.len < 4) return false;
     const sc: spirv.StorageClass = @enumFromInt(var_inst.words[3]);
@@ -767,19 +776,95 @@ fn localArrayValueCopyDest(m: *const ParsedModule, var_inst: Instruction) bool {
         if (inst.op != .Store or inst.words.len < 3) continue;
         if (inst.words[1] != var_id) continue;
         const val = getDef(m, inst.words[2]) orelse continue;
-        if (val.op == .Load) return true;
+        switch (val.op) {
+            .Load, .Select, .CopyObject, .CompositeConstruct => {
+                // B3: only a value whose RESULT TYPE is an array forces the
+                // template spelling; a scalar load/select into an array element
+                // (which would not have an array result type) must not match.
+                if (val.words.len < 2) continue;
+                const vt = getDef(m, val.words[1]) orelse continue;
+                if (vt.op == .TypeArray) return true;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// True if `var_inst` is a Function-storage array `OpVariable` whose id roots a
+/// whole-array `OpLoad` (i.e. it is the SOURCE of a whole-array value copy such
+/// as the `a` in `float b[N] = a;`). A C-array cannot be copy-assigned in Metal,
+/// so the source must be declared `spvUnsafeArray<…>` to match the destination.
+fn localArrayValueCopySource(m: *const ParsedModule, var_inst: Instruction) bool {
+    if (var_inst.op != .Variable or var_inst.words.len < 4) return false;
+    const sc: spirv.StorageClass = @enumFromInt(var_inst.words[3]);
+    if (sc != .Function) return false;
+    const ptr = getDef(m, var_inst.words[1]) orelse return false;
+    if (ptr.op != .TypePointer or ptr.words.len < 4) return false;
+    const pointee = getDef(m, ptr.words[3]) orelse return false;
+    if (pointee.op != .TypeArray) return false;
+    return arrayLoadedAsValue(m, var_inst.words[2]);
+}
+
+/// Follow a pointer (through `OpAccessChain`/`OpCopyObject`) to the root
+/// `OpVariable`/`OpConstant*` def it ultimately addresses. Returns null if the
+/// root cannot be resolved.
+fn pointerRootDef(m: *const ParsedModule, start_id: u32) ?Instruction {
+    var id = start_id;
+    var guard: u32 = 0;
+    while (guard < 64) : (guard += 1) {
+        const inst = getDef(m, id) orelse return null;
+        switch (inst.op) {
+            .AccessChain, .CopyObject => {
+                if (inst.words.len < 4) return inst;
+                id = inst.words[3];
+            },
+            else => return inst,
+        }
+    }
+    return null;
+}
+
+/// True if the whole-array VALUE loaded through pointer `pid` comes from a source
+/// the backend has declared as `spvUnsafeArray<…>` — i.e. a Function-storage
+/// array local that is itself a value-copy SOURCE or DEST, or a const global that
+/// is value-copied (materialized as `constant spvUnsafeArray<…>`). Only then is
+/// the whole-array load `spvUnsafeArray dst = src;` a legal struct copy. If the
+/// source is anything else (a plain `constant T[N]` C-array, a UBO/SSBO member,
+/// an array function param, …) the template spelling would NOT match and the
+/// caller must NOT silently emit it (see `.Load`).
+fn arrayLoadRootIsUnsafeArray(m: *const ParsedModule, pid: u32) bool {
+    const root = pointerRootDef(m, pid) orelse return false;
+    if (root.op != .Variable or root.words.len < 4) return false;
+    const sc: spirv.StorageClass = @enumFromInt(root.words[3]);
+    if (sc == .Function) {
+        // A value-copied function local (source or dest) is spvUnsafeArray.
+        return localArrayValueCopySource(m, root) or localArrayValueCopyDest(m, root);
+    }
+    if (sc == .Private) {
+        // A const-initialized Private global is materialized at module scope; it
+        // is `constant spvUnsafeArray<…>` only when it is value-copied.
+        if (common.constInitializedPrivateVar(m, root) != null)
+            return arrayLoadedAsValue(m, root.words[2]);
     }
     return false;
 }
 
 /// Whether the module needs the `spvUnsafeArray<T,Num>` template preamble: true
-/// when any whole-array value load occurs (which forces both ends of the copy to
-/// the template spelling).
+/// when any whole-array VALUE op occurs — a whole-array `OpLoad`, or an
+/// `OpCompositeConstruct`/`OpSelect`/`OpCopyObject` whose result type is an array
+/// (each of which the backend now spells with the template). Any of these forces
+/// both ends of the copy to the template spelling.
 fn moduleNeedsUnsafeArray(m: *const ParsedModule) bool {
     for (m.instructions) |inst| {
-        if (inst.op != .Load or inst.words.len < 4) continue;
-        const rt = getDef(m, inst.words[1]) orelse continue;
-        if (rt.op == .TypeArray) return true;
+        switch (inst.op) {
+            .Load, .CompositeConstruct, .Select, .CopyObject => {
+                if (inst.words.len < 2) continue;
+                const rt = getDef(m, inst.words[1]) orelse continue;
+                if (rt.op == .TypeArray) return true;
+            },
+            else => {},
+        }
     }
     return false;
 }
@@ -1087,6 +1172,46 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         if (names.fetchPut(inst.words[2], dup) catch null) |old| aa.free(old.value);
     }
 
+    // C8 (honest-error): a Private array global with NO initializer that the
+    // backend never declares would leak into the body as an UNDEFINED identifier
+    // (`float4x4 vN = M[i];` with no `M`). This happens for matrix-element const
+    // arrays (`const mat4 M[N]`), which the FRONTEND does not fold to an
+    // OpConstantComposite (float/vec ARE folded). Rather than emit a reference to
+    // an undeclared name (silent-wrong), fail loud until the frontend folds them
+    // (deferred to a frontend fix — see deblasis/glslpp#173). Detect: a Private OpVariable whose
+    // unwrapped pointee is an array, with no initializer operand and no recovered
+    // const initializer, that is actually referenced by the body.
+    for (module.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc != .Private) continue;
+        if (inst.words.len >= 5) continue; // has an OpVariable initializer operand
+        if (common.constInitializedPrivateVar(&module, inst) != null) continue; // recovered const init
+        const ptr = getDef(&module, inst.words[1]) orelse continue;
+        if (ptr.op != .TypePointer or ptr.words.len < 4) continue;
+        var pointee = getDef(&module, ptr.words[3]) orelse continue;
+        while (pointee.op == .TypeArray and pointee.words.len > 2) {
+            pointee = getDef(&module, pointee.words[2]) orelse break;
+        }
+        // Only the array shape is the unsupported case here (the frontend gap).
+        const pe0 = getDef(&module, ptr.words[3]) orelse continue;
+        if (pe0.op != .TypeArray) continue;
+        const var_id = inst.words[2];
+        // Confirm the variable is actually referenced (loaded or access-chained)
+        // so a dead global never trips the error.
+        var referenced = false;
+        for (module.instructions) |use| {
+            switch (use.op) {
+                .AccessChain, .Load, .CopyObject => {
+                    if (use.words.len >= 4 and pointerRootsAt(&module, use.words[3], var_id)) referenced = true;
+                },
+                else => {},
+            }
+            if (referenced) break;
+        }
+        if (referenced) return error.UndeclaredPrivateArrayGlobal;
+    }
+
     var member_offsets = std.AutoHashMap(MemberKey, u32).init(aa);
     defer member_offsets.deinit();
     collectMemberOffsets(&module, &member_offsets);
@@ -1360,6 +1485,37 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     }
     try w.writeAll("\n");
 
+    // Emit struct declarations for types used as local variables. C7: this MUST
+    // precede the module-scope array-constant block below, because a value-copied
+    // struct-element const array is materialized as `constant spvUnsafeArray<S,N>`
+    // — referencing `struct S`, which would otherwise be used before its
+    // declaration (uncompilable Metal). spirv-cross likewise declares the struct
+    // first.
+    var local_structs_msl = std.AutoHashMap(u32, void).init(aa);
+    defer local_structs_msl.deinit();
+    for (module.instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Function) {
+                const ptr_type = inst.words[1];
+                const ptr_inst = getDef(&module, ptr_type) orelse continue;
+                if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
+                    var pointee_id = ptr_inst.words[3];
+                    var pt_inst = getDef(&module, pointee_id) orelse continue;
+                    // Unwrap array types to find underlying struct
+                    while (pt_inst.op == .TypeArray and pt_inst.words.len > 2) {
+                        pointee_id = pt_inst.words[2];
+                        pt_inst = getDef(&module, pointee_id) orelse break;
+                    }
+                    if (pt_inst.op == .TypeStruct) {
+                        mslEmitOneStructForwardDecl(&module, &names, pointee_id, w, aa, &local_structs_msl, &emitted_names_msl) catch {};
+                    }
+                }
+            }
+        }
+    }
+    if (local_structs_msl.count() > 0) try w.writeAll("\n");
+
     // Module-scope array constants. Each array `OpConstantComposite` referenced
     // by name — i.e. the initializer of a promoted read-only function-local
     // const array OR of a const-initialized Private global — is emitted as a
@@ -1434,32 +1590,6 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         }
         if (emitted_const_array) try w.writeAll("\n");
     }
-
-    // Emit struct declarations for types used as local variables
-    var local_structs_msl = std.AutoHashMap(u32, void).init(aa);
-    defer local_structs_msl.deinit();
-    for (module.instructions) |inst| {
-        if (inst.op == .Variable and inst.words.len >= 4) {
-            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-            if (sc == .Function) {
-                const ptr_type = inst.words[1];
-                const ptr_inst = getDef(&module, ptr_type) orelse continue;
-                if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
-                    var pointee_id = ptr_inst.words[3];
-                    var pt_inst = getDef(&module, pointee_id) orelse continue;
-                    // Unwrap array types to find underlying struct
-                    while (pt_inst.op == .TypeArray and pt_inst.words.len > 2) {
-                        pointee_id = pt_inst.words[2];
-                        pt_inst = getDef(&module, pointee_id) orelse break;
-                    }
-                    if (pt_inst.op == .TypeStruct) {
-                        mslEmitOneStructForwardDecl(&module, &names, pointee_id, w, aa, &local_structs_msl, &emitted_names_msl) catch {};
-                    }
-                }
-            }
-        }
-    }
-    if (local_structs_msl.count() > 0) try w.writeAll("\n");
 
     // Emit non-entry functions first
     for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings); }
@@ -3035,6 +3165,22 @@ fn emitInstruction(
             // local without an invalid C-array copy of the initializer.
             if (analyzeLocalConstArray(m, inst)) |info| {
                 if (!info.mutated) return;
+                // A1: if this mutable local is ALSO the source of a whole-array
+                // value copy (its id roots a whole-array OpLoad), it must be a
+                // `spvUnsafeArray<…>` — a C-array cannot be copy-assigned in
+                // Metal, so `spvUnsafeArray dst = cArraySrc;` would not compile.
+                // Brace-init the template via its `{…}` constructor.
+                if (arrayLoadedAsValue(m, ri)) {
+                    const pointee = blk: {
+                        const ptr = getDef(m, inst.words[1]) orelse break :blk inst.words[1];
+                        break :blk if (ptr.op == .TypePointer and ptr.words.len >= 4) ptr.words[3] else inst.words[1];
+                    };
+                    const vt = try mslValueType(m, pointee, names, alloc);
+                    try w.print("    {s} {s} = {s}(", .{ vt, names.get(ri) orelse "var", vt });
+                    try writeMslConstInit(m, names, w, info.init_id);
+                    try w.writeAll(");\n");
+                    return;
+                }
                 const tn = try mslType(m, inst.words[1], names, alloc);
                 const arr = try mslGetArraySuffix(m, inst.words[1]);
                 try w.print("    {s} {s}{s} = ", .{ tn, names.get(ri) orelse "var", arr });
@@ -3045,7 +3191,7 @@ fn emitInstruction(
             // Whole-array value-copy destination (`float local[N] = LUT;`):
             // declare as `spvUnsafeArray<…>` (no C-array suffix) so the
             // following whole-array store is a legal struct assignment.
-            if (localArrayValueCopyDest(m, inst)) {
+            if (localArrayValueCopyDest(m, inst) or localArrayValueCopySource(m, inst)) {
                 const pointee = blk: {
                     const ptr = getDef(m, inst.words[1]) orelse break :blk inst.words[1];
                     break :blk if (ptr.op == .TypePointer and ptr.words.len >= 4) ptr.words[3] else inst.words[1];
@@ -3074,11 +3220,20 @@ fn emitInstruction(
                 const a = try alloc.dupe(u8, pn);
                 if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
             } else {
-                // A whole-array load is a VALUE copy: use the spvUnsafeArray
-                // spelling (mslType would drop `[N]` → an illegal scalar-from-
-                // array load). The pointer source (a value-copied const global
-                // or another spvUnsafeArray local) is itself spvUnsafeArray, so
-                // the assignment is a legal struct copy.
+                // B4: a whole-array load is a VALUE copy. Spell it
+                // `spvUnsafeArray<…>` (mslType would drop `[N]` → an illegal
+                // scalar-from-array load) ONLY when the load's source is itself
+                // declared `spvUnsafeArray` — a value-copied const global or a
+                // value-copied function local. If the source is some other shape
+                // (a plain `constant T[N]` C-array, a UBO/SSBO member, an array
+                // function param, …) the template spelling would NOT match the
+                // C-array source, so emitting it would be silent-wrong; fail loud
+                // instead. Non-array loads fall through to mslType unchanged.
+                const rt = getDef(m, inst.words[1]);
+                if (rt != null and rt.?.op == .TypeArray) {
+                    if (!arrayLoadRootIsUnsafeArray(m, pid))
+                        return error.UnsupportedWholeArrayValueLoad;
+                }
                 const rtt = try mslValueType(m, inst.words[1], names, alloc);
                 try w.print("    {s} {s} = ", .{rtt, rn});
                 try writeResolvePointer(m, names, pid, true, w);
@@ -3185,7 +3340,11 @@ fn emitInstruction(
             try w.print("    {s} {s} = !{s};\n", .{rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0"});
         },
         .Select => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
+            // A2: a Select whose result type is an array is a whole-array VALUE
+            // (`float la[N] = cond ? A : B;`). mslType would drop `[N]` → an
+            // illegal scalar Select; use the spvUnsafeArray spelling so the
+            // result (and its dest, declared via localArrayValueCopyDest) match.
+            const rtt = try mslValueType(m, inst.words[1], names, alloc);
             const cond_name = names.get(inst.words[3]) orelse "c";
             const true_name = names.get(inst.words[4]) orelse "t";
             const false_name = names.get(inst.words[5]) orelse "f";
@@ -3228,6 +3387,24 @@ fn emitInstruction(
             try w.print("    {s} {s} = {s}({s});\n", .{rtt, names.get(inst.words[2]) orelse "v", rtt, names.get(inst.words[3]) orelse "0"});
         },
         .CompositeConstruct => {
+            // C6: an array OpCompositeConstruct (`float arr[N] = float[](a,…);`)
+            // is a whole-array VALUE. mslType would drop `[N]` and emit a bogus
+            // scalar ctor `float(a, b, c)`; instead spell the spvUnsafeArray
+            // template and brace-init its elements — `spvUnsafeArray<T,N>({…})`
+            // (the spirv-cross idiom). Its dest local is declared spvUnsafeArray
+            // via localArrayValueCopyDest (which recognises a CompositeConstruct
+            // store value of array type). Non-array constructs are unchanged.
+            const rt = getDef(m, inst.words[1]);
+            if (rt != null and rt.?.op == .TypeArray) {
+                const vt = try mslValueType(m, inst.words[1], names, alloc);
+                try w.print("    {s} {s} = {s}({{ ", .{ vt, names.get(inst.words[2]) orelse "v", vt });
+                for (inst.words[3..], 0..) |cid, i| {
+                    if (i > 0) try w.writeAll(", ");
+                    try w.writeAll(names.get(cid) orelse "0");
+                }
+                try w.writeAll(" });\n");
+                return;
+            }
             const rtt = try mslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = {s}(", .{rtt, names.get(inst.words[2]) orelse "v", rtt});
             for (inst.words[3..], 0..) |cid, i| {
