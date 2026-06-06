@@ -1391,6 +1391,30 @@ test "wgsl: constant array of vectors uses array<vecN<T>,M>, not the scalar elem
     try nagaValidateOrSkip(wgsl, "const-array-of-vec");
 }
 
+test "wgsl: constant array of structs uses array<StructName,N> element type" {
+    // Extends the array-of-vectors fix to STRUCT (and nested-array) elements: an
+    // `OpConstantComposite` array of structs previously emitted
+    // `array<f32, 2>(Foobar(...), ...)` — scalar element type, a mismatch naga
+    // rejects. The element must be the struct name `Foobar`.
+    const source: [:0]const u8 =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location=0) out vec4 o;
+        \\struct Foobar { float a; float b; };
+        \\void main(){
+        \\    const Foobar foos[2] = Foobar[](Foobar(10.0, 40.0), Foobar(90.0, 70.0));
+        \\    o = vec4(foos[0].a + foos[1].b);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "array<Foobar, 2>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "array<f32, 2>(Foobar") == null);
+    try nagaValidateOrSkip(wgsl, "const-array-of-struct");
+}
+
 test "wgsl: array element extract uses [i] indexing, not a .x swizzle" {
     // OpCompositeExtract of an array element (`arr[0]`) was inlined as `arr.x`
     // — a vector swizzle on an array — which naga rejects ("invalid field
