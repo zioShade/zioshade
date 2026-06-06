@@ -142,6 +142,39 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         }
     }
 
+    // Fail loud on a call to a function that is declared (a GLSL prototype) but
+    // never DEFINED. glslang rejects these; codegen would emit an OpFunctionCall
+    // to a body-less function id, producing invalid SPIR-V ("forward referenced
+    // IDs have not been defined") with exit 0 — a silent-wrong. Run post-analysis
+    // so forward references (defined later in the file) are NOT flagged. Builtins
+    // lower to ExtInst / direct ops, never `.function_call`, so this only sees
+    // user-function calls.
+    {
+        var defined_fns = std.AutoHashMapUnmanaged(u32, void){};
+        defer defined_fns.deinit(alloc);
+        for (analyzer.functions.items) |f| defined_fns.put(alloc, f.result_id, {}) catch {};
+        check: for (analyzer.functions.items) |f| {
+            for (f.body) |inst| {
+                if (inst.tag != .function_call or inst.operands.len < 1) continue;
+                const callee = switch (inst.operands[0]) {
+                    .id => |id| id,
+                    else => continue,
+                };
+                if (defined_fns.contains(callee)) continue;
+                var nm: []const u8 = "<unknown>";
+                var it = analyzer.overloads.iterator();
+                while (it.next()) |e| {
+                    for (e.value_ptr.items) |ov| {
+                        if (ov.ir_id == callee) nm = e.key_ptr.*;
+                    }
+                }
+                const msg = std.fmt.allocPrint(alloc, "function '{s}' is called but never defined (declared only)", .{nm}) catch "function called but never defined";
+                analyzer.errors.append(alloc, msg) catch {};
+                break :check;
+            }
+        }
+    }
+
     if ((!analyzer.tolerate_errors or options.fail_on_recorded_errors) and analyzer.errors.items.len > 0) return error.SemanticFailed;
 
     // Transfer ownership to module; clear analyzer fields so defer deinit doesn't double-free
