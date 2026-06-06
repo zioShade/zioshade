@@ -1698,3 +1698,75 @@ test "wgsl: a reloaded output accumulator keeps one name across recomputed sub-e
     try assertNoUndeclaredVTemp(wgsl);
     try nagaValidateOrSkip(wgsl, "reloaded-output-def-drop");
 }
+
+// --- gap #170 Pass 1: deepen WGSL coverage ---------------------------------
+
+test "wgsl: findMSB(uint) lowers to firstLeadingBit (GLSL.std.450 FindUMsb 75)" {
+    // GLSL findMSB on an unsigned int emits GLSL.std.450 FindUMsb (75). It was
+    // missing from the shared name table, so it hit recordUnsupportedExtInst —
+    // a needless honest-error for an op WGSL fully supports as firstLeadingBit.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0, std140) uniform U { uint a; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ uint m = uint(findMSB(u.a)); o = vec4(float(m)); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "firstLeadingBit(");
+    try nagaValidateOrSkip(wgsl, "findMSB-uint");
+}
+
+test "wgsl: textureProj is an honest error (WGSL has no projective sampling)" {
+    // GLSL textureProj emits ImageSampleProjImplicitLod. WGSL has no projective
+    // sampling builtin; emitting a manual `coord.xy / coord.w` perspective divide
+    // is value-sensitive silent-wrong (it passes naga while being subtly wrong
+    // vs. the GLSL semantics for cube/array/bias forms). Fail loud instead.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProj(tex, vec3(gl_FragCoord.xy, 1.0)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
+test "wgsl: fragment-shader interlock is an honest error (no WGSL equivalent)" {
+    // GL_ARB_fragment_shader_interlock emits OpBeginInvocationInterlockEXT /
+    // OpEndInvocationInterlockEXT (and an interlock execution mode). WGSL has no
+    // fragment-shader interlock; fail loud rather than silently drop the barrier.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\#extension GL_ARB_fragment_shader_interlock : require
+        \\layout(pixel_interlock_ordered) in;
+        \\layout(binding=0, std430) buffer B { uint counter; };
+        \\layout(location=0) out vec4 o;
+        \\void main(){ beginInvocationInterlockARB(); counter += 1u; endInvocationInterlockARB(); o = vec4(1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
+test "wgsl: the main-path else no longer emits a silent-wrong placeholder var" {
+    // Regression guard for the silent-wrong `else` fallback. It used to emit
+    // `// unhandled op N` + `var <name>: T;` (an uninitialized var = garbage value
+    // that naga still accepts). A representative shader exercising many ops must
+    // compile WITHOUT any such placeholder, and naga must accept the real output.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0, std140) uniform U { vec4 a; vec4 b; uint n; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\    vec4 m = mix(u.a, u.b, 0.5);
+        \\    uint bits = uint(findMSB(u.n)) + uint(findLSB(u.n));
+        \\    o = m + vec4(float(bits)) + vec4(min(u.a.x, u.b.x), max(u.a.y, u.b.y), clamp(u.a.z, 0.0, 1.0), 1.0);
+        \\}
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertNotContains(wgsl, "unhandled op");
+    try nagaValidateOrSkip(wgsl, "no-silent-placeholder");
+}

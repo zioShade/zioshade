@@ -138,8 +138,23 @@ fn glslStd450WgslName(instruction: u32) error{UnsupportedExtInst}![]const u8 {
         70 => "faceForward",
         71 => "reflect",
         72 => "refract",
-        73 => "findILsb",
-        74 => "findSMsb",
+        // Bit-scan ops. WGSL spells these firstTrailingBit/firstLeadingBit. They
+        // are emitted here under their final WGSL names directly so BOTH ExtInst
+        // paths (main + replay) get the right builtin — the old main-path-only
+        // special-case remap from "findILsb"/"findSMsb"/"findUMsb" is retired.
+        //   FindILsb  (73) → firstTrailingBit
+        //   FindSMsb  (74) → firstLeadingBit (signed MSB)
+        //   FindUMsb  (75) → firstLeadingBit (unsigned MSB)
+        73 => "firstTrailingBit",
+        74 => "firstLeadingBit",
+        75 => "firstLeadingBit",
+        // NMin/NMax/NClamp (79/80/81) are the NaN-min/max/clamp variants. WGSL's
+        // min/max/clamp already propagate the non-NaN operand (matching the N*
+        // semantics), so map them to the plain builtins (spirv-cross does the
+        // same). naga-validated.
+        79 => "min",
+        80 => "max",
+        81 => "clamp",
         else => return recordUnsupportedExtInst(instruction),
     };
 }
@@ -4484,16 +4499,24 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                 if (ai > 0) try args.appendSlice(arena, ", ");
                                 try args.appendSlice(arena, names.get(arg_id) orelse "0");
                             }
-                            // Map GLSL.std.450 names to WGSL equivalents
-                            const wgsl_name = if (std.mem.eql(u8, func_name, "faceForward"))
-                                "faceForward"
-                            else if (std.mem.eql(u8, func_name, "findILsb"))
-                                "firstTrailingBit"
-                            else if (std.mem.eql(u8, func_name, "findSMsb") or std.mem.eql(u8, func_name, "findUMsb"))
-                                "firstLeadingBit"
-                            else
-                                func_name;
-                            try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, wgsl_name, args.items });
+                            // glslStd450WgslName already returns the final WGSL
+                            // builtin name (incl. firstTrailingBit/firstLeadingBit
+                            // for the bit-scan ops), so no further remap is needed.
+                            //
+                            // GLSL findMSB/findLSB always return SIGNED int (the
+                            // result type is `int`/`ivec`) even for an unsigned
+                            // operand (FindUMsb), but WGSL firstLeadingBit/
+                            // firstTrailingBit return the ARGUMENT's type. So a
+                            // `u32` arg yields a `u32` result while `rt` is `i32`
+                            // (naga: "expected i32, got u32"). Wrap the bit-scan
+                            // result in an explicit `rt(...)` conversion; the cast
+                            // is an identity when the types already match (valid WGSL).
+                            const is_bitscan = instruction == 73 or instruction == 74 or instruction == 75;
+                            if (is_bitscan) {
+                                try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s}({s}));\n", .{ result_name, rt, rt, func_name, args.items });
+                            } else {
+                                try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                            }
                         }
                     }
                 }
@@ -4940,14 +4963,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try writeInd(w, indent); try w.print("let {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
             },
 
-            // ImageSampleProjImplicitLod — projective texture sampling
-            .ImageSampleProjImplicitLod => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const result_name = names.get(inst.words[2]) orelse "v";
-                const coord = names.get(inst.words[4]) orelse "uv";
-                const tex_name = names.get(inst.words[3]) orelse "tex";
-                // Projective: divide xy by w (component 3)
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}.xy / {s}.w);\n", .{ result_name, rt, tex_name, tex_name, coord, coord });
+            // Projective texture sampling (GLSL textureProj*). WGSL has no
+            // projective sampling builtin. The previous handler synthesised a
+            // manual perspective divide (`coord.xy / coord.w`), which is
+            // value-sensitive silent-wrong — it passes naga while diverging from
+            // GLSL semantics for the dref/bias/array/cube forms (and ignored the
+            // dref/lod operands entirely). Fail loud instead of fabricating output.
+            .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod, .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod => {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no projective texture sampling ({s})", .{@tagName(inst.op)}) catch null;
+                return error.UnsupportedOp;
             },
 
             // ReadClockKHR — shader clock
@@ -5045,14 +5069,28 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 return error.UnsupportedOp;
             },
 
+            // Fragment-shader interlock barriers (GL_ARB/EXT_fragment_shader_interlock).
+            // WGSL has no fragment-shader interlock. The interlock execution mode is
+            // already caught earlier, but the barrier opcodes themselves were being
+            // silently dropped; honest-error them as defense-in-depth so an interlock
+            // shader can never produce silently-unsynchronised WGSL.
+            .BeginInvocationInterlockEXT, .EndInvocationInterlockEXT => {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no fragment-shader interlock ({s})", .{@tagName(inst.op)}) catch null;
+                return error.UnsupportedOp;
+            },
+
             else => {
-                // Try to handle as a simple assignment
-                if (inst.words.len > 2) {
-                    const rt = try wgslType(module, inst.words[1], names, arena);
-                    const rn = names.get(inst.words[2]) orelse "v";
-                    try writeInd(w, indent); try w.print("// unhandled op {d}\n", .{@intFromEnum(inst.op)});
-                    try writeInd(w, indent); try w.print("var {s}: {s};\n", .{ rn, rt });
-                }
+                // No mapping for this op in the main emit path. The old fallback
+                // emitted `// unhandled op N` + `var <name>: T;` — an UNINITIALIZED
+                // var (garbage value) that is nonetheless syntactically valid WGSL,
+                // so naga accepts it: a textbook silent-wrong. Fail loud instead.
+                // (Verified: no shader in the conformance corpus reaches here — a
+                // grep for "unhandled op" over the full corpus output is empty — so
+                // flipping this to an honest error regresses nothing. If a future
+                // REPRESENTABLE op surfaces here, give it a real naga-validated arm
+                // rather than re-introducing the placeholder.)
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unsupported op '{s}' in main emit path", .{@tagName(inst.op)}) catch null;
+                return error.UnsupportedOp;
             },
         }
     }
@@ -5360,7 +5398,16 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                     if (ai > 0) try args.appendSlice(arena, ", ");
                     try args.appendSlice(arena, names.get(arg_id) orelse "0");
                 }
-                try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                // Bit-scan ops (FindILsb 73 / FindSMsb 74 / FindUMsb 75): GLSL
+                // returns signed int, WGSL firstTrailingBit/firstLeadingBit return
+                // the arg type — wrap in an explicit `rt(...)` conversion (mirrors
+                // the main emit path; identity cast when types already match).
+                const is_bitscan = instruction == 73 or instruction == 74 or instruction == 75;
+                if (is_bitscan) {
+                    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s}({s}));\n", .{ result_name, rt, rt, func_name, args.items });
+                } else {
+                    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                }
             }
         },
         .CompositeConstruct => {
