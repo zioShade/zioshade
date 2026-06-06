@@ -2125,6 +2125,22 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         try w.writeAll("}\n\n");
         use_frag_depth_struct = true;
     } else if (is_fragment and output_vars.items.len > 1) {
+        // Two outputs sharing a @location is GLSL dual-source blending
+        // (`layout(location=0, index=0/1)`), which WGSL expresses with
+        // `@blend_src(0/1)`. glslpp's SPIR-V currently drops the `Index`
+        // decoration, so the backend cannot reconstruct which output is src0 vs
+        // src1 — emitting two `@location(0)` is invalid (naga: "Multiple bindings
+        // at location 0 are present"). Fail loud rather than emit it.
+        for (output_vars.items, 0..) |a, ai| {
+            const la = getDecVal(&decorations, a, .location) orelse ai;
+            for (output_vars.items[ai + 1 ..]) |b| {
+                const lb = getDecVal(&decorations, b, .location) orelse continue;
+                if (la == lb) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL dual-source blending (two outputs at @location({d}); needs @blend_src) is not supported", .{la}) catch null;
+                    return error.UnsupportedOp;
+                }
+            }
+        }
         // Multiple render targets — emit FragmentOutput struct
         try w.writeAll("struct FragmentOutput {\n");
         for (output_vars.items, 0..) |ovid, i| {
