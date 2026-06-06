@@ -219,7 +219,12 @@ fn resolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
 
 // ---- GLSL type resolution ----
 fn getArraySuffix(m: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
-    return common.commonGetArraySuffix(m.instructions, m.id_defs, ptr_type_id, false);
+    // multi_dim=true: a local/output variable of a multi-dimensional array type
+    // (`vec4 v[2][2]`) must emit ALL nested dimensions. With single-dim, a 2D
+    // array local was declared `vec4 v[2];` then assigned a `vec4 v[2][2]`
+    // const — glslang rejects the type mismatch (GLSL 4.30+ supports arrays of
+    // arrays; spirv-cross also emits the full `[N][M]`).
+    return common.commonGetArraySuffix(m.instructions, m.id_defs, ptr_type_id, true);
 }
 
 fn glslType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
