@@ -1915,6 +1915,14 @@ const Analyzer = struct {
                                                     // via @floatFromInt) the out-of-range value.
                                                     const word = try literalWord(arg);
                                                     // For float-element composites, convert int → float.
+                                                    // NOTE: a signed int_literal >=2^31 here folds with the
+                                                    // wrong sign (bare @floatFromInt on the u32 word), the
+                                                    // same class fixed for the float-vector ctor and the
+                                                    // const-array folder. Left as-is: this path is only
+                                                    // reachable via `layout(constant_id=N) const vecT` — a
+                                                    // SpecId on a composite, which is NOT valid Vulkan GLSL
+                                                    // (SpecId is scalar-only) and glslangValidator rejects,
+                                                    // so there is no oracle to gate the fix against.
                                                     if (is_float_elem) {
                                                         const fv: f32 = @floatFromInt(word);
                                                         lit = @as(u32, @bitCast(fv));
@@ -7359,7 +7367,19 @@ const Analyzer = struct {
                                 // panics out-of-range. Defensive (child was vetted
                                 // upstream); identical word for in-range literals.
                                 const val: u32 = try literalWord(child);
-                                const fval: f32 = @floatFromInt(val);
+                                // A signed (int_literal) source must be widened
+                                // from its TWO'S-COMPLEMENT i32 value: GLSL's
+                                // `int` is 32-bit signed, so a decimal literal
+                                // like 2147483648 (=2^31) wraps to -2147483648
+                                // and `vec2(2147483648,0)` is -2.147e9 (glslang).
+                                // A bare @floatFromInt on the u32 word would
+                                // silently flip the sign to +2.147e9. A uint
+                                // source (uint_literal, `u` suffix) stays
+                                // unsigned. Mirrors the scalar path below.
+                                const fval: f32 = if (child.tag == .int_literal)
+                                    @floatFromInt(@as(i32, @bitCast(val)))
+                                else
+                                    @floatFromInt(val);
                                 arg_id = try self.getConstFloat(fval);
                                 flat_ids.append(self.alloc, arg_id) catch return error.OutOfMemory;
                                 continue;

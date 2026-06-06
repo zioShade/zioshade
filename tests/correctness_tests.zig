@@ -459,3 +459,39 @@ test "cross: SSBO reflected as storage_buffer and present in HLSL" {
         std.mem.indexOf(u8, hlsl, "RWByteAddressBuffer") != null or
         std.mem.indexOf(u8, hlsl, "buffer") != null);
 }
+
+fn spirvHasWord(spv: []const u32, word: u32) bool {
+    for (spv) |w| if (w == word) return true;
+    return false;
+}
+
+test "fold: signed int literal in float-vector ctor wraps (two's complement) like glslang" {
+    // Regression: `vec2(2147483648, 0)` — a bare decimal literal is a 32-bit
+    // SIGNED int in GLSL, so 2^31 wraps to -2147483648; glslang folds the vec
+    // component to -2.147e9. A bare @floatFromInt on the u32 word silently gave
+    // +2.147e9 (sign flip = silent-wrong). f32 bit patterns: -2147483648.0 =
+    // 0xCF000000, +2147483648.0 = 0x4F000000.
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location = 0) out vec2 o;
+        \\void main() { o = vec2(2147483648, 0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasWord(spv, 0xCF000000)); // -2.147e9 (correct)
+    try std.testing.expect(!spirvHasWord(spv, 0x4F000000)); // not the sign-flipped +2.147e9
+}
+
+test "fold: unsigned literal in float-vector ctor stays positive" {
+    // The `u` suffix makes it unsigned — 2147483648u is +2.147e9 (= 0x4F000000),
+    // matching glslang. Guards against over-correcting the signed fix.
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location = 0) out vec2 o;
+        \\void main() { o = vec2(2147483648u, 0u); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasWord(spv, 0x4F000000)); // +2.147e9 (correct)
+    try std.testing.expect(!spirvHasWord(spv, 0xCF000000));
+}
