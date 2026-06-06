@@ -1367,6 +1367,24 @@ test "wgsl: clip-distance is an honest error, not a naga-invalid @location array
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
 
+test "wgsl: vector shift coerces the amount to vecN<u32>, not scalar u32" {
+    // `uvec2(1) << uvec2(a,b)` — the WGSL shift amount must match the base's
+    // vector dimension (`vec2<u32> << vec2<u32>`). glslpp wrapped it in scalar
+    // `u32(...)` ("cannot cast a vec2<u32> to a u32"); scalar shifts keep `u32()`.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) flat in uvec2 a;
+        \\layout(location=0) out uvec2 o;
+        \\void main(){ o = (uvec2(1u) << a) - 1u; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "vec2<u32>(") != null);
+    try nagaValidateOrSkip(wgsl, "vec-shift");
+}
+
 test "wgsl: scalar geometric builtins lower to scalar ops (normalize->sign etc.)" {
     // GLSL allows normalize/length/distance on scalars; WGSL defines them only on
     // vectors (naga: "wrong type passed as argument #1 to `normalize`"). They must
