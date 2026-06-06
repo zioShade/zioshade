@@ -36,10 +36,10 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Cross-compilers (HLSL, GLSL, MSL, WGSL) | ~12,000 |
 | Optimizer (compact_ids_passes) | ~10,200 |
 | Preprocessor | ~1,800 |
-| `spirv-val` conformance passing | 2,072 PASS / 15 XFAIL / 8 SKIP — exits 0 (`zig build conformance`) |
+| `spirv-val` conformance passing | 2076 PASS / 0 FAIL / 14 XFAIL / 8 SKIP / 2098 total — exits 0 (`zig build conformance`; see `docs/STATUS.md`) |
 | External DXC SPIR-V fixtures | 47 / 51 compile (4 limited by DXC SM 6.1+ / 2 KB structured-buffer cap) |
 | WGSL stress tests | 470 / 470 |
-| Fuzzer iterations (clean, ad-hoc) | 50,000 (run `zig build fuzz -- --count 50000` to reproduce) |
+| Fuzzer iterations (clean) | 1,000,000 (run `just fuzz-million` to reproduce; ad-hoc: `zig build fuzz -- --count N`) |
 | Shader stages supported | 14 (vert, frag, comp, geom, tesc, tese, mesh, task, raygen, closesthit, miss, intersection, anyhit, callable) |
 
 ### 1.2 Frontend (replaces glslang)
@@ -57,7 +57,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Mesh/Task shaders | ✅ | 4 pass | ⚠️ Basic |
 | Ray tracing shaders | ✅ | 3 pass | ⚠️ Basic |
 | SPIR-V output | 1.0–1.6 | 1.0–1.6 | ✅ |
-| spirv-val conformance | Reference | 2,074 PASS / 15 XFAIL (honest rejections) / 8 SKIP — exits 0 | ✅ |
+| spirv-val conformance | Reference | 2076 PASS / 0 FAIL / 14 XFAIL (honest rejections) / 8 SKIP / 2098 total — exits 0 | ✅ |
 | GLSL extensions parsed | 100+ | 9 (subgroup basic/vote/arithmetic/ballot/shuffle, fragment interlock, mesh, ray tracing, null initializer) | ⚠️ Covers wintty needs |
 | Error diagnostics | Rich (line, column, context) | Basic (error enum, no location) | ❌ Gap |
 
@@ -124,7 +124,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | mesh-task | 4 | 4 | Mesh/task shaders |
 | stress | ~140 | ~140 | Handcrafted edge cases |
 | DXC validated | 47 | 51 | HLSL→DXIL compilation |
-| Fuzzer | 50,000 | 50,000 | 5 seeds, 0 crashes |
+| Fuzzer | 1,000,000 | 1,000,000 | structured-GLSL, 0 crashes (`just fuzz-million`) |
 | Rendering verified | 2+83 | — | CRT + focus pixel-perfect, 83 render_compare |
 
 ---
@@ -179,7 +179,7 @@ All 4 are DXC toolchain constraints, not glslpp bugs.
 
 ### 3.3 Cross-Compilation Validation
 
-All 3 primary backends produce compilable output across the conformance corpus (exact per-backend pass counts predate the current 2,095-fixture corpus and are pending regeneration — tracked under the "single source of truth for status numbers" cleanup):
+All 3 primary backends produce compilable output across the conformance corpus (exact per-backend pass counts predate the current 2,098-fixture corpus and are pending regeneration — tracked under the "single source of truth for status numbers" cleanup):
 - **GLSL backend**: passes
 - **MSL backend**: passes
 - **HLSL backend**: passes (DXC-validated 47/51 on the prebuilt SPIR-V fixtures)
@@ -193,6 +193,8 @@ All 3 primary backends produce compilable output across the conformance corpus (
 - **83 render_compare tests**: pixel-level comparison against reference rendering
 
 ### 3.5 Fuzz Testing
+
+The structured-GLSL fuzzer is clean over **1,000,000** iterations (reproduce with `just fuzz-million`; ad-hoc runs via `zig build fuzz -- --count N`). The per-seed sweep below is the original smaller ad-hoc run kept for reference.
 
 | Seed | Iterations | Crashes | Invalid SPIR-V |
 |------|-----------|---------|----------------|
@@ -312,9 +314,9 @@ A comprehensive plan to close the remaining gaps and reach drop-in parity with g
 
 These are tracked openly so consumers can decide whether glslpp fits their use case today.
 
-- **No CI yet.** Conformance numbers come from local `zig build conformance` runs. Cross-platform (Linux / macOS) builds are unverified by automation; a GitHub Actions workflow is being added.
+- **CI workflow committed, not yet green.** A 3-OS GitHub Actions matrix (`.github/workflows/ci.yml`: build/test, spirv-val conformance, fuzz smoke, C-ABI smoke) is committed but has not yet been observed passing in CI due to a GitHub Actions billing block; conformance is currently verified locally via `zig build conformance` / `just`.
 - **Lib-vs-lib benchmark (cross-compiler) published:** `just lib-bench` links **SPIRV-Cross in-process** (its C API, from the Vulkan SDK static libs) and times glslpp vs SPIRV-Cross on the *same* SPIR-V → GLSL/HLSL/MSL. Honest result (no subprocess): glslpp is ~**1.4–1.6× faster** on the median cell — roughly at parity on a trivial GLSL shader (~0.6×) and up to ~2.6× faster on math/control-flow-heavy MSL. (Numbers are machine-relative; rerun locally.) A glslpp-vs-glslang in-process comparison for the **GLSL→SPIR-V** direction (`glslang_c_interface.h`) is not yet wired — the front-end half of the bench remains.
 - **`spirv-val` is the conformance oracle, not glslang reference output.** Some test fixtures in `tests/spirv-cross/` are known to fail reference compilation with `glslangValidator` even though glslpp accepts them — see `docs/REFERENCE_FAILURE_ANALYSIS.md`.
 - **Cross-compiler control flow (G2 partial).** A module-level structurization pre-pass (`src/cfg_structurize.zig`, run by every backend) recovers missing `OpSelectionMerge`s for unstructured-but-reducible `if`/`switch` headers via dominator/post-dominator analysis, so externally-optimized SPIR-V with stripped selection merges compiles faithfully (byte-identical no-op on already-structured input). Unstructured **loops** (missing `OpLoopMerge`) and irreducible CFGs still **fail loud** (`error.UnstructuredControlFlow`) — never miscompiled. Loop-merge recovery primitives exist (`recoverLoopMerges`/`spliceLoopMerges`, unit-tested) but composing them with selection recovery is future work; valid Shader SPIR-V is always structured, so this only affects malformed/hand-authored input.
-- **C ABI bindings are not provided.** Consumers outside the Zig ecosystem need to write their own FFI layer.
+- **C ABI is provided.** A C header (`include/glslpp.h`) plus shared and static libraries are built with `zig build c-lib`; a runnable C consumer example lives in `examples/c/main.c` (`zig build c-example` / `zig build run-c-example`). The public C surface is smoke-tested across Linux / macOS / Windows by the `c-abi` job in `.github/workflows/ci.yml`.
 - **Single-contributor project.** No formal release cadence yet; treat as alpha if you are not the wintty project.
