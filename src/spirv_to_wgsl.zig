@@ -787,6 +787,18 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
 /// RowMajor decoration (4). WGSL has no row_major feature and is column-indexed,
 /// so a row-major matrix's std140 bytes are read as the TRANSPOSE of the logical
 /// matrix — every read must be transposed back (see `findRowMajorMatrix`).
+fn memberHasFlat(module: *const ParsedModule, struct_id: u32, member_index: u32) bool {
+    for (module.instructions) |inst| {
+        if (inst.op == .MemberDecorate and inst.words.len >= 4 and
+            inst.words[1] == struct_id and inst.words[2] == member_index)
+        {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[3]);
+            if (dec == .flat) return true;
+        }
+    }
+    return false;
+}
+
 fn memberIsRowMajor(module: *const ParsedModule, struct_id: u32, member_index: u32) bool {
     for (module.instructions) |inst| {
         if (inst.op == .MemberDecorate and inst.words.len >= 4 and
@@ -2222,6 +2234,45 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         try w.writeAll("}\n\n");
     }
 
+    // Stage I/O interface blocks: a GLSL `in/out Block {…} inst;` lowers to a
+    // struct-typed I/O variable. Declare it as a WGSL struct with @location /
+    // @interpolate MEMBERS (passed by value) so member access `inst.f` works.
+    // (A struct-typed I/O is ALWAYS an interface block here — non-block I/O is
+    // scalar/vector — so this only affects the currently-naga-rejected cluster;
+    // no passing shader has a struct I/O param.)
+    var io_block_inputs = std.AutoHashMap(u32, void).init(arena);
+    {
+        var declared = std.AutoHashMap(u32, void).init(arena);
+        for (input_vars.items) |iv| {
+            if (iv.builtin != null) continue;
+            const ptr_inst = getDef(&module, iv.type_id);
+            var sty = iv.type_id;
+            if (ptr_inst) |pi| {
+                if (pi.op == .TypePointer and pi.words.len > 3) sty = pi.words[3];
+            }
+            const sdef = getDef(&module, sty) orelse continue;
+            // A struct-typed stage input is ALWAYS a GLSL interface block (plain
+            // structs cannot be non-block I/O), so the struct shape alone is the
+            // signal — glslpp's SPIR-V does not emit the `Block` decoration.
+            if (sdef.op != .TypeStruct) continue;
+            try io_block_inputs.put(iv.id, {});
+            if (declared.contains(sty)) continue;
+            try declared.put(sty, {});
+            const sname = names.get(sty) orelse "Block";
+            const base_loc = getDecVal(&decorations, iv.id, .location) orelse 0;
+            try w.print("struct {s} {{\n", .{sname});
+            for (sdef.words[2..], 0..) |mt_id, mi| {
+                var mname_buf: [32]u8 = undefined;
+                const mname = getMemberName(&module, sty, @intCast(mi), &mname_buf);
+                const mtype = try wgslType(&module, mt_id, &names, arena);
+                const flat = memberHasFlat(&module, sty, @intCast(mi)) or isIntegerWgslType(mtype);
+                const interp: []const u8 = if (flat) "@interpolate(flat) " else "";
+                try w.print("    @location({d}) {s}{s}: {s},\n", .{ base_loc + @as(u32, @intCast(mi)), interp, mname, mtype });
+            }
+            try w.writeAll("}\n\n");
+        }
+    }
+
     // Emit entry function
     const entry_stage: []const u8 = if (is_fragment) "@fragment" else if (is_vertex) "@vertex" else if (is_compute) "@compute" else "@fragment";
 
@@ -2292,6 +2343,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             } else {
                 try w.print("@builtin({s}) {s}: {s}", .{ builtin_name, var_name, type_name });
             }
+        } else if (io_block_inputs.contains(iv.id)) {
+            // Interface-block input: a by-value struct parameter. Its MEMBERS
+            // carry @location (emitted in the struct decl above); the parameter
+            // itself must NOT have @location.
+            try w.print("{s}: {s}", .{ var_name, type_name });
         } else {
             const loc = getDecVal(&decorations, iv.id, .location) orelse i;
             // Fragment INPUTS that are integer-typed (or GLSL `flat`-qualified)
