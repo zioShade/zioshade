@@ -378,27 +378,14 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
                     }
                     // This composite-constant naming is consumed ONLY by the WGSL
                     // backend (array<T,N>(...) is WGSL syntax), so the element type
-                    // must use WGSL names — tryResolveTypeName returns the GLSL
-                    // spelling ("float"/"int"/"uint"), which would leak as a bare
-                    // identifier naga rejects ("no definition in scope: float").
-                    // A VECTOR element (e.g. `vec3 palette[4]`) must spell the full
-                    // `vecN<scalar>`, not just the scalar — emitting `array<f32, 4>`
-                    // for a vec3[4] is a type mismatch naga rejects (the args are
-                    // `vec3<f32>(...)`). Matrix elements are rare; fall back to the
-                    // resolved name.
-                    var elem_buf: [32]u8 = undefined;
-                    const elem_inst = getDef(module, elem_type_id);
-                    const elem_name: []const u8 = blk2: {
-                        if (elem_inst) |ei| {
-                            if (ei.op == .TypeVector and ei.words.len > 3) {
-                                const comp_raw = tryResolveTypeName(module, ei.words[2]);
-                                const ws: []const u8 = if (std.mem.eql(u8, comp_raw, "float")) "f32" else if (std.mem.eql(u8, comp_raw, "int")) "i32" else if (std.mem.eql(u8, comp_raw, "uint")) "u32" else comp_raw;
-                                break :blk2 std.fmt.bufPrint(&elem_buf, "vec{d}<{s}>", .{ ei.words[3], ws }) catch "f32";
-                            }
-                        }
-                        const elem_raw = tryResolveTypeName(module, elem_type_id);
-                        break :blk2 if (std.mem.eql(u8, elem_raw, "float")) "f32" else if (std.mem.eql(u8, elem_raw, "int")) "i32" else if (std.mem.eql(u8, elem_raw, "uint")) "u32" else elem_raw; // "bool" is identical in WGSL
-                    };
+                    // must use the fully-qualified WGSL type name. A VECTOR element
+                    // needs `vecN<scalar>`, an ARRAY element `array<.., N>`, a STRUCT
+                    // element its struct name — emitting the scalar fallback `f32`
+                    // (e.g. `array<f32, 2>(array<vec4<f32>,2>(...), ...)` or
+                    // `array<f32, 2>(Foobar(...), ...)`) is a type mismatch naga
+                    // rejects. wgslTypeName() resolves all of these recursively.
+                    const elem_name = wgslTypeName(alloc, module, names, elem_type_id) catch (alloc.dupe(u8, "f32") catch continue);
+                    defer alloc.free(elem_name);
                     buf2.writer(alloc).print("array<{s}, {d}>(", .{elem_name, count_val}) catch continue;
                     for (inst.words[3..], 0..) |comp_id, i| {
                         if (i > 0) buf2.writer(alloc).writeAll(", ") catch continue;
@@ -456,6 +443,48 @@ pub fn tryResolveTypeName(module: *const ParsedModule, type_id: u32) []const u8 
         .TypeBool => "bool",
         else => "float",
     };
+}
+
+/// Spell the fully-qualified WGSL type name for `type_id`, recursively. Used by
+/// the WGSL ConstantComposite namer so an array/matrix/struct element gets its
+/// real WGSL type (`vec4<f32>`, `array<vec4<f32>, 2>`, `Foobar`) instead of the
+/// scalar fallback `f32` — emitting `array<f32, 2>(array<...>(...))` is a type
+/// mismatch naga rejects. `names` supplies struct type names. Caller frees.
+pub fn wgslTypeName(alloc: std.mem.Allocator, module: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), type_id: u32) ![]const u8 {
+    const inst = getDef(module, type_id) orelse return alloc.dupe(u8, "f32");
+    switch (inst.op) {
+        .TypeFloat => return alloc.dupe(u8, "f32"),
+        .TypeInt => return alloc.dupe(u8, if (inst.words.len > 3 and inst.words[3] != 0) "i32" else "u32"),
+        .TypeBool => return alloc.dupe(u8, "bool"),
+        .TypeVector => {
+            if (inst.words.len > 3) {
+                const scalar = try wgslTypeName(alloc, module, names, inst.words[2]);
+                defer alloc.free(scalar);
+                return std.fmt.allocPrint(alloc, "vec{d}<{s}>", .{ inst.words[3], scalar });
+            }
+            return alloc.dupe(u8, "f32");
+        },
+        .TypeMatrix => {
+            // words: [_, result, col_type, col_count]; col_type is a vector.
+            if (inst.words.len > 3) {
+                const col = getDef(module, inst.words[2]);
+                const rows: u32 = if (col) |c| (if (c.op == .TypeVector and c.words.len > 3) c.words[3] else 4) else 4;
+                return std.fmt.allocPrint(alloc, "mat{d}x{d}<f32>", .{ inst.words[3], rows });
+            }
+            return alloc.dupe(u8, "mat4x4<f32>");
+        },
+        .TypeArray => {
+            const elem = try wgslTypeName(alloc, module, names, inst.words[2]);
+            defer alloc.free(elem);
+            var count_val: u32 = 0;
+            if (getDef(module, inst.words[3])) |ci| {
+                if (ci.op == .Constant and ci.words.len > 3) count_val = ci.words[3];
+            }
+            return std.fmt.allocPrint(alloc, "array<{s}, {d}>", .{ elem, count_val });
+        },
+        .TypeStruct => return alloc.dupe(u8, names.get(type_id) orelse "Struct"),
+        else => return alloc.dupe(u8, "f32"),
+    }
 }
 
 pub fn constantLiteral(alloc: std.mem.Allocator, type_inst: Instruction, literal_words: []const u32) ![]const u8 {
