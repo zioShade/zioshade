@@ -1628,3 +1628,73 @@ test "wgsl: module-scope const array indexed at runtime emits its values" {
     try assertNotContains(wgsl, "var<private> LUT"); // not a zero-init fallback
     try nagaValidateOrSkip(wgsl, "const-array-global");
 }
+
+test "wgsl: a reloaded input index keeps one name across recomputed sub-expressions" {
+    // Regression (spirv-cross constant-array.frag / lut-promotion.frag): the
+    // single load of a `flat in int index` is rendered INCONSISTENTLY — as the
+    // input name `index` in the direct emission path but as its raw generated
+    // `vN` inside a sub-expression that the running sum gets recomputed into
+    // (triggered by re-evaluating function-call arguments). The recomputed `vN`
+    // was never declared → naga "no definition in scope".
+    //
+    // Root cause: the AccessChain pre-scan froze the index operand using the
+    // load's default name BEFORE the immutable-load name propagation ran, so the
+    // inline expressions captured `v20` while direct emission used `index`. The
+    // fix propagates immutable direct-variable load names before the AccessChain
+    // pre-scan so a reloaded value is bound consistently everywhere.
+    const source: [:0]const u8 =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out vec4 FragColor;
+        \\layout(location = 0) flat in int index;
+        \\struct Foobar { float a; float b; };
+        \\vec4 resolve(Foobar f) { return vec4(f.a + f.b); }
+        \\void main() {
+        \\   const vec4 foo[3] = vec4[](vec4(1.0), vec4(2.0), vec4(3.0));
+        \\   const vec4 foobars[2][2] = vec4[][](vec4[](vec4(1.0), vec4(2.0)), vec4[](vec4(8.0), vec4(10.0)));
+        \\   const Foobar foos[2] = Foobar[](Foobar(10.0, 40.0), Foobar(90.0, 70.0));
+        \\   FragColor = foo[index] + foobars[index][index + 1] + resolve(Foobar(10.0, 20.0)) + resolve(foos[index]);
+        \\}
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertNoUndeclaredVTemp(wgsl);
+    try nagaValidateOrSkip(wgsl, "reloaded-index-def-drop");
+}
+
+test "wgsl: a reloaded output accumulator keeps one name across recomputed sub-expressions" {
+    // Regression (spirv-cross lut-promotion.frag): the same def-drop class as the
+    // index case, but for a reloaded OUTPUT. Successive `FragColor += …` reload
+    // the output; a sub-expression recomputed into a later `+` froze the
+    // `OpLoad %FragColor` as its raw `vN` (the is_output_load name propagation
+    // only ran at emission, after the inline-expression pre-scan) → undeclared
+    // `vN` (naga "no definition in scope"). The fix propagates output/input/
+    // texture load names before the pre-scans.
+    const source: [:0]const u8 =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out float FragColor;
+        \\layout(location = 0) flat in int index;
+        \\const float LUT[16] = float[](
+        \\    1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0,
+        \\    1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0);
+        \\void main() {
+        \\    FragColor = LUT[index];
+        \\    if (index < 10) FragColor += LUT[index ^ 1];
+        \\    else FragColor += LUT[index & 1];
+        \\    vec4 foo[4] = vec4[](vec4(0.0), vec4(1.0), vec4(8.0), vec4(5.0));
+        \\    if (index > 30) FragColor += foo[index & 3].y;
+        \\    else FragColor += foo[index & 1].x;
+        \\    vec4 foobar[4] = vec4[](vec4(0.0), vec4(1.0), vec4(8.0), vec4(5.0));
+        \\    if (index > 30) foobar[1].z = 20.0;
+        \\    FragColor += foobar[index & 3].z;
+        \\    vec4 baz[4] = vec4[](vec4(0.0), vec4(1.0), vec4(8.0), vec4(5.0));
+        \\    baz = vec4[](vec4(20.0), vec4(30.0), vec4(50.0), vec4(60.0));
+        \\    FragColor += baz[index & 3].z;
+        \\}
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertNoUndeclaredVTemp(wgsl);
+    try nagaValidateOrSkip(wgsl, "reloaded-output-def-drop");
+}

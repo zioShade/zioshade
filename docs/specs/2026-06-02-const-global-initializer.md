@@ -118,3 +118,55 @@ declare-but-zero, so gate it behind Design A or keep as a follow-up.)
    naga-validates.
 2. GREEN: Design A.
 3. Oracle-gate: spirv-val + naga + the existing backend suites.
+
+## Follow-up (LANDED): WGSL reloaded-value def-drop in recomputed sub-expressions
+
+**Independent of the const-global work above** (those const arrays are
+function-LOCAL and already declared as `var v17 = array<…>(…)`). This is a
+distinct expression-emission / CSE bug surfaced by the same two witnesses.
+
+### Symptom
+`constant-array.frag` and `lut-promotion.frag` emitted WGSL that referenced an
+undeclared `vN` (naga: `no definition in scope for identifier: vN`):
+
+```wgsl
+let v26: vec4f = v17[index] + v18[index][v22];      // direct path — uses `index`
+let v29: vec4f = (v17[v20] + v18[v20][v22]) + v28;  // recomputed path — uses `v20` (undeclared)
+```
+
+The single `OpLoad %int %index` was rendered under TWO names — the input name
+`index` in the direct emission path, but its raw generated `v20` inside a
+sub-expression that the running sum was redundantly recomputed into (triggered by
+re-evaluating function-call arguments). The `lut-promotion.frag` variant is the
+same class for a reloaded OUTPUT (`FragColor += …`): a recomputed sub-expression
+froze `OpLoad %FragColor` as a raw `vN`.
+
+### Root cause
+The load-name propagation (the `is_input_load` / `is_output_load` / `is_tex`
+branches, plus the generic immutable-load value-name loop) ran ONLY at *emission*
+time. But the AccessChain pre-scan and the arithmetic inline-expression pre-scan
+freeze operands BY NAME *before* emission. So a reloaded input/output value was
+captured in those frozen inline expressions under its default `vN`, while direct
+emission used the real name — the same value under two names, one undeclared.
+
+### Fix (`src/spirv_to_wgsl.zig`, `emitBody`)
+Add a pre-pass that propagates DIRECT-variable load names BEFORE both pre-scans:
+- Output / Input / texture loads propagate the variable name UNCONDITIONALLY
+  (mirroring the emission branches; WGSL reads these by name at the use site).
+- Other variables (Uniform/PushConstant/Private/Function) propagate only when the
+  pointer is not a Store target, so mutable values still capture per-load.
+- Loads of AccessChain results stay in the post-pre-scan value-name loop (their
+  names depend on the expressions that pre-scan builds); that loop now skips ids
+  already finalized by the pre-pass.
+
+Result: every emission path binds a reloaded value to one consistent name. No
+silent-wrong — `FragColor`/`index` are read by name at the same program point, so
+recomputed sub-expressions are value-equivalent.
+
+### Tests (`tests/wgsl_tests.zig`)
+- "a reloaded input index keeps one name across recomputed sub-expressions"
+  (constant-array.frag shape)
+- "a reloaded output accumulator keeps one name across recomputed sub-expressions"
+  (lut-promotion.frag shape)
+Both assert `assertNoUndeclaredVTemp` + `nagaValidateOrSkip`. Conformance stays at
+2076 PASS / 0 FAIL.
