@@ -1367,6 +1367,30 @@ test "wgsl: clip-distance is an honest error, not a naga-invalid @location array
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
 
+test "wgsl: stage output interface block is flattened into VertexOutput" {
+    // GLSL `out Block { vec4 color; vec3 normal; } vout;` -> a struct-typed
+    // Output. WGSL forbids a nested struct field in an I/O struct, so the block
+    // members are flattened into VertexOutput and `vout.color` becomes
+    // `vertex_out.color`. glslpp emitted `@location(0) vout: Block` (undeclared
+    // nested struct) → naga "no definition in scope".
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec4 Position;
+        \\out Block { vec4 color; vec3 normal; } vout;
+        \\void main(){ gl_Position = Position; vout.color = vec4(1.0); vout.normal = vec3(0.5); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(0) color: vec4f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(1) normal: vec3f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "vertex_out.color =") != null);
+    // No nested struct field.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, ": Block") == null);
+    try nagaValidateOrSkip(wgsl, "io-block-output");
+}
+
 test "wgsl: stage input interface block is declared as a struct with @location members" {
     // GLSL `in Block { flat float f; vec4 g; int h; } vin;` -> a struct-typed
     // Input variable. WGSL needs a struct with @location/@interpolate members

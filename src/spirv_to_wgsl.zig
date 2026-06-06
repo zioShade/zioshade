@@ -2173,6 +2173,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         try w.writeAll("}\n\n");
         use_frag_mrt_struct = true;
     }
+    // Output interface blocks (`out Block {…} vout;`): a struct-typed output
+    // var. WGSL forbids a nested struct field in an I/O struct, so flatten the
+    // block's members into VertexOutput directly and alias the block var to
+    // `vertex_out` (so the body's `vout.m` access becomes `vertex_out.m`).
+    var io_block_outputs = std.AutoHashMap(u32, void).init(arena);
     if (is_vertex and output_vars.items.len > 1) {
         for (output_vars.items) |ovid| {
             const builtin_val = getDecVal(&decorations, ovid, .built_in);
@@ -2183,6 +2188,20 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             var actual_type: u32 = var_def.words[1];
             if (ptr_def) |pi| {
                 if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3];
+            }
+            // A struct-typed (non-builtin) output is an interface block — flatten.
+            const adef = getDef(&module, actual_type);
+            if (builtin_val == null and adef != null and adef.?.op == .TypeStruct) {
+                try io_block_outputs.put(ovid, {});
+                const base: u32 = loc_val orelse 0;
+                for (adef.?.words[2..], 0..) |mt_id, mi| {
+                    var mb: [32]u8 = undefined;
+                    const mname = getMemberName(&module, actual_type, @intCast(mi), &mb);
+                    const mtype = try wgslType(&module, mt_id, &names, arena);
+                    const mflat = memberHasFlat(&module, actual_type, @intCast(mi)) or isIntegerWgslType(mtype);
+                    try vertex_output_fields.append(arena, .{ .name = try arena.dupe(u8, mname), .type_name = mtype, .builtin = null, .location = base + @as(u32, @intCast(mi)), .flat = mflat });
+                }
+                continue;
             }
             const type_name = try wgslType(&module, actual_type, &names, arena);
             var bi_name: ?[]const u8 = null;
@@ -2504,7 +2523,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             try w.writeAll("    var vertex_out: VertexOutput;\n");
             for (output_vars.items) |ovid| {
                 const var_name = names.get(ovid) orelse continue;
-                const alias = try std.fmt.allocPrint(alloc, "vertex_out.{s}", .{var_name});
+                // A flattened output block aliases to `vertex_out` itself, so the
+                // body's `vout.member` access chain resolves to `vertex_out.member`
+                // (the flattened field) rather than the (nonexistent) nested field.
+                const alias = if (io_block_outputs.contains(ovid))
+                    try std.fmt.allocPrint(alloc, "vertex_out", .{})
+                else
+                    try std.fmt.allocPrint(alloc, "vertex_out.{s}", .{var_name});
                 if (names.fetchPut(ovid, alias) catch null) |old| alloc.free(old.value);
             }
         } else if ((is_fragment or is_vertex) and output_var_id != null) {
