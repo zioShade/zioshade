@@ -1931,3 +1931,32 @@ test "GLSL: integer fragment input is qualified flat" {
     try assertContains(glsl, "flat in int idx;");
     try assertNotContains(glsl, ") in int idx;"); // not the unqualified form
 }
+
+test "GLSL: multidimensional array local declares all dimensions" {
+    // Regression: a 2D array local was declared with only ONE dimension
+    // (`vec4 v[2];`) then assigned a `vec4 v[2][2]` const — glslang rejected the
+    // type mismatch. The local-var array suffix must walk all nested TypeArray
+    // dimensions (GLSL 4.30+ arrays of arrays), matching spirv-cross.
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) flat in int index;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    const vec4 foobars[2][2] = vec4[][](vec4[](vec4(1.0), vec4(2.0)), vec4[](vec4(8.0), vec4(10.0)));
+        \\    FragColor = foobars[index][index + 1];
+        \\}
+    ;
+    const glsl = try compileToGlslStage(source, .fragment);
+    defer alloc.free(glsl);
+    // Both the const declaration AND the local copy must carry both dimensions
+    // (`[2][2]`). Before the fix, the local copy dropped a dimension, so the 2D
+    // const couldn't be assigned to it. Two occurrences = const + local var.
+    var count: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, glsl, i, "[2][2]")) |pos| : (i = pos + 1) count += 1;
+    if (count < 2) {
+        std.debug.print("Expected >=2 `[2][2]` (const + local), found {d}:\n{s}\n", .{ count, glsl });
+        return error.TestExpectedFind;
+    }
+}
