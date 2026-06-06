@@ -1,8 +1,42 @@
 # Spec: module-scope `const` global initializers are dropped (frontend silent-wrong)
 
-**Status:** proposed (2026-06-02)
+**Status:** frontend + GLSL/HLSL/WGSL done (2026-06-06); MSL follow-up
 **Severity:** silent-wrong, **all backends** (the SPIR-V itself is wrong)
 **Witnesses:** `tests/spirv-cross/lut-promotion.frag`, `tests/spirv-cross/constant-array.frag`
+
+## Progress
+
+- **Frontend (Design A) + GLSL + HLSL** — PR #158 (`6dfb1961`).
+- **WGSL** — done 2026-06-06. Two fixes shipped together (the has_load
+  widening alone would convert an honest naga-reject into a silent-wrong zero-init):
+  1. The Private-var "is used" check (`spirv_to_wgsl.zig`) now also counts an
+     `OpAccessChain` whose base (`words[3]`) is the variable, so an array global
+     reached only via `arr[i]` is declared (was skipped → dangling identifier).
+  2. `resolveConstantExpr` resolves an `OpConstantComposite` by reusing the WGSL
+     constructor literal `collectNames` already precomputes (`array<T,N>(...)`,
+     `vecN<..>(..)`, `StructName(..)`, `matCxR..(..)`) — single source of truth,
+     guarded by a `'('` check so a `vN`-placeholder (unspellable composite) returns
+     null. The const-emit path now FAILS LOUD (`error.UnsupportedOp`) when an
+     initializer cannot be lowered, never zero-initialises (silent-wrong).
+  Regression test: `tests/wgsl_tests.zig` "module-scope const array indexed at
+  runtime emits materialized array literal" (asserts the `const LUT: array<f32,4>
+  = array<f32,4>(...)` literal + naga-valid). Minimal witness used (not the two
+  spirv-cross fixtures) because those trip the orthogonal def-drop below.
+- **MSL** — still a follow-up.
+
+## ⚠ Orthogonal pre-existing bug — WGSL local-array index def-drop (NOT this fix)
+
+`tests/spirv-cross/{constant-array,lut-promotion}.frag` still fail to fully
+naga-validate after the const-global fix, for a **separate** reason. They use
+*function-local* `const` arrays (already declared as `var v = array<..>(..)`),
+and a single `%27 = OpLoad %int %index` is rendered **inconsistently**: as the
+input name `index` in the primary emission path but as its raw generated name
+`v20` inside a **recomputed** sub-expression (the running sum
+`foo[index] + foobars[index][index+1]` is redundantly recomputed for later `+`
+terms, triggered by the `resolve(...)` function-call argument re-evaluation), and
+`let v20` is never emitted → naga `no definition in scope for identifier: v20`.
+This is a WGSL expression-emission / CSE bug (load-of-input naming + sub-expr
+recompute), independent of the const-initializer path. Fix separately.
 
 ## Problem
 

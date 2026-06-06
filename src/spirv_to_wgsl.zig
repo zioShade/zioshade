@@ -978,9 +978,24 @@ fn buildAccessExprPlain(module: *const ParsedModule, names: *std.AutoHashMap(u32
 
 /// Try to resolve a constant expression to a WGSL literal string
 fn resolveConstantExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), id: u32, arena: std.mem.Allocator) ?[]const u8 {
-    _ = names;
     const inst = common.getDef(module, id) orelse return null;
     switch (inst.op) {
+        .ConstantTrue => return "true",
+        .ConstantFalse => return "false",
+        .ConstantComposite => {
+            // collectNames already precomputes the fully-qualified WGSL
+            // constructor literal for a composite constant — `array<T, N>(...)`,
+            // `vecN<scalar>(...)`, `matCxRf(...)`, or `StructName(...)` (resolving
+            // nested element types recursively) — and stores it in the names map.
+            // Reuse it as the single source of truth rather than re-deriving it.
+            // A real constructor literal contains '('; if the entry is instead a
+            // generated `vN` placeholder (a composite shape collectNames could not
+            // spell), return null so the caller fails loud rather than emit a
+            // dangling identifier or zero-init.
+            const lit = names.get(id) orelse return null;
+            if (std.mem.indexOfScalar(u8, lit, '(') != null) return lit;
+            return null;
+        },
         .Constant => {
             if (inst.words.len < 4) return null;
             const val = inst.words[3];
@@ -1571,22 +1586,57 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         const result_id = inst.words[2];
         const name = names.get(result_id) orelse continue;
         const rt = wgslType(&module, inst.words[1], &names, arena) catch continue;
-        // Check if this Private var is actually used (has loads from it)
+        // Check if this Private var is actually used. A scalar global is read by
+        // a direct OpLoad, but an ARRAY/STRUCT global is reached via an
+        // OpAccessChain rooted at the variable (then an OpLoad of the element) —
+        // so counting only direct OpLoad deems a const array unused and skips its
+        // declaration, leaving `arr[i]` referencing an undeclared name (naga
+        // reject). Count an OpAccessChain whose BASE (words[3]) is the variable.
         var has_load = false;
         for (module.instructions) |check| {
             if (check.op == .Load and check.words.len > 3 and check.words[3] == result_id) {
                 has_load = true;
                 break;
             }
+            if (check.op == .AccessChain and check.words.len > 3 and check.words[3] == result_id) {
+                has_load = true;
+                break;
+            }
         }
         if (!has_load) continue;
-        // Check for initializer (optional 5th word in OpVariable)
+        // Check for initializer (optional 5th word in OpVariable). A module-scope
+        // `const T arr[N]` lowers (Design A) to a Private OpVariable whose 5th word
+        // references an OpConstantComposite carrying the values.
         if (inst.words.len > 4) {
             const init_id = inst.words[4];
             const init_val = resolveConstantExpr(&module, &names, init_id, arena);
             if (init_val) |val| {
                 try w.print("const {s}: {s} = {s};\n", .{ name, rt, val });
                 continue;
+            }
+            // The initializer carries a real (possibly non-zero) value we could
+            // NOT lower to a WGSL literal. Falling through to a zero-initialised
+            // `var<private>` would emit the WRONG values (silent-wrong) — worse
+            // than an honest reject. Fail loud. (An OpUndef / OpConstantNull
+            // initializer IS zero, so a zero-init var<private> is correct there —
+            // those fall through below, not here.)
+            const carries_value = blk: {
+                const di = getDef(&module, init_id) orelse break :blk false;
+                break :blk switch (di.op) {
+                    .Constant, .ConstantTrue, .ConstantFalse, .ConstantComposite,
+                    .SpecConstant, .SpecConstantTrue, .SpecConstantFalse,
+                    .SpecConstantComposite, .SpecConstantOp,
+                    => true,
+                    else => false,
+                };
+            };
+            if (carries_value) {
+                last_error_detail = std.fmt.bufPrint(
+                    &last_error_detail_buf,
+                    "cannot materialize module-scope const initializer for '{s}' (unsupported constant shape)",
+                    .{name},
+                ) catch null;
+                return error.UnsupportedOp;
             }
         }
         try w.print("var<private> {s}: {s};\n", .{ name, rt });

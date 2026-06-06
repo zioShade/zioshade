@@ -1604,3 +1604,33 @@ test "wgsl: array element extract uses [i] indexing, not a .x swizzle" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "array-extract-index");
 }
+
+test "wgsl: module-scope const array indexed at runtime emits materialized array literal" {
+    // Design A (PR #158) makes the frontend emit a Private OpVariable with a
+    // word-count-5 initializer referencing an OpConstantComposite that carries
+    // the values. The WGSL backend must (1) recognise the array global is USED
+    // via its OpAccessChain (not just a direct OpLoad) so it declares it, and
+    // (2) materialise the initializer as a WGSL array literal — NOT a
+    // zero-initialised var<private>, which would be the wrong values
+    // (silent-wrong, worse than the naga-reject). Index by gl_FragCoord (a
+    // runtime value) so the LUT cannot be constant-folded away, and avoid
+    // integer `flat in` inputs (an orthogonal GLSL/WGSL issue).
+    const source: [:0]const u8 =
+        \\#version 450
+        \\const float LUT[4] = float[](1.0, 2.0, 3.0, 4.0);
+        \\layout(location=0) out vec4 fragColor;
+        \\void main() {
+        \\    int idx = int(gl_FragCoord.x) & 3;
+        \\    fragColor = vec4(LUT[idx]);
+        \\}
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    // The LUT must be declared as a module-scope const carrying the real values,
+    // not a zero-initialised var<private> (silent-wrong) and not absent (the
+    // dangling-identifier naga reject).
+    try assertContains(wgsl, "const LUT: array<f32, 4> = array<f32, 4>(1.0, 2.0, 3.0, 4.0);");
+    try assertNotContains(wgsl, "var<private> LUT");
+    // Ground truth: naga must accept the materialized output.
+    try nagaValidateOrSkip(wgsl, "module-scope const array runtime index");
+}
