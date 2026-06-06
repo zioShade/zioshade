@@ -2034,6 +2034,50 @@ fn emitFunction(
         }
     }
 
+    // A per-vertex (barycentric) ARRAY input `nointerpolation T v[N] : TEXCOORDk`
+    // consumes N consecutive HLSL semantic slots (k..k+N-1), but glslpp keys the
+    // TEXCOORD index off the SPIR-V Location (1 slot per per-vertex var). If two
+    // varyings' slot ranges actually OVERLAP, dxc rejects ("Semantic 'TEXCOORD'
+    // overlap"). The correct lowering is GetAttributeAtVertex (not an array) — a
+    // real feature glslpp does not yet emit — so fail loud on a genuine overlap
+    // rather than emit dxc-invalid HLSL. (Detection is exact: a single per-vertex
+    // array, or well-spaced ones, do NOT overlap and stay supported.)
+    if (is_fragment) {
+        // A per-vertex ARRAY's HLSL slot span (loc..loc+N-1) collides with a
+        // following varying only when N>1 — detect EXACTLY that, by checking each
+        // per-vertex array's EXTENDED slots (loc+1..loc+N-1) against every other
+        // (non-builtin) varying's base Location. This is barycentric-specific:
+        // normal varyings that merely share a Location (e.g. invalid duplicate
+        // locations in a test fixture) are NOT flagged here.
+        var overlap = false;
+        outer: for (input_var_ids.items) |a| {
+            if (getDecorationValue(decorations, a, .built_in) != null) continue;
+            if (!(hasDecoration(decorations, a, .per_vertex_khr) or hasDecoration(decorations, a, .per_vertex_nv))) continue;
+            const a_loc = getDecorationValue(decorations, a, .location) orelse continue;
+            var span: u32 = 1;
+            if (resolvePointeeType(module, a)) |pt| {
+                if (getDef(module, pt)) |pti| {
+                    if (pti.op == .TypeArray and pti.words.len > 3) {
+                        if (getDef(module, pti.words[3])) |li| {
+                            if (li.op == .Constant and li.words.len > 3) span = li.words[3];
+                        }
+                    }
+                }
+            }
+            if (span <= 1) continue;
+            for (input_var_ids.items) |b| {
+                if (b == a) continue;
+                if (getDecorationValue(decorations, b, .built_in) != null) continue;
+                const b_loc = getDecorationValue(decorations, b, .location) orelse continue;
+                if (b_loc > a_loc and b_loc <= a_loc + span - 1) {
+                    overlap = true;
+                    break :outer;
+                }
+            }
+        }
+        if (overlap) return error.UnsupportedBarycentricArrayOverlap;
+    }
+
     // Add input variables and builtin outputs as parameters for fragment entry function
     var first_input = if (is_fragment) param_ids.items.len == 0 else true;
     if (is_fragment) {
