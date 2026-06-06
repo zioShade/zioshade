@@ -1367,6 +1367,22 @@ test "wgsl: clip-distance is an honest error, not a naga-invalid @location array
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
 
+test "wgsl: gl_PointSize is an honest error, not @builtin(__point_size)" {
+    // WGSL points always render at 1px — there is no point-size output. glslpp
+    // previously emitted `@builtin(__point_size)` (an invented builtin) which
+    // naga rejects ("Identifier starts with a reserved prefix: `__point_size`").
+    // The PointSize decoration only appears when the shader actually writes
+    // gl_PointSize, so failing loud is correct: WGSL cannot honor the size.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec4 p;
+        \\void main(){ gl_Position = p; gl_PointSize = 4.0; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
 test "wgsl: constant array of vectors uses array<vecN<T>,M>, not the scalar elem type" {
     // A `const vec3 pal[3]` lowered to an OpConstantComposite array previously
     // emitted `array<f32, 3>(vec3<f32>(...), ...)` — the element type was the

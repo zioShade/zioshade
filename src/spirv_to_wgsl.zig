@@ -1164,7 +1164,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             dinst.words[2] == @intFromEnum(spirv.Decoration.built_in))
         {
             const bi = dinst.words[3];
-            if (bi == 9 or bi == 10 or bi == 3 or bi == 4) {
+            //   PointSize=1 — WGSL points always render at 1px; there is no
+            //     point-size output. We previously emitted `@builtin(__point_size)`
+            //     (an invented builtin), which naga rejects ("Identifier starts
+            //     with a reserved prefix: `__point_size`"). The decoration only
+            //     appears when the shader actually writes gl_PointSize, so this
+            //     fails loud exactly for shaders that depend on a size WGSL cannot
+            //     honor — rather than silently dropping it and rendering wrong.
+            if (bi == 9 or bi == 10 or bi == 3 or bi == 4 or bi == 1) {
                 last_error_detail = std.fmt.bufPrint(
                     &last_error_detail_buf,
                     "WGSL has no {s} built-in",
@@ -1172,7 +1179,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                         9 => "layer (gl_Layer)",
                         10 => "viewport-index (gl_ViewportIndex)",
                         3 => "clip-distance (gl_ClipDistance) array",
-                        else => "cull-distance (gl_CullDistance) array",
+                        4 => "cull-distance (gl_CullDistance) array",
+                        else => "point-size (gl_PointSize)",
                     }},
                 ) catch null;
                 return error.UnsupportedOp;
