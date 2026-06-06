@@ -2333,3 +2333,269 @@ test "msl: local array partially written via an unmerged nested chain is NOT pro
     // … and `foo` is NOT promoted to a module-scope read-only constant.
     try assertNotContains(msl, "constant float4");
 }
+
+/// Assert the MSL emits the `spvUnsafeArray<T, Num>` template helper EXACTLY
+/// once (a duplicate definition would not compile in Metal).
+fn assertSpvUnsafeArrayTemplateOnce(msl: []const u8) !void {
+    const pat = "struct spvUnsafeArray";
+    const first = std.mem.indexOf(u8, msl, pat) orelse {
+        std.debug.print("No `struct spvUnsafeArray` template in output:\n{s}\n", .{msl});
+        return error.NoSpvUnsafeArrayTemplate;
+    };
+    if (std.mem.indexOfPos(u8, msl, first + pat.len, pat) != null) {
+        std.debug.print("`struct spvUnsafeArray` emitted more than once in:\n{s}\n", .{msl});
+        return error.SpvUnsafeArrayTemplateDuplicated;
+    }
+}
+
+test "msl: whole-array value copy from a const global uses spvUnsafeArray (no illegal C-array copy)" {
+    // `float local[4] = LUT;` is a whole-array VALUE copy. Metal C-arrays are not
+    // assignable, so the array VALUE type must be `spvUnsafeArray<float, 4>` (the
+    // spirv-cross idiom). The pre-fix silent-wrong was:
+    //   float v14 = v3;   // INVALID scalar-from-array load
+    //   v13 = v14;        // INVALID C-array whole-copy
+    const source =
+        \\#version 450
+        \\layout(location=0) out float FragColor;
+        \\const float LUT[4] = float[](1.0,2.0,3.0,4.0);
+        \\void main(){ float local[4] = LUT; int i = int(gl_FragCoord.x) & 3; FragColor = local[i]; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The array value type is spvUnsafeArray<float, 4>, used for the local copy.
+    try assertContains(msl, "spvUnsafeArray<float, 4>");
+    // The template helper is emitted exactly once.
+    try assertSpvUnsafeArrayTemplateOnce(msl);
+    // No illegal scalar-from-array load (`float vN = vM;` where vM is the array)
+    // and no bare `float vN[4];` decl followed by a whole-array copy assignment.
+    try assertNotContains(msl, "float v14 = v");
+}
+
+test "msl: value-copied const global is materialized as a spvUnsafeArray (matching the copy types)" {
+    // The SOURCE of a whole-array copy — the read-only const global — must also be
+    // spelled `constant spvUnsafeArray<…>` (not the plain `constant T[N]` C-array),
+    // otherwise the copy `local = global;` is a type mismatch / illegal C-array
+    // copy. This mirrors `spirv-cross --msl`'s materialization of the global.
+    const source =
+        \\#version 450
+        \\layout(location=0) out float FragColor;
+        \\const float LUT[4] = float[](1.0,2.0,3.0,4.0);
+        \\void main(){ float local[4] = LUT; int i = int(gl_FragCoord.x) & 3; FragColor = local[i]; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The const global itself is a `constant spvUnsafeArray<float, 4>`, built via
+    // the template's brace-init constructor (legal copy source).
+    try assertContains(msl, "constant spvUnsafeArray<float, 4>");
+    try assertContains(msl, "spvUnsafeArray<float, 4>({ 1.0, 2.0, 3.0, 4.0 })");
+    // The whole-array C-array decl `float vN[4];` must be gone (replaced by the
+    // template-typed local), so no illegal C-array copy can occur.
+    try assertNotContains(msl, "[4];");
+}
+
+test "msl: read-only const array (no value copy) still uses the plain `constant T[N]` path" {
+    // Regression guard: when a const array is ONLY indexed (never whole-copied),
+    // keep the simpler valid-Metal `constant T name[N] = {…};` path and do NOT
+    // pull in the spvUnsafeArray template (intentional divergence from spirv-cross).
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out float FragColor;
+        \\const float LUT[4] = float[](10.0, 20.0, 30.0, 40.0);
+        \\void main()
+        \\{
+        \\    int i = int(gl_FragCoord.x) & 3;
+        \\    FragColor = LUT[i];
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "10.0, 20.0, 30.0, 40.0");
+    try assertConstArrayDeclaredAndIndexed(msl);
+    try assertNotContains(msl, "spvUnsafeArray");
+}
+
+test "msl: local-to-local whole-array copy spells BOTH source and dest as spvUnsafeArray" {
+    // A1: `float a[3]=…; a[0]=seed; float b[3]=a;` is a whole-array VALUE copy
+    // between two Function-storage locals. The pre-fix silent-wrong left the
+    // SOURCE local as a C-array:
+    //   float v13[3] = {…};                 // C-array source
+    //   spvUnsafeArray<float,3> v17 = v13;  // INVALID: no ctor from float[3]
+    // spirv-cross declares BOTH ends spvUnsafeArray, so the copy is a legal
+    // struct assignment. The source local must be spvUnsafeArray too.
+    const source =
+        \\#version 450
+        \\layout(location=0) out float FragColor;
+        \\layout(location=1) in float seed;
+        \\void main(){
+        \\  float a[3] = float[](1.0, 2.0, 3.0);
+        \\  a[0] = seed;
+        \\  float b[3] = a;
+        \\  int i = int(gl_FragCoord.x) % 3;
+        \\  FragColor = b[i];
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertSpvUnsafeArrayTemplateOnce(msl);
+    // The mutable source local must be spvUnsafeArray (not a C-array). No
+    // `float vN[3]` C-array declaration may survive for a value-copy source.
+    try assertContains(msl, "spvUnsafeArray<float, 3>");
+    try assertNotContains(msl, "float v13[3]");
+    // Generalize: no `[3]` C-array suffix anywhere (both ends are template-typed).
+    try assertNotContains(msl, "[3] = ");
+    try assertNotContains(msl, "[3];");
+}
+
+test "msl: whole-array ternary/OpSelect result is spvUnsafeArray (no scalar-from-array select)" {
+    // A2: `float la[4] = (t>0.5) ? A : B;` lowers to an OpSelect whose result
+    // type is an ARRAY. The pre-fix silent-wrong typed it with mslType (drops
+    // `[N]`) → an illegal scalar Select, and stored it into a C-array dest:
+    //   float v16[4];                         // C-array dest
+    //   float v21 = (v18) ? v19 : v20;        // INVALID scalar from float[4]
+    //   v16 = v21;                            // INVALID C-array copy
+    // spirv-cross spells the Select result `spvUnsafeArray<float, 4>`.
+    const source =
+        \\#version 450
+        \\layout(location=0) out float FragColor;
+        \\layout(location=1) in float t;
+        \\const float A[4] = float[](1.0,2.0,3.0,4.0);
+        \\const float B[4] = float[](5.0,6.0,7.0,8.0);
+        \\void main(){
+        \\  float la[4] = (t > 0.5) ? A : B;
+        \\  int i = int(gl_FragCoord.x) & 3;
+        \\  FragColor = la[i];
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertSpvUnsafeArrayTemplateOnce(msl);
+    // The Select result and its dest must both be spvUnsafeArray, never a C-array.
+    try assertContains(msl, "spvUnsafeArray<float, 4>");
+    // No illegal scalar Select from array operands and no `[4]` C-array decls.
+    try assertNotContains(msl, "float v16[4]");
+    try assertNotContains(msl, "[4];");
+    try assertNotContains(msl, "[4] = ");
+    // The ternary still appears (lowering preserved), now array-typed.
+    try assertContains(msl, " ? ");
+}
+
+test "msl: whole-array value copy of a SPEC-CONSTANT-sized array is an honest error (no silent [1] sizing)" {
+    // B5: `mslValueType` needs a concrete compile-time `Num` for
+    // `spvUnsafeArray<T, Num>`. A spec-constant array length (`OpSpecConstant`)
+    // has no literal it can read; the pre-fix blindly used `words[3]` with an
+    // `else 1` fallback, which would silently size the copy as `<float, 1>`
+    // (dropping elements — silent-wrong). It must fail loud instead.
+    const source =
+        \\#version 450
+        \\layout(constant_id=0) const int N = 4;
+        \\layout(location=0) out float FragColor;
+        \\layout(location=1) in float seed;
+        \\void main(){
+        \\  float a[N];
+        \\  for (int k=0;k<N;k++) a[k]=seed+float(k);
+        \\  float b[N] = a;
+        \\  int i = int(gl_FragCoord.x) % N;
+        \\  FragColor = b[i];
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(
+        error.UnresolvableArrayLength,
+        glslpp.spirvToMSL(alloc, spirv, .{}),
+    );
+}
+
+test "msl: array OpCompositeConstruct emits a spvUnsafeArray brace-init (no bogus scalar ctor)" {
+    // C6: `float arr[3] = float[](a, b, c);` lowers to an OpCompositeConstruct
+    // of array type. The pre-fix silent-wrong was a bogus scalar ctor + C-array
+    // copy:
+    //   float v12[3];
+    //   float v16 = float(in.a, in.b, in.c);  // INVALID: scalar from 3 args
+    //   v12 = v16;                            // INVALID C-array copy
+    // spirv-cross spells it `spvUnsafeArray<float, 3>({ a, b, c })`.
+    const source =
+        \\#version 450
+        \\layout(location=0) out float FragColor;
+        \\layout(location=1) in float a;
+        \\layout(location=2) in float b;
+        \\layout(location=3) in float c;
+        \\void main(){
+        \\  float arr[3] = float[](a, b, c);
+        \\  int i = int(gl_FragCoord.x) % 3;
+        \\  FragColor = arr[i];
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertSpvUnsafeArrayTemplateOnce(msl);
+    // The construct is a spvUnsafeArray brace-init over the three element values.
+    try assertContains(msl, "spvUnsafeArray<float, 3>({ in.a, in.b, in.c })");
+    // No bogus scalar ctor and no C-array decl/copy.
+    try assertNotContains(msl, "float v16 = float(in.a");
+    try assertNotContains(msl, "[3];");
+}
+
+test "msl: struct-element const-array value copy declares `struct S` before it is referenced" {
+    // C7: `const S LUT[2]; S local[2] = LUT;` materializes the const global as
+    // `constant spvUnsafeArray<S, 2> = …`. The pre-fix silent-wrong emitted that
+    // const BEFORE `struct S` was declared (use-before-definition → uncompilable
+    // Metal). The struct declaration must precede every reference to it.
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 FragColor;
+        \\layout(location=1) in float seed;
+        \\struct S { float a; float b; };
+        \\const S LUT[2] = S[](S(1.0,2.0), S(3.0,4.0));
+        \\void main(){
+        \\  S local[2] = LUT;
+        \\  local[0].a = seed;
+        \\  int i = int(gl_FragCoord.x) & 1;
+        \\  FragColor = vec4(local[i].a, local[i].b, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertSpvUnsafeArrayTemplateOnce(msl);
+    // Both the struct decl and the const global appear.
+    const struct_decl = "struct S\n";
+    const const_use = "constant spvUnsafeArray<S, 2>";
+    const sd = std.mem.indexOf(u8, msl, struct_decl) orelse {
+        std.debug.print("No `struct S` declaration in output:\n{s}\n", .{msl});
+        return error.NoStructDecl;
+    };
+    const cu = std.mem.indexOf(u8, msl, const_use) orelse {
+        std.debug.print("No `constant spvUnsafeArray<S, 2>` in output:\n{s}\n", .{msl});
+        return error.NoConstUse;
+    };
+    // The struct must be declared BEFORE it is referenced (no use-before-def).
+    if (sd >= cu) {
+        std.debug.print("`struct S` (at {d}) declared AFTER its use (at {d}):\n{s}\n", .{ sd, cu, msl });
+        return error.StructUsedBeforeDeclared;
+    }
+}
+
+test "msl: matrix-element const-array global is an honest error (frontend leaves it undeclared)" {
+    // C8: `const mat4 M[2] = …;` indexed at runtime. The FRONTEND does not fold
+    // a matrix-element array to an OpConstantComposite (float/vec ARE folded), so
+    // the Private `M` has NO initializer and is never declared. The pre-fix
+    // silent-wrong emitted `float4x4 vN = M[idx];` — a reference to an undefined
+    // identifier. The backend must NOT emit that silently; it fails loud until
+    // the frontend folds matrix-element arrays (tracked as a separate gap).
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 FragColor;
+        \\const mat4 M[2] = mat4[](mat4(1.0), mat4(2.0));
+        \\void main(){
+        \\  int i = int(gl_FragCoord.x) & 1;
+        \\  FragColor = M[i] * vec4(1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(
+        error.UndeclaredPrivateArrayGlobal,
+        glslpp.spirvToMSL(alloc, spirv, .{}),
+    );
+}
