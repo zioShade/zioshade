@@ -13926,15 +13926,17 @@ test "HLSL: barycentric-khr from SPIR-V binary" {
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "SV_Barycentrics") != null);
 }
 
-test "HLSL: barycentric-nv from SPIR-V binary" {
+test "HLSL: barycentric-nv with overlapping per-vertex arrays is an honest error" {
+    // This shader has multiple per-vertex (barycentric) ARRAY varyings whose HLSL
+    // TEXCOORD slot spans overlap (`v[3] : TEXCOORDk` consumes k..k+2). The old
+    // output asserted here (nointerpolation + SV_Barycentrics) is dxc-INVALID
+    // ("Semantic 'TEXCOORD' overlap") — the correct lowering needs
+    // GetAttributeAtVertex, not arrays. Until that's implemented, fail loud.
     const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/barycentric-nv.spv", 1024 * 1024);
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
-    defer alloc.free(hlsl);
-    try std.testing.expect(std.mem.indexOf(u8, hlsl, "nointerpolation") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hlsl, "SV_Barycentrics") != null);
+    try std.testing.expectError(error.UnsupportedBarycentricArrayOverlap, glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 }));
 }
 
 test "HLSL: single-array-member SSBO unwraps to RWStructuredBuffer<elem> (dxc 2048-byte limit)" {
