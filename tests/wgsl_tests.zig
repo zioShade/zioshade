@@ -1390,3 +1390,25 @@ test "wgsl: constant array of vectors uses array<vecN<T>,M>, not the scalar elem
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "array<f32, 4>(") == null);
     try nagaValidateOrSkip(wgsl, "const-array-of-vec");
 }
+
+test "wgsl: array element extract uses [i] indexing, not a .x swizzle" {
+    // OpCompositeExtract of an array element (`arr[0]`) was inlined as `arr.x`
+    // — a vector swizzle on an array — which naga rejects ("invalid field
+    // accessor `x`"). Covers both a named local array and an inline constant
+    // array literal (`array<vec4<f32>,2>(...)[0]`).
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\layout(location=0) in vec4 a;
+        \\void main(){
+        \\    vec4 vals[2] = vec4[2](a, a + vec4(1.0));
+        \\    vec4 consts[2] = vec4[2](vec4(10.0), vec4(30.0));
+        \\    o = vals[0] + vals[1] + consts[0];
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "array-extract-index");
+}
