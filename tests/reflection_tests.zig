@@ -314,3 +314,238 @@ test "reflectSPIRV reports descriptor array_size (sampler2D tex[4])" {
     try std.testing.expect(res.outputs.len >= 1);
     try std.testing.expectEqual(@as(u32, 0), res.outputs[0].array_size);
 }
+
+// ── G1 Batch A: array/matrix strides, block_size, runtime arrays, readonly/writeonly ──
+// Expected literals derived from `spirv-cross <fixture>.spv --reflect` (the oracle).
+
+test "reflection G1: UBO matrix + array member strides and block_size" {
+    // Oracle (spirv-cross --reflect):
+    //   Xforms.mvp:       offset 0,   matrix_stride 16
+    //   Xforms.normalMat: offset 64,  matrix_stride 16
+    //   Xforms.colors:    offset 112, array_stride 16, array[4]
+    //   Xforms.exposure:  offset 176
+    //   block_size 180
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(std140, binding = 0) uniform Xforms {
+        \\    mat4 mvp;
+        \\    mat3 normalMat;
+        \\    vec4 colors[4];
+        \\    float exposure;
+        \\};
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = mvp * colors[0] * normalMat[0].xyzz * exposure; }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
+    const ubo = res.uniform_buffers[0];
+    try std.testing.expectEqual(@as(u32, 180), ubo.block_size);
+    try std.testing.expectEqual(@as(usize, 4), ubo.members.len);
+
+    // mvp (mat4)
+    const mvp = ubo.members[0];
+    try std.testing.expectEqualStrings("mvp", mvp.name);
+    try std.testing.expectEqual(@as(u32, 0), mvp.offset);
+    try std.testing.expectEqual(@as(u32, 16), mvp.matrix_stride);
+    try std.testing.expectEqual(false, mvp.is_row_major);
+
+    // normalMat (mat3)
+    const nm = ubo.members[1];
+    try std.testing.expectEqualStrings("normalMat", nm.name);
+    try std.testing.expectEqual(@as(u32, 64), nm.offset);
+    try std.testing.expectEqual(@as(u32, 16), nm.matrix_stride);
+    try std.testing.expectEqual(false, nm.is_row_major);
+
+    // colors (vec4[4])
+    const colors = ubo.members[2];
+    try std.testing.expectEqualStrings("colors", colors.name);
+    try std.testing.expectEqual(@as(u32, 112), colors.offset);
+    try std.testing.expectEqual(@as(u32, 16), colors.array_stride);
+    try std.testing.expectEqual(@as(u32, 4), colors.array_dim);
+    try std.testing.expectEqual(false, colors.is_runtime_array);
+
+    // exposure (float)
+    const exp = ubo.members[3];
+    try std.testing.expectEqualStrings("exposure", exp.name);
+    try std.testing.expectEqual(@as(u32, 176), exp.offset);
+}
+
+test "reflection G1: SSBO runtime tail array + readonly/writeonly + block_size" {
+    // Oracle (spirv-cross --reflect):
+    //   InBuf  readonly,  block_size 16
+    //     count:     offset 0
+    //     particles: offset 16, runtime array (array[0]), array_stride 0 (struct elem)
+    //   OutBuf writeonly, block_size 0
+    //     results:   offset 0, runtime array (array[0]), array_stride 16
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\struct Particle { vec4 pos; vec4 vel; };
+        \\layout(std430, binding = 0) readonly buffer InBuf {
+        \\    uint count;
+        \\    Particle particles[];
+        \\};
+        \\layout(std430, binding = 1) writeonly buffer OutBuf {
+        \\    vec4 results[];
+        \\};
+        \\void main() {
+        \\    results[0] = particles[0].pos + vec4(float(count));
+        \\}
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 2), res.storage_buffers.len);
+
+    // Find by name (declaration order in SPIR-V is not guaranteed).
+    var in_buf: ?glslpp.reflection.Resource = null;
+    var out_buf: ?glslpp.reflection.Resource = null;
+    for (res.storage_buffers) |sb| {
+        if (std.mem.eql(u8, sb.name, "InBuf")) in_buf = sb;
+        if (std.mem.eql(u8, sb.name, "OutBuf")) out_buf = sb;
+    }
+    const ib = in_buf orelse return error.MissingInBuf;
+    const ob = out_buf orelse return error.MissingOutBuf;
+
+    // InBuf
+    try std.testing.expectEqual(true, ib.readonly);
+    try std.testing.expectEqual(false, ib.writeonly);
+    try std.testing.expectEqual(@as(u32, 16), ib.block_size);
+    try std.testing.expectEqual(@as(usize, 2), ib.members.len);
+    const particles = ib.members[1];
+    try std.testing.expectEqualStrings("particles", particles.name);
+    try std.testing.expectEqual(@as(u32, 16), particles.offset);
+    try std.testing.expectEqual(true, particles.is_runtime_array);
+    try std.testing.expectEqual(@as(u32, 0), particles.array_dim);
+    try std.testing.expectEqual(@as(u32, 0), particles.array_stride);
+
+    // OutBuf
+    try std.testing.expectEqual(true, ob.writeonly);
+    try std.testing.expectEqual(false, ob.readonly);
+    try std.testing.expectEqual(@as(u32, 0), ob.block_size);
+    try std.testing.expectEqual(@as(usize, 1), ob.members.len);
+    const results = ob.members[0];
+    try std.testing.expectEqualStrings("results", results.name);
+    try std.testing.expectEqual(@as(u32, 0), results.offset);
+    try std.testing.expectEqual(true, results.is_runtime_array);
+    try std.testing.expectEqual(@as(u32, 0), results.array_dim);
+    try std.testing.expectEqual(@as(u32, 16), results.array_stride);
+}
+
+// ── #171 review: block_size must account for array length/stride and matrix
+// column padding for a trailing array/matrix member. Expected literals from
+// `spirv-cross <fixture>.spv --reflect` (the oracle). ──
+
+test "reflection #171: UBO block_size with trailing sized array (float tail[4])" {
+    // Oracle (spirv-cross --reflect): std140
+    //   head: offset 0
+    //   tail: offset 16, array[4], array_stride 16
+    //   block_size 80  (16 + 16*4)
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(std140, binding = 0) uniform A { vec4 head; float tail[4]; };
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = head + vec4(tail[0]); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
+    try std.testing.expectEqual(@as(u32, 80), res.uniform_buffers[0].block_size);
+}
+
+test "reflection #171: SSBO block_size with trailing sized array (float tail[5])" {
+    // Oracle (spirv-cross --reflect): std430
+    //   head: offset 0
+    //   tail: offset 16, array[5], array_stride 4
+    //   block_size 36  (16 + 4*5)
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { vec4 head; float tail[5]; };
+        \\void main() { tail[0] = head.x; }
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.storage_buffers.len);
+    try std.testing.expectEqual(@as(u32, 36), res.storage_buffers[0].block_size);
+}
+
+test "reflection #171: UBO block_size with trailing mat3" {
+    // Oracle (spirv-cross --reflect): std140
+    //   head: offset 0
+    //   m:    offset 16, matrix_stride 16  (mat3 occupies 3 cols * 16-byte stride)
+    //   block_size 64  (16 + 16*3)
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(std140, binding = 0) uniform D { vec4 head; mat3 m; };
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = head + vec4(m[0], 1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
+    try std.testing.expectEqual(@as(u32, 64), res.uniform_buffers[0].block_size);
+}
+
+test "reflection #171: UBO block_size with trailing multidim array (float md[2][3])" {
+    // Oracle (spirv-cross --reflect): std140
+    //   head: offset 0
+    //   md:   offset 16, array[3,2] (inner-first), array_stride 48 (OUTER stride)
+    //   block_size 112  (16 + 48*2)
+    // The member's SPIR-V type is the OUTER OpTypeArray: array_dim = 2 (outer
+    // count), array_stride = 48 (outer stride). extent = stride * outer_count.
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(std140, binding = 0) uniform C { vec4 head; float md[2][3]; };
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = head + vec4(md[0][0]); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
+    try std.testing.expectEqual(@as(u32, 112), res.uniform_buffers[0].block_size);
+}
+
+test "reflection #171: per-member row_major / column_major flags" {
+    // Adversarial review confirmed the path works; this locks it in.
+    // Oracle (spirv-cross --reflect): rm member is row-major, cm is column-major.
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(std140, binding = 0) uniform M {
+        \\    layout(row_major) mat4 rm;
+        \\    layout(column_major) mat4 cm;
+        \\};
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = rm[0] + cm[0]; }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
+    const ubo = res.uniform_buffers[0];
+    try std.testing.expectEqual(@as(usize, 2), ubo.members.len);
+
+    var rm: ?glslpp.reflection.Member = null;
+    var cm: ?glslpp.reflection.Member = null;
+    for (ubo.members) |m| {
+        if (std.mem.eql(u8, m.name, "rm")) rm = m;
+        if (std.mem.eql(u8, m.name, "cm")) cm = m;
+    }
+    try std.testing.expectEqual(true, (rm orelse return error.MissingRm).is_row_major);
+    try std.testing.expectEqual(false, (cm orelse return error.MissingCm).is_row_major);
+}
