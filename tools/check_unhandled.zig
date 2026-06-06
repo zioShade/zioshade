@@ -1,8 +1,16 @@
 const std = @import("std");
 const glslpp = @import("glslpp");
-const hlsl = @import("glslpp").spirv_to_hlsl;
-const glsl_backend = @import("glslpp").spirv_to_glsl;
-const msl = @import("glslpp").spirv_to_msl;
+// Use the public cross-compile API — the internal spirv_to_* modules are not
+// exported from src/root.zig, so referencing them broke the 0.15.2 build.
+const hlsl = struct {
+    const spirvToHLSL = glslpp.spirvToHLSL;
+};
+const glsl_backend = struct {
+    const spirvToGLSL = glslpp.spirvToGLSL;
+};
+const msl = struct {
+    const spirvToMSL = glslpp.spirvToMSL;
+};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{ .never_unmap = true, .retain_metadata = false }){};

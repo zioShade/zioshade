@@ -1,19 +1,15 @@
 const std = @import("std");
 pub const glslpp = @import("glslpp");
-const compat = glslpp.compat;
 
-pub fn main(maybe_init: compat.MainInit) !void {
-    compat.setMainInit(maybe_init);
-    var gpa_impl = compat.Gpa(.{}){};
-    defer _ = gpa_impl.deinit();
-    const alloc = gpa_impl.allocator();
+// Migrated to plain Zig 0.15.2 (was using the 0.16 `compat` main-init shim,
+// which broke the build: 0.15.2 `main` takes no arguments). Mirrors the other
+// dev tools (dump_crt_hlsl / dump_shader): page allocator, std.process.argsAlloc,
+// std.fs.cwd().readFileAlloc / writeFile.
+pub fn main() !void {
+    const alloc = std.heap.page_allocator;
 
-    var main_io = compat.MainIo().init(alloc);
-    defer main_io.deinit();
-    const io = main_io.io();
-
-    const args = try compat.argsAlloc(alloc);
-    defer compat.argsFree(alloc, args);
+    const args = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, args);
 
     if (args.len < 4) {
         std.debug.print("Usage: glsl_cross <input.glsl> <output_prefix> <target:hlsl|glsl|msl>\n", .{});
@@ -24,21 +20,18 @@ pub fn main(maybe_init: compat.MainInit) !void {
     const output_prefix = args[2];
     const target = args[3];
 
-    // Read input GLSL
-    const dir = compat.cwd();
-    const glsl_src = try compat.dirReadFileAlloc(io, dir, alloc, input_path, 1024 * 1024);
+    const dir = std.fs.cwd();
+    const glsl_src = try dir.readFileAlloc(alloc, input_path, 1024 * 1024);
     defer alloc.free(glsl_src);
 
-    // Add null terminator
-    var src_buf = try alloc.allocSentinel(u8, glsl_src.len, 0);
+    // Null-terminate for compileToSPIRV's [:0]const u8 source.
+    const src_buf = try alloc.allocSentinel(u8, glsl_src.len, 0);
     defer alloc.free(src_buf);
     @memcpy(src_buf[0..glsl_src.len], glsl_src);
 
-    // Compile to SPIR-V
     const spv = try glslpp.compileToSPIRV(alloc, src_buf, .{ .stage = .fragment });
     defer alloc.free(spv);
 
-    // Cross-compile to target
     var output: []const u8 = undefined;
     if (std.mem.eql(u8, target, "hlsl")) {
         output = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
@@ -52,9 +45,8 @@ pub fn main(maybe_init: compat.MainInit) !void {
     }
     defer alloc.free(output);
 
-    // Write output
     var out_path: [512]u8 = undefined;
     const out_name = try std.fmt.bufPrint(&out_path, "{s}_glslpp.{s}", .{ output_prefix, target });
-    try compat.dirWriteFile(io, dir, out_name, output);
+    try dir.writeFile(.{ .sub_path = out_name, .data = output });
     std.debug.print("Wrote {s}\n", .{out_name});
 }
