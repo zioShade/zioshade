@@ -237,6 +237,66 @@ pub fn hasOpaqueArrayResource(module: *const ParsedModule) bool {
     return false;
 }
 
+/// True if `var_id` is ever written — directly (`OpStore %var ...`) or through
+/// an access chain rooted at it (`%c = OpAccessChain %p %var ...; OpStore %c`).
+/// Used to keep the const-initializer aliasing below from touching a mutable
+/// global.
+fn privateVarMutated(module: *const ParsedModule, var_id: u32) bool {
+    for (module.instructions) |inst| {
+        if (inst.op == .Store and inst.words.len >= 2 and inst.words[1] == var_id) return true;
+        if (inst.op == .AccessChain and inst.words.len >= 4 and inst.words[3] == var_id) {
+            const chain_id = inst.words[2];
+            for (module.instructions) |s| {
+                if (s.op == .Store and s.words.len >= 2 and s.words[1] == chain_id) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Design A backend support — a module-scope `const T arr[N] = …` global lowers
+/// to a Private `OpVariable` carrying a constant initializer
+/// (`%var = OpVariable %ptr Private %init`); the variable is never stored to.
+/// Backends emit the initializer constant as a promoted global const (e.g.
+/// `const float v4[16] = {…}`) but don't initialise the Private variable, so an
+/// access `arr[i]` reads uninitialised memory (silent-wrong). Alias the
+/// variable's name to its initializer constant's name so every access resolves
+/// to the constant; the (now-redundant) variable declaration is skipped by each
+/// backend's "is this id a const-initialised private var?" check
+/// (`constInitializedPrivateVar`). Only fires for a constant initializer on a
+/// never-written Private variable, so ingested mutable globals are untouched.
+pub fn aliasConstInitializedPrivateVars(
+    alloc: std.mem.Allocator,
+    module: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+) void {
+    for (module.instructions) |inst| {
+        const init_id = constInitializedPrivateVar(module, inst) orelse continue;
+        const var_id = inst.words[2];
+        const init_name = names.get(init_id) orelse continue;
+        const dup = alloc.dupe(u8, init_name) catch continue;
+        if (names.fetchPut(var_id, dup) catch null) |old| alloc.free(old.value);
+    }
+}
+
+/// If `inst` is a Private `OpVariable` with a *constant* initializer operand and
+/// is never written, return the initializer constant's id; else null. Backends
+/// use this to (a) skip declaring the variable and (b) confirm an access base is
+/// a promoted const. Returns null for anything else.
+pub fn constInitializedPrivateVar(module: *const ParsedModule, inst: Instruction) ?u32 {
+    if (inst.op != .Variable or inst.words.len < 5) return null; // needs initializer operand
+    const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+    if (sc != .Private) return null;
+    const init_id = inst.words[4];
+    const init_def = getDef(module, init_id) orelse return null;
+    switch (init_def.op) {
+        .Constant, .ConstantComposite, .ConstantTrue, .ConstantFalse => {},
+        else => return null,
+    }
+    if (privateVarMutated(module, inst.words[2])) return null;
+    return init_id;
+}
+
 pub fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(module, id) orelse return null;
     return switch (inst.op) {

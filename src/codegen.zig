@@ -3932,6 +3932,17 @@ const Codegen = struct {
                 }
             }
         }
+        // Design A — module-scope const-array global initializers. Replay the
+        // self-contained constant instructions (scalar OpConstants then the
+        // OpConstantComposite, in dependency order) into the constants section,
+        // BEFORE emitGlobals runs, so each Private OpVariable can reference its
+        // composite as a word-count-5 initializer without a forward reference.
+        // emitInstruction here (in_functions == false) routes to the main
+        // stream and dedups scalars via emitted_constants/constant_alias, so a
+        // value shared with a function body is emitted once.
+        for (self.module.global_init_constants) |inst| {
+            try self.emitInstruction(inst);
+        }
         // Emit named struct types and global types/pointer types.
         // All other types and constants are emitted on-demand via the two-buffer system.
         // Collect referenced type names first
@@ -4046,6 +4057,21 @@ const Codegen = struct {
             }
 
             const ptr_type_id = try self.ensurePointerType(effective_ty, global.storage_class);
+            // Design A — a module-scope `const` global lowered to a Private
+            // OpVariable carries its folded constant-composite as an initializer
+            // (word-count 5). The composite was emitted in emitTypesAndConstants
+            // (before this point) so the reference is backward, not forward.
+            // Guard on Private storage: only Private/Function/Output may take an
+            // initializer, and only Private globals are produced this way.
+            if (global.initializer_id != null and global.storage_class == .private) {
+                const init_id = self.constant_alias.get(global.initializer_id.?) orelse global.initializer_id.?;
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.Variable)));
+                try self.emitWord(ptr_type_id);
+                try self.emitWord(global.result_id);
+                try self.emitWord(@intFromEnum(global.storage_class));
+                try self.emitWord(init_id);
+                continue;
+            }
             try self.emitWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.Variable)));
             try self.emitWord(ptr_type_id);
             try self.emitWord(global.result_id);
