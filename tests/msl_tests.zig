@@ -2333,3 +2333,84 @@ test "msl: local array partially written via an unmerged nested chain is NOT pro
     // … and `foo` is NOT promoted to a module-scope read-only constant.
     try assertNotContains(msl, "constant float4");
 }
+
+/// Assert the MSL emits the `spvUnsafeArray<T, Num>` template helper EXACTLY
+/// once (a duplicate definition would not compile in Metal).
+fn assertSpvUnsafeArrayTemplateOnce(msl: []const u8) !void {
+    const pat = "struct spvUnsafeArray";
+    const first = std.mem.indexOf(u8, msl, pat) orelse {
+        std.debug.print("No `struct spvUnsafeArray` template in output:\n{s}\n", .{msl});
+        return error.NoSpvUnsafeArrayTemplate;
+    };
+    if (std.mem.indexOfPos(u8, msl, first + pat.len, pat) != null) {
+        std.debug.print("`struct spvUnsafeArray` emitted more than once in:\n{s}\n", .{msl});
+        return error.SpvUnsafeArrayTemplateDuplicated;
+    }
+}
+
+test "msl: whole-array value copy from a const global uses spvUnsafeArray (no illegal C-array copy)" {
+    // `float local[4] = LUT;` is a whole-array VALUE copy. Metal C-arrays are not
+    // assignable, so the array VALUE type must be `spvUnsafeArray<float, 4>` (the
+    // spirv-cross idiom). The pre-fix silent-wrong was:
+    //   float v14 = v3;   // INVALID scalar-from-array load
+    //   v13 = v14;        // INVALID C-array whole-copy
+    const source =
+        \\#version 450
+        \\layout(location=0) out float FragColor;
+        \\const float LUT[4] = float[](1.0,2.0,3.0,4.0);
+        \\void main(){ float local[4] = LUT; int i = int(gl_FragCoord.x) & 3; FragColor = local[i]; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The array value type is spvUnsafeArray<float, 4>, used for the local copy.
+    try assertContains(msl, "spvUnsafeArray<float, 4>");
+    // The template helper is emitted exactly once.
+    try assertSpvUnsafeArrayTemplateOnce(msl);
+    // No illegal scalar-from-array load (`float vN = vM;` where vM is the array)
+    // and no bare `float vN[4];` decl followed by a whole-array copy assignment.
+    try assertNotContains(msl, "float v14 = v");
+}
+
+test "msl: value-copied const global is materialized as a spvUnsafeArray (matching the copy types)" {
+    // The SOURCE of a whole-array copy — the read-only const global — must also be
+    // spelled `constant spvUnsafeArray<…>` (not the plain `constant T[N]` C-array),
+    // otherwise the copy `local = global;` is a type mismatch / illegal C-array
+    // copy. This mirrors `spirv-cross --msl`'s materialization of the global.
+    const source =
+        \\#version 450
+        \\layout(location=0) out float FragColor;
+        \\const float LUT[4] = float[](1.0,2.0,3.0,4.0);
+        \\void main(){ float local[4] = LUT; int i = int(gl_FragCoord.x) & 3; FragColor = local[i]; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The const global itself is a `constant spvUnsafeArray<float, 4>`, built via
+    // the template's brace-init constructor (legal copy source).
+    try assertContains(msl, "constant spvUnsafeArray<float, 4>");
+    try assertContains(msl, "spvUnsafeArray<float, 4>({ 1.0, 2.0, 3.0, 4.0 })");
+    // The whole-array C-array decl `float vN[4];` must be gone (replaced by the
+    // template-typed local), so no illegal C-array copy can occur.
+    try assertNotContains(msl, "[4];");
+}
+
+test "msl: read-only const array (no value copy) still uses the plain `constant T[N]` path" {
+    // Regression guard: when a const array is ONLY indexed (never whole-copied),
+    // keep the simpler valid-Metal `constant T name[N] = {…};` path and do NOT
+    // pull in the spvUnsafeArray template (intentional divergence from spirv-cross).
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out float FragColor;
+        \\const float LUT[4] = float[](10.0, 20.0, 30.0, 40.0);
+        \\void main()
+        \\{
+        \\    int i = int(gl_FragCoord.x) & 3;
+        \\    FragColor = LUT[i];
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "10.0, 20.0, 30.0, 40.0");
+    try assertConstArrayDeclaredAndIndexed(msl);
+    try assertNotContains(msl, "spvUnsafeArray");
+}

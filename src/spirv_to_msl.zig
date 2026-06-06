@@ -714,6 +714,120 @@ fn mslType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []
     };
 }
 
+/// MSL **value** type for `type_id`. Identical to `mslType` except that arrays
+/// are spelled as `spvUnsafeArray<elem, N>` (recursing for nested arrays →
+/// `spvUnsafeArray<spvUnsafeArray<T, N2>, N1>`). Metal C-arrays are not
+/// assignable, so any array used as a VALUE (whole `OpLoad`/`OpStore`,
+/// `OpCopyObject`, array-typed function param/return) must use this template
+/// spelling — mirroring `spirv-cross --msl`. Non-array types fall through to
+/// `mslType`, so existing scalar/vector/matrix/struct spellings are unchanged.
+fn mslValueType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
+    const inst = getDef(m, type_id) orelse return mslType(m, type_id, names, alloc);
+    if (inst.op == .TypeArray and inst.words.len > 3) {
+        const elem = try mslValueType(m, inst.words[2], names, alloc);
+        const len_def = getDef(m, inst.words[3]);
+        const n: u32 = if (len_def) |ld| (if (ld.words.len > 3) ld.words[3] else 1) else 1;
+        return std.fmt.allocPrint(alloc, "spvUnsafeArray<{s}, {d}>", .{ elem, n });
+    }
+    return mslType(m, type_id, names, alloc);
+}
+
+/// True if the array variable / constant `id` is used as a whole-array VALUE
+/// anywhere in the module — i.e. there is an `OpLoad` of a pointer that roots at
+/// `id` whose result type is a `TypeArray`. Such a whole-array load (and the
+/// copy/store that consumes it) is illegal on a Metal C-array, so both the
+/// source and destination must be spelled with `spvUnsafeArray<…>` instead.
+/// Recomputed on demand (no shared mutable state) so each emit site can decide
+/// independently and consistently.
+fn arrayLoadedAsValue(m: *const ParsedModule, id: u32) bool {
+    for (m.instructions) |inst| {
+        if (inst.op != .Load or inst.words.len < 4) continue;
+        const rt = getDef(m, inst.words[1]) orelse continue;
+        if (rt.op != .TypeArray) continue;
+        if (pointerRootsAt(m, inst.words[3], id)) return true;
+    }
+    return false;
+}
+
+/// True if `var_inst` is a Function-storage array `OpVariable` that is the
+/// destination of a whole-array `OpStore` whose value is an `OpLoad` of another
+/// array (a whole-array value copy, e.g. `float local[N] = LUT;`). These locals
+/// must be declared as `spvUnsafeArray<…>` so the copy is a legal struct
+/// assignment rather than an illegal C-array copy.
+fn localArrayValueCopyDest(m: *const ParsedModule, var_inst: Instruction) bool {
+    if (var_inst.op != .Variable or var_inst.words.len < 4) return false;
+    const sc: spirv.StorageClass = @enumFromInt(var_inst.words[3]);
+    if (sc != .Function) return false;
+    const ptr = getDef(m, var_inst.words[1]) orelse return false;
+    if (ptr.op != .TypePointer or ptr.words.len < 4) return false;
+    const pointee = getDef(m, ptr.words[3]) orelse return false;
+    if (pointee.op != .TypeArray) return false;
+    const var_id = var_inst.words[2];
+    for (m.instructions) |inst| {
+        if (inst.op != .Store or inst.words.len < 3) continue;
+        if (inst.words[1] != var_id) continue;
+        const val = getDef(m, inst.words[2]) orelse continue;
+        if (val.op == .Load) return true;
+    }
+    return false;
+}
+
+/// Whether the module needs the `spvUnsafeArray<T,Num>` template preamble: true
+/// when any whole-array value load occurs (which forces both ends of the copy to
+/// the template spelling).
+fn moduleNeedsUnsafeArray(m: *const ParsedModule) bool {
+    for (m.instructions) |inst| {
+        if (inst.op != .Load or inst.words.len < 4) continue;
+        const rt = getDef(m, inst.words[1]) orelse continue;
+        if (rt.op == .TypeArray) return true;
+    }
+    return false;
+}
+
+/// The exact `spvUnsafeArray<T, Num>` template emitted by `spirv-cross --msl`
+/// (reproduced verbatim so glslpp output is structurally equivalent).
+const spv_unsafe_array_template =
+    \\template<typename T, size_t Num>
+    \\struct spvUnsafeArray
+    \\{
+    \\    T elements[Num ? Num : 1];
+    \\
+    \\    thread T& operator [] (size_t pos) thread
+    \\    {
+    \\        return elements[pos];
+    \\    }
+    \\    constexpr const thread T& operator [] (size_t pos) const thread
+    \\    {
+    \\        return elements[pos];
+    \\    }
+    \\
+    \\    device T& operator [] (size_t pos) device
+    \\    {
+    \\        return elements[pos];
+    \\    }
+    \\    constexpr const device T& operator [] (size_t pos) const device
+    \\    {
+    \\        return elements[pos];
+    \\    }
+    \\
+    \\    constexpr const constant T& operator [] (size_t pos) const constant
+    \\    {
+    \\        return elements[pos];
+    \\    }
+    \\
+    \\    threadgroup T& operator [] (size_t pos) threadgroup
+    \\    {
+    \\        return elements[pos];
+    \\    }
+    \\    constexpr const threadgroup T& operator [] (size_t pos) const threadgroup
+    \\    {
+    \\        return elements[pos];
+    \\    }
+    \\};
+    \\
+    \\
+;
+
 fn constantLiteral(alloc: std.mem.Allocator, type_inst: Instruction, literal_words: []const u32) ![]const u8 {
     if (type_inst.op == .TypeFloat and literal_words.len > 0) {
         const val: f32 = @bitCast(literal_words[0]);
@@ -1018,6 +1132,15 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // MSL header
     try w.writeAll("#include <metal_stdlib>\n#include <simd/simd.h>\n\nusing namespace metal;\n\n");
 
+    // Whole-array value semantics: Metal C-arrays are not assignable, so any
+    // array used as a VALUE (whole OpLoad/OpStore/OpCopyObject, array-typed
+    // param/return) must use the `spvUnsafeArray<T,N>` template (the spirv-cross
+    // idiom). Emit the template once, gated on actual need. Read-only const
+    // arrays that are only INDEXED keep the simpler valid `constant T[N]` path
+    // (intentional divergence from spirv-cross — see the module-array block).
+    const need_unsafe_array = moduleNeedsUnsafeArray(&module);
+    if (need_unsafe_array) try w.writeAll(spv_unsafe_array_template);
+
     // Emit struct forward declarations for types used in uniform/storage blocks
     // These must come before the block declarations
     var emitted_structs = std.AutoHashMap(u32, void).init(aa);
@@ -1248,12 +1371,25 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     {
         var named_consts = std.AutoHashMap(u32, void).init(aa);
         defer named_consts.deinit();
+        // Consts that are whole-array value-copied somewhere (the source of a
+        // `float local[N] = LUT;`): these must be spelled `spvUnsafeArray<…>`
+        // (template assignment), not the plain `constant T[N]` C-array, so the
+        // copy is legal Metal. A const that is ONLY indexed stays a plain
+        // `constant T[N]` (simpler, valid; intentional spirv-cross divergence).
+        var value_copied_consts = std.AutoHashMap(u32, void).init(aa);
+        defer value_copied_consts.deinit();
         for (module.instructions) |inst| {
             if (inst.op != .Variable) continue;
             if (analyzeLocalConstArray(&module, inst)) |info| {
-                if (!info.mutated) named_consts.put(info.init_id, {}) catch {};
+                if (!info.mutated) {
+                    named_consts.put(info.init_id, {}) catch {};
+                    if (arrayLoadedAsValue(&module, inst.words[2])) value_copied_consts.put(info.init_id, {}) catch {};
+                }
             }
-            if (common.constInitializedPrivateVar(&module, inst)) |init_id| named_consts.put(init_id, {}) catch {};
+            if (common.constInitializedPrivateVar(&module, inst)) |init_id| {
+                named_consts.put(init_id, {}) catch {};
+                if (arrayLoadedAsValue(&module, inst.words[2])) value_copied_consts.put(init_id, {}) catch {};
+            }
         }
         var emitted_const_array = false;
         for (module.instructions) |inst| {
@@ -1262,6 +1398,17 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             if (!named_consts.contains(rid)) continue;
             const type_inst = getDef(&module, inst.words[1]) orelse continue;
             if (type_inst.op != .TypeArray) continue;
+            const name = names.get(rid) orelse continue;
+            // Value-copied → emit as `constant spvUnsafeArray<…> name =
+            // spvUnsafeArray<…>({…});` (matches spirv-cross; legal copy source).
+            if (value_copied_consts.contains(rid)) {
+                const vt = mslValueType(&module, inst.words[1], &names, aa) catch continue;
+                try w.print("constant {s} {s} = {s}(", .{ vt, name, vt });
+                try writeMslConstInit(&module, &names, w, rid);
+                try w.writeAll(");\n");
+                emitted_const_array = true;
+                continue;
+            }
             // Walk nested TypeArray dimensions, collecting the base element type.
             var dims = std.ArrayList(u32).initCapacity(aa, 2) catch continue;
             defer dims.deinit(aa);
@@ -1278,7 +1425,6 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
                 } else break;
             }
             const base_type = mslType(&module, elem_id, &names, aa) catch "float";
-            const name = names.get(rid) orelse continue;
             try w.print("constant {s} {s}", .{ base_type, name });
             for (dims.items) |d| try w.print("[{d}]", .{d});
             try w.writeAll(" = ");
@@ -2896,6 +3042,18 @@ fn emitInstruction(
                 try w.writeAll(";\n");
                 return;
             }
+            // Whole-array value-copy destination (`float local[N] = LUT;`):
+            // declare as `spvUnsafeArray<…>` (no C-array suffix) so the
+            // following whole-array store is a legal struct assignment.
+            if (localArrayValueCopyDest(m, inst)) {
+                const pointee = blk: {
+                    const ptr = getDef(m, inst.words[1]) orelse break :blk inst.words[1];
+                    break :blk if (ptr.op == .TypePointer and ptr.words.len >= 4) ptr.words[3] else inst.words[1];
+                };
+                const vt = try mslValueType(m, pointee, names, alloc);
+                try w.print("    {s} {s};\n", .{ vt, names.get(ri) orelse "var" });
+                return;
+            }
             const tn = try mslType(m, inst.words[1], names, alloc);
             const arr = try mslGetArraySuffix(m, inst.words[1]);
             try w.print("    {s} {s}{s};\n", .{tn, names.get(ri) orelse "var", arr});
@@ -2916,7 +3074,12 @@ fn emitInstruction(
                 const a = try alloc.dupe(u8, pn);
                 if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
             } else {
-                const rtt = try mslType(m, inst.words[1], names, alloc);
+                // A whole-array load is a VALUE copy: use the spvUnsafeArray
+                // spelling (mslType would drop `[N]` → an illegal scalar-from-
+                // array load). The pointer source (a value-copied const global
+                // or another spvUnsafeArray local) is itself spvUnsafeArray, so
+                // the assignment is a legal struct copy.
+                const rtt = try mslValueType(m, inst.words[1], names, alloc);
                 try w.print("    {s} {s} = ", .{rtt, rn});
                 try writeResolvePointer(m, names, pid, true, w);
                 try w.writeAll(";\n");
