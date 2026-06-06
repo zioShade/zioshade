@@ -133,6 +133,53 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     return module;
 }
 
+/// True if `var_id` is ever written — directly or through a single-level access
+/// chain. Detects only direct + one-level-chain stores; sufficient because a
+/// `const` global (the only thing carrying a const initializer here) is never
+/// written. Deeper-chain / pass-by-pointer mutation in ingested SPIR-V is the
+/// only blind spot.
+fn hlslPrivateVarMutated(module: *const ParsedModule, var_id: u32) bool {
+    for (module.instructions) |inst| {
+        if (inst.op == .Store and inst.words.len >= 2 and inst.words[1] == var_id) return true;
+        if (inst.op == .AccessChain and inst.words.len >= 4 and inst.words[3] == var_id) {
+            const chain_id = inst.words[2];
+            for (module.instructions) |s| {
+                if (s.op == .Store and s.words.len >= 2 and s.words[1] == chain_id) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Design A — if `inst` is a never-written Private OpVariable with a constant
+/// initializer operand, return the initializer constant id; else null. The
+/// variable is aliased to its promoted const literal (HLSL emits the array
+/// ConstantComposite as `static const T v[N] = {…}`), so `v[i]` resolves to the
+/// const and the uninitialised `static T v[N];` declaration is skipped.
+fn hlslConstInitializedPrivateVar(module: *const ParsedModule, inst: Instruction) ?u32 {
+    if (inst.op != .Variable or inst.words.len < 5) return null;
+    const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+    if (sc != .Private) return null;
+    const init_id = inst.words[4];
+    const init_def = getDef(module, init_id) orelse return null;
+    switch (init_def.op) {
+        .Constant, .ConstantComposite, .ConstantTrue, .ConstantFalse => {},
+        else => return null,
+    }
+    if (hlslPrivateVarMutated(module, inst.words[2])) return null;
+    return init_id;
+}
+
+fn hlslAliasConstInitializedPrivateVars(alloc: std.mem.Allocator, module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8)) void {
+    for (module.instructions) |inst| {
+        const init_id = hlslConstInitializedPrivateVar(module, inst) orelse continue;
+        const var_id = inst.words[2];
+        const init_name = names.get(init_id) orelse continue;
+        const dup = alloc.dupe(u8, init_name) catch continue;
+        if (names.fetchPut(var_id, dup) catch null) |old| alloc.free(old.value);
+    }
+}
+
 fn findEntryPoint(module: *const ParsedModule, name: []const u8) ?u32 {
     for (module.instructions) |inst| {
         if (inst.op == .EntryPoint and inst.words.len > 3) {
@@ -331,6 +378,8 @@ pub fn spirvToHLSL(
 
     // Phase 1: collect names, decorations
     collectNames(aa, &module, &names);
+    // Alias const-initialised Private globals to their promoted const (Design A).
+    hlslAliasConstInitializedPrivateVars(aa, &module, &names);
 
     // Rename HLSL-reserved keyword names (line, register, etc.)
     {
@@ -1955,6 +2004,10 @@ fn emitFunction(
         if (inst.op == .Variable and inst.words.len >= 4) {
             const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
             if (sc == .Private) {
+                // A const-initialised Private var was aliased to its promoted
+                // const initializer (which is already declared) — skip the
+                // redundant, uninitialised `static` declaration.
+                if (hlslConstInitializedPrivateVar(module, inst) != null) continue;
                 const type_name = try hlslType(module, inst.words[1], names, alloc);
                 const arr_suffix = try hlslGetArraySuffix(module, inst.words[1]);
                 const vname = names.get(inst.words[2]) orelse "_private";
