@@ -1604,3 +1604,27 @@ test "wgsl: array element extract uses [i] indexing, not a .x swizzle" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "array-extract-index");
 }
+
+test "wgsl: module-scope const array indexed at runtime emits its values" {
+    // Regression: a `const T arr[N]` global indexed by a runtime value lowers to
+    // a Private OpVariable carrying a constant-composite initializer. The "used"
+    // check ignored OpAccessChain, so the declaration was skipped (`arr[i]`
+    // referenced an undeclared name); and resolveConstantExpr didn't build array
+    // literals, so even when declared it fell back to a zero-init var<private>
+    // (wrong values = silent-wrong). Now: `const LUT: array<f32,4> =
+    // array<f32,4>(1.0, 2.0, 3.0, 4.0);` and the access resolves to it. Index by
+    // int(gl_FragCoord.x) to avoid the orthogonal integer-`flat`-input concern.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out float o;
+        \\const float LUT[4] = float[](1.0, 2.0, 3.0, 4.0);
+        \\void main(){ int i = int(gl_FragCoord.x) & 3; o = LUT[i]; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "array<f32, 4>(1.0, 2.0, 3.0, 4.0)");
+    try assertNotContains(wgsl, "var<private> LUT"); // not a zero-init fallback
+    try nagaValidateOrSkip(wgsl, "const-array-global");
+}
