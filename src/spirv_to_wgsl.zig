@@ -138,8 +138,23 @@ fn glslStd450WgslName(instruction: u32) error{UnsupportedExtInst}![]const u8 {
         70 => "faceForward",
         71 => "reflect",
         72 => "refract",
-        73 => "findILsb",
-        74 => "findSMsb",
+        // Bit-scan ops. WGSL spells these firstTrailingBit/firstLeadingBit. They
+        // are emitted here under their final WGSL names directly so BOTH ExtInst
+        // paths (main + replay) get the right builtin — the old main-path-only
+        // special-case remap from "findILsb"/"findSMsb"/"findUMsb" is retired.
+        //   FindILsb  (73) → firstTrailingBit
+        //   FindSMsb  (74) → firstLeadingBit (signed MSB)
+        //   FindUMsb  (75) → firstLeadingBit (unsigned MSB)
+        73 => "firstTrailingBit",
+        74 => "firstLeadingBit",
+        75 => "firstLeadingBit",
+        // NMin/NMax/NClamp (79/80/81) are the NaN-min/max/clamp variants. WGSL's
+        // min/max/clamp already propagate the non-NaN operand (matching the N*
+        // semantics), so map them to the plain builtins (spirv-cross does the
+        // same). naga-validated.
+        79 => "min",
+        80 => "max",
+        81 => "clamp",
         else => return recordUnsupportedExtInst(instruction),
     };
 }
@@ -271,6 +286,50 @@ fn depthCompareShape(module: *const ParsedModule, sampled_image_value_id: u32) D
     };
     const arrayed = inst.words.len > 5 and inst.words[5] == 1;
     return .{ .comps = comps, .arrayed = arrayed };
+}
+
+/// Spatial dimensionality (1/2/3) of the sampler behind a sampled-image value,
+/// for lowering GLSL projective sampling (textureProj*). WGSL has no projective
+/// builtin, so textureProj is lowered to a manual perspective divide: the
+/// coordinate is divided by its LAST component, then the leading `dim`
+/// components are sampled with a plain textureSample/textureSampleLevel. The
+/// number of leading components must match the texture dimension exactly (.x for
+/// 1D, .xy for 2D, .xyz for 3D) or naga rejects ("coordinate type does not match
+/// dimension"). Returns null for dims with no clean projective mapping (cube /
+/// arrayed), which the caller honest-errors. SPIR-V Dim: 0=1D, 1=2D, 2=3D,
+/// 3=Cube.
+fn projectiveCoordDim(module: *const ParsedModule, sampled_image_value_id: u32) ?u32 {
+    const type_id = getTypeOf(module, sampled_image_value_id) orelse return null;
+    var inst = getDef(module, type_id) orelse return null;
+    if (inst.op == .TypePointer and inst.words.len > 3) {
+        inst = getDef(module, inst.words[3]) orelse return null;
+    }
+    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
+        inst = getDef(module, inst.words[2]) orelse return null;
+    }
+    if (inst.op != .TypeImage or inst.words.len <= 3) return null;
+    // Arrayed projective forms have no clean WGSL mapping (the array layer is a
+    // separate non-projective argument) — defer to the honest-error path.
+    const arrayed = inst.words.len > 5 and inst.words[5] == 1;
+    if (arrayed) return null;
+    return switch (inst.words[3]) {
+        0 => 1, // 1D
+        1 => 2, // 2D
+        2 => 3, // 3D
+        else => null, // Cube (3) / SubpassData / Buffer: no clean projective map
+    };
+}
+
+/// Component count of the vector type behind `value_id` (e.g. 4 for a vec4
+/// coordinate), or null if it is not a vector. Used by projective sampling to
+/// pick the divisor = the value's LAST component, which GLSL's textureProj
+/// divides by regardless of the sampler dimension. TypeVector layout:
+/// [op, result_id, component_type, count].
+fn vectorComponentCount(module: *const ParsedModule, value_id: u32) ?u32 {
+    const type_id = getTypeOf(module, value_id) orelse return null;
+    const inst = getDef(module, type_id) orelse return null;
+    if (inst.op != .TypeVector or inst.words.len <= 3) return null;
+    return inst.words[3];
 }
 
 /// Emit a WGSL depth-compare sample for OpImageSampleDref{Implicit,Explicit}Lod.
@@ -4484,16 +4543,24 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                 if (ai > 0) try args.appendSlice(arena, ", ");
                                 try args.appendSlice(arena, names.get(arg_id) orelse "0");
                             }
-                            // Map GLSL.std.450 names to WGSL equivalents
-                            const wgsl_name = if (std.mem.eql(u8, func_name, "faceForward"))
-                                "faceForward"
-                            else if (std.mem.eql(u8, func_name, "findILsb"))
-                                "firstTrailingBit"
-                            else if (std.mem.eql(u8, func_name, "findSMsb") or std.mem.eql(u8, func_name, "findUMsb"))
-                                "firstLeadingBit"
-                            else
-                                func_name;
-                            try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, wgsl_name, args.items });
+                            // glslStd450WgslName already returns the final WGSL
+                            // builtin name (incl. firstTrailingBit/firstLeadingBit
+                            // for the bit-scan ops), so no further remap is needed.
+                            //
+                            // GLSL findMSB/findLSB always return SIGNED int (the
+                            // result type is `int`/`ivec`) even for an unsigned
+                            // operand (FindUMsb), but WGSL firstLeadingBit/
+                            // firstTrailingBit return the ARGUMENT's type. So a
+                            // `u32` arg yields a `u32` result while `rt` is `i32`
+                            // (naga: "expected i32, got u32"). Wrap the bit-scan
+                            // result in an explicit `rt(...)` conversion; the cast
+                            // is an identity when the types already match (valid WGSL).
+                            const is_bitscan = instruction == 73 or instruction == 74 or instruction == 75;
+                            if (is_bitscan) {
+                                try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s}({s}));\n", .{ result_name, rt, rt, func_name, args.items });
+                            } else {
+                                try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                            }
                         }
                     }
                 }
@@ -4940,14 +5007,59 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try writeInd(w, indent); try w.print("let {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
             },
 
-            // ImageSampleProjImplicitLod — projective texture sampling
-            .ImageSampleProjImplicitLod => {
+            // Projective texture sampling (GLSL textureProj*). WGSL has no
+            // projective sampling builtin, but textureProj has a CORRECT manual
+            // lowering for the non-Dref forms: divide the coordinate by its LAST
+            // component, then sample with the leading components matching the
+            // sampler dimensionality (.x for 1D, .xy for 2D, .xyz for 3D). This
+            // is naga-validated and matches GLSL semantics. (The previous handler
+            // hard-coded `.xy / coord.w` — wrong for vec3 coords, where the
+            // divisor is .z — and a later over-correction blanket honest-errored
+            // it, regressing the working 2D case. This is dimension-aware.)
+            .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod => {
+                const dim = projectiveCoordDim(module, inst.words[3]) orelse {
+                    // Cube / arrayed projective: no clean WGSL map — fail loud.
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no projective texture sampling for this sampler kind ({s})", .{@tagName(inst.op)}) catch null;
+                    return error.UnsupportedOp;
+                };
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
-                const coord = names.get(inst.words[4]) orelse "uv";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
-                // Projective: divide xy by w (component 3)
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}.xy / {s}.w);\n", .{ result_name, rt, tex_name, tex_name, coord, coord });
+                const coord = names.get(inst.words[4]) orelse "uv";
+                // Leading components = the sampler dim (.x for 1D, .xy for 2D,
+                // .xyz for 3D). The divisor = the coordinate's LAST component —
+                // which depends on the coordinate VECTOR width, not the sampler
+                // dim: textureProj(sampler2D, vec4) divides by .w, but
+                // textureProj(sampler2D, vec3) divides by .z. Read the actual
+                // operand width; fall back to dim+1 if it's not a vector type.
+                const lead: []const u8 = switch (dim) {
+                    1 => ".x",
+                    2 => ".xy",
+                    else => ".xyz",
+                };
+                const coord_comps = vectorComponentCount(module, inst.words[4]) orelse (dim + 1);
+                const last_comp: []const u8 = switch (coord_comps) {
+                    2 => ".y",
+                    3 => ".z",
+                    else => ".w",
+                };
+                try writeInd(w, indent);
+                if (inst.op == .ImageSampleProjExplicitLod) {
+                    const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+                    try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}{s} / {s}{s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, lod });
+                } else {
+                    try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s} / {s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp });
+                }
+            },
+
+            // Projective DEPTH-COMPARE sampling (textureProj on a shadow sampler).
+            // WGSL's textureSampleCompare takes a NON-projective coordinate and a
+            // depth reference; the projective divide of BOTH coord and ref is
+            // value-sensitive with no faithful builtin mapping. Fail loud rather
+            // than silently dropping the perspective divide on the compare.
+            .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod => {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no projective depth-compare sampling ({s})", .{@tagName(inst.op)}) catch null;
+                return error.UnsupportedOp;
             },
 
             // ReadClockKHR — shader clock
@@ -5045,14 +5157,28 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 return error.UnsupportedOp;
             },
 
+            // Fragment-shader interlock barriers (GL_ARB/EXT_fragment_shader_interlock).
+            // WGSL has no fragment-shader interlock. The interlock execution mode is
+            // already caught earlier, but the barrier opcodes themselves were being
+            // silently dropped; honest-error them as defense-in-depth so an interlock
+            // shader can never produce silently-unsynchronised WGSL.
+            .BeginInvocationInterlockEXT, .EndInvocationInterlockEXT => {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no fragment-shader interlock ({s})", .{@tagName(inst.op)}) catch null;
+                return error.UnsupportedOp;
+            },
+
             else => {
-                // Try to handle as a simple assignment
-                if (inst.words.len > 2) {
-                    const rt = try wgslType(module, inst.words[1], names, arena);
-                    const rn = names.get(inst.words[2]) orelse "v";
-                    try writeInd(w, indent); try w.print("// unhandled op {d}\n", .{@intFromEnum(inst.op)});
-                    try writeInd(w, indent); try w.print("var {s}: {s};\n", .{ rn, rt });
-                }
+                // No mapping for this op in the main emit path. The old fallback
+                // emitted `// unhandled op N` + `var <name>: T;` — an UNINITIALIZED
+                // var (garbage value) that is nonetheless syntactically valid WGSL,
+                // so naga accepts it: a textbook silent-wrong. Fail loud instead.
+                // (Verified: no shader in the conformance corpus reaches here — a
+                // grep for "unhandled op" over the full corpus output is empty — so
+                // flipping this to an honest error regresses nothing. If a future
+                // REPRESENTABLE op surfaces here, give it a real naga-validated arm
+                // rather than re-introducing the placeholder.)
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unsupported op '{s}' in main emit path", .{@tagName(inst.op)}) catch null;
+                return error.UnsupportedOp;
             },
         }
     }
@@ -5360,7 +5486,16 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                     if (ai > 0) try args.appendSlice(arena, ", ");
                     try args.appendSlice(arena, names.get(arg_id) orelse "0");
                 }
-                try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                // Bit-scan ops (FindILsb 73 / FindSMsb 74 / FindUMsb 75): GLSL
+                // returns signed int, WGSL firstTrailingBit/firstLeadingBit return
+                // the arg type — wrap in an explicit `rt(...)` conversion (mirrors
+                // the main emit path; identity cast when types already match).
+                const is_bitscan = instruction == 73 or instruction == 74 or instruction == 75;
+                if (is_bitscan) {
+                    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s}({s}));\n", .{ result_name, rt, rt, func_name, args.items });
+                } else {
+                    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                }
             }
         },
         .CompositeConstruct => {
