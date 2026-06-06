@@ -45,16 +45,43 @@ and **materialises a Function-local `indexable` copy per dynamic access**:
    `encodeInstructionHeader(4, .Variable)` — never the optional 5th initializer
    operand.
 
+## ⚠ Architectural finding (2026-06-02 — a first Design-A attempt, reverted)
+
+A naive Design A **fails** and must NOT be shipped (it emits `spirv-val`-invalid
+SPIR-V — forward reference `%LUT = OpVariable … Private %5` where `%5 has not
+been defined`). Two facts make it fail:
+
+1. **`Analyzer.instructions` is per-function scratch** (`semantic.zig` ~561/566:
+   deinit'd, never assigned to the Module). Calling `analyzeExpression(initNode)`
+   at global-decl time (`collectTopLevel`) folds the composite to an id but the
+   `OpConstantComposite` instruction is **discarded** — never emitted.
+2. **Codegen materialises its own constants** (`emitted_constants` /
+   `type_section`, `codegen.zig` ~2823+) and ignores semantic-side constant ids
+   for globals. A raw semantic id handed to `emitGlobals` references a constant
+   codegen never emitted.
+
+**Use the existing `spec_op_literals` pattern as the model.** The Module already
+carries `spec_op_literals: []const SpecOpLiteralConst` (`ir.zig` ~86) — a
+module-level list that "codegen lowers each to an OpConstant **before** the …
+consumers, and also populates the codegen-side `emitted_constants` cache." Mirror
+it with a `global_init_constants` list carrying the folded constant **values**
+(not a semantic id); codegen emits each as `OpConstantComposite` in the constants
+section, registers it in `emitted_constants`, then references it from the global
+OpVariable. The hard part is carrying arbitrary (possibly nested) constant values
+from semantic to the Module — `spec_op_literals` only models scalars, so this
+needs a small recursive constant representation.
+
 ## Fix (two viable designs)
 
 **Design A — initializer on the Private global (smaller SPIR-V):**
-1. Add `initializer: ?ast.Expr` (or a pre-folded constant handle) to `ir.Global`.
-2. In AST→IR lowering, when a global is `const` (or has an initializer), carry the
-   init expression.
-3. In `emitGlobals`, if present: fold it to a SPIR-V constant id (reuse the
-   existing constant-composite emitter the local-array path already uses), emit
-   the `OpVariable` with word-count **5** and the constant id as the initializer.
-   Private+initializer is valid SPIR-V (`spirv-val` clean) and Vulkan-legal.
+1. Add a module-level `global_init_constants` list (modeled on `spec_op_literals`)
+   carrying the folded constant **values** + the global's result id, plus an
+   `initializer_id` on `ir.Global`.
+2. In AST→IR lowering, fold the `const` global's initializer to constant values
+   and append to that list.
+3. In `emitGlobals`, if present: codegen emits each entry as an
+   `OpConstantComposite` (its own emitter, constants section) and the
+   `OpVariable` with word-count **5** referencing it. `spirv-val` clean, Vulkan-legal.
    - Then the WGSL backend's existing initializer path (line ~1552) emits
      `const LUT: array<f32,16> = array<f32,16>(...)` for free; HLSL/MSL/GLSL get
      the values via their global-initializer paths.
