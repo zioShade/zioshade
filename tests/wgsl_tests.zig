@@ -1717,16 +1717,69 @@ test "wgsl: findMSB(uint) lowers to firstLeadingBit (GLSL.std.450 FindUMsb 75)" 
     try nagaValidateOrSkip(wgsl, "findMSB-uint");
 }
 
-test "wgsl: textureProj is an honest error (WGSL has no projective sampling)" {
-    // GLSL textureProj emits ImageSampleProjImplicitLod. WGSL has no projective
-    // sampling builtin; emitting a manual `coord.xy / coord.w` perspective divide
-    // is value-sensitive silent-wrong (it passes naga while being subtly wrong
-    // vs. the GLSL semantics for cube/array/bias forms). Fail loud instead.
+// textureProj semantics: divide the coordinate by its LAST component, then
+// sample with the leading components matching the sampler dimensionality. WGSL
+// has no projective builtin, but the perspective divide + plain textureSample is
+// a CORRECT, naga-validated lowering for the non-Dref forms — so emit it
+// (dimension-aware), rather than blanket honest-erroring (which regressed the
+// working 2D case). Dref/compare projective forms stay honest-errored.
+test "wgsl: textureProj(sampler2D, vec4) lowers to coord.xy / coord.w" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProj(tex, vec4(gl_FragCoord.xy, 0.0, 1.0)); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(");
+    try assertContains(wgsl, ".xy / ");
+    try assertContains(wgsl, ".w");
+    try nagaValidateOrSkip(wgsl, "textureProj-2d-vec4");
+}
+
+test "wgsl: textureProj(sampler2D, vec3) divides by the LAST component (.z)" {
+    // The vec3 form's divisor is the LAST component (.z), not .w. The old
+    // handler emitted `.w` on a vec3 (out-of-bounds / wrong) — this is the
+    // dimension-aware fix.
     const source: [:0]const u8 =
         \\#version 450
         \\layout(binding=0) uniform sampler2D tex;
         \\layout(location=0) out vec4 o;
         \\void main(){ o = textureProj(tex, vec3(gl_FragCoord.xy, 1.0)); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(");
+    try assertContains(wgsl, ".xy / ");
+    try assertContains(wgsl, ".z");
+    try nagaValidateOrSkip(wgsl, "textureProj-2d-vec3");
+}
+
+test "wgsl: textureProj(sampler3D, vec4) lowers to coord.xyz / coord.w" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler3D tex;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProj(tex, vec4(gl_FragCoord.xyz, 1.0)); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(");
+    try assertContains(wgsl, ".xyz / ");
+    try assertContains(wgsl, ".w");
+    try nagaValidateOrSkip(wgsl, "textureProj-3d-vec4");
+}
+
+test "wgsl: projective shadow (sampler2DShadow) is an honest error" {
+    // Projective depth-compare has no clean WGSL mapping (textureSampleCompare
+    // takes no projective coord and the divided ref is value-sensitive). Fail
+    // loud rather than silently drop the depth compare.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow tex;
+        \\layout(location=0) out float o;
+        \\void main(){ o = textureProj(tex, vec4(gl_FragCoord.xy, 0.5, 1.0)); }
     ;
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);

@@ -288,6 +288,50 @@ fn depthCompareShape(module: *const ParsedModule, sampled_image_value_id: u32) D
     return .{ .comps = comps, .arrayed = arrayed };
 }
 
+/// Spatial dimensionality (1/2/3) of the sampler behind a sampled-image value,
+/// for lowering GLSL projective sampling (textureProj*). WGSL has no projective
+/// builtin, so textureProj is lowered to a manual perspective divide: the
+/// coordinate is divided by its LAST component, then the leading `dim`
+/// components are sampled with a plain textureSample/textureSampleLevel. The
+/// number of leading components must match the texture dimension exactly (.x for
+/// 1D, .xy for 2D, .xyz for 3D) or naga rejects ("coordinate type does not match
+/// dimension"). Returns null for dims with no clean projective mapping (cube /
+/// arrayed), which the caller honest-errors. SPIR-V Dim: 0=1D, 1=2D, 2=3D,
+/// 3=Cube.
+fn projectiveCoordDim(module: *const ParsedModule, sampled_image_value_id: u32) ?u32 {
+    const type_id = getTypeOf(module, sampled_image_value_id) orelse return null;
+    var inst = getDef(module, type_id) orelse return null;
+    if (inst.op == .TypePointer and inst.words.len > 3) {
+        inst = getDef(module, inst.words[3]) orelse return null;
+    }
+    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
+        inst = getDef(module, inst.words[2]) orelse return null;
+    }
+    if (inst.op != .TypeImage or inst.words.len <= 3) return null;
+    // Arrayed projective forms have no clean WGSL mapping (the array layer is a
+    // separate non-projective argument) — defer to the honest-error path.
+    const arrayed = inst.words.len > 5 and inst.words[5] == 1;
+    if (arrayed) return null;
+    return switch (inst.words[3]) {
+        0 => 1, // 1D
+        1 => 2, // 2D
+        2 => 3, // 3D
+        else => null, // Cube (3) / SubpassData / Buffer: no clean projective map
+    };
+}
+
+/// Component count of the vector type behind `value_id` (e.g. 4 for a vec4
+/// coordinate), or null if it is not a vector. Used by projective sampling to
+/// pick the divisor = the value's LAST component, which GLSL's textureProj
+/// divides by regardless of the sampler dimension. TypeVector layout:
+/// [op, result_id, component_type, count].
+fn vectorComponentCount(module: *const ParsedModule, value_id: u32) ?u32 {
+    const type_id = getTypeOf(module, value_id) orelse return null;
+    const inst = getDef(module, type_id) orelse return null;
+    if (inst.op != .TypeVector or inst.words.len <= 3) return null;
+    return inst.words[3];
+}
+
 /// Emit a WGSL depth-compare sample for OpImageSampleDref{Implicit,Explicit}Lod.
 /// `builtin` is "textureSampleCompare" (implicit) or "textureSampleCompareLevel"
 /// (explicit — WGSL drops the SPIR-V Lod operand, always sampling mip 0).
@@ -4964,13 +5008,57 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             // Projective texture sampling (GLSL textureProj*). WGSL has no
-            // projective sampling builtin. The previous handler synthesised a
-            // manual perspective divide (`coord.xy / coord.w`), which is
-            // value-sensitive silent-wrong — it passes naga while diverging from
-            // GLSL semantics for the dref/bias/array/cube forms (and ignored the
-            // dref/lod operands entirely). Fail loud instead of fabricating output.
-            .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod, .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod => {
-                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no projective texture sampling ({s})", .{@tagName(inst.op)}) catch null;
+            // projective sampling builtin, but textureProj has a CORRECT manual
+            // lowering for the non-Dref forms: divide the coordinate by its LAST
+            // component, then sample with the leading components matching the
+            // sampler dimensionality (.x for 1D, .xy for 2D, .xyz for 3D). This
+            // is naga-validated and matches GLSL semantics. (The previous handler
+            // hard-coded `.xy / coord.w` — wrong for vec3 coords, where the
+            // divisor is .z — and a later over-correction blanket honest-errored
+            // it, regressing the working 2D case. This is dimension-aware.)
+            .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod => {
+                const dim = projectiveCoordDim(module, inst.words[3]) orelse {
+                    // Cube / arrayed projective: no clean WGSL map — fail loud.
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no projective texture sampling for this sampler kind ({s})", .{@tagName(inst.op)}) catch null;
+                    return error.UnsupportedOp;
+                };
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const tex_name = names.get(inst.words[3]) orelse "tex";
+                const coord = names.get(inst.words[4]) orelse "uv";
+                // Leading components = the sampler dim (.x for 1D, .xy for 2D,
+                // .xyz for 3D). The divisor = the coordinate's LAST component —
+                // which depends on the coordinate VECTOR width, not the sampler
+                // dim: textureProj(sampler2D, vec4) divides by .w, but
+                // textureProj(sampler2D, vec3) divides by .z. Read the actual
+                // operand width; fall back to dim+1 if it's not a vector type.
+                const lead: []const u8 = switch (dim) {
+                    1 => ".x",
+                    2 => ".xy",
+                    else => ".xyz",
+                };
+                const coord_comps = vectorComponentCount(module, inst.words[4]) orelse (dim + 1);
+                const last_comp: []const u8 = switch (coord_comps) {
+                    2 => ".y",
+                    3 => ".z",
+                    else => ".w",
+                };
+                try writeInd(w, indent);
+                if (inst.op == .ImageSampleProjExplicitLod) {
+                    const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+                    try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}{s} / {s}{s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, lod });
+                } else {
+                    try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s} / {s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp });
+                }
+            },
+
+            // Projective DEPTH-COMPARE sampling (textureProj on a shadow sampler).
+            // WGSL's textureSampleCompare takes a NON-projective coordinate and a
+            // depth reference; the projective divide of BOTH coord and ref is
+            // value-sensitive with no faithful builtin mapping. Fail loud rather
+            // than silently dropping the perspective divide on the compare.
+            .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod => {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no projective depth-compare sampling ({s})", .{@tagName(inst.op)}) catch null;
                 return error.UnsupportedOp;
             },
 
