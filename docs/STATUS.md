@@ -3,18 +3,18 @@
 
 # glslpp status
 
-Generated: `2026-06-02T07:18:59Z` · commit `9c5fffa1`
+Generated: `2026-06-06T08:19:22Z` · commit `c96462af`
 
 ## Conformance (`zig build conformance` — every fixture's SPIR-V validated with spirv-val)
 
 | Metric | Count |
 |--------|-------|
-| PASS (spirv-val clean) | 2074 |
+| PASS (spirv-val clean) | 2076 |
 | FAIL (spirv-val) | 0 |
 | FAIL (compile) | 0 |
 | SKIP | 8 |
-| XFAIL (known-unsupported, documented) | 15 |
-| **TOTAL** | **2097** |
+| XFAIL (known-unsupported, documented) | 14 |
+| **TOTAL** | **2098** |
 
 The suite exits 0 when `FAIL (spirv) == 0` and `FAIL (compile) == 0`
 (PASS + XFAIL + SKIP == TOTAL). XFAIL entries are the curated, documented
