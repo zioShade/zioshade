@@ -6,7 +6,7 @@ A pure-Zig GLSL → SPIR-V compiler and SPIR-V cross-compiler (HLSL / MSL / GLSL
 
 Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated terminal emulator, to replace ~60 MB of glslang + SPIRV-Cross C++ dependencies in a single Zig module. No C++ runtime. No system dependencies. No DLL isolation hacks.
 
-> **Scope:** glslpp is **not** a full Khronos drop-in. It is a focused replacement for the shader-compilation surface wintty needs (GLSL 430-class shaders → SPIR-V → backend), validated on the full [`spirv-cross`](https://github.com/KhronosGroup/SPIRV-Cross) and `glslang` reference suites. If you need full GLSL ES, descriptor-set reflection, specialization constants, or SPIRV-Cross-grade WGSL output, **use upstream**. See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the full gap analysis.
+> **Scope:** glslpp is **not** a full Khronos drop-in. It is a focused replacement for the shader-compilation surface wintty needs (GLSL 430-class shaders → SPIR-V → backend), validated on the full [`spirv-cross`](https://github.com/KhronosGroup/SPIRV-Cross) and `glslang` reference suites. If you need full GLSL ES, descriptor-set reflection, or SPIRV-Cross-grade WGSL output, **use upstream**. See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the full gap analysis.
 
 ## Features
 
@@ -20,15 +20,16 @@ Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated t
 - **Shadertoy support**: One-shot API for Shadertoy-style fragment shaders
 - **Zero C++ dependency**: Pure Zig, builds with `zig build`
 - **In-process, threadlocal state only**: Safe to call from multiple threads; no process-wide init/finalize
+- **C ABI**: A C header (`include/glslpp.h`) and shared/static libraries are provided for non-Zig consumers (`zig build c-lib`)
 
 ## Status
 
 | Metric | Value |
 |---|---|
-| `spirv-val` conformance | **2,080 / 2,087** runnable fixtures pass (`zig build conformance`); 7 known feature-gap failures (64-bit int/float, OpExtInst word-count, shader_ballot, ray_sphere, struct-material), 8 skipped, 2,095 total — see [docs/TEST_COVERAGE.md](docs/TEST_COVERAGE.md) |
+| `spirv-val` conformance | **2076 PASS, 0 spirv-val failures** (`zig build conformance`); 14 known-unsupported constructs honest-error as XFAIL (documented rejections, not failures — `tests/known-conformance-fails.txt`), 8 skipped, 2098 total — see [docs/STATUS.md](docs/STATUS.md) (generated source of truth) |
 | External DXC SPIR-V fixtures | **47 / 51** compile to DXIL (4 limited by DXC's SM 6.1+ / 2 KB structured-buffer cap) |
 | WGSL stress tests | **470 / 470** |
-| Fuzzer iterations (ad-hoc, no CI yet) | 50,000 crash-free — reproduce with `zig build fuzz -- --count 50000` |
+| Fuzzer iterations | Structured-GLSL fuzzer clean over **1,000,000** iterations — reproduce with `just fuzz-million` (ad-hoc runs: `zig build fuzz -- --count N`) |
 | CI | GitHub Actions workflow committed (3-OS matrix, `.github/workflows/ci.yml`); currently verified locally via `just` (see [Building](#building)) |
 | Production use | Backs all shader compilation in [wintty](https://github.com/deblasis/wintty) |
 
@@ -184,11 +185,9 @@ See [`examples/`](examples/) for runnable end-to-end programs.
 
 ## Known limitations
 
-- **No specialization constants** (`OpSpecConstant*`).
 - **GLSL output is 430 only** — other versions are not generated.
 - **WGSL backend is shallow** vs SPIRV-Cross — common opcodes only.
-- **Cross-compiler control flow requires `OpSelectionMerge`.** SPIR-V produced by glslpp itself always satisfies this; externally-produced or post-optimized SPIR-V without merge info will get an empty branch body and a stderr warning.
-- **No formal C ABI.** Consumers outside the Zig ecosystem must write their own FFI layer.
+- **Cross-compiler control flow:** structured SPIR-V works on every backend; unstructured-but-reducible `if`/`switch` (missing `OpSelectionMerge`) is structurized transparently by a pre-pass. Unstructured loops (missing `OpLoopMerge`) and irreducible CFGs **fail loud** with `error.UnstructuredControlFlow` rather than miscompile. glslpp's own SPIR-V is always structured; this only affects externally-optimized/hand-authored input.
 - **Single contributor.** Treat as alpha if you are not the wintty project.
 
 See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the complete feature-by-feature comparison against glslang / SPIRV-Cross.
@@ -221,7 +220,7 @@ zig build                  # Library
 zig build cli              # CLI tool
 zig build test             # Unit tests
 zig build conformance      # spirv-val conformance suite (needs spirv-val on PATH)
-zig build fuzz -- --count 50000  # Fuzzer
+zig build fuzz -- --count N  # Fuzzer (headline: 1,000,000 clean via `just fuzz-million`)
 ```
 
 Requires **Zig 0.15.2** (managed via [mise](https://mise.jdx.dev) if `.mise.toml` is honored).
