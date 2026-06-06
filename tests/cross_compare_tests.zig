@@ -654,14 +654,17 @@ const attrib_vert_src: [:0]const u8 =
     \\void main() { vColor = aPos; gl_Position = vec4(aPos, 1.0); }
 ;
 
-test "glsl-version acceptance: UBO frag valid at 330/410/450/460" {
-    inline for (.{ 330, 410, 450, 460 }) |v| {
+test "glsl-version acceptance: UBO frag valid at 330/400/410/420/440/450/460" {
+    inline for (.{ 330, 400, 410, 420, 440, 450, 460 }) |v| {
         try roundTripAcceptsAt(alloc, "ubo_frag", ubo_frag_src, .fragment, v);
     }
 }
 
-test "glsl-version acceptance: fragment input varying valid at 330/410/450/460" {
-    inline for (.{ 330, 410, 450, 460 }) |v| {
+test "glsl-version acceptance: fragment input varying valid at 330/400/410/420/440/450/460" {
+    // 400 is the regression target for #169 BLOCKER 1: explicit `layout(location=)`
+    // on a *varying* is not core GLSL until 410, so glslang rejects it at 400 (and
+    // 330). The backend must drop the location below 410, not only at 330.
+    inline for (.{ 330, 400, 410, 420, 440, 450, 460 }) |v| {
         try roundTripAcceptsAt(alloc, "varying_frag", varying_frag_src, .fragment, v);
     }
 }
@@ -696,40 +699,49 @@ test "glsl-version structural: 420pack guard present at 330 and 410, absent at 4
     }
 }
 
-test "glsl-version structural: location dropped on frag input at 330, kept at 410+" {
-    // At 330 glslang rejects `layout(location=)` on a fragment INPUT varying, so
-    // glslpp must emit bare `in`. At >= 410 the location is kept. spirv-cross does
-    // the same: confirm glslpp drops it at 330.
+test "glsl-version structural: location dropped on frag input below 410, kept at 410+" {
+    // Below 410 glslang rejects `layout(location=)` on a fragment INPUT varying, so
+    // glslpp must emit bare `in` at 330 AND 400. At >= 410 the location is kept.
+    // spirv-cross does the same. #169 BLOCKER 1: 400 was previously not dropped.
     const spirv = try compileToSpirvViaGlslang(alloc, varying_frag_src, .fragment);
     defer alloc.free(spirv);
 
-    const g330 = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 330 });
-    defer alloc.free(g330);
-    // glslpp must emit a bare `in vec3` (no location) for the fragment input at 330.
-    try std.testing.expect(std.mem.indexOf(u8, g330, "in vec3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, g330, "layout(location = 0) in vec3") == null);
-    // spirv-cross agrees: at 330 it also drops the location on the fragment input.
-    const sc330 = try spirvCrossToGlslVersion(alloc, spirv, 330, false);
-    defer alloc.free(sc330);
-    try std.testing.expect(std.mem.indexOf(u8, sc330, "layout(location = 0) in vec3") == null);
+    inline for (.{ 330, 400 }) |v| {
+        const g = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = v });
+        defer alloc.free(g);
+        // glslpp must emit a bare `in vec3` (no location) for the fragment input.
+        try std.testing.expect(std.mem.indexOf(u8, g, "in vec3") != null);
+        try std.testing.expect(std.mem.indexOf(u8, g, "layout(location = 0) in vec3") == null);
+        // spirv-cross agrees: it also drops the location on the fragment input.
+        const sc = try spirvCrossToGlslVersion(alloc, spirv, v, false);
+        defer alloc.free(sc);
+        try std.testing.expect(std.mem.indexOf(u8, sc, "layout(location = 0) in vec3") == null);
+    }
 
-    const g410 = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 410 });
-    defer alloc.free(g410);
-    try std.testing.expect(std.mem.indexOf(u8, g410, "layout(location = 0) in vec3") != null);
+    inline for (.{ 410, 420, 440 }) |v| {
+        const g = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = v });
+        defer alloc.free(g);
+        try std.testing.expect(std.mem.indexOf(u8, g, "layout(location = 0) in vec3") != null);
+    }
 }
 
-test "glsl-version structural: vertex output location dropped at 330, kept at 410+" {
+test "glsl-version structural: vertex output location dropped below 410, kept at 410+" {
     const spirv = try compileToSpirvViaGlslang(alloc, attrib_vert_src, .vertex);
     defer alloc.free(spirv);
 
-    const g330 = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 330 });
-    defer alloc.free(g330);
-    // Vertex INPUT (attribute) keeps location at 330; vertex OUTPUT varying drops it.
-    try std.testing.expect(std.mem.indexOf(u8, g330, "layout(location = 0) in vec3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, g330, "out vec3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, g330, "layout(location = 0) out vec3") == null);
+    // Below 410: vertex INPUT (attribute) keeps location; vertex OUTPUT varying drops
+    // it. #169 BLOCKER 1: 400 was previously not dropped.
+    inline for (.{ 330, 400 }) |v| {
+        const g = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = v });
+        defer alloc.free(g);
+        try std.testing.expect(std.mem.indexOf(u8, g, "layout(location = 0) in vec3") != null);
+        try std.testing.expect(std.mem.indexOf(u8, g, "out vec3") != null);
+        try std.testing.expect(std.mem.indexOf(u8, g, "layout(location = 0) out vec3") == null);
+    }
 
-    const g410 = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 410 });
-    defer alloc.free(g410);
-    try std.testing.expect(std.mem.indexOf(u8, g410, "layout(location = 0) out vec3") != null);
+    inline for (.{ 410, 420, 440 }) |v| {
+        const g = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = v });
+        defer alloc.free(g);
+        try std.testing.expect(std.mem.indexOf(u8, g, "layout(location = 0) out vec3") != null);
+    }
 }

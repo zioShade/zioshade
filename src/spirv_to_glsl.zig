@@ -292,7 +292,9 @@ fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id:
 // ---- Public API ----
 /// Options for SPIR-V → GLSL cross-compilation.
 pub const GlslCompileOptions = struct {
-    /// Target GLSL version: 330, 400, 410, 420, 430, 440, 450, 460.
+    /// Target GLSL version. Must be one of `supported_glsl_versions`
+    /// (330, 400, 410, 420, 430, 440, 450, 460); anything else is rejected with
+    /// `error.UnsupportedGlslVersion`. ESSL is excluded (#169).
     version: u32 = 430,
     /// Output OpenGL ES Shading Language (ESSL) instead of desktop GLSL.
     es: bool = false,
@@ -304,11 +306,26 @@ pub const GlslCompileOptions = struct {
 };
 
 // Use shared parse cache from root (avoids circular import — cache is passed via allocator context)
-/// Desktop GLSL versions glslpp can emit. ESSL is intentionally excluded (#169).
+/// Single source of truth for the desktop GLSL versions glslpp can emit. ESSL is
+/// intentionally excluded (#169). Referenced by both the honest-error gate and the
+/// `GlslCompileOptions.version` doc comment so the two cannot drift apart.
+pub const supported_glsl_versions = [_]u32{ 330, 400, 410, 420, 430, 440, 450, 460 };
+
 fn isSupportedGlslVersion(v: u32) bool {
-    return switch (v) {
-        330, 400, 410, 420, 430, 440, 450, 460 => true,
-        else => false,
+    for (supported_glsl_versions) |sv| {
+        if (v == sv) return true;
+    }
+    return false;
+}
+
+/// `layout(location=)` on a *varying* (fragment input / vertex output) is rejected
+/// by glslang below 410; vertex inputs (attributes) and fragment outputs always keep
+/// it. spirv-cross drops it the same way. (#169 BLOCKER 1: this is < 410, not == 330
+/// — explicit varying locations are not core GLSL until 410, so 400 must also drop.)
+fn dropVaryingLocation(version: u32, model: spirv.ExecutionModel, comptime dir: enum { in, out }) bool {
+    return version < 410 and switch (dir) {
+        .in => model == .Fragment,
+        .out => model == .Vertex,
     };
 }
 
@@ -1075,10 +1092,10 @@ fn emitFunction(
             // emit it whenever present (never fabricate — only what the SPIR-V
             // says). Applies symmetrically to flat vertex outputs below.
             const flat_q: []const u8 = if (hasDec(decs, ivid, .flat)) "flat " else "";
-            // #169 (G4) Tier 3: at version 330 glslang rejects `layout(location=)`
-            // on a fragment INPUT varying (only vertex inputs may carry it). Drop
-            // the qualifier there; keep it at >= 410 and for vertex inputs.
-            const drop_loc = version == 330 and m.execution_model == .Fragment;
+            // #169 (G4) Tier 3: below 410 glslang rejects `layout(location=)` on a
+            // fragment INPUT varying (only vertex inputs may carry it). Drop the
+            // qualifier there; keep it at >= 410 and for vertex inputs.
+            const drop_loc = dropVaryingLocation(version, m.execution_model, .in);
             if (!drop_loc) if (getDecVal(decs, ivid, .location)) |l| {
                 try w.print("layout(location = {d}) {s}in {s} {s};\n", .{ l, flat_q, it, in_name });
                 emitted_any_io = true;
@@ -1095,10 +1112,10 @@ fn emitFunction(
             // Mirror the input side: a `flat out` (e.g. integer varying from a
             // vertex stage) carries an `OpDecorate … Flat`; preserve it.
             const flat_q: []const u8 = if (hasDec(decs, ovid, .flat)) "flat " else "";
-            // #169 (G4) Tier 3: at version 330 glslang rejects `layout(location=)`
-            // on a vertex OUTPUT varying (only fragment outputs may carry it). Drop
-            // it there; keep it at >= 410 and for fragment outputs.
-            const drop_loc = version == 330 and m.execution_model == .Vertex;
+            // #169 (G4) Tier 3: below 410 glslang rejects `layout(location=)` on a
+            // vertex OUTPUT varying (only fragment outputs may carry it). Drop it
+            // there; keep it at >= 410 and for fragment outputs.
+            const drop_loc = dropVaryingLocation(version, m.execution_model, .out);
             if (!drop_loc) if (getDecVal(decs, ovid, .location)) |l| {
                 try w.print("layout(location = {d}) {s}out {s} {s};\n", .{ l, flat_q, ot, on });
                 emitted_any_io = true;
