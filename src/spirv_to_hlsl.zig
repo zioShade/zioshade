@@ -133,7 +133,11 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     return module;
 }
 
-/// True if `var_id` is ever written (directly or through an access chain).
+/// True if `var_id` is ever written — directly or through a single-level access
+/// chain. Detects only direct + one-level-chain stores; sufficient because a
+/// `const` global (the only thing carrying a const initializer here) is never
+/// written. Deeper-chain / pass-by-pointer mutation in ingested SPIR-V is the
+/// only blind spot.
 fn hlslPrivateVarMutated(module: *const ParsedModule, var_id: u32) bool {
     for (module.instructions) |inst| {
         if (inst.op == .Store and inst.words.len >= 2 and inst.words[1] == var_id) return true;

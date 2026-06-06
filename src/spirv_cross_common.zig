@@ -238,9 +238,14 @@ pub fn hasOpaqueArrayResource(module: *const ParsedModule) bool {
 }
 
 /// True if `var_id` is ever written — directly (`OpStore %var ...`) or through
-/// an access chain rooted at it (`%c = OpAccessChain %p %var ...; OpStore %c`).
-/// Used to keep the const-initializer aliasing below from touching a mutable
-/// global.
+/// a single-level access chain rooted at it
+/// (`%c = OpAccessChain %p %var ...; OpStore %c`). Used to keep the
+/// const-initializer aliasing below from touching a mutable global. Detects only
+/// direct + one-level-chain stores (and not pass-by-pointer to a storing
+/// callee); sufficient because glslpp never emits either for a `const` global —
+/// a const global is never written at all. Arbitrary ingested SPIR-V with a
+/// mutated const-initialised Private global via a deeper chain is the only blind
+/// spot.
 fn privateVarMutated(module: *const ParsedModule, var_id: u32) bool {
     for (module.instructions) |inst| {
         if (inst.op == .Store and inst.words.len >= 2 and inst.words[1] == var_id) return true;
