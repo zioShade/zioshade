@@ -66,6 +66,35 @@ test "harness self-test: compileToSPIRVStrict rejects a recorded error" {
     try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
 }
 
+test "fail-loud: a call to an undefined (declared-only) function is rejected" {
+    const alloc = std.testing.allocator;
+    // `getColor()` is prototyped but never defined. Codegen would emit an
+    // OpFunctionCall to a body-less id → invalid SPIR-V ("forward referenced IDs
+    // have not been defined"). compileToSPIRV must fail loud, not emit garbage.
+    const src =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\vec4 getColor();
+        \\void main() { o = getColor(); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+}
+
+test "fail-loud: a forward-referenced function (defined later) is accepted" {
+    const alloc = std.testing.allocator;
+    // The undefined-function check runs post-analysis, so a prototype whose
+    // definition appears later in the file must NOT be flagged.
+    const src =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\vec4 helper();
+        \\void main() { o = helper(); }
+        \\vec4 helper() { return vec4(1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+}
+
 test "strict: user function with 1D array parameter is accepted" {
     const alloc = std.testing.allocator;
     const src =
