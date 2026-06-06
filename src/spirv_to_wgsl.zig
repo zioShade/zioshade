@@ -1168,6 +1168,16 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         },
     }
 
+    // WGSL has no ARM tensors (SPV_ARM_tensors: OpTypeTensorARM + OpTensor*ARM).
+    // Without this guard the unmapped tensor ops fell through to a `var v`
+    // fallback emitted repeatedly → naga "redefinition of `v`". Fail loud.
+    for (module.instructions) |tinst| {
+        if (tinst.op == .TypeTensorARM) {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no ARM tensor type (SPV_ARM_tensors)", .{}) catch null;
+            return error.UnsupportedOp;
+        }
+    }
+
     // WGSL has no fragment-shader interlock (GL_ARB/EXT_fragment_shader_interlock:
     // beginInvocationInterlockARB/endInvocationInterlockARB). Detect the interlock
     // execution mode (PixelInterlock{Ordered,Unordered}EXT 5366/5367,
