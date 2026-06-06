@@ -169,6 +169,44 @@ fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
     return common.getTypeOf(module, id);
 }
 
+/// GLSL allows scalar overloads of the geometric builtins (`normalize(float)`,
+/// `length(float)`, …) but WGSL defines `normalize`/`length`/`distance`/
+/// `reflect` only on vectors — naga rejects the scalar call ("wrong type passed
+/// as argument #1"). Return the value-equivalent WGSL scalar expression, or null
+/// if this is not a scalar geometric op (use the normal `func(args)` path).
+///   length(x)      -> abs(x)
+///   distance(a,b)  -> abs(a - b)
+///   normalize(x)   -> sign(x)        (x/|x| for a scalar)
+///   reflect(I,N)   -> I - 2*(N*I)*N
+/// Scalar `refract` is deliberately NOT lowered here — its formula is value-
+/// sensitive and naga only type-checks, so a hand-rolled version could pass naga
+/// while computing the wrong result (a silent-wrong). The caller honest-errors it.
+fn scalarGeomLower(arena: std.mem.Allocator, module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), instruction: u32, result_type_id: u32, arg_ids: []const u32) ?[]const u8 {
+    // length(66)/distance(67) always return a scalar, so probe the ARGUMENT type;
+    // normalize(69)/reflect(71) return the argument type, so the result suffices.
+    const probe_type: u32 = switch (instruction) {
+        66, 67 => if (arg_ids.len >= 1) (resolveTypeOf(module, arg_ids[0]) orelse return null) else return null,
+        69, 71 => result_type_id,
+        else => return null,
+    };
+    const ti = getDef(module, probe_type) orelse return null;
+    if (ti.op != .TypeFloat) return null; // vector form is valid WGSL — leave it.
+    const a0 = if (arg_ids.len >= 1) (names.get(arg_ids[0]) orelse "0.0") else "0.0";
+    return switch (instruction) {
+        66 => std.fmt.allocPrint(arena, "abs({s})", .{a0}) catch null,
+        67 => blk: {
+            const a1 = if (arg_ids.len >= 2) (names.get(arg_ids[1]) orelse "0.0") else "0.0";
+            break :blk std.fmt.allocPrint(arena, "abs(({s}) - ({s}))", .{ a0, a1 }) catch null;
+        },
+        69 => std.fmt.allocPrint(arena, "sign({s})", .{a0}) catch null,
+        71 => blk: {
+            const a1 = if (arg_ids.len >= 2) (names.get(arg_ids[1]) orelse "0.0") else "0.0";
+            break :blk std.fmt.allocPrint(arena, "(({s}) - 2.0 * (({s}) * ({s})) * ({s}))", .{ a0, a1, a0, a1 }) catch null;
+        },
+        else => null,
+    };
+}
+
 fn isStructType(module: *const ParsedModule, type_id: u32) bool {
     const ti = common.getDef(module, type_id);
     if (ti) |inst| {
@@ -1184,6 +1222,23 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                     }},
                 ) catch null;
                 return error.UnsupportedOp;
+            }
+        }
+    }
+
+    // Scalar `refract` (GLSL.std.450 Refract=72 on a scalar) — WGSL's `refract`
+    // is vector-only. Unlike normalize/length/distance/reflect (lowered inline by
+    // scalarGeomLower), refract's formula is value-sensitive and naga only
+    // type-checks, so a hand-rolled scalar version could pass naga while
+    // computing the wrong value (silent-wrong). Fail loud instead.
+    for (module.instructions) |xinst| {
+        if (xinst.op == .ExtInst and xinst.words.len > 4 and xinst.words[4] == 72) {
+            const rt_inst = getDef(&module, xinst.words[1]);
+            if (rt_inst) |ti| {
+                if (ti.op == .TypeFloat) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no scalar refract() (the builtin is vector-only)", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
             }
         }
     }
@@ -4189,6 +4244,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                 }
                             }
                             try writeInd(w, indent); try w.print("let {s}: {s} = {s}.fract;\n", .{ result_name, rt, tmp });
+                        } else if (scalarGeomLower(arena, module, names, instruction, inst.words[1], inst.words[5..])) |sexpr| {
+                            // Scalar geometric builtin WGSL lacks (normalize/length/
+                            // distance/reflect on a scalar) — emit the equivalent.
+                            try writeInd(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, sexpr });
                         } else {
                             // Shared name mapping (single source of truth; honest-errors unmapped ops).
                             const func_name = try glslStd450WgslName(instruction);
@@ -5064,6 +5123,10 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                 // Shared name mapping (same source of truth as the main emit path —
                 // previously this replay switch had drifted and was missing
                 // ldexp/pack*/unpack*/findILsb/findSMsb etc.).
+                if (scalarGeomLower(arena, module, names, instruction, inst.words[1], inst.words[5..])) |sexpr| {
+                    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, sexpr });
+                    return;
+                }
                 const func_name = try glslStd450WgslName(instruction);
                 var args = std.ArrayList(u8).initCapacity(arena, 128) catch return;
                 defer args.deinit(arena);
