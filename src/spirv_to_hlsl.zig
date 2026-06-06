@@ -4829,7 +4829,13 @@ fn ssboRuntimeArrayElement(module: *const ParsedModule, struct_type_id: u32) ?u3
     if (inst.words.len != 3) return null; // [header, struct_id, member0_type]
     const member_type_id = inst.words[2];
     const m = getDef(module, member_type_id) orelse return null;
-    if (m.op != .TypeRuntimeArray or m.words.len < 3) return null;
+    // A single-member SSBO whose member is an array `{ T data[]; }` or
+    // `{ T data[N]; }` maps to `RWStructuredBuffer<T>` (the buffer IS the array),
+    // matching spirv-cross. Both TypeRuntimeArray and TypeArray carry the element
+    // type at words[2]. Without unwrapping the FIXED-size case, a large array
+    // (e.g. `float4[1024]` = 16 KB) becomes one structured-buffer element, which
+    // dxc rejects (">2048 bytes per element").
+    if ((m.op != .TypeRuntimeArray and m.op != .TypeArray) or m.words.len < 3) return null;
     return m.words[2];
 }
 
