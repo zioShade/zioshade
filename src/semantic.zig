@@ -132,6 +132,18 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         try analyzer.collectTopLevel(node);
     }
 
+    // Top-level constant evaluation (spec-constant defaults, global `const`
+    // initializers) appends constant instructions to the per-function scratch
+    // list that is then discarded — yet their result-ids persist in the constant
+    // caches. A later function that reuses such a cached id would reference an
+    // unemitted (dangling) constant: e.g. `spec_const_array[1 - a]` emits
+    // `OpISub %<dangling-1> %a` because the `1` cached at top-level was never
+    // codegen-emitted → invalid SPIR-V ("forward referenced IDs ... not defined").
+    // Drop the top-level constant caches so each function re-emits its own
+    // constants in-scope. Inter-function dedup and the unreachable-constant rescue
+    // still work (they rebuild the caches during function analysis).
+    analyzer.const_cache.clearRetainingCapacity();
+
     for (root.body) |node| {
         if (node.tag == .function_decl) {
             analyzer.analyzeFunction(node) catch |err| {
