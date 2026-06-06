@@ -1912,3 +1912,22 @@ test "GLSL: module-scope const array indexed at runtime materializes its values"
     // so the raw `LUT[` token must not appear in the body.
     try assertNotContains(glsl, "LUT[");
 }
+
+test "GLSL: integer fragment input is qualified flat" {
+    // Regression: GLSL requires `flat` on integer/double fragment inputs
+    // (glslang: "'int' : must be qualified as flat in"). The frontend preserves
+    // the source qualifier as an OpDecorate Flat; the backend must emit it, else
+    // the GLSL output is glslang-rejected (silent-wrong). `int(gl_FragCoord.x)`
+    // avoids needing the input itself flat — the input here IS declared flat.
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) flat in int idx;
+        \\layout(location = 0) out float FragColor;
+        \\void main() { FragColor = float(idx); }
+    ;
+    const glsl = try compileToGlslStage(source, .fragment);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "flat in int idx;");
+    try assertNotContains(glsl, ") in int idx;"); // not the unqualified form
+}
