@@ -1698,3 +1698,128 @@ test "wgsl: a reloaded output accumulator keeps one name across recomputed sub-e
     try assertNoUndeclaredVTemp(wgsl);
     try nagaValidateOrSkip(wgsl, "reloaded-output-def-drop");
 }
+
+// --- gap #170 Pass 1: deepen WGSL coverage ---------------------------------
+
+test "wgsl: findMSB(uint) lowers to firstLeadingBit (GLSL.std.450 FindUMsb 75)" {
+    // GLSL findMSB on an unsigned int emits GLSL.std.450 FindUMsb (75). It was
+    // missing from the shared name table, so it hit recordUnsupportedExtInst —
+    // a needless honest-error for an op WGSL fully supports as firstLeadingBit.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0, std140) uniform U { uint a; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ uint m = uint(findMSB(u.a)); o = vec4(float(m)); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "firstLeadingBit(");
+    try nagaValidateOrSkip(wgsl, "findMSB-uint");
+}
+
+// textureProj semantics: divide the coordinate by its LAST component, then
+// sample with the leading components matching the sampler dimensionality. WGSL
+// has no projective builtin, but the perspective divide + plain textureSample is
+// a CORRECT, naga-validated lowering for the non-Dref forms — so emit it
+// (dimension-aware), rather than blanket honest-erroring (which regressed the
+// working 2D case). Dref/compare projective forms stay honest-errored.
+test "wgsl: textureProj(sampler2D, vec4) lowers to coord.xy / coord.w" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProj(tex, vec4(gl_FragCoord.xy, 0.0, 1.0)); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(");
+    try assertContains(wgsl, ".xy / ");
+    try assertContains(wgsl, ".w");
+    try nagaValidateOrSkip(wgsl, "textureProj-2d-vec4");
+}
+
+test "wgsl: textureProj(sampler2D, vec3) divides by the LAST component (.z)" {
+    // The vec3 form's divisor is the LAST component (.z), not .w. The old
+    // handler emitted `.w` on a vec3 (out-of-bounds / wrong) — this is the
+    // dimension-aware fix.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProj(tex, vec3(gl_FragCoord.xy, 1.0)); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(");
+    try assertContains(wgsl, ".xy / ");
+    try assertContains(wgsl, ".z");
+    try nagaValidateOrSkip(wgsl, "textureProj-2d-vec3");
+}
+
+test "wgsl: textureProj(sampler3D, vec4) lowers to coord.xyz / coord.w" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler3D tex;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProj(tex, vec4(gl_FragCoord.xyz, 1.0)); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(");
+    try assertContains(wgsl, ".xyz / ");
+    try assertContains(wgsl, ".w");
+    try nagaValidateOrSkip(wgsl, "textureProj-3d-vec4");
+}
+
+test "wgsl: projective shadow (sampler2DShadow) is an honest error" {
+    // Projective depth-compare has no clean WGSL mapping (textureSampleCompare
+    // takes no projective coord and the divided ref is value-sensitive). Fail
+    // loud rather than silently drop the depth compare.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow tex;
+        \\layout(location=0) out float o;
+        \\void main(){ o = textureProj(tex, vec4(gl_FragCoord.xy, 0.5, 1.0)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
+test "wgsl: fragment-shader interlock is an honest error (no WGSL equivalent)" {
+    // GL_ARB_fragment_shader_interlock emits OpBeginInvocationInterlockEXT /
+    // OpEndInvocationInterlockEXT (and an interlock execution mode). WGSL has no
+    // fragment-shader interlock; fail loud rather than silently drop the barrier.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\#extension GL_ARB_fragment_shader_interlock : require
+        \\layout(pixel_interlock_ordered) in;
+        \\layout(binding=0, std430) buffer B { uint counter; };
+        \\layout(location=0) out vec4 o;
+        \\void main(){ beginInvocationInterlockARB(); counter += 1u; endInvocationInterlockARB(); o = vec4(1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
+test "wgsl: the main-path else no longer emits a silent-wrong placeholder var" {
+    // Regression guard for the silent-wrong `else` fallback. It used to emit
+    // `// unhandled op N` + `var <name>: T;` (an uninitialized var = garbage value
+    // that naga still accepts). A representative shader exercising many ops must
+    // compile WITHOUT any such placeholder, and naga must accept the real output.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0, std140) uniform U { vec4 a; vec4 b; uint n; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\    vec4 m = mix(u.a, u.b, 0.5);
+        \\    uint bits = uint(findMSB(u.n)) + uint(findLSB(u.n));
+        \\    o = m + vec4(float(bits)) + vec4(min(u.a.x, u.b.x), max(u.a.y, u.b.y), clamp(u.a.z, 0.0, 1.0), 1.0);
+        \\}
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertNotContains(wgsl, "unhandled op");
+    try nagaValidateOrSkip(wgsl, "no-silent-placeholder");
+}
