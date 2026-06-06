@@ -1035,10 +1035,16 @@ fn emitFunction(
             const iv = getDef(m, ivid) orelse continue;
             const it = try glslType(m, iv.words[1], names, alloc);
             const in_name = names.get(ivid) orelse continue;
+            // GLSL requires `flat` interpolation on integer/double fragment
+            // inputs (glslang: "'int' : must be qualified as flat in"). The
+            // frontend preserves the source qualifier as an `OpDecorate … Flat`;
+            // emit it whenever present (never fabricate — only what the SPIR-V
+            // says). Applies symmetrically to flat vertex outputs below.
+            const flat_q: []const u8 = if (hasDec(decs, ivid, .flat)) "flat " else "";
             if (getDecVal(decs, ivid, .location)) |l| {
-                try w.print("layout(location = {d}) in {s} {s};\n", .{ l, it, in_name });
+                try w.print("layout(location = {d}) {s}in {s} {s};\n", .{ l, flat_q, it, in_name });
             } else {
-                try w.print("in {s} {s};\n", .{ it, in_name });
+                try w.print("{s}in {s} {s};\n", .{ flat_q, it, in_name });
             }
             emitted_any_io = true;
         }
@@ -1047,10 +1053,13 @@ fn emitFunction(
             const ov = getDef(m, ovid) orelse continue;
             const ot = try glslType(m, ov.words[1], names, alloc);
             const on = names.get(ovid) orelse "_out";
+            // Mirror the input side: a `flat out` (e.g. integer varying from a
+            // vertex stage) carries an `OpDecorate … Flat`; preserve it.
+            const flat_q: []const u8 = if (hasDec(decs, ovid, .flat)) "flat " else "";
             if (getDecVal(decs, ovid, .location)) |l| {
-                try w.print("layout(location = {d}) out {s} {s};\n", .{ l, ot, on });
+                try w.print("layout(location = {d}) {s}out {s} {s};\n", .{ l, flat_q, ot, on });
             } else {
-                try w.print("out {s} {s};\n", .{ ot, on });
+                try w.print("{s}out {s} {s};\n", .{ flat_q, ot, on });
             }
             emitted_any_io = true;
         }
