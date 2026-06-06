@@ -1046,6 +1046,11 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
         .Load, .CopyObject, .CompositeConstruct, .CompositeInsert,
         .FunctionCall, .Phi, .Select, .CopyLogical, .FunctionParameter,
         .Undef,
+        // Composite constants carry their result type in words[1] too — needed so
+        // an OpCompositeExtract from an inline `array<...>(...)` constant is typed
+        // as an array (indexed `[i]`), not swizzled `.x`.
+        .ConstantComposite, .SpecConstantComposite,
+        .Constant, .ConstantTrue, .ConstantFalse, .SpecConstant,
         .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
         .UConvert, .SConvert, .FConvert, .Bitcast,
         .VectorShuffle, .CompositeExtract, .VectorTimesScalar,
@@ -2796,6 +2801,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const source_type = resolveTypeOf(module, scan_inst.words[3]);
                 var is_struct_field = false;
                 var is_matrix_col = false;
+                var is_array_elem = false;
                 var field_name_buf: [32]u8 = undefined;
                 const field_name: []const u8 = if (source_type) |st| blk: {
                     const st_def = getDef(module, st);
@@ -2806,6 +2812,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         }
                         if (sd2.op == .TypeMatrix) {
                             is_matrix_col = true;
+                            break :blk "";
+                        }
+                        // An ARRAY element is indexed `[idx]`, NOT swizzled. Without
+                        // this, `arr[0]` (extract index 0 from `array<vec4,2>`) was
+                        // inlined as `arr.x` — a vector swizzle on an array, which
+                        // naga rejects ("invalid field accessor `x`"). Silent-wrong.
+                        if (sd2.op == .TypeArray or sd2.op == .TypeRuntimeArray) {
+                            is_array_elem = true;
                             break :blk "";
                         }
                     }
@@ -2821,7 +2835,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 };
                 if (is_struct_field) {
                     new_name_buf = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ composite_name, suffix });
-                } else if (is_matrix_col) {
+                } else if (is_matrix_col or is_array_elem) {
                     new_name_buf = try std.fmt.allocPrint(alloc, "{s}[{d}]", .{ composite_name, idx });
                 } else if (idx <= 3) {
                     new_name_buf = try std.fmt.allocPrint(alloc, "{s}{s}", .{ composite_name, suffix });
