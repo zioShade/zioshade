@@ -29,6 +29,9 @@ tests/wintty/*.dxil
 /debug_*.py
 /audit_*.py
 
+# Tooling scratch output (never commit)
+.probe/
+
 # Internal research / planning artifacts (use docs/ for shipping docs)
 /autoresearch*
 /HANDOFF.md
