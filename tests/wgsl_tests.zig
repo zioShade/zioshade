@@ -1367,6 +1367,30 @@ test "wgsl: clip-distance is an honest error, not a naga-invalid @location array
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
 
+test "wgsl: stage input interface block is declared as a struct with @location members" {
+    // GLSL `in Block { flat float f; vec4 g; int h; } vin;` -> a struct-typed
+    // Input variable. WGSL needs a struct with @location/@interpolate members
+    // passed by value; glslpp emitted `@location(0) vin: Block` with the struct
+    // undeclared (naga: "no definition in scope for identifier: Block").
+    const source: [:0]const u8 =
+        \\#version 450
+        \\in Block { flat float f; vec4 g; flat int h; } vin;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(vin.f) + vin.g + vec4(float(vin.h)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "struct Block {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(0) f: f32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(2) @interpolate(flat) h: i32") != null);
+    // The param is a bare struct (members carry @location), not @location(N) vin.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "vin: Block") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(0) vin") == null);
+    try nagaValidateOrSkip(wgsl, "io-block-input");
+}
+
 test "wgsl: struct constructed from vector components keeps per-field args" {
     // `Point(uv.x, uv.y)` must stay per-field; the vector-collapse simplification
     // (valid for `vec2(uv.x,uv.y)->uv`) wrongly produced `Point(uv)` — a vec2
