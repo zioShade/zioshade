@@ -6,6 +6,8 @@ set dotenv-load := false
 
 # zig wrapper — ensures Zig 0.15.2 via mise
 zig := "mise exec -- zig"
+# DXC (HLSL oracle). Override: `just dxc="C:/path/to/dxc.exe" hlsl-dxc`.
+dxc := "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/dxc.exe"
 
 # ── default ──────────────────────────────────────────────────────────
 
@@ -45,9 +47,10 @@ strict-gate:
 
 # ── backend oracle differentials ─────────────────────────────────────
 # Every backend output is checked against its reference oracle:
-#   SPIR-V → spirv-val   (conformance)        HLSL → dxc            (validate-dxc)
+#   SPIR-V → spirv-val   (conformance)        HLSL → dxc            (hlsl-dxc)
 #   GLSL/HLSL/MSL structural → spirv-cross    (test-cross-compare)
-#   WGSL → naga                               (test-realworld)
+#   WGSL → naga          (wgsl-naga / test-realworld)
+#   MSL silent-wrong invariants               (msl-lint)
 
 # cross-compiler structural differential: glslpp output vs SPIRV-Cross
 test-cross-compare:
@@ -56,6 +59,21 @@ test-cross-compare:
 # validate glslpp WGSL output against naga (real-world shader corpus)
 test-realworld:
     {{zig}} build test-realworld --summary all
+
+# validate glslpp HLSL output against DXC over the SPIR-V corpus (stage-aware:
+# vs/ps/cs/ms profiles auto-selected from each module's execution model). This
+# is the HLSL analog of `wgsl-naga` / `msl-lint` — dxc is the real HLSL oracle.
+# Reports per-stage PASS/FAIL/SKIP. Requires dxc (override the `dxc` variable).
+#
+# Baseline at SM 6.0: ZERO unexplained divergences. The 4 known FAILs are all
+# DXC/D3D constraints on otherwise-correct glslpp HLSL, NOT glslpp bugs:
+#   * barycentric-{khr,khr-io-block,nv}: `SV_Barycentrics` requires ps_6_1
+#     (correct semantic; this gate compiles at 6.0).
+#   * complex-expression-in-access-chain: a structured-buffer element exceeds
+#     DXC's hard 2048-byte element-size limit (16384 B); a D3D limit, not glslpp.
+# Any NEW fail beyond these four is a real divergence to fix.
+hlsl-dxc:
+    {{zig}} build test-dxc -- "{{dxc}}" tests/spirv_bins 60
 
 # all backend oracle differentials in one gate (spirv-val + SPIRV-Cross + naga)
 oracle-diff: test-conformance test-cross-compare test-realworld
