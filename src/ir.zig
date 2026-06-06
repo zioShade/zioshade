@@ -84,6 +84,14 @@ pub const Module = struct {
     /// Literal-constant operands referenced by spec_constant_ops. Owned;
     /// freed in Module.deinit. Order doesn't matter (codegen scans by value).
     spec_op_literals: []const SpecOpLiteralConst = &.{},
+    /// Self-contained constant instructions (scalar OpConstants + the folded
+    /// OpConstantComposite) for module-scope `const` global initializers,
+    /// in dependency order (operands appear before the composite that uses
+    /// them). Codegen replays these in the constants section BEFORE emitting
+    /// the global OpVariables, so a Private variable's initializer operand
+    /// (`Global.initializer_id`) is never a forward reference. Owned; each
+    /// instruction's `operands` slice and the outer slice are freed in deinit.
+    global_init_constants: []const Instruction = &.{},
     // Fragment shader depth / early test flags
     depth_greater: bool = false,
     depth_less: bool = false,
@@ -163,6 +171,12 @@ pub const Module = struct {
         if (self.spec_op_literals.len > 0) {
             self.alloc.free(self.spec_op_literals);
         }
+        for (self.global_init_constants) |inst| {
+            if (inst.operands.len > 0) self.alloc.free(inst.operands);
+        }
+        if (self.global_init_constants.len > 0) {
+            self.alloc.free(self.global_init_constants);
+        }
         // Free heap-allocated AST types
         for (self.heap_types) |ptr| {
             self.alloc.destroy(ptr);
@@ -190,6 +204,12 @@ pub const Global = struct {
     layout: ?ast.Layout,
     storage_class: SPIRVStorageClass,
     result_id: u32 = 0,
+    /// For a module-scope `const` global (lowered to a Private OpVariable):
+    /// the result-id of the folded OpConstantComposite that codegen emits as
+    /// the variable's initializer operand (word-count 5). The composite (and
+    /// its scalar operands) live in `Module.global_init_constants`. null = no
+    /// initializer (the OpVariable is word-count 4 as before).
+    initializer_id: ?u32 = null,
 };
 
 pub const Local = struct {

@@ -144,6 +144,75 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
     // still work (they rebuild the caches during function analysis).
     analyzer.const_cache.clearRetainingCapacity();
 
+    // Design A — materialise module-scope `const` global-array initializers.
+    //
+    // A `const T arr[N] = T[](...)` global indexed by a *runtime* value lowers
+    // to a Private `OpVariable` with NO initializer and NO stores — its values
+    // appear nowhere in the SPIR-V, so every backend reads uninitialised memory
+    // (silent-wrong, glslang materialises the constant). Fold each such
+    // initializer to a constant-composite here and stash the self-contained
+    // constant instructions on the module so codegen emits them in the
+    // constants section BEFORE the global OpVariables; record the composite id
+    // on the matching Global so its OpVariable references it (word-count 5).
+    //
+    // Run with the constant caches cleared so the folded constants are fully
+    // self-contained (every operand is freshly emitted into `init_consts`, not
+    // a dangling id from a discarded scratch list), then clear the caches again
+    // so per-function analysis re-emits its own constants independently — the
+    // exact same invariant the const_cache clear above preserves (#157).
+    var init_consts: std.ArrayListUnmanaged(ir.Instruction) = .empty;
+    errdefer {
+        for (init_consts.items) |inst| {
+            if (inst.operands.len > 0) alloc.free(inst.operands);
+        }
+        init_consts.deinit(alloc);
+    }
+    if (analyzer.global_const_ast_inits.count() > 0) {
+        analyzer.const_composite_cache.clearRetainingCapacity();
+        var gci = analyzer.global_const_ast_inits.iterator();
+        while (gci.next()) |entry| {
+            const gid = entry.key_ptr.*;
+            const init_node = entry.value_ptr.*;
+            // Only flat module-scope const arrays lower to a Private global we
+            // can give a constant initializer; skip anything not registered as
+            // a Private OpVariable (defensive — builtins/blocks never appear in
+            // global_const_ast_inits, but storage class is the source of truth).
+            var target: ?*ir.Global = null;
+            for (analyzer.globals.items) |*g| {
+                if (g.result_id == gid and g.storage_class == .private) target = g;
+            }
+            if (target == null) continue;
+            // Evaluate into a throwaway scratch list so we capture exactly the
+            // constant instructions this initializer produces.
+            const saved = analyzer.instructions;
+            analyzer.instructions = .empty;
+            const res = analyzer.analyzeExpression(init_node) catch {
+                for (analyzer.instructions.items) |inst| {
+                    if (inst.operands.len > 0) alloc.free(inst.operands);
+                }
+                analyzer.instructions.deinit(alloc);
+                analyzer.instructions = saved;
+                continue;
+            };
+            if (analyzer.isConstantId(res.id)) {
+                try init_consts.appendSlice(alloc, analyzer.instructions.items);
+                // Ownership of the operand slices moved to init_consts — drop the
+                // scratch list WITHOUT freeing the operands.
+                analyzer.instructions.deinit(alloc);
+                target.?.initializer_id = res.id;
+                analyzer.global_const_init_map.put(alloc, gid, res.id) catch {};
+            } else {
+                for (analyzer.instructions.items) |inst| {
+                    if (inst.operands.len > 0) alloc.free(inst.operands);
+                }
+                analyzer.instructions.deinit(alloc);
+            }
+            analyzer.instructions = saved;
+        }
+        analyzer.const_cache.clearRetainingCapacity();
+        analyzer.const_composite_cache.clearRetainingCapacity();
+    }
+
     for (root.body) |node| {
         if (node.tag == .function_decl) {
             analyzer.analyzeFunction(node) catch |err| {
@@ -202,6 +271,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         .spec_constants = analyzer.spec_constants,
         .spec_constant_ops = analyzer.spec_constant_ops,
         .spec_op_literals = try analyzer.spec_op_literals.toOwnedSlice(alloc),
+        .global_init_constants = try init_consts.toOwnedSlice(alloc),
         .depth_greater = analyzer.has_depth_greater,
         .depth_less = analyzer.has_depth_less,
         .depth_unchanged = analyzer.has_depth_unchanged,

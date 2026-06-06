@@ -1885,3 +1885,30 @@ test "GLSL: sampler array (sampler2D tex[N]) declares + indexes correctly" {
     try assertContains(glsl, "texture(tex[2], uv)");
     try assertNotContains(glsl, "uniform tex"); // not mis-emitted as a UBO block
 }
+
+test "GLSL: module-scope const array indexed at runtime materializes its values" {
+    // Regression (Design A): a `const T arr[N] = T[](...)` global indexed by a
+    // runtime value lowered to a Private OpVariable with NO initializer and NO
+    // stores — every backend read uninitialised memory (silent-wrong). Now the
+    // frontend emits the folded OpConstantComposite as the variable's
+    // initializer, and the backend aliases the variable to the promoted const
+    // literal, so the values appear and the index resolves to them.
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out float FragColor;
+        \\const float LUT[4] = float[](1.0, 2.0, 3.0, 4.0);
+        \\void main() {
+        \\    int idx = int(gl_FragCoord.x) & 3;
+        \\    FragColor = LUT[idx];
+        \\}
+    ;
+    const glsl = try compileToGlslStage(source, .fragment);
+    defer alloc.free(glsl);
+    // The constant array is materialised with its values (not a bare uninit var).
+    try assertContains(glsl, "const float ");
+    try assertContains(glsl, "{1.0, 2.0, 3.0, 4.0}");
+    // No undeclared `LUT` access leaks: the access must resolve to the const,
+    // so the raw `LUT[` token must not appear in the body.
+    try assertNotContains(glsl, "LUT[");
+}

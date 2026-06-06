@@ -14387,3 +14387,26 @@ test "hlsl: unstructured switch (stripped OpSelectionMerge) is recovered (G2)" {
     defer alloc.free(recovered);
     try std.testing.expectEqualStrings(ok, recovered);
 }
+
+test "HLSL: module-scope const array indexed at runtime materializes its values" {
+    // Regression (Design A): a runtime-indexed `const T arr[N]` global must emit
+    // the values as a promoted `static const` and resolve the index to it — not
+    // a bare uninitialised `static T arr[N];` (which read garbage = silent-wrong).
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out float FragColor;
+        \\const float LUT[4] = float[](1.0, 2.0, 3.0, 4.0);
+        \\void main() {
+        \\    int idx = int(gl_FragCoord.x) & 3;
+        \\    FragColor = LUT[idx];
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .fragment);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "static const float ");
+    try assertContains(hlsl, "{1.0, 2.0, 3.0, 4.0}");
+    // No uninitialised duplicate declaration, no undeclared LUT access.
+    try assertNotContains(hlsl, "LUT[");
+    try assertNotContains(hlsl, "static float LUT");
+}
