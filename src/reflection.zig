@@ -34,6 +34,21 @@ pub const Member = struct {
     size: u32 = 0,
     type_id: u32 = 0,
     type_kind: TypeKind = .unknown,
+
+    // ── Layout metadata (read BACK from the SPIR-V decoration table — never recomputed) ──
+    /// `ArrayStride` decoration (Decoration 6) on the member's array type. 0 if
+    /// the member is not an array.
+    array_stride: u32 = 0,
+    /// `MatrixStride` decoration (Decoration 7) on the member. 0 if not a matrix.
+    matrix_stride: u32 = 0,
+    /// True if the member carries `RowMajor` (Decoration 4); false for
+    /// `ColMajor` (Decoration 5) or a non-matrix member.
+    is_row_major: bool = false,
+    /// True if the member's type is `OpTypeRuntimeArray` (an unsized tail array,
+    /// e.g. `Particle particles[];`). `array_dim` is 0 in that case.
+    is_runtime_array: bool = false,
+    /// Fixed element count for a sized array member; 0 for runtime or non-array.
+    array_dim: u32 = 0,
 };
 
 pub const Resource = struct {
@@ -62,6 +77,18 @@ pub const Resource = struct {
     /// Raw 32-bit operand from `OpSpecConstant`. Consumer reinterprets per type
     /// (int / uint / float bitcast / bool 0-or-1).
     default_value_u32: u32 = 0,
+
+    // ── Block-layout metadata (uniform_buffers / storage_buffers / push_constants) ──
+    /// Total size of the block's fixed part, derived as
+    /// `last_member.offset + last_member.size` (NOT a std140/std430 recompute).
+    /// A block whose only/last member is a runtime array is legitimately 0.
+    block_size: u32 = 0,
+    /// True if the resource variable carries `NonWritable` (Decoration 24),
+    /// i.e. a `readonly` buffer.
+    readonly: bool = false,
+    /// True if the resource variable carries `NonReadable` (Decoration 25),
+    /// i.e. a `writeonly` buffer.
+    writeonly: bool = false,
 };
 
 pub const EntryPoint = struct {
@@ -119,6 +146,16 @@ const Deco = struct {
     spec_id: u32 = 0xFFFF_FFFF,
     is_block: bool = false,
     is_buffer_block: bool = false,
+    /// `NonWritable` (24) on the variable → readonly buffer.
+    nonwritable: bool = false,
+    /// `NonReadable` (25) on the variable → writeonly buffer.
+    nonreadable: bool = false,
+};
+
+// Per-member matrix layout decorations, keyed by memberKey(struct_id, idx).
+const MemberMatrixDeco = struct {
+    matrix_stride: u32 = 0,
+    is_row_major: bool = false,
 };
 
 // Internal: type info
@@ -131,6 +168,10 @@ const TInfo = struct {
     byte_size: u32 = 0,
     /// For `.array`: the OpConstant id giving the (fixed) element count, 0 if runtime.
     array_len_id: u32 = 0,
+    /// True when this `.array` came from `OpTypeRuntimeArray` (unsized tail array).
+    /// Distinguishes a genuine runtime array from a sized array whose length
+    /// constant we failed to resolve.
+    is_runtime: bool = false,
 
     // Image-specific (only set when kind == .image, from OpTypeImage operands).
     /// Image dimensionality per SPIR-V `Dim` enum: 1=1D, 2=2D, 3=3D, 4=Cube, 5=Rect, 6=SubpassData, 7=Buffer.
@@ -161,6 +202,10 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
     defer types.deinit();
     var moffs = std.AutoHashMap(u64, u32).init(alloc); // key = memberKey(struct_id, idx)
     defer moffs.deinit();
+    var astrides = std.AutoHashMap(u32, u32).init(alloc); // array TYPE id → ArrayStride
+    defer astrides.deinit();
+    var mmat = std.AutoHashMap(u64, MemberMatrixDeco).init(alloc); // memberKey → matrix layout
+    defer mmat.deinit();
     var const_u32 = std.AutoHashMap(u32, u32).init(alloc); // OpConstant id → 32-bit value (for array lengths)
     defer const_u32.deinit();
 
@@ -218,13 +263,40 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                         1 => { if (wc >= 4) gop.value_ptr.spec_id = spirv_words[pos + 3]; }, // SpecId
                         2 => { gop.value_ptr.is_block = true; }, // Block
                         3 => { gop.value_ptr.is_buffer_block = true; }, // BufferBlock
+                        24 => { gop.value_ptr.nonwritable = true; }, // NonWritable → readonly
+                        25 => { gop.value_ptr.nonreadable = true; }, // NonReadable → writeonly
+                        6 => { if (wc >= 4) try astrides.put(target, spirv_words[pos + 3]); }, // ArrayStride (on array TYPE id)
                         else => {},
                     }
                 }
             },
-            72 => { // OpMemberDecorate
-                if (wc >= 5 and spirv_words[pos + 3] == 35) { // Offset
-                    try moffs.put(memberKey(spirv_words[pos + 1], spirv_words[pos + 2]), spirv_words[pos + 4]);
+            72 => { // OpMemberDecorate %struct member Decoration [operand]
+                if (wc >= 4) {
+                    const struct_id = spirv_words[pos + 1];
+                    const member_idx = spirv_words[pos + 2];
+                    const deco = spirv_words[pos + 3];
+                    const mkey = memberKey(struct_id, member_idx);
+                    switch (deco) {
+                        35 => { if (wc >= 5) try moffs.put(mkey, spirv_words[pos + 4]); }, // Offset
+                        7 => { // MatrixStride
+                            if (wc >= 5) {
+                                const gop = try mmat.getOrPut(mkey);
+                                if (!gop.found_existing) gop.value_ptr.* = .{};
+                                gop.value_ptr.matrix_stride = spirv_words[pos + 4];
+                            }
+                        },
+                        4 => { // RowMajor
+                            const gop = try mmat.getOrPut(mkey);
+                            if (!gop.found_existing) gop.value_ptr.* = .{};
+                            gop.value_ptr.is_row_major = true;
+                        },
+                        5 => { // ColMajor
+                            const gop = try mmat.getOrPut(mkey);
+                            if (!gop.found_existing) gop.value_ptr.* = .{};
+                            gop.value_ptr.is_row_major = false;
+                        },
+                        else => {},
+                    }
                 }
             },
             59 => { // OpVariable
@@ -292,6 +364,19 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                     var info = TInfo{ .kind = .array, .element_type_id = spirv_words[pos + 2], .array_len_id = spirv_words[pos + 3] };
                     if (types.get(spirv_words[pos + 2])) |t| info.byte_size = t.byte_size;
                     try types.put(spirv_words[pos + 1], info);
+                }
+            },
+            29 => { // OpTypeRuntimeArray %result %elemType  (unsized tail array)
+                if (wc >= 3) {
+                    // Mirror OpTypeArray but with no length constant and runtime flag.
+                    // byte_size stays 0: the runtime part contributes nothing to the
+                    // block's fixed size.
+                    try types.put(spirv_words[pos + 1], .{
+                        .kind = .array,
+                        .element_type_id = spirv_words[pos + 2],
+                        .array_len_id = 0,
+                        .is_runtime = true,
+                    });
                 }
             },
             43 => { // OpConstant %type %result %value...  (track scalar ints for array lengths)
@@ -408,6 +493,9 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             .size = if (pointee_info) |t| t.byte_size else 0,
             .array_size = array_size,
             .image_format = img_format,
+            // readonly/writeonly come from NonWritable/NonReadable on the VARIABLE.
+            .readonly = d.nonwritable,
+            .writeonly = d.nonreadable,
         };
 
         // Opaque resources (samplers / images / accel structs) are routed by their
@@ -457,17 +545,59 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
 
             var members = std.ArrayList(Member).initCapacity(alloc, ti.member_type_ids.len) catch continue;
             for (ti.member_type_ids, 0..) |mid, i| {
-                const mname = mnames.get(memberKey(res.type_id, @intCast(i))) orelse "";
-                const offset = moffs.get(memberKey(res.type_id, @intCast(i))) orelse 0;
+                const mkey = memberKey(res.type_id, @intCast(i));
+                const mname = mnames.get(mkey) orelse "";
+                const offset = moffs.get(mkey) orelse 0;
+                const mt: ?TInfo = types.get(mid);
+
+                // Matrix layout (per-member decorations).
+                var matrix_stride: u32 = 0;
+                var is_row_major = false;
+                if (mmat.get(mkey)) |md| {
+                    matrix_stride = md.matrix_stride;
+                    is_row_major = md.is_row_major;
+                }
+
+                // Array layout: ArrayStride is keyed by the array TYPE id; runtime
+                // detection comes from OpTypeRuntimeArray (is_runtime), NOT from a
+                // zero length.
+                var array_stride: u32 = 0;
+                var array_dim: u32 = 0;
+                var is_runtime_array = false;
+                if (mt) |t| {
+                    if (t.kind == .array) {
+                        array_stride = astrides.get(mid) orelse 0;
+                        if (t.is_runtime) {
+                            is_runtime_array = true;
+                            array_dim = 0;
+                        } else {
+                            array_dim = if (t.array_len_id != 0) (const_u32.get(t.array_len_id) orelse 0) else 0;
+                        }
+                    }
+                }
+
                 members.appendAssumeCapacity(.{
                     .name = if (mname.len > 0) alloc.dupe(u8, mname) catch "" else "",
                     .offset = offset,
                     .type_id = mid,
                     .type_kind = resolveKind(&types, mid),
-                    .size = if (types.get(mid)) |mt| mt.byte_size else 0,
+                    .size = if (mt) |t| t.byte_size else 0,
+                    .matrix_stride = matrix_stride,
+                    .is_row_major = is_row_major,
+                    .array_stride = array_stride,
+                    .array_dim = array_dim,
+                    .is_runtime_array = is_runtime_array,
                 });
             }
             res.members = members.items;
+
+            // block_size = last member's offset + its fixed size. Read BACK from the
+            // decoration table; never a std140/std430 recompute. A trailing runtime
+            // array contributes size 0, so a runtime-only/writeonly block reports 0.
+            if (members.items.len > 0) {
+                const last = members.items[members.items.len - 1];
+                res.block_size = last.offset + last.size;
+            }
         }
     }
 
