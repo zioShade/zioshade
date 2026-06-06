@@ -1367,6 +1367,24 @@ test "wgsl: clip-distance is an honest error, not a naga-invalid @location array
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
 
+test "wgsl: depth-only fragment declares -> FragmentOutput return type" {
+    // A shader writing only gl_FragDepth (no color output) returns
+    // `FragmentOutput(...)` from its body, so the signature must declare the
+    // return type. glslpp emitted `fn main()` (no return type) because
+    // output_var_id was null → naga "Returning Some where None is expected".
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(depth_greater) out float gl_FragDepth;
+        \\void main(){ gl_FragDepth = 0.5; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "-> FragmentOutput") != null);
+    try nagaValidateOrSkip(wgsl, "depth-only");
+}
+
 test "wgsl: vector shift coerces the amount to vecN<u32>, not scalar u32" {
     // `uvec2(1) << uvec2(a,b)` — the WGSL shift amount must match the base's
     // vector dimension (`vec2<u32> << vec2<u32>`). glslpp wrapped it in scalar
