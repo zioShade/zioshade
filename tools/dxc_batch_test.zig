@@ -233,6 +233,19 @@ pub fn main() !void {
         };
         defer alloc.free(hlsl);
 
+        // SV_Barycentrics requires Shader Model 6.1 (dxc rejects it for 6.0).
+        // Bump the profile for exactly those shaders so the differential reports
+        // only TRUE divergences, not version-policy mismatches.
+        var eff_profile: []const u8 = profile;
+        var bumped_profile: ?[]u8 = null;
+        if (sm < 61 and std.mem.indexOf(u8, hlsl, "SV_Barycentrics") != null) {
+            if (try dxcProfile(alloc, stage, 61)) |p61| {
+                bumped_profile = p61;
+                eff_profile = p61;
+            }
+        }
+        defer if (bumped_profile) |p| alloc.free(p);
+
         // Write HLSL to a temp file (one shared name; fine because we run sequentially).
         const tmp_path = "tmp_hlsl_test.hlsl";
         {
@@ -245,7 +258,7 @@ pub fn main() !void {
         // Run DXC with the resolved profile.
         const result = try std.process.Child.run(.{
             .allocator = alloc,
-            .argv = &.{ dxc_path, "-T", profile, "-E", "main", tmp_path },
+            .argv = &.{ dxc_path, "-T", eff_profile, "-E", "main", tmp_path },
         });
         defer alloc.free(result.stdout);
         defer alloc.free(result.stderr);
@@ -258,7 +271,7 @@ pub fn main() !void {
         if (exited_ok) {
             bucket.pass += 1;
             total_pass += 1;
-            std.debug.print("PASS {s} ({s} → {s})\n", .{ name, stage.name(), profile });
+            std.debug.print("PASS {s} ({s} → {s})\n", .{ name, stage.name(), eff_profile });
         } else {
             bucket.fail += 1;
             total_fail += 1;
@@ -270,7 +283,7 @@ pub fn main() !void {
             } else {
                 gop.value_ptr.* = 1;
             }
-            std.debug.print("FAIL {s} ({s} → {s}): {s}\n", .{ name, stage.name(), profile, gop.key_ptr.* });
+            std.debug.print("FAIL {s} ({s} → {s}): {s}\n", .{ name, stage.name(), eff_profile, gop.key_ptr.* });
         }
     }
 
