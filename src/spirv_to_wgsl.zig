@@ -2874,6 +2874,77 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
+    // For single-use OpLoad results, inline the source pointer name
+    // This eliminates unnecessary 'let vN = ptr;' declarations
+    // BUT: don't inline if the pointer is also a Store target (to preserve load-before-store semantics)
+    var inline_loads = std.AutoHashMap(u32, void).init(arena);
+    // Build set of pointer IDs that are Store targets in this function
+    var store_targets = std.AutoHashMap(u32, void).init(arena);
+    {
+        var si: usize = func_idx + 1;
+        while (si < module.instructions.len) : (si += 1) {
+            const scan_inst = module.instructions[si];
+            if (scan_inst.op == .FunctionEnd) break;
+            if (scan_inst.op == .Store and scan_inst.words.len > 1) {
+                store_targets.put(scan_inst.words[1], {}) catch {};
+            }
+        }
+    }
+
+    // Pre-pass (MUST run before the AccessChain pre-scan below): propagate the
+    // source name of DIRECT-variable loads (e.g. `%27 = OpLoad %int %index`, or
+    // `OpLoad %float %FragColor`) onto the load result. The AccessChain pre-scan
+    // and the arithmetic inline-expression pre-scan freeze operands by name; the
+    // load-name propagation, however, used to happen ONLY at emission time (the
+    // is_input/is_output/is_tex branches plus the generic immutable-load loop),
+    // which runs AFTER those pre-scans. So a reloaded input/output value resolved
+    // to its raw default `vN` inside a frozen inline expression while direct
+    // emission used the real name (`index`, `FragColor`) — the same value under
+    // two names, leaving the `vN` undeclared (naga "no definition in scope",
+    // silent-wrong). Doing it here keeps every emission path consistent.
+    //
+    // Output/Input/texture loads propagate the variable name UNCONDITIONALLY
+    // (mirroring emission), since in WGSL those are read by name at the use site.
+    // Other variables (Uniform/PushConstant/Private/Function) propagate only when
+    // the pointer is not a Store target, so mutable values still capture per-load.
+    // Loads of AccessChain results are left to the value-name loop after the
+    // pre-scan, since their names depend on the expressions it builds.
+    {
+        var it = def_op.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* != .Load and entry.value_ptr.* != .CopyObject) continue;
+            const result_id = entry.key_ptr.*;
+            const load_inst = getDef(module, result_id) orelse continue;
+            if (load_inst.words.len <= 3) continue;
+            const ptr_id = load_inst.words[3];
+            const ptr_def = getDef(module, ptr_id) orelse continue;
+            if (ptr_def.op != .Variable or ptr_def.words.len < 4) continue; // direct-variable loads only
+            const sc: spirv.StorageClass = @enumFromInt(ptr_def.words[3]);
+            // Texture/sampler loads (UniformConstant whose element is an image/
+            // sampler/sampled-image) propagate unconditionally, like is_tex.
+            var is_tex = false;
+            if (sc == .UniformConstant) {
+                if (getDef(module, ptr_def.words[1])) |ptv| {
+                    if (ptv.op == .TypePointer and ptv.words.len > 3) {
+                        if (getDef(module, ptv.words[3])) |pev| {
+                            is_tex = (pev.op == .TypeSampler or pev.op == .TypeSampledImage or pev.op == .TypeImage);
+                        }
+                    }
+                }
+            }
+            const unconditional = (sc == .Output or sc == .Input or is_tex);
+            // Mutable, non-special variables must capture the current value.
+            if (!unconditional and store_targets.contains(ptr_id)) continue;
+            const ptr_name = names.get(ptr_id) orelse continue;
+            if (ptr_name.len == 0) continue;
+            const current_name = names.get(result_id) orelse "";
+            if (std.mem.eql(u8, ptr_name, current_name)) continue; // already aligned
+            const name_copy = try alloc.dupe(u8, ptr_name);
+            if (try names.fetchPut(result_id, name_copy)) |old| alloc.free(old.value);
+            try inline_loads.put(result_id, {});
+        }
+    }
+
     // Pre-scan: process AccessChain instructions to set names before expression inlining
     // Without this, inline expressions reference raw names like v27 instead of v15.colors[v25]
     {
@@ -2902,27 +2973,19 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
-    // For single-use OpLoad results, inline the source pointer name
-    // This eliminates unnecessary 'let vN = ptr;' declarations
-    // BUT: don't inline if the pointer is also a Store target (to preserve load-before-store semantics)
-    var inline_loads = std.AutoHashMap(u32, void).init(arena);
-    // Build set of pointer IDs that are Store targets in this function
-    var store_targets = std.AutoHashMap(u32, void).init(arena);
-    {
-        var si: usize = func_idx + 1;
-        while (si < module.instructions.len) : (si += 1) {
-            const scan_inst = module.instructions[si];
-            if (scan_inst.op == .FunctionEnd) break;
-            if (scan_inst.op == .Store and scan_inst.words.len > 1) {
-                store_targets.put(scan_inst.words[1], {}) catch {};
-            }
-        }
-    }
+    // For single-use OpLoad results, inline the source pointer name (continued).
+    // `inline_loads` and `store_targets` were set up before the AccessChain
+    // pre-scan above (so direct immutable-variable loads are named first). This
+    // loop covers the remaining loads — notably loads of AccessChain results,
+    // whose names depend on the expressions that pre-scan built.
     {
         var it = def_op.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.* == .Load or entry.value_ptr.* == .CopyObject) {
                 const result_id = entry.key_ptr.*;
+                // Already handled by the direct-variable pre-pass — its name and
+                // inline status are final; re-running would self-assignment-rename it.
+                if (inline_loads.contains(result_id)) continue;
                 // Immutable loads (pointers that are NOT store targets — inputs,
                 // uniforms, push-constants, spec-consts) are inlined to the source
                 // name at ANY use count: the value can't change, so substitution is
