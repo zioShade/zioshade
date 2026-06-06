@@ -1367,6 +1367,25 @@ test "wgsl: clip-distance is an honest error, not a naga-invalid @location array
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
 
+test "wgsl: struct constructed from vector components keeps per-field args" {
+    // `Point(uv.x, uv.y)` must stay per-field; the vector-collapse simplification
+    // (valid for `vec2(uv.x,uv.y)->uv`) wrongly produced `Point(uv)` — a vec2
+    // passed to a 2-scalar struct, which naga rejects.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\struct P { float a; float b; };
+        \\void main(){ P p = P(uv.x, uv.y); o = vec4(p.a, p.b, 0.0, 1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "(uv.x, uv.y)") != null);
+    try nagaValidateOrSkip(wgsl, "struct-from-vec");
+}
+
 test "wgsl: dual-source blending (two outputs at one @location) is an honest error" {
     // GLSL `layout(location=0, index=0/1)` dual-source blending → WGSL needs
     // @blend_src, but glslpp's SPIR-V drops the Index decoration, so the backend

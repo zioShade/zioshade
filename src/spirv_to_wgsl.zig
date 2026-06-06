@@ -3850,6 +3850,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const num_comps = inst.words.len - 3;
+                // A STRUCT result needs one argument per field — the vector
+                // simplifications below (broadcast `T(x)`, sequential-extract
+                // collapse `T(v)` / `T(v.xy)`) are only valid for vector results.
+                // `Point(uv.x, uv.y)` collapsed to `Point(uv)` (passing a vec2 to a
+                // 2-scalar struct) — naga-invalid. Force the per-field general case.
+                const is_struct_result = isStructType(module, inst.words[1]);
                 // Check if all components are the same (for scalar broadcast simplification)
                 var all_same = true;
                 var first_comp: ?[]const u8 = null;
@@ -3862,7 +3868,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         break;
                     }
                 }
-                if (all_same and num_comps > 1 and first_comp != null) {
+                if (!is_struct_result and all_same and num_comps > 1 and first_comp != null) {
                     try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, first_comp.? });
                 } else {
                     // Check for leading sequential extracts from the same source
@@ -3899,7 +3905,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             }
                         }
                     }
-                    if (lead_count >= 2 and lead_source != null and !src_is_struct) {
+                    if (lead_count >= 2 and lead_source != null and !src_is_struct and !is_struct_result) {
                         // Emit with leading source aggregated
                         var parts = std.ArrayList(u8).initCapacity(arena, 128) catch return;
                         defer parts.deinit(arena);
