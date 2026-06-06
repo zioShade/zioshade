@@ -977,10 +977,27 @@ fn buildAccessExprPlain(module: *const ParsedModule, names: *std.AutoHashMap(u32
 }
 
 /// Try to resolve a constant expression to a WGSL literal string
-fn resolveConstantExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), id: u32, arena: std.mem.Allocator) ?[]const u8 {
-    _ = names;
+fn resolveConstantExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32, arena: std.mem.Allocator) ?[]const u8 {
     const inst = common.getDef(module, id) orelse return null;
     switch (inst.op) {
+        .ConstantComposite => {
+            // Build a WGSL composite constructor: `vec4f(e0,…)` for a vector,
+            // `array<T, N>(e0, e1, …)` for a (possibly nested) array, recursing
+            // into each constituent. Used so a const-initialised global emits
+            // its real values (`const LUT: array<f32,16> = array<f32,16>(…)`)
+            // instead of a zero-initialised var<private> (silent-wrong).
+            if (inst.words.len < 3) return null;
+            const type_name = wgslType(module, inst.words[1], names, arena) catch return null;
+            var buf = std.ArrayList(u8).initCapacity(arena, 64) catch return null;
+            buf.print(arena, "{s}(", .{type_name}) catch return null;
+            for (inst.words[3..], 0..) |comp_id, i| {
+                if (i > 0) buf.appendSlice(arena, ", ") catch return null;
+                const comp = resolveConstantExpr(module, names, comp_id, arena) orelse return null;
+                buf.appendSlice(arena, comp) catch return null;
+            }
+            buf.appendSlice(arena, ")") catch return null;
+            return buf.toOwnedSlice(arena) catch return null;
+        },
         .Constant => {
             if (inst.words.len < 4) return null;
             const val = inst.words[3];
@@ -1571,10 +1588,20 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         const result_id = inst.words[2];
         const name = names.get(result_id) orelse continue;
         const rt = wgslType(&module, inst.words[1], &names, arena) catch continue;
-        // Check if this Private var is actually used (has loads from it)
+        // Check if this Private var is actually used. A direct OpLoad reads a
+        // scalar/struct global; an OpAccessChain rooted at the var reads an
+        // element (`arr[i]` for a const array). Both count as "used" — missing
+        // the access-chain case skipped declaring const-array globals, leaving
+        // `arr[i]` referencing an undeclared name (naga reject). Safe to declare
+        // now that the initializer path below emits the real array values via
+        // resolveConstantExpr (not a zero-initialised var<private>).
         var has_load = false;
         for (module.instructions) |check| {
             if (check.op == .Load and check.words.len > 3 and check.words[3] == result_id) {
+                has_load = true;
+                break;
+            }
+            if (check.op == .AccessChain and check.words.len > 3 and check.words[3] == result_id) {
                 has_load = true;
                 break;
             }
@@ -1582,12 +1609,16 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         if (!has_load) continue;
         // Check for initializer (optional 5th word in OpVariable)
         if (inst.words.len > 4) {
+            // Const-initialised global: emit its real values as a `const`. If we
+            // can't materialise the initializer, DON'T fall through to a
+            // zero-initialised `var<private>` (that would be the wrong values =
+            // silent-wrong) — skip the declaration so the access fails loudly
+            // (naga: undefined identifier) instead of silently reading zeros.
             const init_id = inst.words[4];
-            const init_val = resolveConstantExpr(&module, &names, init_id, arena);
-            if (init_val) |val| {
+            if (resolveConstantExpr(&module, &names, init_id, arena)) |val| {
                 try w.print("const {s}: {s} = {s};\n", .{ name, rt, val });
-                continue;
             }
+            continue;
         }
         try w.print("var<private> {s}: {s};\n", .{ name, rt });
     }
