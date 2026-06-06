@@ -1367,6 +1367,39 @@ test "wgsl: clip-distance is an honest error, not a naga-invalid @location array
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
 
+test "wgsl: scalar geometric builtins lower to scalar ops (normalize->sign etc.)" {
+    // GLSL allows normalize/length/distance on scalars; WGSL defines them only on
+    // vectors (naga: "wrong type passed as argument #1 to `normalize`"). They must
+    // lower: normalize(x)->sign(x), length(x)->abs(x), distance(a,b)->abs(a-b).
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0, std140) uniform U { float a; float b; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(normalize(u.a), length(u.a), distance(u.a, u.b), 1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "sign(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "abs(") != null);
+    // The vector-only builtins must NOT be emitted on scalars.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "normalize(") == null);
+    try nagaValidateOrSkip(wgsl, "scalar-geom");
+}
+
+test "wgsl: scalar refract is an honest error (vector-only builtin, formula not faked)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0, std140) uniform U { float i; float n; float e; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(refract(u.i, u.n, u.e)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
 test "wgsl: gl_PointSize is an honest error, not @builtin(__point_size)" {
     // WGSL points always render at 1px — there is no point-size output. glslpp
     // previously emitted `@builtin(__point_size)` (an invented builtin) which
