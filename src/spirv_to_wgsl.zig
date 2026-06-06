@@ -1190,6 +1190,16 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
+    // WGSL has no ray queries (SPV_KHR_ray_query: OpTypeRayQueryKHR + rayQuery
+    // ops). The unmapped ops otherwise fall through to a repeated `var v`
+    // fallback → naga "redefinition of `v`". Fail loud.
+    for (module.instructions) |rinst| {
+        if (rinst.op == .TypeRayQueryKHR) {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no ray-query type (SPV_KHR_ray_query)", .{}) catch null;
+            return error.UnsupportedOp;
+        }
+    }
+
     // WGSL has no fragment-shader interlock (GL_ARB/EXT_fragment_shader_interlock:
     // beginInvocationInterlockARB/endInvocationInterlockARB). Detect the interlock
     // execution mode (PixelInterlock{Ordered,Unordered}EXT 5366/5367,
