@@ -166,6 +166,52 @@ const cases = [_]Case{
         ,
         .offsets = &.{ .{ 0, 0 }, .{ 1, 64 }, .{ 2, 96 } },
     },
+    // std140 STRUCT base alignment rounds UP to 16: S{float a} has max-member
+    // alignment 4, but a struct's std140 base alignment is roundUp(4,16)=16, and
+    // its size likewise rounds to 16, so a FLOAT `tail` (align 4) follows at
+    // Offset 16 — NOT 4. A vec4 tail would mask this (its own 16-alignment pulls
+    // it up regardless), so we use a float tail to isolate the struct base-align
+    // rule. glslang oracle = 16. (Pre-fix glslpp gave 4.)
+    .{
+        .name = "std140 scalar-only struct base-align -> float tail 16",
+        .src =
+        \\#version 450
+        \\struct S { float a; };
+        \\layout(set=0,binding=0,std140) uniform U { S s; float tail; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.s.a + u.tail); }
+        ,
+        .offsets = &.{ .{ 0, 0 }, .{ 1, 16 } },
+    },
+    // std140 STRUCT base alignment rounds UP to 16: V2{vec2 a} has max-member
+    // alignment 8, but roundUp(8,16)=16, so a FLOAT `tail` follows at Offset 16
+    // — NOT 8. glslang oracle = 16. (Pre-fix glslpp gave 8.)
+    .{
+        .name = "std140 vec2-only struct base-align -> float tail 16",
+        .src =
+        \\#version 450
+        \\struct V2 { vec2 a; };
+        \\layout(set=0,binding=0,std140) uniform U { V2 s; float tail; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(u.s.a, 0, u.tail); }
+        ,
+        .offsets = &.{ .{ 0, 0 }, .{ 1, 16 } },
+    },
+    // std430 must NOT round struct base alignment to 16: S{float a} keeps its
+    // REAL max-member alignment 4, so `t` (a float) follows at Offset 4.
+    // glslang oracle = 4. This proves FIX 1 is std140-only and stays correct
+    // throughout.
+    .{
+        .name = "std430 scalar struct base-align stays 4 -> t 4",
+        .src =
+        \\#version 450
+        \\struct S { float a; };
+        \\layout(set=0,binding=0,std430) buffer B { S s; float t; } b;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(b.s.a + b.t); }
+        ,
+        .offsets = &.{ .{ 0, 0 }, .{ 1, 4 } },
+    },
 };
 
 test "std140/std430 member offset after a nested struct matches glslang (#181)" {

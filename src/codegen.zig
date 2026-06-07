@@ -3305,6 +3305,18 @@ const Codegen = struct {
         }
     }
 
+    /// Resolve a named struct's emitted SPIR-V type id for layout computations.
+    /// Interface-block structs (UBO/SSBO) are cached in
+    /// `emitted_interface_named_types`; plain structs in `emitted_named_types`.
+    /// The interface map must win — a struct reached through a block lives there,
+    /// and missing it makes the layout recursion return silent-wrong defaults
+    /// (#181). Returns null when the type was never emitted (both maps miss);
+    /// each caller supplies its own per-site default for that case.
+    fn resolveLayoutTypeId(self: *Codegen, name: []const u8) ?u32 {
+        return self.emitted_interface_named_types.get(name) orelse
+            self.emitted_named_types.get(name);
+    }
+
     fn layoutAlignmentScalar(self: *Codegen, ty: ast.Type) u32 {
         // Scalar layout: alignment of any type is the alignment of its scalar component.
         // No 16-byte rounding, no vec3-to-vec4 padding.
@@ -3330,8 +3342,7 @@ const Codegen = struct {
                 // ensureType's in_interface_block split). Look there first so the
                 // member alignment/size recursion finds the real members instead
                 // of the silent-wrong default. (#181)
-                const type_id = self.emitted_interface_named_types.get(name) orelse
-                    self.emitted_named_types.get(name) orelse break :blk 4;
+                const type_id = self.resolveLayoutTypeId(name) orelse break :blk 4;
                 if (self.layout_visited.contains(type_id)) break :blk 8; // self-ref cycle: pointer
                 self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 4;
                 defer _ = self.layout_visited.remove(type_id);
@@ -3374,8 +3385,7 @@ const Codegen = struct {
                 if (td.is_buffer_reference) break :blk 8; // pointer alignment
                 // Interface-block structs live in emitted_interface_named_types;
                 // try it first or the recursion misses and returns 16 (#181).
-                const type_id = self.emitted_interface_named_types.get(name) orelse
-                    self.emitted_named_types.get(name) orelse break :blk 16;
+                const type_id = self.resolveLayoutTypeId(name) orelse break :blk 16;
                 if (self.layout_visited.contains(type_id)) break :blk 8; // self-ref cycle: pointer
                 self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 16;
                 defer _ = self.layout_visited.remove(type_id);
@@ -3404,9 +3414,8 @@ const Codegen = struct {
                 if (td.is_buffer_reference) break :blk 8; // pointer alignment
                 // Interface-block structs live in emitted_interface_named_types;
                 // try it first or the recursion misses and returns 16 (#181).
-                const type_id = self.emitted_interface_named_types.get(name) orelse
-                    self.emitted_named_types.get(name) orelse break :blk 16;
-                if (self.layout_visited.contains(type_id)) break :blk 8; // self-ref cycle: pointer
+                const type_id = self.resolveLayoutTypeId(name) orelse break :blk 16;
+                if (self.layout_visited.contains(type_id)) break :blk 16; // self-ref cycle: pointer (std140 rounds to 16)
                 self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 16;
                 defer _ = self.layout_visited.remove(type_id);
                 var max_align: u32 = 4;
@@ -3414,7 +3423,12 @@ const Codegen = struct {
                     const ma = self.layoutAlignmentStd140(member.ty);
                     if (ma > max_align) max_align = ma;
                 }
-                break :blk max_align;
+                // std140 rule: a struct's base alignment is the max member
+                // alignment ROUNDED UP to a multiple of 16 (vec4 alignment). So a
+                // member following a scalar-only / vec2-only nested struct lands
+                // at a 16-aligned offset (glslang ground truth). std430 does NOT
+                // do this (see layoutAlignmentStd430) — keep them distinct.
+                break :blk std.mem.alignForward(u32, max_align, 16);
             },
             else => 4,
         };
@@ -3460,8 +3474,7 @@ const Codegen = struct {
                 // are cached in emitted_interface_named_types; look there first or
                 // the size recursion misses and returns 0 — the member after a
                 // nested struct then never advances and overlaps it (#181).
-                const type_id = self.emitted_interface_named_types.get(name) orelse
-                    self.emitted_named_types.get(name) orelse {
+                const type_id = self.resolveLayoutTypeId(name) orelse {
                         // Both maps missed: the struct's type was never emitted
                         // before its layout was computed. Returning 0 here is the
                         // silent-wrong default that #181 was about — make it loud
@@ -3560,8 +3573,7 @@ const Codegen = struct {
                 // Recurse into nested struct arrays: emit Offset for the element struct members
                 if (effective_ty == .named) {
                     const elem_td = self.module.types.get(effective_ty.named) orelse continue;
-                    const elem_type_id = self.emitted_interface_named_types.get(effective_ty.named) orelse
-                        self.emitted_named_types.get(effective_ty.named) orelse continue;
+                    const elem_type_id = self.resolveLayoutTypeId(effective_ty.named) orelse continue;
                     // Inside a nested struct the array-split context is null (its
                     // arrays were created unsplit), so its array-stride lookups must
                     // use the same null key.
@@ -3574,8 +3586,7 @@ const Codegen = struct {
             // Recurse into direct nested struct members
             if (member.ty == .named) {
                 const nested_td = self.module.types.get(member.ty.named) orelse continue;
-                const nested_type_id = self.emitted_interface_named_types.get(member.ty.named) orelse
-                    self.emitted_named_types.get(member.ty.named) orelse continue;
+                const nested_type_id = self.resolveLayoutTypeId(member.ty.named) orelse continue;
                 // Nested struct → array-split context is null (see above).
                 const saved_ctx = self.array_layout_ctx;
                 self.array_layout_ctx = null;
