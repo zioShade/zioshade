@@ -423,7 +423,12 @@ pub const AddressingModel = enum(u32) {
 };
 
 pub const Decoration = enum(u32) {
-    coherent = 0,
+    // NOTE: Coherent/Volatile/Restrict were previously WRONG here
+    // (coherent=0 collided with RelaxedPrecision; @"volatile"=22 collided with
+    // NoSignedWrap). The SPIR-V spec values are Restrict=19, Volatile=21,
+    // Coherent=23 — see fix in #177.
+    coherent = 23,
+    @"volatile" = 21,
     invariant = 18,
     block = 2,
     buffer_block = 3,
@@ -436,7 +441,6 @@ pub const Decoration = enum(u32) {
     flat = 14,
     centroid = 16,
     restrict = 19,
-    @"volatile" = 22,
     non_writable = 24,
     non_readable = 25,
     location = 30,

@@ -427,11 +427,13 @@ fn doGlslToWgsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const
 
 // ── Reflect / Validate ─────────────────────────────────────────────
 
-/// Print buffer-block member layout metadata (offset / strides / runtime).
-fn printMembers(members: []const glslpp.reflection.Member) void {
+/// Print buffer-block member layout metadata (offset / strides / runtime /
+/// access quals), recursing into nested struct members (#177).
+fn printMembers(members: []const glslpp.reflection.Member, indent: usize) void {
     const p = std.debug.print;
     for (members) |m| {
-        p("    .{s}: offset={d} size={d}", .{ m.name, m.offset, m.size });
+        for (0..indent) |_| p("  ", .{});
+        p("  .{s}: offset={d} size={d}", .{ m.name, m.offset, m.size });
         if (m.matrix_stride != 0) p(" matrix_stride={d} {s}", .{ m.matrix_stride, if (m.is_row_major) "row_major" else "col_major" });
         if (m.array_stride != 0 or m.is_runtime_array or m.array_dim != 0) {
             if (m.is_runtime_array) {
@@ -440,7 +442,11 @@ fn printMembers(members: []const glslpp.reflection.Member) void {
                 p(" array[{d}] array_stride={d}", .{ m.array_dim, m.array_stride });
             }
         }
+        if (m.coherent) p(" coherent", .{});
+        if (m.is_volatile) p(" volatile", .{});
+        if (m.@"restrict") p(" restrict", .{});
         p("\n", .{});
+        if (m.members) |inner| printMembers(inner, indent + 1);
     }
 }
 
@@ -459,16 +465,19 @@ fn doReflect(alloc: std.mem.Allocator, input: []const u8) !void {
     p("Uniform Buffers: {d}\n", .{resources.uniform_buffers.len});
     for (resources.uniform_buffers) |ubo| {
         p("  {s}: set={d} binding={d} size={d} block_size={d}\n", .{ ubo.name, ubo.set, ubo.binding, ubo.size, ubo.block_size });
-        printMembers(ubo.members);
+        printMembers(ubo.members, 0);
     }
     p("Storage Buffers: {d}\n", .{resources.storage_buffers.len});
     for (resources.storage_buffers) |sb| {
-        p("  {s}: set={d} binding={d} size={d} block_size={d}{s}{s}\n", .{
+        p("  {s}: set={d} binding={d} size={d} block_size={d}{s}{s}{s}{s}{s}\n", .{
             sb.name, sb.set, sb.binding, sb.size, sb.block_size,
             if (sb.readonly) " readonly" else "",
             if (sb.writeonly) " writeonly" else "",
+            if (sb.coherent) " coherent" else "",
+            if (sb.is_volatile) " volatile" else "",
+            if (sb.@"restrict") " restrict" else "",
         });
-        printMembers(sb.members);
+        printMembers(sb.members, 0);
     }
     p("Inputs: {d}\n", .{resources.inputs.len});
     for (resources.inputs) |inp| p("  {s}: location={d}\n", .{ inp.name, inp.location });
