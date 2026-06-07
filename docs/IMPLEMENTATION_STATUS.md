@@ -71,7 +71,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | WGSL output | ✅ | ✅ | ✅ naga-validated; stage I/O **interface blocks** (in + out), cross-function I/O, frexp/modf struct-return, loop phi, passthrough-return, scalar geometric builtins, vector shifts, array-element/struct construction all naga-clean. Honest-errors the genuinely-unrepresentable: recursion, multisample/sampler arrays, layer/viewport/clip-cull/point-size built-ins, dual-source blending, ARM tensors, ray queries, geometry/tess stages |
 | SPIR-V input (pre-compiled) | ✅ Full | ✅ Partial (best-effort) | ⚠️ Assumes glslpp structure |
 | Opcode handler coverage | ~400 opcodes | HLSL: 180, GLSL: 132, MSL: 130, WGSL: ~65 (deepening under #170) | ✅ HLSL strong, ⚠️ WGSL narrower but never silent-wrong (catch-all fails loud) |
-| Reflection API | ✅ Full | ✅ Resources + bindings + members + array/matrix strides + block_size + readonly/writeonly (`reflect`) | ⚠️ No JSON/nested-struct recursion (#171 Batch A done) |
+| Reflection API | ✅ Full | ✅ Resources + bindings + members + array/matrix strides + block_size + readonly/writeonly + nested-struct recursion + access quals + **JSON serialization** (`reflect --json`) | ✅ #171 + #177 done (`toJson` mirrors `spirv-cross --reflect`) |
 | Descriptor set management | ✅ Full | `binding_shift` + per-resource `resource_bindings` remap (HLSL/MSL, CLI `--bind`); no UBO flatten | ⚠️ Partial |
 | Combined image sampler | ✅ | Partial | ⚠️ |
 | UBO/SSBO layout handling | Full (std140, std430, row/column-major) | Basic (std140, std430) | ⚠️ |
@@ -253,7 +253,7 @@ wintty compiles ~10 shaders at startup:
 
 | # | Gap | Impact | Effort |
 |---|-----|--------|--------|
-| G1 | **Reflection API** | Without this, consumers must hardcode bindings/inputs/outputs. SPIRV-Cross's most-used feature after cross-compilation. **Batch A done (#171):** array/matrix strides, row/col-major, runtime arrays, `block_size`, readonly/writeonly — all read back from decorations. Remaining: nested-struct recursion + JSON serialization (deferred follow-up). | Large (new module, ~2,000 lines) |
+| G1 | **Reflection API** | Without this, consumers must hardcode bindings/inputs/outputs. SPIRV-Cross's most-used feature after cross-compilation. **Done (#171 Batch A + #177):** array/matrix strides, row/col-major, runtime arrays, `block_size`, readonly/writeonly, nested-struct recursion, per-member/-resource Coherent/Volatile/Restrict, and JSON serialization (`reflect --json` / `reflection.toJson`, mirroring `spirv-cross --reflect`) — all read back from decorations, never recomputed. | Large (new module, ~2,000 lines) |
 | G2 | **Robust pre-compiled SPIR-V consumption** | Backends assume glslpp-generated SPIR-V structure. Need to handle arbitrary SPIR-V from glslang, DXC, etc. | Medium (defensive parsing, edge cases) |
 | G3 | **Diagnostic quality** | Line/column tracking through the pipeline. Currently errors are opaque enums. | Medium (source mapping throughout) |
 

@@ -993,6 +993,13 @@ pub fn reflectSPIRV(alloc: std.mem.Allocator, spirv_words: []const u32) !reflect
     return reflection.reflect(alloc, spirv_words);
 }
 
+/// Serialize a reflection result to a JSON document mirroring the
+/// `spirv-cross <file>.spv --reflect` schema (#177 Item 2). Opt-in and additive;
+/// caller owns the returned slice. Thin re-export of `reflection.toJson`.
+pub fn reflectionToJson(alloc: std.mem.Allocator, res: *const reflection.ShaderResources) ![]u8 {
+    return reflection.toJson(alloc, res);
+}
+
 /// Compile GLSL source and reflect on the resulting SPIR-V.
 /// Convenience function that combines compileToSPIRV + reflectSPIRV.
 pub fn reflectGLSL(alloc: std.mem.Allocator, source: [:0]const u8, options: CompileOptions) !reflection.ShaderResources {
