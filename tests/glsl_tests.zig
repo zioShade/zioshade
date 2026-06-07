@@ -1960,3 +1960,61 @@ test "GLSL: multidimensional array local declares all dimensions" {
         return error.TestExpectedFind;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Arrayed sampler type names (#187 part A).
+//
+// The OpTypeImage `Arrayed` operand (word[5]) was dropped when naming sampled
+// textures, so `sampler2DArray`/`samplerCubeArray` degraded to the non-array
+// `sampler2D`/`samplerCube`. GLSL keeps the array layer inside the sample
+// coordinate, so ONLY the declared type name was wrong (the `texture(...)` call
+// is unchanged). Oracle: spirv-cross --version 450.
+//
+// NOTE: GLSL drops the `Shadow` qualifier entirely (sampler2DArrayShadow →
+// sampler2D) — a separate, pre-existing depth-naming bug that is OUT OF SCOPE
+// here, so only the NON-shadow array types are pinned.
+// ---------------------------------------------------------------------------
+
+test "arrayed: sampler2DArray keeps the Array suffix" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArray tex;
+        \\layout(location=0) in vec3 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = texture(tex, uv); }
+    ;
+    const glsl = try compileToGlslStage(source, .fragment);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "sampler2DArray tex");
+    // The sample call keeps the layer in the coord (no GLSL call change).
+    try assertContains(glsl, "texture(tex, uv)");
+}
+
+test "arrayed: samplerCubeArray keeps the Array suffix" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform samplerCubeArray tex;
+        \\layout(location=0) in vec4 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = texture(tex, uv); }
+    ;
+    const glsl = try compileToGlslStage(source, .fragment);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "samplerCubeArray tex");
+    // Must not degrade to the non-array name.
+    try assertNotContains(glsl, "samplerCube tex;");
+}
+
+test "arrayed: plain sampler2D keeps no Array suffix (no regression)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = texture(tex, uv); }
+    ;
+    const glsl = try compileToGlslStage(source, .fragment);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "sampler2D tex");
+    try assertNotContains(glsl, "sampler2DArray");
+}
