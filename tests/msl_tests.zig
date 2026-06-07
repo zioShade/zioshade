@@ -206,6 +206,37 @@ test "struct member after a VARIABLE array index emits .member, not [N] (silent-
     try assertNotContains(msl, "[idx][0]");
 }
 
+test "nested struct in UBO: array element + std140 packing matches spirv-cross" {
+    // A UBO containing an array of a nested struct exercises two paths that the
+    // codegen std140 offset fix (#181) unmasked in the MSL backend:
+    //   1. mslWidenedElementType must accept a TypeStruct element so the member
+    //      emits `Light lights[4];` (was honest-error UnsupportedUboMemberLayout).
+    //   2. the nested `Light` struct decl must be laid out std140-aware: a vec3
+    //      followed by a tightly-packed scalar becomes `packed_float3` so the
+    //      struct's natural MSL size (16) equals its std140 ArrayStride (16).
+    //      Emitting plain `float3` would push `intensity` to offset 16, making
+    //      Light 32 bytes and reading `lights[i]` at the wrong stride.
+    // Oracle: spirv-cross --msl emits exactly `packed_float3 color; float
+    // intensity;` inside Light and `Light lights[4];` inside the block.
+    const source =
+        \\#version 450
+        \\struct Light { vec3 color; float intensity; };
+        \\layout(std140, binding=0) uniform U { Light lights[4]; } u;
+        \\layout(location=0) flat in int idx;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(u.lights[idx].color * u.lights[idx].intensity, 1.0); }
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    // Nested struct laid out to match std140 (packed vec3 so the scalar packs at
+    // offset 12). `packed_float3` keeps Light at 16 bytes; the silent-wrong
+    // `float3` form (16-byte aligned, pushing intensity to 16) would NOT have the
+    // `packed_` prefix, so asserting its presence rules that bug out.
+    try assertContains(msl, "packed_float3 color;");
+    try assertContains(msl, "float intensity;");
+    try assertContains(msl, "Light lights[4];");
+}
+
 test "T3.4: texture binding attribute" {
     const source =
         \\#version 430
