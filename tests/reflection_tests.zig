@@ -378,7 +378,8 @@ test "reflection G1: SSBO runtime tail array + readonly/writeonly + block_size" 
     // Oracle (spirv-cross --reflect):
     //   InBuf  readonly,  block_size 16
     //     count:     offset 0
-    //     particles: offset 16, runtime array (array[0]), array_stride 0 (struct elem)
+    //     particles: offset 16, runtime array (array[0]), array_stride 32
+    //                (Particle = 2*vec4 = 32 bytes std430) — glslang oracle.
     //   OutBuf writeonly, block_size 0
     //     results:   offset 0, runtime array (array[0]), array_stride 16
     const alloc = std.testing.allocator;
@@ -423,7 +424,9 @@ test "reflection G1: SSBO runtime tail array + readonly/writeonly + block_size" 
     try std.testing.expectEqual(@as(u32, 16), particles.offset);
     try std.testing.expectEqual(true, particles.is_runtime_array);
     try std.testing.expectEqual(@as(u32, 0), particles.array_dim);
-    try std.testing.expectEqual(@as(u32, 0), particles.array_stride);
+    // array_stride 32 (Particle = 2*vec4) matches the glslang oracle after the
+    // #181 fix; the old pinned 0 was the silent-wrong nested-struct-size default.
+    try std.testing.expectEqual(@as(u32, 32), particles.array_stride);
 
     // OutBuf
     try std.testing.expectEqual(true, ob.writeonly);
@@ -529,17 +532,11 @@ test "reflection #171: UBO block_size with trailing multidim array (float md[2][
 //     Material.l:      offset 16  (struct Light)
 //       Light.pos:       offset 0
 //       Light.intensity: offset 16
-//   Scene.mvp:  offset 0, matrix_stride 16
+//   Scene.mvp:  offset 48, matrix_stride 16
 //
-// NOTE on offsets / block_size: glslpp's CODEGEN currently emits the WRONG
-// std140 `Offset` for a member that FOLLOWS a nested struct — it emits
-// `Scene.mvp Offset 0` where glslang emits `Offset 48`. spirv-cross reflects
-// the same (buggy) values from glslpp's SPIR-V. This is a SEPARATE pre-existing
-// codegen bug, NOT a reflection bug: reflection faithfully reads back whatever
-// offsets are decorated. The assertions below therefore pin glslpp's ACTUAL
-// reflectable output (mvp offset 0, block_size 64); the nested-member
-// STRUCTURE/relative-offset assertions — the #177 Item 1 deliverable — are
-// fully correct. The codegen offset bug is tracked as a separate follow-up.
+// Codegen now lays the member FOLLOWING a nested struct correctly (#181 fix):
+// Scene.mvp Offset 48 (Material size 48 = albedo@0 + Light@16 size 32) and
+// block_size 112 (48 + mat4 64) — matching glslang/spirv-cross exactly.
 test "reflection #177: nested-struct members recurse with relative offsets" {
     const alloc = std.testing.allocator;
     const spv = try glslpp.compileToSPIRV(alloc,
@@ -559,9 +556,9 @@ test "reflection #177: nested-struct members recurse with relative offsets" {
 
     try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
     const ubo = res.uniform_buffers[0];
-    // block_size 64 reflects glslpp's actual (buggy-offset) emission, not the
-    // glslang oracle's 112 — see the codegen-offset note above.
-    try std.testing.expectEqual(@as(u32, 64), ubo.block_size);
+    // block_size 112 matches the glslang oracle (Material 48 + mat4 64) after
+    // the #181 codegen fix.
+    try std.testing.expectEqual(@as(u32, 112), ubo.block_size);
     try std.testing.expectEqual(@as(usize, 2), ubo.members.len);
 
     // Scene.mat — a struct member that must carry inner members.
@@ -590,13 +587,11 @@ test "reflection #177: nested-struct members recurse with relative offsets" {
     try std.testing.expectEqualStrings("intensity", l_members[1].name);
     try std.testing.expectEqual(@as(u32, 16), l_members[1].offset);
 
-    // Scene.mvp — non-struct member has no inner members. Offset reflects
-    // glslpp's actual emission (0, see codegen-offset note above), not the
-    // glslang oracle's 48. matrix_stride and the null `members` are the points
-    // under test for #177 Item 1.
+    // Scene.mvp — non-struct member has no inner members. Offset 48 matches the
+    // glslang oracle after the #181 codegen fix (member after a nested struct).
     const mvp = ubo.members[1];
     try std.testing.expectEqualStrings("mvp", mvp.name);
-    try std.testing.expectEqual(@as(u32, 0), mvp.offset);
+    try std.testing.expectEqual(@as(u32, 48), mvp.offset);
     try std.testing.expectEqual(@as(u32, 16), mvp.matrix_stride);
     try std.testing.expectEqual(@as(?[]const glslpp.reflection.Member, null), mvp.members);
 }
@@ -716,11 +711,9 @@ test "toJson: nested-struct UBO mirrors spirv-cross schema" {
     try std.testing.expectEqualStrings("Scene", ubo.get("name").?.string);
     try std.testing.expectEqual(@as(i64, 0), ubo.get("set").?.integer);
     try std.testing.expectEqual(@as(i64, 0), ubo.get("binding").?.integer);
-    // block_size is read back from glslpp's OWN codegen layout. spirv-cross on
-    // glslang's binary reports 100 (intensity@96 + 4); glslpp's codegen lays the
-    // trailing nested-struct tail slightly tighter (96). We assert glslpp's value
-    // because this test reflects glslpp-produced SPIR-V, not glslang's.
-    try std.testing.expectEqual(@as(i64, 96), ubo.get("block_size").?.integer);
+    // block_size 100 matches the glslang/spirv-cross oracle (intensity@96 + 4)
+    // after the #181 codegen fix.
+    try std.testing.expectEqual(@as(i64, 100), ubo.get("block_size").?.integer);
     const scene_type = ubo.get("type").?.string; // a "_NN" reference
 
     // The referenced struct type is present in the flat `types` map with members.
@@ -753,17 +746,12 @@ test "toJson: nested-struct UBO mirrors spirv-cross schema" {
     try std.testing.expectEqualStrings("vec4", light_members.items[0].object.get("type").?.string);
     try std.testing.expectEqual(@as(i64, 16), light_members.items[1].object.get("offset").?.integer);
 
-    // intensity: float scalar. NOTE: we assert name + spelling, not the offset.
-    // The oracle (glslang binary) places intensity at 96 (after the 32-byte
-    // nested Light struct), but glslpp's OWN std140 codegen currently mislays the
-    // member FOLLOWING a nested struct (emits offset 64, overlapping `light`).
-    // The JSON serializer faithfully reads back whatever Offset decoration glslpp
-    // emitted — this is a pre-existing codegen layout bug, out of scope for the
-    // additive JSON work. The `offset` key is still present and an integer.
+    // intensity: float scalar @96 (after the 32-byte nested Light struct at 64).
+    // Matches the glslang/spirv-cross oracle after the #181 codegen fix.
     const intensity = scene_members.items[2].object;
     try std.testing.expectEqualStrings("intensity", intensity.get("name").?.string);
     try std.testing.expectEqualStrings("float", intensity.get("type").?.string);
-    try std.testing.expect(intensity.get("offset").?.integer >= 0);
+    try std.testing.expectEqual(@as(i64, 96), intensity.get("offset").?.integer);
 }
 
 test "toJson: runtime-array SSBO shows array [0]" {
