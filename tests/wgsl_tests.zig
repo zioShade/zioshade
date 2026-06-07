@@ -2197,3 +2197,70 @@ test "wgsl: A2 SSBO scalar array member NOT wrapped (uniform-only gate)" {
     try assertNotContains(wgsl, "arr: array<vec4<f32>, 4>");
     try nagaValidateOrSkip(wgsl, "A2-ssbo-scalar-array");
 }
+
+// ---------------------------------------------------------------------------
+// #170 review — wrap must gate on ArrayStride == 16, NOT just !is_ssbo.
+//
+// The vec4-wrap (`array<vec4<f32>,N>` + `.x`) is only VALUE-CORRECT when the
+// source array's std140 ArrayStride is 16: std140 rounds every array-element
+// stride up to 16, so the host packs the float at byte 0 of each 16-byte slot,
+// exactly where `arr[i].x` reads it. A scalar-block-layout / std430 UNIFORM
+// has ArrayStride 4 (host packs floats tightly at 0,4,8,12); the vec4-wrap then
+// reads bytes 0,16,32,48 → WRONG DATA, yet naga ACCEPTS it (silent-wrong).
+//
+// On `main` this same shader emitted `array<f32,4>` (stride 4) which naga
+// REJECTS loudly ("array stride 4 is not a multiple of the required alignment
+// 16") — an HONEST failure. The fix gates the wrap on ArrayStride==16 so the
+// scalar-layout case falls through to the honest (naga-rejected) path instead
+// of being silently wrapped wrong.
+// ---------------------------------------------------------------------------
+
+test "wgsl: A2 scalar-block-layout uniform NOT silently wrapped (#170 review)" {
+    // The MAJOR silent-wrong guard. The source SPIR-V has ArrayStride 4 (verified
+    // out-of-band via spirv-dis: `OpDecorate %_arr_float_uint_4 ArrayStride 4`),
+    // so wrapping to `array<vec4<f32>>` + `.x` would read the wrong host bytes.
+    //
+    // RED (pre-fix): emits `arr: array<vec4<f32>, 4>` + `u.arr[u.n].x` — accepted
+    //   by naga but reads bytes 0,16,32,48 instead of 0,4,8,12 = SILENT-WRONG.
+    // GREEN (post-fix): the member is NOT recorded for wrapping (stride != 16), so
+    //   it falls through to the honest `array<f32, 4>` path which naga REJECTS
+    //   loudly (matching main). We assert the absence of the vec4-wrap — proving
+    //   we did not silent-wrong it. This case is intentionally honest-rejected by
+    //   naga (like main), so it is NOT naga-validated as passing here.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\#extension GL_EXT_scalar_block_layout : require
+        \\layout(binding=0, scalar) uniform U { float arr[4]; int n; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(u.arr[u.n], 0.0, 0.0, 1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The stride-4 array member must NOT be silently widened to vec4.
+    try assertNotContains(wgsl, "array<vec4<f32>, 4>");
+    try assertNotContains(wgsl, "u.arr[u.n].x");
+    // It falls through to the honest (naga-rejected) plain-f32 array.
+    try assertContains(wgsl, "array<f32, 4>");
+}
+
+test "wgsl: A2 std140 uniform still wraps at ArrayStride 16 (#170 review regression)" {
+    // Regression for the stride gate: an std140 uniform float-array member has
+    // ArrayStride 16 (verified: `OpDecorate %_arr_float_uint_4 ArrayStride 16`),
+    // so it MUST still be wrapped to `array<vec4<f32>>` + `.x` and naga-validate.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0, std140) uniform U { float arr[4]; int n; } u;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(u.arr[u.n], 0.0, 0.0, 1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // std140 stride 16 → still widened + swizzled (value-correct).
+    try assertContains(wgsl, "array<vec4<f32>, 4>");
+    try assertContains(wgsl, ".x");
+    try nagaValidateOrSkip(wgsl, "A2-std140-stride16-wrap");
+}

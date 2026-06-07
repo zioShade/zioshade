@@ -1122,6 +1122,22 @@ fn memberIsRowMajor(module: *const ParsedModule, struct_id: u32, member_index: u
     return false;
 }
 
+/// Read the ArrayStride decoration (6) off an ARRAY TYPE id. Unlike row_major /
+/// flat (which are `OpMemberDecorate` on the enclosing struct), ArrayStride is an
+/// `OpDecorate` on the array type id itself — mirror reflection.zig's lookup
+/// (`astrides`: array TYPE id → ArrayStride). Returns null if undecorated.
+fn arrayTypeStride(module: *const ParsedModule, array_type_id: u32) ?u32 {
+    for (module.instructions) |inst| {
+        if (inst.op == .Decorate and inst.words.len >= 4 and
+            inst.words[1] == array_type_id and
+            inst.words[2] == @intFromEnum(spirv.Decoration.array_stride))
+        {
+            return inst.words[3];
+        }
+    }
+    return null;
+}
+
 const RowMajorAccess = struct { boundary: usize, matrix_tid: u32 };
 
 /// Return where a row-major matrix VALUE is produced in `indices`, so the read
@@ -1447,6 +1463,13 @@ fn collectAtomicFields(module: *const ParsedModule, out: *AtomicFieldMap) !void 
 ///
 /// Nested *sub-struct* array members are NOT recursed into here (deferred —
 /// see #170): only the direct members of the uniform struct are classified.
+///
+/// DEFERRED (honest, not silent-wrong): a whole-array-member LOAD of a wrapped
+/// member (e.g. passing `u.arr` to a function taking `float a[N]`) drops the
+/// per-element swizzle and emits `array<vec4<f32>,N>` where `array<f32,N>` is
+/// expected → naga surfaces a TYPE error. That is honest-loud (caught by naga),
+/// not silent-wrong, so it is left for a follow-up; only indexed element reads
+/// (`u.arr[i]` → `.x`/`.xy`) are lowered correctly today.
 fn collectWrappedUniformMembersForStruct(module: *const ParsedModule, struct_type_id: u32, out: *WrappedUniformMemberMap) !void {
     const sdef = getDef(module, struct_type_id) orelse return;
     if (sdef.op != .TypeStruct or sdef.words.len <= 2) return;
@@ -1458,6 +1481,18 @@ fn collectWrappedUniformMembersForStruct(module: *const ParsedModule, struct_typ
         const md = getDef(module, mt_id) orelse continue;
         if (md.op != .TypeArray and md.op != .TypeRuntimeArray) continue;
         if (md.words.len <= 2) continue;
+        // CORRECTNESS GATE (#170 review): only wrap when the SOURCE array's
+        // ArrayStride is 16. std140 ALWAYS rounds an array-element stride up to
+        // 16, so the host packs the scalar/vec2 at byte 0 of each 16-byte slot —
+        // exactly where the widened `arr[i].x`/`.xy` reads it. A stride of 4 or 8
+        // (scalar-block-layout `scalar` / std430 UNIFORM) means the host packs
+        // elements TIGHTLY (0,4,8,12); wrapping to vec4 then reads bytes
+        // 0,16,32,48 → WRONG DATA, which naga ACCEPTS (silent-wrong). When the
+        // stride is not 16 we DON'T record the member: it falls through to the
+        // unwrapped `array<base,N>` emission, which naga rejects loudly (honest),
+        // matching `main`'s behavior. (SSBOs are already excluded by the caller's
+        // `!cb.is_ssbo` filter; this guards scalar/std430 UNIFORM blocks.)
+        if (arrayTypeStride(module, mt_id) != 16) continue;
         const elem_id = md.words[2];
         const ed = getDef(module, elem_id) orelse continue;
         // If the element is itself an array, it is a multi-dim array → defer.
