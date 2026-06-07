@@ -2175,22 +2175,37 @@ const Parser = struct {
             .kw_sampler2d, .kw_sampler3d, .kw_sampler_cube, .kw_sampler2d_array, .kw_sampler2d_ms,
             => {
                 var ty = self.tryType().?;
-                // Handle array constructors: float[](1.0, 2.0, ...), vec4[](...), vec4[][](...)
+                // Handle array constructors: float[](1.0, 2.0, ...), vec4[](...),
+                // float[2][3](...), vec4[][](...). Collect ALL bracket dims in
+                // source order first (0 marks an unsized `[]` dim), then wrap
+                // outermost-to-innermost so `float[2][3]` becomes
+                // array{size=2, base=array{size=3, base=float}} — matching the
+                // SPIR-V layout `OpTypeArray %inner %outerLen` and the correct
+                // declaration-side logic in parseDeclaration (see ~line 1052).
+                var ctor_dims = std.ArrayListUnmanaged(u32).empty;
+                defer ctor_dims.deinit(self.alloc);
                 while (self.current().tag == .l_bracket) {
                     _ = self.advance(); // [
                     if (self.current().tag == .r_bracket) {
                         _ = self.advance(); // ]
-                        // Unsized array constructor: base_type[](...)
-                        const arr_base = try self.createType(ty);
-                        ty = .{ .array = .{ .base = arr_base, .size = 0 } };
+                        // Unsized array dim: base_type[]
+                        try ctor_dims.append(self.alloc, 0);
                     } else {
-                        // Sized array type: base_type[N]
+                        // Sized array dim: base_type[N]
                         const size_tok = self.current();
                         _ = self.advance(); // size
                         _ = self.expect(.r_bracket) catch {};
                         const size_val = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                        try ctor_dims.append(self.alloc, size_val);
+                    }
+                }
+                // Reverse-wrap: innermost dim first, outermost dim last.
+                if (ctor_dims.items.len > 0) {
+                    var di: usize = ctor_dims.items.len;
+                    while (di > 0) {
+                        di -= 1;
                         const arr_base = try self.createType(ty);
-                        ty = .{ .array = .{ .base = arr_base, .size = size_val } };
+                        ty = .{ .array = .{ .base = arr_base, .size = ctor_dims.items[di] } };
                     }
                 }
                 _ = self.expect(.l_paren) catch return .{

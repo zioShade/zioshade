@@ -1823,3 +1823,27 @@ test "wgsl: the main-path else no longer emits a silent-wrong placeholder var" {
     try assertNotContains(wgsl, "unhandled op");
     try nagaValidateOrSkip(wgsl, "no-silent-placeholder");
 }
+
+test "wgsl: matrix-element const-array global folds to an mat4x4 array initializer (#173 item1)" {
+    // #173 item1: `const mat4 M[2]` runtime-indexed. The frontend now folds the
+    // matrix ctors + the array ctor to OpConstantComposite, so M carries an
+    // initializer the WGSL backend materializes as an `array<mat4x4f, 2>(...)`
+    // (or const) — not an undeclared/garbage global. naga is the ground truth.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out vec4 FragColor;
+        \\const mat4 M[2] = mat4[](mat4(1.0), mat4(2.0));
+        \\void main(){
+        \\  int i = int(gl_FragCoord.x) & 1;
+        \\  FragColor = M[i] * vec4(1.0);
+        \\}
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    // The array is materialized as a mat4x4 array with an initializer (the exact
+    // var<private>/const spelling may vary; the load-bearing facts are the
+    // mat4x4 array type and a brace/paren initializer with the folded values).
+    try assertContains(wgsl, "array<mat4x4");
+    try assertContains(wgsl, "2.0");
+    try nagaValidateOrSkip(wgsl, "matrix-const-array-#173");
+}

@@ -1022,7 +1022,7 @@ fn analyzeLocalConstArray(m: *const ParsedModule, var_inst: Instruction) ?LocalC
 /// Write an array/struct constant's brace initializer, recursively inlining
 /// nested array/struct composites (`{ { … }, { … } }`). Scalar constants and
 /// vector composites use their precomputed name (`"10.0"`, `"float4(0.0)"`).
-fn writeMslConstInit(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), w: anytype, id: u32) !void {
+fn writeMslConstInit(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), w: anytype, id: u32, alloc: std.mem.Allocator) !void {
     const inst = getDef(m, id) orelse {
         try w.writeAll(names.get(id) orelse "0");
         return;
@@ -1033,10 +1033,27 @@ fn writeMslConstInit(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
                 try w.writeAll("{ ");
                 for (inst.words[3..], 0..) |cid, i| {
                     if (i > 0) try w.writeAll(", ");
-                    try writeMslConstInit(m, names, w, cid);
+                    try writeMslConstInit(m, names, w, cid, alloc);
                 }
                 try w.writeAll(" }");
                 return;
+            }
+            // Matrix / vector composites must be INLINED with a typed
+            // constructor — e.g. `float4x4(float4(…), …)` — because their nested
+            // constituents are constant_composites that are NOT emitted at module
+            // scope (referencing them by name would be an undefined identifier).
+            // (#173 item1: matrix-element const arrays.)
+            if (t.op == .TypeMatrix or t.op == .TypeVector) {
+                const ty_str = mslType(m, inst.words[1], names, alloc) catch null;
+                if (ty_str) |ts| {
+                    try w.print("{s}(", .{ts});
+                    for (inst.words[3..], 0..) |cid, i| {
+                        if (i > 0) try w.writeAll(", ");
+                        try writeMslConstInit(m, names, w, cid, alloc);
+                    }
+                    try w.writeAll(")");
+                    return;
+                }
             }
         }
     }
@@ -1560,7 +1577,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             if (value_copied_consts.contains(rid)) {
                 const vt = mslValueType(&module, inst.words[1], &names, aa) catch continue;
                 try w.print("constant {s} {s} = {s}(", .{ vt, name, vt });
-                try writeMslConstInit(&module, &names, w, rid);
+                try writeMslConstInit(&module, &names, w, rid, aa);
                 try w.writeAll(");\n");
                 emitted_const_array = true;
                 continue;
@@ -1584,7 +1601,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             try w.print("constant {s} {s}", .{ base_type, name });
             for (dims.items) |d| try w.print("[{d}]", .{d});
             try w.writeAll(" = ");
-            try writeMslConstInit(&module, &names, w, rid);
+            try writeMslConstInit(&module, &names, w, rid, aa);
             try w.writeAll(";\n");
             emitted_const_array = true;
         }
@@ -3177,14 +3194,14 @@ fn emitInstruction(
                     };
                     const vt = try mslValueType(m, pointee, names, alloc);
                     try w.print("    {s} {s} = {s}(", .{ vt, names.get(ri) orelse "var", vt });
-                    try writeMslConstInit(m, names, w, info.init_id);
+                    try writeMslConstInit(m, names, w, info.init_id, alloc);
                     try w.writeAll(");\n");
                     return;
                 }
                 const tn = try mslType(m, inst.words[1], names, alloc);
                 const arr = try mslGetArraySuffix(m, inst.words[1]);
                 try w.print("    {s} {s}{s} = ", .{ tn, names.get(ri) orelse "var", arr });
-                try writeMslConstInit(m, names, w, info.init_id);
+                try writeMslConstInit(m, names, w, info.init_id, alloc);
                 try w.writeAll(";\n");
                 return;
             }

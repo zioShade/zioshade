@@ -745,3 +745,76 @@ test "glsl-version structural: vertex output location dropped below 410, kept at
         try std.testing.expect(std.mem.indexOf(u8, g, "layout(location = 0) out vec3") != null);
     }
 }
+
+// ============================================================================
+// #173 (items 1+2): frontend const-array folding gaps
+// ============================================================================
+
+const SpirvVal = "C:\\VulkanSDK\\1.4.341.1\\Bin\\spirv-val.exe";
+
+/// Run spirv-val on glslpp-produced SPIR-V bytes. Returns true if spirv-val
+/// accepts the module (exit 0), false otherwise. spirv-val is the authority on
+/// whether the OpTypeArray/OpConstantComposite layout is structurally valid.
+fn spirvValAccepts(allocator: std.mem.Allocator, spirv_words: []const u32) !bool {
+    const io = compat.testIo();
+    const dir = compat.cwd();
+    compat.dirMakePath(io, dir, ".zig-cache") catch {};
+
+    const spirv_bytes = std.mem.sliceAsBytes(spirv_words);
+    var tmp_buf: [compat.max_path_bytes]u8 = undefined;
+    const spv_path = std.fmt.bufPrint(&tmp_buf, ".zig-cache/val{d}.spv", .{compat.randomInt(u32)}) catch return error.OutOfMemory;
+    const f = compat.dirCreateFile(io, dir, spv_path, .{}) catch return error.FileNotFound;
+    compat.fileWriteAll(io, f, spirv_bytes) catch {};
+    compat.fileClose(io, f);
+    defer compat.dirDeleteFile(io, dir, spv_path) catch {};
+
+    const result = try compat.processRun(io, allocator, &.{ SpirvVal, spv_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    const ok = (result.term.exitedCode() orelse 1) == 0;
+    if (!ok) {
+        std.debug.print("\nspirv-val REJECTED glslpp output:\n--- stdout ---\n{s}\n--- stderr ---\n{s}\n", .{ result.stdout, result.stderr });
+    }
+    return ok;
+}
+
+test "#173 item2: sized multi-dim const array folds to spirv-val-valid SPIR-V" {
+    // `const float m[2][3]` indexed at runtime. Pre-fix the parser wrapped the
+    // bracket dims inner-first, so the OpConstantComposite array length did not
+    // match its OpTypeArray length → spirv-val "Constituent count does not match
+    // NumElements". Post-fix the dims wrap outermost→innermost and it validates.
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 FragColor;
+        \\void main(){
+        \\  const float m[2][3] = float[2][3](float[3](1.0,2.0,3.0), float[3](4.0,5.0,6.0));
+        \\  int i = int(gl_FragCoord.x) & 1;
+        \\  int j = int(gl_FragCoord.y) % 3;
+        \\  FragColor = vec4(m[i][j]);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expect(try spirvValAccepts(alloc, spirv));
+}
+
+test "#173 item1: matrix-element const-array global cross-compiles to glslang-valid GLSL" {
+    // `const mat4 M[2]` indexed at runtime. Pre-fix the frontend never folded the
+    // matrix ctors to constant_composite, so the Private `M` got no initializer
+    // and was never declared → the body referenced an undefined `M` (glslang
+    // rejects). Post-fix the array folds and `M` is declared with an initializer.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out vec4 FragColor;
+        \\const mat4 M[2] = mat4[](mat4(1.0), mat4(2.0));
+        \\void main(){
+        \\  int i = int(gl_FragCoord.x) & 1;
+        \\  FragColor = M[i] * vec4(1.0);
+        \\}
+    ;
+    const spirv = try compileToSpirvViaGlslang(alloc, source, .fragment);
+    defer alloc.free(spirv);
+    const g = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    defer alloc.free(g);
+    try assertGlslangAccepts(alloc, "matrix-const-array", g, .fragment);
+}
