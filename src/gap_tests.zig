@@ -1913,6 +1913,49 @@ fn imageArrayedOfType(words: []const u32, type_id: u32) ?u32 {
     return null;
 }
 
+const DimArrayed = struct { dim: u32, arrayed: u32 };
+
+/// Resolve `type_id` to an `OpTypeImage` and return its (Dim, Arrayed) operands,
+/// or null if `type_id` is not an image type.
+fn imageDimArrayedOfType(words: []const u32, type_id: u32) ?DimArrayed {
+    var i: usize = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        if (opcode == @intFromEnum(spirv.Op.TypeImage) and word_count >= 9 and words[i + 1] == type_id) {
+            return .{ .dim = words[i + 3], .arrayed = words[i + 5] };
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    return null;
+}
+
+/// Collect the (Dim, Arrayed) of the image type referenced by every `OpImage`
+/// extraction in program order. The result type of OpImage IS the inner image
+/// type, so this tells us which Dim/Arrayed each extraction claims. The
+/// undefined-id / clobber bug makes distinct sources collapse or point at id 0.
+fn collectOpImageDimArrayed(alloc: std.mem.Allocator, words: []const u32) ![]DimArrayed {
+    var out: std.ArrayListUnmanaged(DimArrayed) = .{};
+    errdefer out.deinit(alloc);
+    var i: usize = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        if (opcode == @intFromEnum(spirv.Op.OpImage) and word_count >= 4) {
+            const result_type_id = words[i + 1];
+            if (imageDimArrayedOfType(words, result_type_id)) |da| {
+                try out.append(alloc, .{ .dim = da.dim, .arrayed = da.arrayed });
+            }
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 /// Collect the `Arrayed` operand of the image type referenced by every `OpImage`
 /// extraction in the binary, in program order. `OpImage` layout:
 ///   [header | result_type_id | result_id | sampled_image_id]
@@ -1983,4 +2026,70 @@ test "gap #183: samplerCube + samplerCubeArray coexist with correct-Arrayed OpIm
     }
     try testing.expect(saw_non_array);
     try testing.expect(saw_array);
+}
+
+test "gap #188: int/uint non-2D sampler textureSize emits defined, distinct OpImage types" {
+    // Systemic int/uint non-2D sampler image-query gap (broader than the #188
+    // title). textureSize/textureQueryLevels (→ OpImageQuerySizeLod / OpImage
+    // extraction) on int/uint cube / array samplers either:
+    //   - referenced an UNDEFINED id (spirv-val "ID has not been defined"),
+    //     because the int/uint cube / cube-array / 2D-array ensureType arms
+    //     never recorded an inner-id and the extract_image ladder either
+    //     returned 0 (early-return → undefined) or did not list the type; OR
+    //   - COLLIDED onto the single 2D-int field when a 2D int sampler coexisted
+    //     (spirv-val "Expected Sample Image image type to be equal to Result
+    //     Type").
+    //
+    // All five results are written into fragColor so the OpImage extractions
+    // escape DCE. Oracle (glslangValidator -V): each textureSize lowers to an
+    // OpImage of the correct inner OpTypeImage with distinct Dim/Arrayed:
+    //   isampler2D        → 2D   Arrayed=0
+    //   isamplerCube      → Cube Arrayed=0
+    //   isamplerCubeArray → Cube Arrayed=1
+    //   usamplerCubeArray → Cube Arrayed=1
+    //   isampler2DArray   → 2D   Arrayed=1
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform isampler2D        s2;
+        \\layout(binding=1) uniform isamplerCube      sc;
+        \\layout(binding=2) uniform isamplerCubeArray sca;
+        \\layout(binding=3) uniform usamplerCubeArray uca;
+        \\layout(binding=4) uniform isampler2DArray   s2a;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    ivec2 a=textureSize(s2,0);
+        \\    ivec2 b=textureSize(sc,0);
+        \\    ivec3 c=textureSize(sca,0);
+        \\    ivec3 d=textureSize(uca,0);
+        \\    ivec3 e=textureSize(s2a,0);
+        \\    fragColor=vec4(float(a.x+a.y+b.x+b.y), float(c.x+c.y+c.z), float(d.x+d.y+d.z+e.x+e.y+e.z), 1.0);
+        \\}
+    ;
+    const words = try compileToWords(testing.allocator, source, .fragment);
+    defer testing.allocator.free(words);
+
+    // All five OpImage extractions must survive (escape DCE) and resolve.
+    try testing.expectEqual(@as(usize, 5), countOp(words, .OpImage));
+
+    // Each OpImage's result-type OpTypeImage must have the correct, distinct
+    // (Dim, Arrayed). Pre-fix these collapsed onto the 2D-int type or pointed
+    // at an undefined id (none collected). Dim: 1 = 2D, 3 = Cube.
+    const da = try collectOpImageDimArrayed(testing.allocator, words);
+    defer testing.allocator.free(da);
+    try testing.expectEqual(@as(usize, 5), da.len);
+
+    var saw_2d_a0 = false; // isampler2D
+    var saw_cube_a0 = false; // isamplerCube
+    var cube_a1 = @as(usize, 0); // isamplerCubeArray + usamplerCubeArray
+    var saw_2d_a1 = false; // isampler2DArray
+    for (da) |x| {
+        if (x.dim == 1 and x.arrayed == 0) saw_2d_a0 = true;
+        if (x.dim == 3 and x.arrayed == 0) saw_cube_a0 = true;
+        if (x.dim == 3 and x.arrayed == 1) cube_a1 += 1;
+        if (x.dim == 1 and x.arrayed == 1) saw_2d_a1 = true;
+    }
+    try testing.expect(saw_2d_a0);
+    try testing.expect(saw_cube_a0);
+    try testing.expectEqual(@as(usize, 2), cube_a1);
+    try testing.expect(saw_2d_a1);
 }
