@@ -2723,3 +2723,82 @@ test "T19.4: plain sampler2D stays texture2d<float> (no array regression)" {
     // No spurious layer-split for a non-array sampler.
     try assertNotContains(msl, "uint(rint(");
 }
+
+// ---------------------------------------------------------------------------
+// T19.5–T19.8: texelFetch (OpImageFetch → .read) and textureGather
+// (OpImageGather → .gather) on ARRAY textures also split the array layer (#187).
+//
+// Like OpImageSample*, MSL's `.read`/`.gather` take the array layer in a
+// SEPARATE integer argument after the (dimension-sliced) coordinate. Before the
+// fix the whole int/float coord was passed verbatim — invalid MSL.
+//
+// Oracle (spirv-cross --msl 1.4.341.1):
+//   texelFetch(sampler2DArray p, lod)  → tex.read(uint2(p.xy), uint(p.z), lod)
+//   textureGather(sampler2DArray c)    → tex.gather(s, c.xy, uint(rint(c.z)), int2(0), component::x)
+//   textureGather(samplerCubeArray c)  → tex.gather(s, c.xyz, uint(rint(c.w)), component::x)
+//   texelFetch(sampler2D p, lod)       → tex.read(uint2(p), lod)   [unchanged, no layer split]
+// ---------------------------------------------------------------------------
+
+test "T19.5: texelFetch(sampler2DArray) → .read splits array layer" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArray tex;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ ivec3 p = ivec3(1,2,3); o = texelFetch(tex, p, 0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // Oracle: tex.read(uint2(p.xy), uint(p.z), 0).
+    try assertContains(msl, ".read(uint2(");
+    try assertContains(msl, ".xy), uint(");
+    try assertContains(msl, ".z), ");
+    // Must NOT pass the whole int3 coord verbatim.
+    try assertNotContains(msl, ".read(p)");
+}
+
+test "T19.6: textureGather(sampler2DArray) → .gather splits array layer" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArray tex;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGather(tex, vec3(0.5), 0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // Oracle: tex.gather(texSmplr, c.xy, uint(rint(c.z)), int2(0), component::x).
+    try assertContains(msl, ".gather(");
+    try assertContains(msl, ".xy, uint(rint(");
+    try assertContains(msl, ".z)), ");
+    try assertContains(msl, "component::x");
+}
+
+test "T19.7: textureGather(samplerCubeArray) → .gather splits array layer" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform samplerCubeArray tex;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGather(tex, vec4(0.5), 0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // Oracle: tex.gather(texSmplr, c.xyz, uint(rint(c.w)), component::x).
+    try assertContains(msl, ".gather(");
+    try assertContains(msl, ".xyz, uint(rint(");
+    try assertContains(msl, ".w)), ");
+    try assertContains(msl, "component::x");
+}
+
+test "T19.8: texelFetch(sampler2D) stays unchanged (no array-layer split)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ ivec2 p = ivec2(1,2); o = texelFetch(tex, p, 0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, ".read(");
+    // No array-layer split for a non-array fetch.
+    try assertNotContains(msl, "uint(rint(");
+    try assertNotContains(msl, ".xy), uint(");
+}

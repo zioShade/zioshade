@@ -122,15 +122,44 @@ fn imageValueDim(m: *const ParsedModule, image_value_id: u32) u32 {
 /// name and the image dim, returns `"<coord>.xy, uint(rint(<coord>.z))"` (2D
 /// array), `"<coord>.xyz, uint(rint(<coord>.w))"` (cube array), or
 /// `"<coord>.x, uint(rint(<coord>.y))"` (1D array) — matching spirv-cross --msl.
-/// `dref_out`, when non-null, receives the depth-compare component name
-/// (`<coord>.z` for 2D-array shadow) so the caller can use the SPLIT coord's
-/// layer-adjacent component instead of the SPIR-V Dref operand.
+/// The Dref (depth-compare) component is supplied separately by each
+/// `OpImageSampleDref*` call site from the SPIR-V Dref operand, not here.
 fn mslArrayedSampleArgs(alloc: std.mem.Allocator, coord: []const u8, dim: u32) ![]const u8 {
     return switch (dim) {
         3 => try std.fmt.allocPrint(alloc, "{s}.xyz, uint(rint({s}.w))", .{ coord, coord }),
         0 => try std.fmt.allocPrint(alloc, "{s}.x, uint(rint({s}.y))", .{ coord, coord }),
         // 2D (and any other) array layout: xy + layer in z.
         else => try std.fmt.allocPrint(alloc, "{s}.xy, uint(rint({s}.z))", .{ coord, coord }),
+    };
+}
+
+/// Integer-coordinate analogue of `mslArrayedSampleArgs` for `texture.read`
+/// (OpImageFetch). `texelFetch` carries an already-integer coordinate, so the
+/// spatial components are wrapped in `uintN(...)` and the array layer is split
+/// into a separate `uint(...)` arg — matching spirv-cross --msl:
+///   2D array → `"uint2(<coord>.xy), uint(<coord>.z)"`
+///   1D array → `"uint(<coord>.x), uint(<coord>.y)"`
+/// (Cube has no `texelFetch`; the 2D layout is the fallback.)
+fn mslArrayedFetchArgs(alloc: std.mem.Allocator, coord: []const u8, dim: u32) ![]const u8 {
+    return switch (dim) {
+        0 => try std.fmt.allocPrint(alloc, "uint({s}.x), uint({s}.y)", .{ coord, coord }),
+        // 2D (and any other) array layout: xy + layer in z.
+        else => try std.fmt.allocPrint(alloc, "uint2({s}.xy), uint({s}.z)", .{ coord, coord }),
+    };
+}
+
+/// The `component::<swizzle>` token spirv-cross uses for an OpImageGather
+/// component operand. The operand is an OpConstant integer in 0..3; resolve its
+/// literal (OpConstant layout `[op, result_type, result_id, value…]`) and map
+/// 0→x, 1→y, 2→z, 3→w. Falls back to `component::x` when it cannot be resolved.
+fn mslGatherComponent(m: *const ParsedModule, component_id: u32) []const u8 {
+    const cdef = getDef(m, component_id) orelse return "component::x";
+    if (cdef.op != .Constant or cdef.words.len < 4) return "component::x";
+    return switch (cdef.words[3]) {
+        1 => "component::y",
+        2 => "component::z",
+        3 => "component::w",
+        else => "component::x",
     };
 }
 
@@ -3796,7 +3825,23 @@ fn emitInstruction(
         .ImageFetch => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
-            try w.print("    {s} {s} = {s}.read({s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, names.get(inst.words[4]) orelse "0"});
+            const coord_name = names.get(inst.words[4]) orelse "0";
+            // texelFetch on an ARRAY texture: split the array layer into a
+            // separate integer arg after the spatial coordinate (matching
+            // spirv-cross --msl). The lod/sample operand is preserved.
+            if (imageValueIsArrayed(m, inst.words[3])) {
+                const fetch_args = try mslArrayedFetchArgs(alloc, coord_name, imageValueDim(m, inst.words[3]));
+                defer alloc.free(fetch_args);
+                // OpImageFetch operands: result_type(1) result(2) image(3)
+                // coord(4) [image_operands_mask(5) lod/sample_value(6) …].
+                if (inst.words.len > 6) {
+                    try w.print("    {s} {s} = {s}.read({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, fetch_args, names.get(inst.words[6]) orelse "0" });
+                } else {
+                    try w.print("    {s} {s} = {s}.read({s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, fetch_args });
+                }
+            } else {
+                try w.print("    {s} {s} = {s}.read({s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord_name });
+            }
         },
         .ImageGather => {
             // textureGatherOffsets lowers to OpImageGather with the ConstOffsets
@@ -3813,7 +3858,24 @@ fn emitInstruction(
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const comp = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-            try w.print("    {s} {s} = {s}.gather({s}Smplr, {s}, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, comp});
+            // textureGather on an ARRAY texture: split the array layer into a
+            // separate integer arg, matching spirv-cross --msl exactly:
+            //   2D array:   gather(s, c.xy, uint(rint(c.z)), int2(0), component::x)
+            //   cube array: gather(s, c.xyz, uint(rint(c.w)), component::x)
+            // (cube has no per-texel offset, so it omits the int2(0) arg).
+            if (imageValueIsArrayed(m, inst.words[3])) {
+                const dim = imageValueDim(m, inst.words[3]);
+                const split = try mslArrayedSampleArgs(alloc, coord, dim);
+                defer alloc.free(split);
+                const gcomp = mslGatherComponent(m, inst.words[5]);
+                if (dim == 3) {
+                    try w.print("    {s} {s} = {s}.gather({s}Smplr, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, split, gcomp });
+                } else {
+                    try w.print("    {s} {s} = {s}.gather({s}Smplr, {s}, int2(0), {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, split, gcomp });
+                }
+            } else {
+                try w.print("    {s} {s} = {s}.gather({s}Smplr, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, comp });
+            }
         },
         .ImageDrefGather => {
             // MSL: tex.gather_compare(samp, coord, compare)
