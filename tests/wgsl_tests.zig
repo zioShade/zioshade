@@ -1841,9 +1841,11 @@ test "wgsl: matrix-element const-array global folds to an mat4x4 array initializ
     const wgsl = try compileToWgsl(source);
     defer alloc.free(wgsl);
     // The array is materialized as a mat4x4 array with an initializer (the exact
-    // var<private>/const spelling may vary; the load-bearing facts are the
-    // mat4x4 array type and a brace/paren initializer with the folded values).
+    // var<private>/const spelling may vary). Assert the constructor SHAPE with the
+    // folded diagonal values (like the MSL test asserts `float4x4(float4(…))`), not
+    // just a bare "2.0" substring — proves the matrix ctors actually folded.
     try assertContains(wgsl, "array<mat4x4");
-    try assertContains(wgsl, "2.0");
+    try assertContains(wgsl, "mat4x4f(vec4f(1.0, 0.0, 0.0, 0.0)");
+    try assertContains(wgsl, "mat4x4f(vec4f(2.0, 0.0, 0.0, 0.0)");
     try nagaValidateOrSkip(wgsl, "matrix-const-array-#173");
 }

@@ -3513,15 +3513,6 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         if (wc == 0) break;
         const ie = pos + wc;
 
-        // Skip eliminated instructions
-        if (wc >= 3) {
-            const result_id = words[pos + 2];
-            if (result_id > 0 and result_id < bound and replacements.contains(result_id)) {
-                pos = ie;
-                continue;
-            }
-        }
-
         // Rewrite using getOpInfo for correct operand handling
         const info = compact_ids.getOpInfo(opcode) orelse {
             // No info — just copy, but still replace IDs in operands
@@ -3533,6 +3524,27 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
             pos = ie;
             continue;
         };
+
+        // Skip eliminated instructions: only instructions that DEFINE a result id
+        // can be eliminated, and the result id lives at a position determined by
+        // info.fixed (2 => type+result at pos+2; 3 => result-only at pos+1).
+        // Result-less instructions (fixed 0/1, e.g. OpStore, OpBranch, OpDecorate)
+        // have NO result id — `words[pos+2]` there is an OPERAND, so they must
+        // never be dropped just because that operand was folded away. Treating an
+        // operand as a result id (the previous `words[pos+2]` shortcut) silently
+        // deleted live OpStores whose stored value was an identity-folded result,
+        // which then orphaned the store's type chain (dangling OpTypeVector).
+        switch (info.fixed) {
+            2 => { if (pos + 2 < ie) {
+                const rid = words[pos + 2];
+                if (rid > 0 and rid < bound and replacements.contains(rid)) { pos = ie; continue; }
+            } },
+            3 => { if (pos + 1 < ie) {
+                const rid = words[pos + 1];
+                if (rid > 0 and rid < bound and replacements.contains(rid)) { pos = ie; continue; }
+            } },
+            else => {},
+        }
 
         var wi: u32 = pos + 1;
         try result.append(alloc, hdr);

@@ -7250,6 +7250,17 @@ const Analyzer = struct {
                         for (0..col_n) |ei| {
                             elem_ids[ei] = if (ei == ci) .{ .id = scalar_id } else .{ .id = zero_id };
                         }
+                        // CSE: when an identical constant column composite was
+                        // already emitted (e.g. `mat4(1.0)` twice → shared zero/
+                        // diagonal columns), reuse it instead of emitting a
+                        // duplicate OpConstantComposite. Same key/cache the
+                        // from-scalars and array-ctor paths use (~6682).
+                        const col_key = self.constCompositeKey(col_type, elem_ids);
+                        if (self.const_composite_cache.get(col_key)) |existing_id| {
+                            self.alloc.free(elem_ids);
+                            col_ids[ci] = existing_id;
+                            continue;
+                        }
                         // Append the column explicitly (NOT emitPureOp) so the
                         // upgrade below rewrites THIS instruction's tag in place
                         // and isConstantId recognizes the column as a
@@ -7273,6 +7284,14 @@ const Analyzer = struct {
                         mat_ops[i] = .{ .id = cid };
                     }
                     self.alloc.free(col_ids);
+                    // CSE: reuse an already-emitted identical constant matrix
+                    // (e.g. `mat4(1.0)` used twice) instead of a duplicate
+                    // OpConstantComposite.
+                    const mat_key = self.constCompositeKey(result_ty, mat_ops);
+                    if (self.const_composite_cache.get(mat_key)) |existing_id| {
+                        self.alloc.free(mat_ops);
+                        return .{ .ty = result_ty, .id = existing_id };
+                    }
                     try self.instructions.append(self.alloc, .{
                         .tag = .composite_construct,
                         .result_type = null,
