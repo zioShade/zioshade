@@ -601,6 +601,23 @@ pub fn build(b: *std.Build) void {
     std430_matrix_test_step.dependOn(&run_std430_matrix_tests.step);
     test_step.dependOn(&run_std430_matrix_tests.step);
 
+    // std140/std430 nested-struct member Offset (#181): a member following a
+    // nested struct / array-of-struct must advance past the struct size, and a
+    // struct-array's ArrayStride must reflect the real element size. glslang-gated.
+    const std140_nested_test_step = b.step("test-std140-nested-offset", "Run std140/std430 nested-struct offset tests");
+    const std140_nested_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/std140_nested_offset_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    std140_nested_test_mod.addImport("glslpp", glslpp_mod);
+    const run_std140_nested_tests = b.addRunArtifact(b.addTest(.{
+        .name = "std140-nested-offset-tests",
+        .root_module = std140_nested_test_mod,
+    }));
+    std140_nested_test_step.dependOn(&run_std140_nested_tests.step);
+    test_step.dependOn(&run_std140_nested_tests.step);
+
     // Builtin-registration correctness tests (matrixCompMult, gl_PointCoord).
     // Assert real SPIR-V structure so tolerate-mode empty bodies fail loudly.
     const builtin_reg_test_step = b.step("test-builtin-reg", "Run semantic builtin-registration correctness tests");
