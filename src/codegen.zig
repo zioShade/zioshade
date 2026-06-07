@@ -2206,7 +2206,6 @@ const Codegen = struct {
                 try self.emitTypeWord(0); // Not multisampled
                 try self.emitTypeWord(1); // Sampled = 1
                 try self.emitTypeWord(0); // ImageFormat = Unknown
-                self.sampled_image_1d_inner_id = image_id;
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
