@@ -49,7 +49,33 @@ pub const Member = struct {
     is_runtime_array: bool = false,
     /// Fixed element count for a sized array member; 0 for runtime or non-array.
     array_dim: u32 = 0,
+
+    // ── Nested-struct recursion (#177 Item 1) ──
+    /// When the member's resolved type is a struct, this holds the INLINED inner
+    /// members (recursively). `null` for non-struct members. Offsets of nested
+    /// members are RELATIVE to the nested struct (matching spirv-cross). Freed
+    /// recursively by `freeMembers`.
+    members: ?[]const Member = null,
+
+    // ── Per-member access qualifiers (#177 Item 3) ──
+    /// `Coherent` (Decoration 23) on this member (`OpMemberDecorate`).
+    coherent: bool = false,
+    /// `Volatile` (Decoration 21) on this member.
+    is_volatile: bool = false,
+    /// `Restrict` (Decoration 19) on this member.
+    @"restrict": bool = false,
 };
+
+/// Recursively free a member slice and every nested member slice. Frees each
+/// member's `name`, recurses into `member.members`, then frees the slice
+/// itself — exactly once per allocation, so no double-free or leak.
+fn freeMembers(alloc: std.mem.Allocator, members: []const Member) void {
+    for (members) |*m| {
+        if (m.name.len > 0) alloc.free(m.name);
+        if (m.members) |inner| freeMembers(alloc, inner);
+    }
+    alloc.free(members);
+}
 
 pub const Resource = struct {
     name: []const u8 = "",
@@ -92,6 +118,15 @@ pub const Resource = struct {
     /// True if the resource variable carries `NonReadable` (Decoration 25),
     /// i.e. a `writeonly` buffer.
     writeonly: bool = false,
+    /// True if the resource variable carries `Coherent` (Decoration 23),
+    /// i.e. a `coherent` buffer/image. (#177 Item 3)
+    coherent: bool = false,
+    /// True if the resource variable carries `Volatile` (Decoration 21),
+    /// i.e. a `volatile` buffer/image.
+    is_volatile: bool = false,
+    /// True if the resource variable carries `Restrict` (Decoration 19),
+    /// i.e. a `restrict` buffer/image.
+    @"restrict": bool = false,
 };
 
 pub const EntryPoint = struct {
@@ -122,12 +157,7 @@ pub const ShaderResources = struct {
                 const slice: []const Resource = @field(self, field.name);
                 for (slice) |*res| {
                     if (res.name.len > 0) alloc.free(res.name);
-                    if (res.members.len > 0) {
-                        for (res.members) |*m| {
-                            if (m.name.len > 0) alloc.free(m.name);
-                        }
-                        alloc.free(res.members);
-                    }
+                    if (res.members.len > 0) freeMembers(alloc, res.members);
                 }
                 if (slice.len > 0) alloc.free(slice);
             } else if (field.type == []const EntryPoint) {
@@ -153,12 +183,21 @@ const Deco = struct {
     nonwritable: bool = false,
     /// `NonReadable` (25) on the variable → writeonly buffer.
     nonreadable: bool = false,
+    /// `Coherent` (23) on the variable → coherent buffer/image.
+    coherent: bool = false,
+    /// `Volatile` (21) on the variable → volatile buffer/image.
+    is_volatile: bool = false,
+    /// `Restrict` (19) on the variable → restrict buffer/image.
+    @"restrict": bool = false,
 };
 
-// Per-member matrix layout decorations, keyed by memberKey(struct_id, idx).
-const MemberMatrixDeco = struct {
+// Per-member layout/access decorations, keyed by memberKey(struct_id, idx).
+const MemberDeco = struct {
     matrix_stride: u32 = 0,
     is_row_major: bool = false,
+    coherent: bool = false,
+    is_volatile: bool = false,
+    @"restrict": bool = false,
 };
 
 // Internal: type info
@@ -207,7 +246,7 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
     defer moffs.deinit();
     var astrides = std.AutoHashMap(u32, u32).init(alloc); // array TYPE id → ArrayStride
     defer astrides.deinit();
-    var mmat = std.AutoHashMap(u64, MemberMatrixDeco).init(alloc); // memberKey → matrix layout
+    var mmat = std.AutoHashMap(u64, MemberDeco).init(alloc); // memberKey → matrix layout + access quals
     defer mmat.deinit();
     var const_u32 = std.AutoHashMap(u32, u32).init(alloc); // OpConstant id → 32-bit value (for array lengths)
     defer const_u32.deinit();
@@ -268,6 +307,9 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                         3 => { gop.value_ptr.is_buffer_block = true; }, // BufferBlock
                         24 => { gop.value_ptr.nonwritable = true; }, // NonWritable → readonly
                         25 => { gop.value_ptr.nonreadable = true; }, // NonReadable → writeonly
+                        23 => { gop.value_ptr.coherent = true; }, // Coherent
+                        21 => { gop.value_ptr.is_volatile = true; }, // Volatile
+                        19 => { gop.value_ptr.@"restrict" = true; }, // Restrict
                         6 => { if (wc >= 4) try astrides.put(target, spirv_words[pos + 3]); }, // ArrayStride (on array TYPE id)
                         else => {},
                     }
@@ -297,6 +339,21 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                             const gop = try mmat.getOrPut(mkey);
                             if (!gop.found_existing) gop.value_ptr.* = .{};
                             gop.value_ptr.is_row_major = false;
+                        },
+                        23 => { // Coherent
+                            const gop = try mmat.getOrPut(mkey);
+                            if (!gop.found_existing) gop.value_ptr.* = .{};
+                            gop.value_ptr.coherent = true;
+                        },
+                        21 => { // Volatile
+                            const gop = try mmat.getOrPut(mkey);
+                            if (!gop.found_existing) gop.value_ptr.* = .{};
+                            gop.value_ptr.is_volatile = true;
+                        },
+                        19 => { // Restrict
+                            const gop = try mmat.getOrPut(mkey);
+                            if (!gop.found_existing) gop.value_ptr.* = .{};
+                            gop.value_ptr.@"restrict" = true;
                         },
                         else => {},
                     }
@@ -499,6 +556,11 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             // readonly/writeonly come from NonWritable/NonReadable on the VARIABLE.
             .readonly = d.nonwritable,
             .writeonly = d.nonreadable,
+            // coherent/volatile/restrict come from Coherent/Volatile/Restrict on
+            // the VARIABLE (how glslpp emits them, like readonly/writeonly).
+            .coherent = d.coherent,
+            .is_volatile = d.is_volatile,
+            .@"restrict" = d.@"restrict",
         };
 
         // Opaque resources (samplers / images / accel structs) are routed by their
@@ -546,53 +608,17 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             const ti = types.get(res.type_id) orelse continue;
             if (ti.member_type_ids.len == 0) continue;
 
-            var members = std.ArrayList(Member).initCapacity(alloc, ti.member_type_ids.len) catch continue;
-            for (ti.member_type_ids, 0..) |mid, i| {
-                const mkey = memberKey(res.type_id, @intCast(i));
-                const mname = mnames.get(mkey) orelse "";
-                const offset = moffs.get(mkey) orelse 0;
-                const mt: ?TInfo = types.get(mid);
-
-                // Matrix layout (per-member decorations).
-                var matrix_stride: u32 = 0;
-                var is_row_major = false;
-                if (mmat.get(mkey)) |md| {
-                    matrix_stride = md.matrix_stride;
-                    is_row_major = md.is_row_major;
-                }
-
-                // Array layout: ArrayStride is keyed by the array TYPE id; runtime
-                // detection comes from OpTypeRuntimeArray (is_runtime), NOT from a
-                // zero length.
-                var array_stride: u32 = 0;
-                var array_dim: u32 = 0;
-                var is_runtime_array = false;
-                if (mt) |t| {
-                    if (t.kind == .array) {
-                        array_stride = astrides.get(mid) orelse 0;
-                        if (t.is_runtime) {
-                            is_runtime_array = true;
-                            array_dim = 0;
-                        } else {
-                            array_dim = if (t.array_len_id != 0) (const_u32.get(t.array_len_id) orelse 0) else 0;
-                        }
-                    }
-                }
-
-                members.appendAssumeCapacity(.{
-                    .name = if (mname.len > 0) alloc.dupe(u8, mname) catch "" else "",
-                    .offset = offset,
-                    .type_id = mid,
-                    .type_kind = resolveKind(&types, mid),
-                    .size = if (mt) |t| t.byte_size else 0,
-                    .matrix_stride = matrix_stride,
-                    .is_row_major = is_row_major,
-                    .array_stride = array_stride,
-                    .array_dim = array_dim,
-                    .is_runtime_array = is_runtime_array,
-                });
-            }
-            res.members = members.items;
+            const ctx = BuildCtx{
+                .alloc = alloc,
+                .types = &types,
+                .mnames = &mnames,
+                .moffs = &moffs,
+                .astrides = &astrides,
+                .mmat = &mmat,
+                .const_u32 = &const_u32,
+            };
+            var visited = [_]u32{0} ** MAX_STRUCT_DEPTH;
+            res.members = buildMembers(ctx, res.type_id, &visited, 0) catch continue;
 
             // block_size = max over all members of (offset + member_extent).
             // Computed from member offsets + per-member extents, NOT a recompute of
@@ -607,7 +633,7 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             // `max` (rather than "last declared member") is robust against
             // out-of-declaration-order members; member offsets are authoritative.
             var bsz: u32 = 0;
-            for (members.items, ti.member_type_ids) |m, mid| {
+            for (res.members, ti.member_type_ids) |m, mid| {
                 const end = m.offset + memberExtent(&types, &astrides, &const_u32, m, mid);
                 if (end > bsz) bsz = end;
             }
@@ -644,6 +670,118 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
         .specialization_constants = spec_list.toOwnedSlice(alloc) catch &.{},
         .entry_points = entry_points.toOwnedSlice(alloc) catch &.{},
     };
+}
+
+/// Max nested-struct recursion depth (#177 Item 1). SPIR-V structs can't cycle
+/// by value, but we guard anyway against malformed input.
+const MAX_STRUCT_DEPTH = 32;
+
+/// Read-only maps threaded into the recursive `buildMembers`.
+const BuildCtx = struct {
+    alloc: std.mem.Allocator,
+    types: *const std.AutoHashMap(u32, TInfo),
+    mnames: *const std.AutoHashMap(u64, []const u8),
+    moffs: *const std.AutoHashMap(u64, u32),
+    astrides: *const std.AutoHashMap(u32, u32),
+    mmat: *const std.AutoHashMap(u64, MemberDeco),
+    const_u32: *const std.AutoHashMap(u32, u32),
+};
+
+/// Build the member list for the struct type `struct_type_id`, recursing into
+/// struct-typed members so the nested tree is INLINED into `Member.members`
+/// (#177 Item 1). Nested-member offsets are relative to the nested struct, as
+/// captured in the SPIR-V `OpMemberDecorate ... Offset` table (matching
+/// spirv-cross). `visited` is the recursion stack of struct-type-ids used as a
+/// cycle/depth guard. The returned slice is owned by the caller and freed
+/// recursively by `freeMembers`.
+fn buildMembers(ctx: BuildCtx, struct_type_id: u32, visited: []u32, depth: u32) ![]const Member {
+    const sti = ctx.types.get(struct_type_id) orelse return &.{};
+    if (sti.member_type_ids.len == 0) return &.{};
+
+    // Cycle/depth guard: stop if we'd exceed MAX_STRUCT_DEPTH or revisit a
+    // struct id already on the recursion stack.
+    if (depth >= MAX_STRUCT_DEPTH) return &.{};
+    for (visited[0..depth]) |seen| if (seen == struct_type_id) return &.{};
+    visited[depth] = struct_type_id;
+
+    var members = try std.ArrayList(Member).initCapacity(ctx.alloc, sti.member_type_ids.len);
+    errdefer {
+        for (members.items) |*m| {
+            if (m.name.len > 0) ctx.alloc.free(m.name);
+            if (m.members) |inner| freeMembers(ctx.alloc, inner);
+        }
+        members.deinit(ctx.alloc);
+    }
+
+    for (sti.member_type_ids, 0..) |mid, i| {
+        const mkey = memberKey(struct_type_id, @intCast(i));
+        const mname = ctx.mnames.get(mkey) orelse "";
+        const offset = ctx.moffs.get(mkey) orelse 0;
+        const mt: ?TInfo = ctx.types.get(mid);
+
+        // Per-member matrix layout + access qualifiers.
+        var matrix_stride: u32 = 0;
+        var is_row_major = false;
+        var coherent = false;
+        var is_volatile = false;
+        var restrict_ = false;
+        if (ctx.mmat.get(mkey)) |md| {
+            matrix_stride = md.matrix_stride;
+            is_row_major = md.is_row_major;
+            coherent = md.coherent;
+            is_volatile = md.is_volatile;
+            restrict_ = md.@"restrict";
+        }
+
+        // Array layout: ArrayStride is keyed by the array TYPE id; runtime
+        // detection comes from OpTypeRuntimeArray (is_runtime), NOT a zero length.
+        var array_stride: u32 = 0;
+        var array_dim: u32 = 0;
+        var is_runtime_array = false;
+        if (mt) |t| {
+            if (t.kind == .array) {
+                array_stride = ctx.astrides.get(mid) orelse 0;
+                if (t.is_runtime) {
+                    is_runtime_array = true;
+                    array_dim = 0;
+                } else {
+                    array_dim = if (t.array_len_id != 0) (ctx.const_u32.get(t.array_len_id) orelse 0) else 0;
+                }
+            }
+        }
+
+        // Recurse when the member's resolved type is a struct. We recurse on the
+        // member TYPE id directly (a struct-typed member references the struct
+        // type id, not an array/pointer in the std140/std430 buffer case the
+        // oracle covers); inner offsets are already relative to that struct.
+        var inner: ?[]const Member = null;
+        if (mt) |t| {
+            if (t.kind == .struct_type) {
+                const sub = try buildMembers(ctx, mid, visited, depth + 1);
+                if (sub.len > 0) inner = sub;
+            }
+        }
+
+        const dup_name = if (mname.len > 0) ctx.alloc.dupe(u8, mname) catch "" else "";
+        members.appendAssumeCapacity(.{
+            .name = dup_name,
+            .offset = offset,
+            .type_id = mid,
+            .type_kind = resolveKind(ctx.types, mid),
+            .size = if (mt) |t| t.byte_size else 0,
+            .matrix_stride = matrix_stride,
+            .is_row_major = is_row_major,
+            .array_stride = array_stride,
+            .array_dim = array_dim,
+            .is_runtime_array = is_runtime_array,
+            .members = inner,
+            .coherent = coherent,
+            .is_volatile = is_volatile,
+            .@"restrict" = restrict_,
+        });
+    }
+
+    return members.toOwnedSlice(ctx.alloc);
 }
 
 /// Byte extent a member occupies within its block, used to derive block_size.
