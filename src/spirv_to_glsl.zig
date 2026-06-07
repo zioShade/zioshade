@@ -145,13 +145,12 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     cb_level = false; // only first index uses cb_prefix
                 } else if (is_struct_member) {
                     if (structMemberBuiltin(m, cur_type.?, val)) |bi| {
-                        // gl_PerVertex member: emit bare gl_* name (no leading dot).
-                        if (builtinBlockMemberName(bi)) |gn| {
-                            writer.writeAll(gn);
-                        } else {
-                            var mname_buf: [32]u8 = undefined;
-                            writer.writeAll(getMemberName(m, cur_type.?, val, &mname_buf));
-                        }
+                        var mname_buf: [32]u8 = undefined;
+                        const gn = builtinBlockMemberName(bi) orelse getMemberName(m, cur_type.?, val, &mname_buf);
+                        // Bare gl_* only when the block instance base was suppressed
+                        // (gl_PerVertex). For an array-of-block element such as
+                        // gl_in[i].gl_Position the base is kept, so keep the dot.
+                        if (base_is_builtin_block) writer.writeAll(gn) else writer.print(".{s}", .{gn});
                     } else {
                         // Use struct member name for nested struct access
                         var mname_buf: [32]u8 = undefined;
@@ -202,12 +201,9 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     cb_level2 = false;
                 } else if (is_struct_member) {
                     if (structMemberBuiltin(m, cur_type.?, val)) |bi| {
-                        if (builtinBlockMemberName(bi)) |gn| {
-                            try buf.appendSlice(alloc, gn);
-                        } else {
-                            var mname_buf: [32]u8 = undefined;
-                            try buf.appendSlice(alloc, getMemberName(m, cur_type.?, val, &mname_buf));
-                        }
+                        var mname_buf: [32]u8 = undefined;
+                        const gn = builtinBlockMemberName(bi) orelse getMemberName(m, cur_type.?, val, &mname_buf);
+                        if (base_is_builtin_block) try buf.appendSlice(alloc, gn) else try buf.print(alloc, ".{s}", .{gn});
                     } else {
                         var mname_buf: [32]u8 = undefined;
                         const mname = getMemberName(m, cur_type.?, val, &mname_buf);
@@ -264,13 +260,12 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     cb_level = false;
                 } else if (is_struct_member) {
                     if (structMemberBuiltin(m, cur_type.?, val)) |bi| {
-                        // gl_PerVertex member: emit bare gl_* name (no leading dot).
-                        if (builtinBlockMemberName(bi)) |gn| {
-                            try w.writeAll(gn);
-                        } else {
-                            var mname_buf: [32]u8 = undefined;
-                            try w.writeAll(getMemberName(m, cur_type.?, val, &mname_buf));
-                        }
+                        var mname_buf: [32]u8 = undefined;
+                        const gn = builtinBlockMemberName(bi) orelse getMemberName(m, cur_type.?, val, &mname_buf);
+                        // Bare gl_* only when the block instance base was suppressed
+                        // (gl_PerVertex). For an array-of-block element such as
+                        // gl_in[i].gl_Position the base is kept, so keep the dot.
+                        if (base_is_builtin_block) try w.writeAll(gn) else try w.print(".{s}", .{gn});
                     } else {
                         var mname_buf: [32]u8 = undefined;
                         const mname = getMemberName(m, cur_type.?, val, &mname_buf);
