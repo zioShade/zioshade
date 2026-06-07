@@ -114,6 +114,9 @@ fn generateInternal(
         .sampled_image_int_1d_inner_id = 0,
         .sampled_image_uint_1d_inner_id = 0,
         .sampled_image_cube_inner_id = 0,
+        .sampled_image_cube_array_inner_id = 0,
+        .sampled_image_cube_shadow_inner_id = 0,
+        .sampled_image_cube_array_shadow_inner_id = 0,
         .glsl_std_450_id = 0,
         .access_chain_cache = .{},
         .interface_bool_ptrs = .{},
@@ -429,7 +432,10 @@ const Codegen = struct {
     sampled_image_uint_ms_array_inner_id: u32,
     sampled_image_int_1d_inner_id: u32,
     sampled_image_uint_1d_inner_id: u32,
-    sampled_image_cube_inner_id: u32, // TypeImage (Dim=Cube, Sampled=1)
+    sampled_image_cube_inner_id: u32, // TypeImage (Dim=Cube, Arrayed=0, Sampled=1)
+    sampled_image_cube_array_inner_id: u32, // TypeImage (Dim=Cube, Arrayed=1, Sampled=1)
+    sampled_image_cube_shadow_inner_id: u32, // TypeImage (Dim=Cube, Depth=1, Arrayed=0, Sampled=1)
+    sampled_image_cube_array_shadow_inner_id: u32, // TypeImage (Dim=Cube, Depth=1, Arrayed=1, Sampled=1)
     glsl_std_450_id: u32,
     access_chain_cache: std.AutoHashMapUnmanaged(u64, u32), // (base_id << 32 | index_id) -> result_id, cleared per function
     interface_bool_ptrs: std.AutoHashMapUnmanaged(u32, ast.Type), // ptr_id -> original AST type (bool/bvecN) for interface bool conversion
@@ -2124,7 +2130,7 @@ const Codegen = struct {
                 try self.emitTypeWord(0); // Not multisampled
                 try self.emitTypeWord(1); // Sampled = 1 (with sampler)
                 try self.emitTypeWord(0); // ImageFormat = Unknown
-                self.sampled_image_cube_inner_id = image_id;
+                self.sampled_image_cube_array_inner_id = image_id;
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
                 try self.emitTypeWord(image_id);
@@ -2157,7 +2163,7 @@ const Codegen = struct {
                 try self.emitTypeWord(0); // Not multisampled
                 try self.emitTypeWord(1); // Sampled = 1
                 try self.emitTypeWord(0); // ImageFormat = Unknown
-                self.sampled_image_cube_inner_id = image_id;
+                self.sampled_image_cube_shadow_inner_id = image_id;
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
                 try self.emitTypeWord(image_id);
@@ -2174,7 +2180,7 @@ const Codegen = struct {
                 try self.emitTypeWord(0); // Not multisampled
                 try self.emitTypeWord(1); // Sampled = 1
                 try self.emitTypeWord(0); // ImageFormat = Unknown
-                self.sampled_image_cube_inner_id = image_id; // Cube array uses same inner
+                self.sampled_image_cube_array_shadow_inner_id = image_id;
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
                 try self.emitTypeWord(image_id);
@@ -5421,8 +5427,16 @@ const Codegen = struct {
                     break :blk self.sampled_image_ms_array_inner_id;
                 } else if (inst.ty == .sampler1d or inst.ty == .sampler1d_shadow) blk: {
                     break :blk self.sampled_image_1d_inner_id;
-                } else if (inst.ty == .sampler_cube or inst.ty == .sampler_cube_array or inst.ty == .sampler_cube_shadow or inst.ty == .sampler_cube_array_shadow) blk: {
+                } else if (inst.ty == .sampler_cube) blk: {
                     break :blk self.sampled_image_cube_inner_id;
+                } else if (inst.ty == .sampler_cube_array) blk: {
+                    // Arrayed=1 inner; must NOT alias the non-array cube type, else
+                    // spirv-val rejects "Sample Image image type != Result Type".
+                    break :blk if (self.sampled_image_cube_array_inner_id != 0) self.sampled_image_cube_array_inner_id else self.sampled_image_cube_inner_id;
+                } else if (inst.ty == .sampler_cube_shadow) blk: {
+                    break :blk if (self.sampled_image_cube_shadow_inner_id != 0) self.sampled_image_cube_shadow_inner_id else self.sampled_image_cube_inner_id;
+                } else if (inst.ty == .sampler_cube_array_shadow) blk: {
+                    break :blk if (self.sampled_image_cube_array_shadow_inner_id != 0) self.sampled_image_cube_array_shadow_inner_id else self.sampled_image_cube_array_inner_id;
                 } else if (inst.ty == .isampler2d or inst.ty == .isampler3d or inst.ty == .isampler_cube or inst.ty == .isampler2d_array) blk: {
                     break :blk if (self.sampled_image_int_inner_id != 0) self.sampled_image_int_inner_id else self.sampled_image_inner_id;
                 } else if (inst.ty == .usampler2d or inst.ty == .usampler3d or inst.ty == .usampler_cube or inst.ty == .usampler2d_array) blk: {

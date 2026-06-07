@@ -1894,3 +1894,93 @@ test "gap #183: samplerCubeArray emits OpTypeImage Arrayed=1" {
     try testing.expect(int_arrayed != null);
     try testing.expectEqual(@as(u32, 1), int_arrayed.?);
 }
+
+/// Resolve `type_id` to an `OpTypeImage` and return its `Arrayed` operand, or
+/// null if `type_id` is not an image type. Layout:
+///   OpTypeImage = [header | result_id | sampled_ty | Dim | Depth | Arrayed | MS | Sampled | Format]
+fn imageArrayedOfType(words: []const u32, type_id: u32) ?u32 {
+    var i: usize = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        if (opcode == @intFromEnum(spirv.Op.TypeImage) and word_count >= 9 and words[i + 1] == type_id) {
+            return words[i + 5]; // Arrayed
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    return null;
+}
+
+/// Collect the `Arrayed` operand of the image type referenced by every `OpImage`
+/// extraction in the binary, in program order. `OpImage` layout:
+///   [header | result_type_id | result_id | sampled_image_id]
+/// The result type of OpImage IS the inner image type, so resolving the
+/// result-type-id to its OpTypeImage tells us which Arrayed-ness each
+/// extraction claims. The clobber bug makes two distinct-Arrayed sources both
+/// point at the same OpTypeImage.
+fn collectOpImageArrayed(alloc: std.mem.Allocator, words: []const u32) ![]u32 {
+    var out: std.ArrayListUnmanaged(u32) = .{};
+    errdefer out.deinit(alloc);
+    var i: usize = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        if (opcode == @intFromEnum(spirv.Op.OpImage) and word_count >= 4) {
+            const result_type_id = words[i + 1];
+            if (imageArrayedOfType(words, result_type_id)) |arrayed| {
+                try out.append(alloc, arrayed);
+            }
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+test "gap #183: samplerCube + samplerCubeArray coexist with correct-Arrayed OpImage" {
+    // BLOCKER (#183 review): one `sampled_image_cube_inner_id` field was written
+    // by all four cube ensureType arms, so the OpImage extraction site used
+    // whichever ran last. With BOTH a samplerCube (Arrayed=0) and a
+    // samplerCubeArray (Arrayed=1) present, the non-array textureSize extracted
+    // against the array inner type → spirv-val:
+    //   "Expected Sample Image image type to be equal to Result Type".
+    //
+    // Results are written to gl_FragColor so the optimizer cannot DCE the
+    // OpImage extractions away (the delisted image-query.desktop.frag passed
+    // only because its dead body was stripped). Oracle (glslangValidator -V):
+    //   non-array textureSize(samplerCube)      → OpImage of Cube ... Arrayed=0
+    //   array     textureSize(samplerCubeArray) → OpImage of Cube ... Arrayed=1
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform samplerCube uCube;
+        \\layout(binding=1) uniform samplerCubeArray uCubeArr;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec2 a = textureSize(uCube, 0);
+        \\    ivec3 b = textureSize(uCubeArr, 0);
+        \\    fragColor = vec4(float(a.x + a.y), float(b.x + b.y + b.z), 0.0, 1.0);
+        \\}
+    ;
+    const words = try compileToWords(testing.allocator, source, .fragment);
+    defer testing.allocator.free(words);
+
+    // Both OpImage extractions must survive optimization (escape DCE).
+    try testing.expectEqual(@as(usize, 2), countOp(words, .OpImage));
+
+    // Each OpImage must reference an image type whose Arrayed bit matches its
+    // source: one non-arrayed (0) and one arrayed (1). Pre-fix both were 1.
+    const arrayed = try collectOpImageArrayed(testing.allocator, words);
+    defer testing.allocator.free(arrayed);
+    try testing.expectEqual(@as(usize, 2), arrayed.len);
+    var saw_non_array = false;
+    var saw_array = false;
+    for (arrayed) |a| {
+        if (a == 0) saw_non_array = true;
+        if (a == 1) saw_array = true;
+    }
+    try testing.expect(saw_non_array);
+    try testing.expect(saw_array);
+}
