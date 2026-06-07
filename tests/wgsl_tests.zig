@@ -2030,3 +2030,49 @@ test "wgsl: image atomic errors honestly (WGSL has no image atomics)" {
     const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "image atomic") != null);
 }
+
+// ---------------------------------------------------------------------------
+// Pass 3 (#170 G5) ITEM A1: push-constant blocks. SPIR-V StorageClass
+// PushConstant was unhandled (fell into the switch `else`), so the struct type
+// and the `push` var were never emitted while the body still referenced
+// `push.a` → naga "no definition in scope for push". WGSL has no push_constant
+// address space (naga 29.0.3 rejects both `var<push_constant>` and
+// `enable push_constant`); the representable lowering is a uniform buffer.
+// ---------------------------------------------------------------------------
+
+test "wgsl: push_constant block lowers to var<uniform>" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(push_constant) uniform PC { vec4 a; vec4 b; } push;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = push.a + push.b; }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    // The push-constant block must materialise as a uniform buffer + struct, not
+    // vanish (which left `push.a` dangling).
+    try assertContains(wgsl, "var<uniform>");
+    try assertContains(wgsl, "struct");
+    try nagaValidateOrSkip(wgsl, "push-constant-as-uniform");
+}
+
+// ---------------------------------------------------------------------------
+// Pass 3 (#170 G5) ITEM H: texel buffers. An OpTypeImage with Dim=Buffer
+// (GLSL samplerBuffer/imageBuffer) was emitted as `texture_buffer<f32>`, which
+// is NOT standard WGSL — naga rejects it (silent-wrong-shaped emission). WGSL
+// has no texel-buffer type, so it must honest-error.
+// ---------------------------------------------------------------------------
+
+test "wgsl: texel buffer errors honestly (WGSL has no texture_buffer type)" {
+    const source: [:0]const u8 =
+        \\#version 310 es
+        \\#extension GL_OES_texture_buffer : require
+        \\layout(binding = 4) uniform highp samplerBuffer uSamp;
+        \\void main(){ gl_Position = texelFetch(uSamp, 10); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "texel buffer") != null);
+}
