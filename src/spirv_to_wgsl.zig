@@ -410,6 +410,74 @@ fn depthCompareShape(module: *const ParsedModule, sampled_image_value_id: u32) D
     return .{ .comps = comps, .arrayed = arrayed };
 }
 
+/// How a NON-depth coordinate must be reshaped for an arrayed sampled texture
+/// (sampler2DArray / samplerCubeArray / sampler1DArray). This is the non-depth
+/// analogue of `depthCompareShape`: WGSL's `texture_2d_array` / `texture_cube_array`
+/// take the array layer as a SEPARATE integer argument right after the spatial
+/// coordinate, while glslang packs it as a trailing coordinate component. So the
+/// coordinate must be sliced to exactly the texture's spatial dimension and the
+/// layer extracted into its own `i32(...)` argument, or naga rejects ("coordinate
+/// type does not match dimension"). `arrayed == false` means leave the call alone.
+const ArrayedSampleShape = struct {
+    /// Spatial component count: 1 (1D), 2 (2D), 3 (cube). The layer is the
+    /// component just past these (.x→.y, .xy→.z, .xyz→.w).
+    comps: u32,
+    /// True only for a non-depth arrayed sampled texture; false otherwise so the
+    /// existing (non-array) emit path is used verbatim.
+    arrayed: bool,
+};
+
+/// Derive the arrayed-sample reshape from the OpTypeImage behind a sampled-image
+/// value id (the combined sampler operand of OpImageSample*). DEPTH images are
+/// excluded here — those go through emitDepthCompare, which already does its own
+/// layer split. Accepts the same pointer/sampled-image unwrap chain as
+/// depthCompareShape.
+fn arrayedSampleShape(module: *const ParsedModule, sampled_image_value_id: u32) ArrayedSampleShape {
+    const none = ArrayedSampleShape{ .comps = 2, .arrayed = false };
+    const type_id = getTypeOf(module, sampled_image_value_id) orelse return none;
+    var inst = getDef(module, type_id) orelse return none;
+    if (inst.op == .TypePointer and inst.words.len > 3) {
+        inst = getDef(module, inst.words[3]) orelse return none;
+    }
+    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
+        inst = getDef(module, inst.words[2]) orelse return none;
+    }
+    if (inst.op != .TypeImage or inst.words.len <= 5) return none;
+    // Depth textures take the depth-compare path; not our concern here.
+    const is_depth = inst.words.len > 4 and inst.words[4] == 1;
+    if (is_depth) return none;
+    const arrayed = inst.words[5] == 1;
+    if (!arrayed) return none;
+    const comps: u32 = switch (inst.words[3]) {
+        0 => 1, // 1D family → vec1 spatial (scalar .x)
+        3 => 3, // Cube → vec3 direction
+        else => 2, // 2D family → vec2 spatial
+    };
+    return .{ .comps = comps, .arrayed = true };
+}
+
+/// The spatial-coordinate swizzle (".x"/".xy"/".xyz") and the layer-component
+/// swizzle (".y"/".z"/".w") for an `ArrayedSampleShape`. At the FLOAT-coord
+/// sample sites (ImageSample{Implicit,Explicit}Lod, ImageGather) the layer is
+/// `i32(round(coord.<layer>))` — rounded for glslang parity (floor(layer+0.5)).
+/// At the INTEGER-coord ImageFetch (texelFetch) site the layer component is
+/// already an integer, so it is `i32(coord.<layer>)` with NO round.
+fn arrayedCoordSwizzle(comps: u32) []const u8 {
+    return switch (comps) {
+        1 => ".x",
+        3 => ".xyz",
+        else => ".xy",
+    };
+}
+
+fn arrayedLayerSwizzle(comps: u32) []const u8 {
+    return switch (comps) {
+        1 => ".y",
+        3 => ".w",
+        else => ".z",
+    };
+}
+
 /// Spatial dimensionality (1/2/3) of the sampler behind a sampled-image value,
 /// for lowering GLSL projective sampling (textureProj*). WGSL has no projective
 /// builtin, so textureProj is lowered to a manual perspective divide: the
@@ -873,12 +941,24 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
             const dim = if (inst.words.len > 3) inst.words[3] else 1;
             const sampled_type_id = inst.words[2];
             const st = try wgslType(module, sampled_type_id, names, alloc);
-            const tex_type: []const u8 = switch (dim) {
+            // Array-ness comes from the Arrayed operand (word[5]), NOT from `dim`
+            // (Dim is never 4 for arrays — 4 = Rect). A non-depth arrayed texture
+            // (sampler2DArray, samplerCubeArray, sampler1DArray) MUST be spelled
+            // texture_2d_array<T> / texture_cube_array<T> / texture_1d_array<T>;
+            // emitting the non-array form makes naga reject the sample (coordinate
+            // dimension mismatch). See arrayedSampleShape for the matching layer
+            // split at the call sites.
+            const arrayed_nondepth = inst.words.len > 5 and inst.words[5] == 1;
+            const tex_type: []const u8 = if (arrayed_nondepth) switch (dim) {
+                0 => "texture_1d_array",
+                1 => "texture_2d_array",
+                3 => "texture_cube_array",
+                else => "texture_2d_array",
+            } else switch (dim) {
                 0 => "texture_1d",
                 1 => "texture_2d",
                 2 => "texture_3d",
                 3 => "texture_cube",
-                4 => "texture_2d_array",
                 6 => "texture_2d",
                 else => "texture_2d",
             };
@@ -4882,7 +4962,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const coord = names.get(inst.words[4]) orelse "uv";
                 // Get texture name directly from combined sampler ID
                 const tex_name = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s});\n", .{ result_name, rt, tex_name, tex_name, coord });
+                // Arrayed (non-depth) textures take the layer as a SEPARATE i32 arg:
+                // textureSample(t, s, coord.xy, i32(round(coord.z))). The layer is
+                // ROUNDED (floor(layer+0.5)) for glslang parity — mirrors the depth-
+                // array path in emitDepthCompare and the MSL rint() lowering.
+                const shape = arrayedSampleShape(module, inst.words[3]);
+                if (shape.arrayed) {
+                    const cs = arrayedCoordSwizzle(shape.comps);
+                    const ls = arrayedLayerSwizzle(shape.comps);
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s}, i32(round({s}{s})));\n", .{ result_name, rt, tex_name, tex_name, coord, cs, coord, ls });
+                } else {
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s});\n", .{ result_name, rt, tex_name, tex_name, coord });
+                }
             },
 
             .ImageSampleExplicitLod => {
@@ -4891,7 +4982,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lod });
+                // Arrayed: textureSampleLevel(t, s, coord.xy, i32(round(coord.z)), lod).
+                // Layer rounded for glslang parity (see ImageSampleImplicitLod).
+                const shape = arrayedSampleShape(module, inst.words[3]);
+                if (shape.arrayed) {
+                    const cs = arrayedCoordSwizzle(shape.comps);
+                    const ls = arrayedLayerSwizzle(shape.comps);
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, tex_name, tex_name, coord, cs, coord, ls, lod });
+                } else {
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lod });
+                }
             },
 
             .ImageSampleDrefImplicitLod => {
@@ -4916,13 +5016,22 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // (Lod/Sample) at words[6] (words[5] = operand mask). Emitting only
                 // (t, coord) produced WGSL naga rejects. (Storage-image loads go
                 // through OpImageRead, which correctly takes 2 args.)
+                // Arrayed textures take the layer as a SEPARATE i32 arg before the
+                // level: textureLoad(t, coord.xy, i32(coord.z), level). The fetch
+                // coordinate is already integer, so the layer needs no rounding.
+                const shape = arrayedSampleShape(module, inst.words[3]);
+                const cs = if (shape.arrayed) arrayedCoordSwizzle(shape.comps) else "";
+                const layer_arg: []const u8 = if (shape.arrayed)
+                    try std.fmt.allocPrint(arena, "i32({s}{s}), ", .{ coord, arrayedLayerSwizzle(shape.comps) })
+                else
+                    "";
                 if (inst.words.len > 6) {
                     const level_or_sample = names.get(inst.words[6]) orelse "0";
                     try writeInd(w, indent);
-                    try w.print("let {s}: {s} = textureLoad({s}, {s}, {s});\n", .{ result_name, rt, si, coord, level_or_sample });
+                    try w.print("let {s}: {s} = textureLoad({s}, {s}{s}, {s}{s});\n", .{ result_name, rt, si, coord, cs, layer_arg, level_or_sample });
                 } else {
                     try writeInd(w, indent);
-                    try w.print("let {s}: {s} = textureLoad({s}, {s}, 0);\n", .{ result_name, rt, si, coord });
+                    try w.print("let {s}: {s} = textureLoad({s}, {s}{s}, {s}0);\n", .{ result_name, rt, si, coord, cs, layer_arg });
                 }
             },
 
@@ -5366,7 +5475,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // textureGather(component, texture, sampler, coords). Emitting the
                 // GLSL order (tex, sampler, coords, component) makes naga read the
                 // texture where it expects the integer component (silent-wrong).
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s});\n", .{ result_name, rt, component, tex_name, tex_name, coord });
+                // Arrayed: the layer is a SEPARATE trailing i32 arg —
+                // textureGather(component, t, s, coord.xy, i32(round(coord.z))).
+                // Layer rounded for glslang parity (see ImageSampleImplicitLod).
+                const shape = arrayedSampleShape(module, inst.words[3]);
+                if (shape.arrayed) {
+                    const cs = arrayedCoordSwizzle(shape.comps);
+                    const ls = arrayedLayerSwizzle(shape.comps);
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s}{s}, i32(round({s}{s})));\n", .{ result_name, rt, component, tex_name, tex_name, coord, cs, coord, ls });
+                } else {
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s});\n", .{ result_name, rt, component, tex_name, tex_name, coord });
+                }
             },
 
             // ImageDrefGather — depth comparison gather
