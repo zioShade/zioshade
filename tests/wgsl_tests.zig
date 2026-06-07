@@ -605,6 +605,156 @@ fn runShadowValidTest(c: ShadowCase) !void {
     try nagaValidateOrSkip(wgsl, c.name);
 }
 
+// ---------------------------------------------------------------------------
+// Non-depth ARRAY textures (sampler2DArray, samplerCubeArray, ...). Mirrors the
+// depth-array path: the type name must carry `_array` AND the sample/fetch/gather
+// call must split the array layer out as a SEPARATE i32 argument. Emitting the
+// non-array type (texture_2d<f32>) with the full packed coordinate is silent-
+// wrong at the glslpp level (exit 0) but naga REJECTS it ("coordinate type does
+// not match dimension"). This is the #187 PART B fix.
+// ---------------------------------------------------------------------------
+
+const ArrayTexCase = struct {
+    name: []const u8,
+    source: [:0]const u8,
+    /// Exact texture declaration line — proves the `_array` type name (rules out
+    /// the silent-wrong non-array `texture_2d<f32>` / `texture_cube<f32>`).
+    tex_decl: []const u8,
+    /// The sample/fetch/gather builtin that must still be emitted.
+    builtin: []const u8,
+    /// Spatial coordinate swizzle proving the layer was sliced off (.xy for the
+    /// 2D family, .xyz for cube).
+    coord_swizzle: []const u8,
+    /// Distinguishing tail of the SEPARATE i32 array-layer argument
+    /// (e.g. ".z)" for 2d_array, ".w)" for cube_array). Proves the layer was
+    /// passed as its own integer argument, not folded into the coordinate.
+    array_index: []const u8,
+    /// Whether the layer must be ROUNDED (`i32(round(coord.z))`). True for the
+    /// FLOAT-coord sample/lod/gather sites (glslang parity: floor(layer+0.5));
+    /// FALSE for the INTEGER-coord texelFetch site (layer already an integer,
+    /// `i32(coord.z)` with NO round). Defaults to true.
+    layer_rounded: bool = true,
+};
+
+fn runArrayTexValidTest(c: ArrayTexCase) !void {
+    const spirv = try compileToSpirv(c.name, c.source);
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+
+    // The arrayed texture must be emitted with its `_array` type name...
+    try assertContains(wgsl, c.tex_decl);
+    // ...the sample/fetch/gather builtin must still be present...
+    const builtin_call = try std.fmt.allocPrint(alloc, "{s}(", .{c.builtin});
+    defer alloc.free(builtin_call);
+    try assertContains(wgsl, builtin_call);
+    // ...the spatial coordinate must be sliced to the texture dimension...
+    try assertContains(wgsl, c.coord_swizzle);
+    // ...the array layer must be passed as its own i32 argument. The float-coord
+    // sample/lod/gather sites must ROUND it (`i32(round(coord.z))`) for glslang
+    // parity; the integer-coord texelFetch site must NOT round (`i32(coord.z)`).
+    if (c.layer_rounded) {
+        try assertContains(wgsl, "i32(round(");
+    } else {
+        try assertContains(wgsl, "i32(");
+        try assertNotContains(wgsl, "i32(round(");
+    }
+    try assertContains(wgsl, c.array_index);
+    // ...and no silent-wrong non-array sampled type must appear.
+    try assertNotContains(wgsl, "texture_2d<f32>");
+    try assertNotContains(wgsl, "texture_cube<f32>");
+    // Ground truth: the emitted WGSL must actually validate.
+    try nagaValidateOrSkip(wgsl, c.name);
+}
+
+test "wgsl: sampler2DArray texture() emits texture_2d_array + separate layer arg" {
+    try runArrayTexValidTest(.{
+        .name = "arr_2d",
+        .source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArray arr;
+        \\layout(location=0) in vec3 vC;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = texture(arr, vC); }
+        ,
+        .tex_decl = "var arr: texture_2d_array<f32>;",
+        .builtin = "textureSample",
+        .coord_swizzle = ".xy",
+        .array_index = ".z)",
+    });
+}
+
+test "wgsl: samplerCubeArray texture() emits texture_cube_array + separate layer arg" {
+    try runArrayTexValidTest(.{
+        .name = "arr_cube",
+        .source =
+        \\#version 450
+        \\layout(binding=0) uniform samplerCubeArray arr;
+        \\layout(location=0) in vec4 vC;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = texture(arr, vC); }
+        ,
+        .tex_decl = "var arr: texture_cube_array<f32>;",
+        .builtin = "textureSample",
+        .coord_swizzle = ".xyz",
+        .array_index = ".w)",
+    });
+}
+
+test "wgsl: textureLod(sampler2DArray) emits textureSampleLevel + separate layer arg" {
+    try runArrayTexValidTest(.{
+        .name = "arr_2d_lod",
+        .source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArray arr;
+        \\layout(location=0) in vec3 vC;
+        \\layout(location=1) in float vLod;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = textureLod(arr, vC, vLod); }
+        ,
+        .tex_decl = "var arr: texture_2d_array<f32>;",
+        .builtin = "textureSampleLevel",
+        .coord_swizzle = ".xy",
+        .array_index = ".z)",
+    });
+}
+
+test "wgsl: texelFetch(sampler2DArray) emits textureLoad + separate layer arg" {
+    try runArrayTexValidTest(.{
+        .name = "arr_2d_fetch",
+        .source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArray arr;
+        \\layout(location=0) flat in ivec3 vC;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = texelFetch(arr, vC, 0); }
+        ,
+        .tex_decl = "var arr: texture_2d_array<f32>;",
+        .builtin = "textureLoad",
+        .coord_swizzle = ".xy",
+        .array_index = ".z)",
+        // texelFetch coord is INTEGER — the layer must NOT be rounded.
+        .layer_rounded = false,
+    });
+}
+
+test "wgsl: textureGather(sampler2DArray) emits textureGather + separate layer arg" {
+    try runArrayTexValidTest(.{
+        .name = "arr_2d_gather",
+        .source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArray arr;
+        \\layout(location=0) in vec3 vC;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = textureGather(arr, vC, 0); }
+        ,
+        .tex_decl = "var arr: texture_2d_array<f32>;",
+        .builtin = "textureGather",
+        .coord_swizzle = ".xy",
+        .array_index = ".z)",
+    });
+}
+
 test "WGSL: unmapped ext-inst error names the GLSL.std.450 instruction" {
     // interpolateAtCentroid lowers to GLSL.std.450 InterpolateAtCentroid (76),
     // which has no WGSL equivalent. The honest error must NAME the instruction
