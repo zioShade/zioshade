@@ -55,12 +55,20 @@ pub const Member = struct {
     /// members (recursively). `null` for non-struct members. Offsets of nested
     /// members are RELATIVE to the nested struct (matching spirv-cross). Freed
     /// recursively by `freeMembers`.
+    ///
+    /// LIMITATION: array-of-struct members are NOT expanded — a member whose type
+    /// is an array WHOSE ELEMENT is a struct (e.g. `Light lights[4];`) has
+    /// `members == null`. Only directly struct-typed members recurse. Consumers
+    /// must not assume full nested coverage. Tracked as a #177 follow-up.
     members: ?[]const Member = null,
 
     // ── Per-member access qualifiers (#177 Item 3) ──
     /// `Coherent` (Decoration 23) on this member (`OpMemberDecorate`).
     coherent: bool = false,
-    /// `Volatile` (Decoration 21) on this member.
+    /// `Volatile` (Decoration 21) on this member. NOTE: glslpp's own codegen
+    /// never emits `Volatile` (the GLSL `volatile` qualifier is dropped at
+    /// codegen), so this flag is only populated when reflecting
+    /// EXTERNALLY-produced SPIR-V (e.g. glslang).
     is_volatile: bool = false,
     /// `Restrict` (Decoration 19) on this member.
     @"restrict": bool = false,
@@ -122,7 +130,10 @@ pub const Resource = struct {
     /// i.e. a `coherent` buffer/image. (#177 Item 3)
     coherent: bool = false,
     /// True if the resource variable carries `Volatile` (Decoration 21),
-    /// i.e. a `volatile` buffer/image.
+    /// i.e. a `volatile` buffer/image. NOTE: glslpp's own codegen never emits
+    /// `Volatile` (the GLSL `volatile` qualifier is dropped at codegen), so this
+    /// flag is only ever populated when reflecting EXTERNALLY-produced SPIR-V
+    /// (e.g. glslang).
     is_volatile: bool = false,
     /// True if the resource variable carries `Restrict` (Decoration 19),
     /// i.e. a `restrict` buffer/image.
@@ -724,13 +735,13 @@ fn buildMembers(ctx: BuildCtx, struct_type_id: u32, visited: []u32, depth: u32) 
         var is_row_major = false;
         var coherent = false;
         var is_volatile = false;
-        var restrict_ = false;
+        var @"restrict" = false;
         if (ctx.mmat.get(mkey)) |md| {
             matrix_stride = md.matrix_stride;
             is_row_major = md.is_row_major;
             coherent = md.coherent;
             is_volatile = md.is_volatile;
-            restrict_ = md.@"restrict";
+            @"restrict" = md.@"restrict";
         }
 
         // Array layout: ArrayStride is keyed by the array TYPE id; runtime
@@ -777,7 +788,7 @@ fn buildMembers(ctx: BuildCtx, struct_type_id: u32, visited: []u32, depth: u32) 
             .members = inner,
             .coherent = coherent,
             .is_volatile = is_volatile,
-            .@"restrict" = restrict_,
+            .@"restrict" = @"restrict",
         });
     }
 
