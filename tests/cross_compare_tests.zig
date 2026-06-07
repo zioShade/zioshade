@@ -670,16 +670,12 @@ test "glsl-version acceptance: fragment input varying valid at 330/400/410/420/4
 }
 
 test "glsl-version acceptance: vertex attrib+varying valid at 330/410/450/460" {
-    // KNOWN PRE-EXISTING BUG (orthogonal to #169): the GLSL backend emits a
+    // Exercises the gl_PerVertex emission fix: the GLSL backend used to emit a
     // malformed `out gl_PerVertex ;` declaration and a leading-dot `.gl_Position =`
-    // for ANY vertex shader that writes gl_Position — at every version, including
-    // 450. That makes glslang reject the round-tripped vertex output regardless of
-    // the chosen version, so this acceptance gate cannot pass until that bug is
-    // fixed. The #169-relevant vertex behavior (location gating on the vColor
-    // OUTPUT varying) IS verified by the structural test below, which matches
-    // spirv-cross exactly. Skipped to keep the gate honest rather than green-by-
-    // weakening; re-enable once the gl_PerVertex emission is fixed.
-    if (true) return error.SkipZigTest;
+    // for any vertex shader that writes gl_Position. The block variable carries its
+    // BuiltIn decorations on the *members* (OpMemberDecorate), so it must be skipped
+    // (its members are predefined) and member access must lower to the bare gl_*
+    // name — matching spirv-cross.
     inline for (.{ 330, 410, 450, 460 }) |v| {
         try roundTripAcceptsAt(alloc, "attrib_vert", attrib_vert_src, .vertex, v);
     }
