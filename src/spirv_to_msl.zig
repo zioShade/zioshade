@@ -1290,7 +1290,12 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     var emitted_names_msl = std.StringHashMap(void).init(aa);
     defer emitted_names_msl.deinit();
     for (cbuffers.items) |cb| {
-        mslEmitStructForwardDecls(&module, &names, cb.type_id, w, aa, &emitted_structs, &emitted_names_msl) catch {};
+        // Propagate errors (not `catch {}`): these forward decls now emit full
+        // std140/std430 member layouts via emitStructMembers, which can honest-
+        // error on an unsupported member. Swallowing it would write a truncated
+        // `struct Foo {` with no closing `}` — fail loud instead, matching the
+        // top-level block emission below (which uses `try`).
+        try mslEmitStructForwardDecls(&module, &names, cb.type_id, w, aa, &emitted_structs, &emitted_names_msl, &member_offsets, &decs);
     }
     if (emitted_structs.count() > 0) try w.writeAll("\n");
 
@@ -1324,7 +1329,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // Emit storage buffer structs for compute
     if (storage_buffers.items.len > 0) {
         for (storage_buffers.items) |sb| {
-            mslEmitStructForwardDecls(&module, &names, sb.type_id, w, aa, &emitted_structs, &emitted_names_msl) catch {};
+            try mslEmitStructForwardDecls(&module, &names, sb.type_id, w, aa, &emitted_structs, &emitted_names_msl, &member_offsets, &decs);
         }
         for (storage_buffers.items) |sb| {
             try w.print("struct {s}\n{{\n", .{sb.name});
@@ -2009,6 +2014,14 @@ fn mslWidenedElementType(m: *const ParsedModule, elem_type_id: u32, stride: u32,
     // Matrix elements: the MSL type is driven by the member's MatrixStride
     // (the ArrayStride is cols*MatrixStride). Independent of the array stride.
     if (elem_inst.op == .TypeMatrix) return try mslMatrixMemberType(m, elem_inst, matrix_stride, alloc);
+    // Struct elements: the struct carries its own per-member Offset/packing
+    // decorations and is emitted as a separate `struct` decl (whose members go
+    // through mslUboMemberType, so vec3s get packed_float3 etc.). Its natural MSL
+    // size therefore already equals the std140/std430 ArrayStride, so spirv-cross
+    // emits `Foo arr[N];` directly with no widening — match that. (typeNatSize
+    // returns 4 for a struct, so without this the stride>nat path would reach the
+    // scalar/vector branches and honest-error on the struct element.)
+    if (elem_inst.op == .TypeStruct) return try mslPackedType(m, elem_type_id, names, alloc);
     const nat = typeNatSize(m, elem_type_id);
     if (stride <= nat) return try mslPackedType(m, elem_type_id, names, alloc);
     // stride > nat: must widen the element so the natural array stride == std140.
@@ -2052,10 +2065,56 @@ fn mslWidenedElementType(m: *const ParsedModule, elem_type_id: u32, stride: u32,
     return error.UnsupportedUboMemberLayout;
 }
 
-fn mslEmitStructForwardDecls(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
-    return common.commonEmitStructForwardDecls(m, names, root_type_id, w, alloc, emitted, emitted_names, mslType, getMemberName);
+// Emit forward declarations for every struct reachable from a UBO/SSBO block.
+// Unlike the generic common.commonEmitStructForwardDecls (which types members
+// with plain mslType), this routes each nested struct's members through
+// emitStructMembers so they get the SAME std140/std430-aware treatment as the
+// top-level block: vec3 -> packed_float3 when tightly followed, matrices sized
+// by their MatrixStride, and array elements widened by their ArrayStride. A
+// nested struct's natural MSL layout must equal its std140/std430 size or an
+// array of it (`Foo arr[N];`) silently reads at the wrong stride.
+//
+// NOTE: only use this for BLOCK-reachable structs, which carry the Offset/
+// ArrayStride/MatrixStride decorations emitStructMembers depends on. For
+// Function-storage LOCAL structs (no layout decorations) use the generic
+// mslEmitOneStructForwardDecl below — they want natural MSL types, not packed.
+fn mslEmitStructForwardDecls(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), member_offsets: *const std.AutoHashMap(MemberKey, u32), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry))) !void {
+    const inst = getDef(m, root_type_id) orelse return;
+    if (inst.op != .TypeStruct) return;
+    if (inst.words.len <= 2) return;
+    for (inst.words[2..]) |mt_id| {
+        try mslEmitUboNestedStructDecl(m, names, mt_id, w, alloc, emitted, emitted_names, member_offsets, decs);
+    }
 }
 
+fn mslEmitUboNestedStructDecl(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), member_offsets: *const std.AutoHashMap(MemberKey, u32), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry))) !void {
+    const inst = getDef(m, type_id) orelse return;
+    switch (inst.op) {
+        .TypeStruct => {
+            // Emit dependency structs (members + array/vector/matrix element
+            // structs) before this one so C-style decls are ordered correctly.
+            if (inst.words.len > 2) {
+                for (inst.words[2..]) |mt_id| {
+                    try mslEmitUboNestedStructDecl(m, names, mt_id, w, alloc, emitted, emitted_names, member_offsets, decs);
+                }
+            }
+            if (emitted.get(type_id) != null) return;
+            const sname = names.get(type_id) orelse "Struct";
+            if (emitted_names.get(sname) != null) return;
+            try emitted.put(type_id, {});
+            try emitted_names.put(sname, {});
+            try w.print("struct {s}\n{{\n", .{sname});
+            try emitStructMembers(m, names, type_id, sname, w, alloc, member_offsets, decs);
+            try w.writeAll("};\n");
+        },
+        .TypeArray, .TypeRuntimeArray => if (inst.words.len > 2) try mslEmitUboNestedStructDecl(m, names, inst.words[2], w, alloc, emitted, emitted_names, member_offsets, decs),
+        .TypeMatrix, .TypeVector => if (inst.words.len > 2) try mslEmitUboNestedStructDecl(m, names, inst.words[2], w, alloc, emitted, emitted_names, member_offsets, decs),
+        else => {},
+    }
+}
+
+// Generic struct forward-decl for Function-storage LOCAL structs (no std140/
+// std430 layout decorations) — members keep their natural MSL types via mslType.
 fn mslEmitOneStructForwardDecl(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
     return common.commonEmitOneStructForwardDecl(m, names, type_id, w, alloc, emitted, emitted_names, mslType, getMemberName);
 }
