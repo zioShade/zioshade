@@ -33,7 +33,8 @@ const KNOWN_UNSUPPORTED = [_][]const u8{
     "tests/spirv-cross/extended-arithmetic.desktop.comp",
     "tests/spirv-cross/fp64.desktop.comp",
     "tests/spirv-cross/gcn_shader.comp",
-    "tests/spirv-cross/image-query.desktop.frag",
+    // image-query.desktop.frag was unsupported only because samplerCubeArray /
+    // imageCubeArray were mis-compiled (#183); it now compiles + spirv-vals.
     "tests/spirv-cross/int64.desktop.comp",
     "tests/spirv-cross/ray_sphere_test.frag",
     "tests/spirv-cross/shader-clock.frag",

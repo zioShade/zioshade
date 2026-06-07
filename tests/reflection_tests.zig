@@ -855,11 +855,12 @@ test "toJson: ubo + texture, valid JSON with escaped names" {
 // (arrayed==1) then `Shadow` (depth==1) from the previously-unstored
 // OpTypeImage `arrayed`/`depth` operands.
 //
-// NOTE: `samplerCubeArray` is intentionally NOT asserted. glslpp's CODEGEN
-// currently emits a cube-array as a plain cube (arrayed==0) — a pre-existing
-// codegen bug, NOT a reflection bug: spirv-cross on the SAME glslpp binary also
-// reports `samplerCube`, so the serializer is faithful. The 2D Array/Shadow
-// cases above exercise the full Array+Shadow suffix logic.
+// #183 (tightened): `samplerCubeArray` is now asserted as `samplerCubeArray`.
+// Previously glslpp's CODEGEN emitted a cube-array as a plain cube (arrayed==0)
+// so this was scoped out; #183 fixed the parser/codegen to set Arrayed=1, and
+// spirv-cross on the SAME glslpp binary now also reports `samplerCubeArray`,
+// confirmed against the oracle. The 2D Array/Shadow cases exercise the full
+// Array+Shadow suffix logic.
 test "toJson #177-review: sampler array/shadow type spelling matches oracle" {
     const alloc = std.testing.allocator;
     const spv = try glslpp.compileToSPIRV(alloc,
@@ -868,13 +869,15 @@ test "toJson #177-review: sampler array/shadow type spelling matches oracle" {
         \\layout(binding = 1) uniform sampler2DShadow texShadow;
         \\layout(binding = 2) uniform sampler2DArrayShadow texArrShadow;
         \\layout(binding = 3) uniform samplerCube texCube;
+        \\layout(binding = 4) uniform samplerCubeArray texCubeArr;
         \\layout(location = 0) in vec3 uv;
         \\layout(location = 0) out vec4 o;
         \\void main() {
         \\    o = texture(texArr, uv)
         \\      + vec4(texture(texShadow, vec3(0.5)))
         \\      + vec4(texture(texArrShadow, vec4(0.5)))
-        \\      + texture(texCube, uv);
+        \\      + texture(texCube, uv)
+        \\      + texture(texCubeArr, vec4(uv, 0.0));
         \\}
     , .{ .stage = .fragment });
     defer alloc.free(spv);
@@ -896,6 +899,8 @@ test "toJson #177-review: sampler array/shadow type spelling matches oracle" {
     try std.testing.expectEqualStrings("sampler2DShadow", by_name.get("texShadow").?);
     try std.testing.expectEqualStrings("sampler2DArrayShadow", by_name.get("texArrShadow").?);
     try std.testing.expectEqualStrings("samplerCube", by_name.get("texCube").?);
+    // #183: cube-array now spells `samplerCubeArray` (Arrayed=1).
+    try std.testing.expectEqualStrings("samplerCubeArray", by_name.get("texCubeArr").?);
 }
 
 // ── #177 review MINOR 1: images section emits format + array_size_is_literal ──
@@ -903,21 +908,25 @@ test "toJson #177-review: sampler array/shadow type spelling matches oracle" {
 // SPIR-V, the same binary this test reflects):
 //   destImg -> image2D, format "rgba8"
 //   arr     -> image2D, format "rgba8", array [3], array_size_is_literal [true]
-// NOTE: the source declares `arr` as `rgba32f`, but glslpp's CODEGEN currently
-// drops the per-element format qualifier on a storage-image ARRAY and emits the
-// first image's format (rgba8) — a pre-existing codegen bug, NOT a reflection
-// bug. spirv-cross on the SAME glslpp binary reports rgba8 too, so the JSON
-// serializer is faithful. We assert glslpp's actual (rgba8) value; the
-// `format` + `array_size_is_literal` KEYS are the #177-review MINOR 1 deliverable.
+// #183 (tightened): glslpp's CODEGEN now preserves EACH storage image's own
+// `layout(rgbaN)` Format — both for multiple distinct scalar images AND for an
+// array element. Previously the format-blind type dedup made every image reuse
+// the first one's Format (all rgba8); the array element fell through to an
+// Unknown-format type. These assertions match the glslang/spirv-cross oracle:
+//   destImg -> image2D, format "rgba8"
+//   destImg2 -> image2D, format "rgba32f"   (DISTINCT 2nd scalar image)
+//   arr     -> image2D, format "rgba32f", array [3], array_size_is_literal [true]
 test "toJson #177-review: storage images carry format + array_size_is_literal" {
     const alloc = std.testing.allocator;
     const spv = try glslpp.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x = 1) in;
         \\layout(set = 0, binding = 0, rgba8) uniform image2D destImg;
-        \\layout(set = 0, binding = 1, rgba32f) uniform image2D arr[3];
+        \\layout(set = 0, binding = 1, rgba32f) uniform image2D destImg2;
+        \\layout(set = 0, binding = 2, rgba32f) uniform image2D arr[3];
         \\void main() {
         \\    imageStore(destImg, ivec2(0), vec4(1.0));
+        \\    imageStore(destImg2, ivec2(0), vec4(1.0));
         \\    imageStore(arr[0], ivec2(0), vec4(1.0));
         \\}
     , .{ .stage = .compute });
@@ -930,23 +939,31 @@ test "toJson #177-review: storage images carry format + array_size_is_literal" {
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
     defer parsed.deinit();
     const images = parsed.value.object.get("images").?.array;
-    try std.testing.expectEqual(@as(usize, 2), images.items.len);
+    try std.testing.expectEqual(@as(usize, 3), images.items.len);
 
     var dest: ?std.json.ObjectMap = null;
+    var dest2: ?std.json.ObjectMap = null;
     var arr: ?std.json.ObjectMap = null;
     for (images.items) |im| {
         const n = im.object.get("name").?.string;
         if (std.mem.eql(u8, n, "destImg")) dest = im.object;
+        if (std.mem.eql(u8, n, "destImg2")) dest2 = im.object;
         if (std.mem.eql(u8, n, "arr")) arr = im.object;
     }
     const d = dest.?;
     try std.testing.expectEqualStrings("image2D", d.get("type").?.string);
     try std.testing.expectEqualStrings("rgba8", d.get("format").?.string);
 
-    // Array image: the `format`, `array`, and `array_size_is_literal` keys are
-    // all present (the keys are the fix); value is glslpp's actual rgba8.
+    // #183: the SECOND distinct scalar storage image keeps its OWN format
+    // (rgba32f), not the first image's rgba8.
+    const d2 = dest2.?;
+    try std.testing.expectEqualStrings("image2D", d2.get("type").?.string);
+    try std.testing.expectEqualStrings("rgba32f", d2.get("format").?.string);
+
+    // Array image: #183 — the element now carries its declared rgba32f format
+    // (was rgba8 / Unknown pre-fix). `array` + `array_size_is_literal` keys too.
     const a = arr.?;
-    try std.testing.expectEqualStrings("rgba8", a.get("format").?.string);
+    try std.testing.expectEqualStrings("rgba32f", a.get("format").?.string);
     const a_arr = a.get("array").?.array;
     try std.testing.expectEqual(@as(i64, 3), a_arr.items[0].integer);
     const a_lit = a.get("array_size_is_literal").?.array;

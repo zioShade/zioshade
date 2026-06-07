@@ -793,7 +793,7 @@ const Parser = struct {
             .kw_sampler3d => { _ = self.advance(); return .sampler3d; },
             .kw_isampler3d => { _ = self.advance(); return .isampler3d; },
             .kw_usampler3d => { _ = self.advance(); return .usampler3d; },
-            .kw_sampler_cube_array => { _ = self.advance(); return .sampler_cube; },
+            .kw_sampler_cube_array => { _ = self.advance(); return .sampler_cube_array; },
             .kw_sampler_cube_array_shadow => { _ = self.advance(); return .sampler_cube_array_shadow; },
             .kw_isampler_cube => { _ = self.advance(); return .isampler_cube; },
             .kw_usampler_cube => { _ = self.advance(); return .usampler_cube; },
