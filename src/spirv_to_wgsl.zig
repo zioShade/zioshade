@@ -1832,8 +1832,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 // WGSL has NO push_constant address space (naga 29.0.3 rejects both
                 // `var<push_constant>` and `enable push_constant`). The representable
                 // lowering is a plain uniform buffer. Push constants carry no
-                // Binding/DescriptorSet decoration, so default to binding 0; the
-                // binding-dedup pass below bumps it if a real UBO already owns 0.
+                // Binding/DescriptorSet decoration, so we INVENT one: default to
+                // binding 0. The binding-dedup pass below resolves collisions by
+                // keeping the first-emitted entry at its binding and bumping later
+                // colliders. NOTE: because this binding is fabricated (and dedup may
+                // renumber colliders), the WGSL @binding here is NOT guaranteed to
+                // match any original GLSL set/binding when push constants are present.
                 // Mirroring the .Uniform arm reuses all downstream machinery (struct
                 // forward-decls, name-collision rename, `push.value0` access chains).
                 const name = names.get(result_id) orelse "push";
@@ -1978,7 +1982,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
-    // Deduplicate bindings: auto-assign sequential bindings when multiple uniforms collide
+    // Deduplicate bindings: auto-assign sequential bindings when multiple uniforms collide.
+    // The first entry (ci == 0) always keeps its binding; only LATER entries that collide
+    // with an already-seen binding are bumped to the next free slot. So whichever block is
+    // emitted first keeps binding 0 (e.g. a push-constant block fabricated at binding 0 keeps
+    // it iff it is emitted before any real UBO that also claims 0).
+    // CAVEAT: WGSL binding numbers are therefore NOT guaranteed to match the original GLSL
+    // set/binding when push constants are present (WGSL has no push_constant address space, so
+    // a binding is invented) or when two declarations collide (the later one is renumbered).
     {
         var seen_bindings = std.AutoHashMap(u32, void).init(arena);
         var next_binding: u32 = 0;
@@ -2021,7 +2032,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                     const vname = names.get(vinst.words[2]) orelse continue;
                     if (std.mem.eql(u8, vname, cb.name)) {
                         const new_name = try std.fmt.allocPrint(alloc, "{s}_data", .{cb.name});
-                        try names.put(vinst.words[2], new_name);
+                        // Mirror the workgroup-rename path (~below): fetchPut so we
+                        // free the previous heap-allocated name. Every value in
+                        // `names` is alloc-owned (collectNames dupes; the defer at
+                        // map init frees each with alloc.free), so freeing the old
+                        // value is safe and never touches a borrowed literal.
+                        if (try names.fetchPut(vinst.words[2], new_name)) |old| alloc.free(old.value);
                         var_name = new_name;
                         break;
                     }
