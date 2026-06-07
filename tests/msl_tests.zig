@@ -2636,3 +2636,90 @@ test "msl: matrix-element const-array global folds and is declared with an initi
     try assertContains(msl, "float4x4(float4(1.0, 0.0, 0.0, 0.0)");
     try assertContains(msl, "float4x4(float4(2.0, 0.0, 0.0, 0.0)");
 }
+
+// ---------------------------------------------------------------------------
+// T19: arrayed sampler/texture type names + sample-call layer split (#187).
+//
+// The OpTypeImage `Arrayed` operand (word[5]) was dropped when naming sampled
+// textures, so every arrayed sampler degraded to the non-array 2D type and the
+// array layer stayed glued into the sample coordinate. MSL puts the array layer
+// in a SEPARATE argument, so both the type name AND the sample call were wrong.
+//
+// Oracle (spirv-cross --msl 1.4.341.1):
+//   sampler2DArray       → texture2d_array<float>;   tex.sample(s, c.xy, uint(rint(c.z)))
+//   samplerCubeArray     → texturecube_array<float>; tex.sample(s, c.xyz, uint(rint(c.w)))
+//   sampler2DArrayShadow → depth2d_array<float>;     tex.sample_compare(s, c.xy, uint(rint(c.z)), c.w)
+// Non-array samplers are unchanged (texture2d<float>, texturecube<float>, …).
+// ---------------------------------------------------------------------------
+
+test "T19.1: sampler2DArray → texture2d_array<float> + layer-split sample" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArray tex;
+        \\layout(location=0) in vec3 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = texture(tex, uv); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "texture2d_array<float> tex");
+    // The 2D array layer is a separate argument: coord.xy + uint(rint(coord.z)).
+    try assertContains(msl, ".sample(");
+    try assertContains(msl, "uint(rint(");
+    try assertContains(msl, ".xy, uint(rint(");
+    try assertContains(msl, ".z))");
+}
+
+test "T19.2: samplerCubeArray → texturecube_array<float> + layer-split sample" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform samplerCubeArray tex;
+        \\layout(location=0) in vec4 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = texture(tex, uv); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "texturecube_array<float> tex");
+    // Cube array: coord.xyz + uint(rint(coord.w)).
+    try assertContains(msl, ".xyz, uint(rint(");
+    try assertContains(msl, ".w))");
+    // Must NOT degrade to the non-array cube/2d type.
+    try assertNotContains(msl, "texturecube<float> tex");
+    try assertNotContains(msl, "texture2d<float> tex");
+}
+
+test "T19.3: sampler2DArrayShadow → depth2d_array<float> + layer-split sample_compare" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArrayShadow tex;
+        \\layout(location=0) in vec4 uv;
+        \\layout(location=0) out float o;
+        \\void main(){ o = texture(tex, uv); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "depth2d_array<float> tex");
+    // Oracle: sample_compare(s, coord.xy, uint(rint(coord.z)), coord.w).
+    try assertContains(msl, ".sample_compare(");
+    try assertContains(msl, ".xy, uint(rint(");
+    // Must NOT degrade to the non-array depth/texture type.
+    try assertNotContains(msl, "depth2d<float> tex");
+    try assertNotContains(msl, "texture2d<float> tex");
+}
+
+test "T19.4: plain sampler2D stays texture2d<float> (no array regression)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = texture(tex, uv); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "texture2d<float> tex");
+    try assertNotContains(msl, "texture2d_array");
+    // No spurious layer-split for a non-array sampler.
+    try assertNotContains(msl, "uint(rint(");
+}

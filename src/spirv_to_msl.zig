@@ -16,7 +16,12 @@ const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32, descr
 /// `.gather_compare` methods are members of `depth2d<float>`, NOT
 /// `texture2d<float>` — see mslTextureType. Emitting `texture2d<float>` for one
 /// yields MSL that does not compile.
-const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0, is_depth: bool = false };
+/// `dim` is the SPIR-V `Dim` operand (word[3] of OpTypeImage): 0=1D, 1=2D,
+/// 2=3D, 3=Cube, … `arrayed` is the `Arrayed` operand (word[5]): 1 for an
+/// array texture (sampler2DArray, samplerCubeArray, …). Both feed mslTextureType
+/// to build the correct `textureNd[_array]` / `depthNd[_array]` spelling, and
+/// the sample-call layer split at the OpImageSample sites.
+const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0, is_depth: bool = false, dim: u32 = 1, arrayed: bool = false };
 const MemberKey = struct { struct_id: u32, member_index: u32 };
 /// A stage input that becomes a `main0_in` field and is referenced in the body
 /// as `in.<name>`. For fragment the field is `T name [[user(locnN)]]`; for
@@ -97,12 +102,74 @@ fn imageValueIsArrayed(m: *const ParsedModule, image_value_id: u32) bool {
     return tinst.words[5] == 1;
 }
 
-/// MSL texture type for a sampled texture parameter. Comparison/shadow samplers
-/// must be `depth2d<float>` (the home of `.sample_compare`/`.gather_compare`);
-/// everything else stays `texture2d<float>`. Only the 2D float case is modelled
-/// here, matching the rest of this backend.
+/// SPIR-V `Dim` operand of the image behind a sampled-image VALUE `id`
+/// (0=1D, 1=2D, 2=3D, 3=Cube). Mirrors `imageValueIsArrayed`: resolves the
+/// value's result type and unwraps an OpTypeSampledImage. Returns 1 (2D) when it
+/// cannot be resolved, matching the backend's 2D default.
+fn imageValueDim(m: *const ParsedModule, image_value_id: u32) u32 {
+    const vdef = getDef(m, image_value_id) orelse return 1;
+    if (vdef.words.len < 2) return 1;
+    var tinst = getDef(m, vdef.words[1]) orelse return 1;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(m, tinst.words[2]) orelse return 1;
+    }
+    if (tinst.op != .TypeImage or tinst.words.len < 4) return 1;
+    return tinst.words[3];
+}
+
+/// For an ARRAYED sampled-image VALUE, MSL passes the array layer as a SEPARATE
+/// argument after the (dimension-sliced) coordinate. Given the SSA coordinate
+/// name and the image dim, returns `"<coord>.xy, uint(rint(<coord>.z))"` (2D
+/// array), `"<coord>.xyz, uint(rint(<coord>.w))"` (cube array), or
+/// `"<coord>.x, uint(rint(<coord>.y))"` (1D array) — matching spirv-cross --msl.
+/// `dref_out`, when non-null, receives the depth-compare component name
+/// (`<coord>.z` for 2D-array shadow) so the caller can use the SPLIT coord's
+/// layer-adjacent component instead of the SPIR-V Dref operand.
+fn mslArrayedSampleArgs(alloc: std.mem.Allocator, coord: []const u8, dim: u32) ![]const u8 {
+    return switch (dim) {
+        3 => try std.fmt.allocPrint(alloc, "{s}.xyz, uint(rint({s}.w))", .{ coord, coord }),
+        0 => try std.fmt.allocPrint(alloc, "{s}.x, uint(rint({s}.y))", .{ coord, coord }),
+        // 2D (and any other) array layout: xy + layer in z.
+        else => try std.fmt.allocPrint(alloc, "{s}.xy, uint(rint({s}.z))", .{ coord, coord }),
+    };
+}
+
+/// MSL texture type for a sampled texture parameter, built from the SPIR-V
+/// `Dim` + `Arrayed` operands. Comparison/shadow samplers use the `depthNd…`
+/// family (the home of `.sample_compare`/`.gather_compare`); everything else
+/// uses `textureNd…`. The `Arrayed` operand appends an `_array` suffix
+/// (sampler2DArray → texture2d_array<float>, samplerCubeArray →
+/// texturecube_array<float>). Without it, every array sampler degraded to the
+/// non-array 2D type (#187).
+///
+/// Dim spelling: 0=1d, 1=2d, 2=3d, 3=cube. Rect/Buffer/SubpassData and any
+/// unmodelled dim fall back to `2d`, matching this backend's prior 2D-only
+/// hardcode (those paths are separate, pre-existing gaps).
+///
+/// `depth*` is only produced for the 2D and Cube depth dims that map to real MSL
+/// depth types (`depth2d`, `depth2d_array`, `depthcube`, `depthcube_array`); a
+/// non-2D/Cube depth sampler keeps the texture family rather than inventing a
+/// non-existent type (consistent with the prior 2D-scoped depth promotion).
 fn mslTextureType(tex: TextureDecl) []const u8 {
-    return if (tex.is_depth) "depth2d<float>" else "texture2d<float>";
+    const arr = tex.arrayed;
+    if (tex.is_depth) {
+        return switch (tex.dim) {
+            1 => if (arr) "depth2d_array<float>" else "depth2d<float>",
+            3 => if (arr) "depthcube_array<float>" else "depthcube<float>",
+            // Non-2D/Cube depth has no plain MSL depth type; fall back to the
+            // texture family (pre-existing gap, kept stable).
+            0 => if (arr) "texture1d_array<float>" else "texture1d<float>",
+            2 => "texture3d<float>",
+            else => if (arr) "texture2d_array<float>" else "texture2d<float>",
+        };
+    }
+    return switch (tex.dim) {
+        0 => if (arr) "texture1d_array<float>" else "texture1d<float>",
+        2 => "texture3d<float>", // 3D textures are never arrayed.
+        3 => if (arr) "texturecube_array<float>" else "texturecube<float>",
+        // 1 (2D) and any unmodelled dim → 2D family.
+        else => if (arr) "texture2d_array<float>" else "texture2d<float>",
+    };
 }
 
 fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
@@ -1778,7 +1845,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pt = pi.words[3];
         switch (sc) {
             .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding, .descriptor_set=set}) catch {}; },
-            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; const name = names.get(rid) orelse "tex"; const is_depth = imageTypeIsDepth(m, pei); switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth}) catch {};}, else=>{}} },
+            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; const name = names.get(rid) orelse "tex"; const is_depth = imageTypeIsDepth(m, pei); var img = pei; if (img.op == .TypeSampledImage and img.words.len > 2) { img = getDef(m, img.words[2]) orelse img; } const dim: u32 = if (img.op == .TypeImage and img.words.len > 3) img.words[3] else 1; const arrayed: bool = img.op == .TypeImage and img.words.len > 5 and img.words[5] == 1; switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth,.dim=dim,.arrayed=arrayed}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth,.dim=dim,.arrayed=arrayed}) catch {};}, else=>{}} },
             else => {},
         }
     }
@@ -3629,22 +3696,38 @@ fn emitInstruction(
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
-            // MSL: tex.sample(samp, coord)
-            try w.print("    {s} {s} = {s}.sample({s}Smplr, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord});
+            // MSL: tex.sample(samp, coord). Arrayed textures pass the array layer
+            // as a SEPARATE argument (coord.xy, uint(rint(coord.z)) for 2d_array).
+            if (imageValueIsArrayed(m, inst.words[3])) {
+                const args = try mslArrayedSampleArgs(alloc, coord, imageValueDim(m, inst.words[3]));
+                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, args});
+            } else {
+                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord});
+            }
         },
         .ImageSampleDrefImplicitLod => {
-            // Shadow texture: MSL uses .sample(compare_sampler, coord, depth_compare)
+            // Shadow texture: MSL uses .sample_compare(compare_sampler, coord, dref).
+            // Arrayed: the layer is a SEPARATE arg between coord and dref
+            // (coord.xy, uint(rint(coord.z)), dref) — matching spirv-cross --msl.
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
-            const coord = names.get(inst.words[4]) orelse "uv";
+            const coord_name = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            const coord = if (imageValueIsArrayed(m, inst.words[3]))
+                try mslArrayedSampleArgs(alloc, coord_name, imageValueDim(m, inst.words[3]))
+            else
+                coord_name;
             try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, dref});
         },
         .ImageSampleDrefExplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
-            const coord = names.get(inst.words[4]) orelse "uv";
+            const coord_name = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+            const coord = if (imageValueIsArrayed(m, inst.words[3]))
+                try mslArrayedSampleArgs(alloc, coord_name, imageValueDim(m, inst.words[3]))
+            else
+                coord_name;
             try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}, {s}, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, dref});
         },
         .ImageSampleProjImplicitLod => {
@@ -3690,7 +3773,13 @@ fn emitInstruction(
         .ImageSampleExplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
-            const coord = names.get(inst.words[4]) orelse "uv";
+            const coord_name = names.get(inst.words[4]) orelse "uv";
+            // Arrayed textures split the array layer into a separate argument
+            // BEFORE the level() (coord.xy, uint(rint(coord.z)), level(L)).
+            const coord = if (imageValueIsArrayed(m, inst.words[3]))
+                try mslArrayedSampleArgs(alloc, coord_name, imageValueDim(m, inst.words[3]))
+            else
+                coord_name;
             if (inst.words.len > 5) {
                 const mask = inst.words[5];
                 var off: usize = 6;
