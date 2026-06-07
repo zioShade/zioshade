@@ -68,14 +68,67 @@ fn exprName(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id
     return std.fmt.allocPrint(alloc, "v{d}", .{id}) catch "?";
 }
 
+/// Look up the BuiltIn decoration (if any) on member `member_idx` of struct type
+/// `struct_id`. gl_PerVertex and similar interface blocks carry BuiltIn on the
+/// *members* via `OpMemberDecorate` — which the `decs` map (OpDecorate-only) does
+/// not capture — so this scans the member decorations directly.
+fn structMemberBuiltin(m: *const ParsedModule, struct_id: u32, member_idx: u32) ?spirv.BuiltIn {
+    for (m.instructions) |inst| {
+        if (inst.op == .MemberDecorate and inst.words.len >= 5 and
+            inst.words[1] == struct_id and inst.words[2] == member_idx)
+        {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[3]);
+            if (dec == .built_in) return @enumFromInt(inst.words[4]);
+        }
+    }
+    return null;
+}
+
+/// True when `struct_id` is a built-in interface block (e.g. gl_PerVertex): a
+/// struct with at least one member carrying a BuiltIn decoration.
+fn isBuiltinBlockType(m: *const ParsedModule, struct_id: u32) bool {
+    for (m.instructions) |inst| {
+        if (inst.op == .MemberDecorate and inst.words.len >= 5 and inst.words[1] == struct_id) {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[3]);
+            if (dec == .built_in) return true;
+        }
+    }
+    return false;
+}
+
+/// True when `var_id` is a variable whose pointee type is a built-in interface
+/// block (gl_PerVertex). Such variables must NOT be declared as `out`/`in`
+/// varyings — their members (gl_Position, …) are predefined in GLSL — and member
+/// access through them must lower to the bare gl_* name (no block instance prefix).
+fn isBuiltinBlockVar(m: *const ParsedModule, var_id: u32) bool {
+    const pointee = resolvePointee(m, var_id) orelse return false;
+    return isBuiltinBlockType(m, pointee);
+}
+
+/// Map a gl_PerVertex-style BuiltIn member to its predefined GLSL name. Returns
+/// null for builtins glslpp doesn't lower to a bare gl_* (caller falls back to the
+/// OpMemberName, which glslang also names gl_*).
+fn builtinBlockMemberName(bi: spirv.BuiltIn) ?[]const u8 {
+    return switch (bi) {
+        .position => "gl_Position",
+        .point_size => "gl_PointSize",
+        .clip_distance => "gl_ClipDistance",
+        .cull_distance => "gl_CullDistance",
+        else => null,
+    };
+}
+
 fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) return try alloc.dupe(u8, base_name);
     const base_is_cb = isUniformVar(m, base_id);
     const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
+    // A gl_PerVertex-style built-in block: emit no base instance — its members
+    // lower to bare gl_* names (handled per-index below), matching spirv-cross.
+    const base_is_builtin_block = isBuiltinBlockVar(m, base_id);
     // Use a stack buffer to avoid heap allocation for typical access chains
     var writer = compat.StackBufWriter(512).init();
-    if (!base_is_cb) writer.writeAll(base_name);
+    if (!base_is_cb and !base_is_builtin_block) writer.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
     var cb_level: bool = base_is_cb; // only first level uses cb_prefix
     for (indices) |index_id| {
@@ -91,10 +144,20 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     writer.print("{s}_m{d}", .{cb_prefix, val});
                     cb_level = false; // only first index uses cb_prefix
                 } else if (is_struct_member) {
-                    // Use struct member name for nested struct access
-                    var mname_buf: [32]u8 = undefined;
-                    const mname = getMemberName(m, cur_type.?, val, &mname_buf);
-                    writer.print(".{s}", .{mname});
+                    if (structMemberBuiltin(m, cur_type.?, val)) |bi| {
+                        // gl_PerVertex member: emit bare gl_* name (no leading dot).
+                        if (builtinBlockMemberName(bi)) |gn| {
+                            writer.writeAll(gn);
+                        } else {
+                            var mname_buf: [32]u8 = undefined;
+                            writer.writeAll(getMemberName(m, cur_type.?, val, &mname_buf));
+                        }
+                    } else {
+                        // Use struct member name for nested struct access
+                        var mname_buf: [32]u8 = undefined;
+                        const mname = getMemberName(m, cur_type.?, val, &mname_buf);
+                        writer.print(".{s}", .{mname});
+                    }
                 } else {
                     writer.print("[{d}]", .{val});
                 }
@@ -122,7 +185,7 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     // Fallback to heap allocation for long chains
     var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
     defer buf.deinit(alloc);
-    if (!base_is_cb) try buf.appendSlice(alloc, base_name);
+    if (!base_is_cb and !base_is_builtin_block) try buf.appendSlice(alloc, base_name);
     cur_type = resolvePointee(m, base_id);
     var cb_level2: bool = base_is_cb;
     for (indices) |index_id| {
@@ -138,9 +201,18 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     try buf.print(alloc, "{s}_m{d}", .{cb_prefix, val});
                     cb_level2 = false;
                 } else if (is_struct_member) {
-                    var mname_buf: [32]u8 = undefined;
-                    const mname = getMemberName(m, cur_type.?, val, &mname_buf);
-                    try buf.print(alloc, ".{s}", .{mname});
+                    if (structMemberBuiltin(m, cur_type.?, val)) |bi| {
+                        if (builtinBlockMemberName(bi)) |gn| {
+                            try buf.appendSlice(alloc, gn);
+                        } else {
+                            var mname_buf: [32]u8 = undefined;
+                            try buf.appendSlice(alloc, getMemberName(m, cur_type.?, val, &mname_buf));
+                        }
+                    } else {
+                        var mname_buf: [32]u8 = undefined;
+                        const mname = getMemberName(m, cur_type.?, val, &mname_buf);
+                        try buf.print(alloc, ".{s}", .{mname});
+                    }
                 } else {
                     try buf.print(alloc, "[{d}]", .{val});
                 }
@@ -173,7 +245,8 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     if (indices.len == 0) { try w.writeAll(base_name); return; }
     const base_is_cb = isUniformVar(m, base_id);
     const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
-    if (!base_is_cb) try w.writeAll(base_name);
+    const base_is_builtin_block = isBuiltinBlockVar(m, base_id);
+    if (!base_is_cb and !base_is_builtin_block) try w.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
     var cb_level: bool = base_is_cb;
     for (indices) |index_id| {
@@ -190,9 +263,19 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     try w.print("{s}_1.{s}_m{d}", .{cb_prefix, cb_prefix, val});
                     cb_level = false;
                 } else if (is_struct_member) {
-                    var mname_buf: [32]u8 = undefined;
-                    const mname = getMemberName(m, cur_type.?, val, &mname_buf);
-                    try w.print(".{s}", .{mname});
+                    if (structMemberBuiltin(m, cur_type.?, val)) |bi| {
+                        // gl_PerVertex member: emit bare gl_* name (no leading dot).
+                        if (builtinBlockMemberName(bi)) |gn| {
+                            try w.writeAll(gn);
+                        } else {
+                            var mname_buf: [32]u8 = undefined;
+                            try w.writeAll(getMemberName(m, cur_type.?, val, &mname_buf));
+                        }
+                    } else {
+                        var mname_buf: [32]u8 = undefined;
+                        const mname = getMemberName(m, cur_type.?, val, &mname_buf);
+                        try w.print(".{s}", .{mname});
+                    }
                 } else {
                     try w.print("[{d}]", .{val});
                 }
@@ -1083,6 +1166,10 @@ fn emitFunction(
         var emitted_any_io = false;
         for (input_var_ids.items) |ivid| {
             if (getDecVal(decs, ivid, .built_in) != null) continue;
+            // gl_PerVertex-style built-in blocks carry BuiltIn on their members
+            // (OpMemberDecorate), not on the variable — skip them: the members are
+            // predefined in GLSL and re-declaring the block is invalid.
+            if (isBuiltinBlockVar(m, ivid)) continue;
             const iv = getDef(m, ivid) orelse continue;
             const it = try glslType(m, iv.words[1], names, alloc);
             const in_name = names.get(ivid) orelse continue;
@@ -1106,6 +1193,11 @@ fn emitFunction(
         }
         for (output_var_ids.items) |ovid| {
             if (getDecVal(decs, ovid, .built_in) != null) continue;
+            // Skip gl_PerVertex (built-in block): glslang rejects `out gl_PerVertex;`
+            // and spirv-cross omits it — gl_Position et al. are predefined. The
+            // BuiltIn decorations live on the struct members, so the variable-level
+            // built_in check above doesn't catch it.
+            if (isBuiltinBlockVar(m, ovid)) continue;
             const ov = getDef(m, ovid) orelse continue;
             const ot = try glslType(m, ov.words[1], names, alloc);
             const on = names.get(ovid) orelse "_out";
