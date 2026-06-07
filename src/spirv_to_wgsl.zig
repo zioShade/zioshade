@@ -813,10 +813,17 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
                 2 => "texture_3d",
                 3 => "texture_cube",
                 4 => "texture_2d_array",
-                5 => "texture_buffer",
                 6 => "texture_2d",
                 else => "texture_2d",
             };
+            // Dim=Buffer (GLSL samplerBuffer / imageBuffer, OpTypeImage Dim=5) has
+            // NO WGSL equivalent — `texture_buffer<T>` is not a real WGSL type and
+            // naga rejects it. Fail loud instead of emitting a silent-wrong-shaped
+            // type name (covers both the sampled and storage texel-buffer paths).
+            if (dim == 5) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no texel buffer / texture_buffer type", .{}) catch null;
+                return error.UnsupportedOp;
+            }
             // Check if multisampled (words[6]) or storage image (words[7] != 0)
             const is_ms = if (inst.words.len > 6) inst.words[6] == 1 else false;
             const access_qualifier: u32 = if (inst.words.len > 7) inst.words[7] else 0;
@@ -1820,6 +1827,17 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 const set = getDecVal(&decorations, result_id, .descriptor_set) orelse 0;
                 const name = names.get(result_id) orelse "buffer";
                 try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = true, .result_id = result_id });
+            },
+            .PushConstant => {
+                // WGSL has NO push_constant address space (naga 29.0.3 rejects both
+                // `var<push_constant>` and `enable push_constant`). The representable
+                // lowering is a plain uniform buffer. Push constants carry no
+                // Binding/DescriptorSet decoration, so default to binding 0; the
+                // binding-dedup pass below bumps it if a real UBO already owns 0.
+                // Mirroring the .Uniform arm reuses all downstream machinery (struct
+                // forward-decls, name-collision rename, `push.value0` access chains).
+                const name = names.get(result_id) orelse "push";
+                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = 0, .is_ssbo = false, .result_id = result_id });
             },
             .UniformConstant => {
                 const pointee_inst = getDef(&module, pointee_type) orelse continue;
