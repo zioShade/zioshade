@@ -2576,13 +2576,13 @@ test "msl: struct-element const-array value copy declares `struct S` before it i
     }
 }
 
-test "msl: matrix-element const-array global is an honest error (frontend leaves it undeclared)" {
-    // C8: `const mat4 M[2] = …;` indexed at runtime. The FRONTEND does not fold
-    // a matrix-element array to an OpConstantComposite (float/vec ARE folded), so
-    // the Private `M` has NO initializer and is never declared. The pre-fix
-    // silent-wrong emitted `float4x4 vN = M[idx];` — a reference to an undefined
-    // identifier. The backend must NOT emit that silently; it fails loud until
-    // the frontend folds matrix-element arrays (tracked as a separate gap).
+test "msl: matrix-element const-array global folds and is declared with an initializer (#173 item1)" {
+    // #173 item1: `const mat4 M[2] = …;` indexed at runtime. The FRONTEND now
+    // folds the matrix constructors AND the array constructor to an
+    // OpConstantComposite, so the Private `M` carries an initializer_id. The MSL
+    // backend materializes it at module scope as
+    // `constant float4x4 M[2] = {…};` (no longer the honest-error
+    // `UndeclaredPrivateArrayGlobal`, no longer a silent-wrong undefined ident).
     const source =
         \\#version 450
         \\layout(location=0) out vec4 FragColor;
@@ -2592,10 +2592,16 @@ test "msl: matrix-element const-array global is an honest error (frontend leaves
         \\  FragColor = M[i] * vec4(1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
-    defer alloc.free(spirv);
-    try std.testing.expectError(
-        error.UndeclaredPrivateArrayGlobal,
-        glslpp.spirvToMSL(alloc, spirv, .{}),
-    );
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The array global is declared at module scope as a `constant float4x4[2]`
+    // with a brace initializer (spirv-cross-style; the SSA name may differ from
+    // the GLSL `M`). Pre-fix this was the honest-error UndeclaredPrivateArrayGlobal.
+    try assertContains(msl, "constant float4x4 ");
+    try assertContains(msl, "[2] = {");
+    // The nested matrix constituents are INLINED as `float4x4(float4(…), …)` — not
+    // referenced by an undefined name (the bug this fix closes). The diagonal
+    // values 1.0 and 2.0 are materialized.
+    try assertContains(msl, "float4x4(float4(1.0, 0.0, 0.0, 0.0)");
+    try assertContains(msl, "float4x4(float4(2.0, 0.0, 0.0, 0.0)");
 }

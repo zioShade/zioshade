@@ -7250,13 +7250,48 @@ const Analyzer = struct {
                         for (0..col_n) |ei| {
                             elem_ids[ei] = if (ei == ci) .{ .id = scalar_id } else .{ .id = zero_id };
                         }
-                        col_ids[ci] = try self.emitPureOp(.composite_construct, elem_ids, col_type);
+                        // CSE: when an identical constant column composite was
+                        // already emitted (e.g. `mat4(1.0)` twice → shared zero/
+                        // diagonal columns), reuse it instead of emitting a
+                        // duplicate OpConstantComposite. Same key/cache the
+                        // from-scalars and array-ctor paths use (~6682).
+                        const col_key = self.constCompositeKey(col_type, elem_ids);
+                        if (self.const_composite_cache.get(col_key)) |existing_id| {
+                            self.alloc.free(elem_ids);
+                            col_ids[ci] = existing_id;
+                            continue;
+                        }
+                        // Append the column explicitly (NOT emitPureOp) so the
+                        // upgrade below rewrites THIS instruction's tag in place
+                        // and isConstantId recognizes the column as a
+                        // constant_composite — required for the matrix (and any
+                        // enclosing array) to fold too (#173 item1). emitPureOp's
+                        // dedup cache could otherwise hand back a pre-upgrade
+                        // composite_construct id.
+                        const col_id = self.allocId();
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_construct,
+                            .result_type = null,
+                            .result_id = col_id,
+                            .operands = elem_ids,
+                            .ty = col_type,
+                        });
+                        _ = self.tryUpgradeToConstantComposite();
+                        col_ids[ci] = col_id;
                     }
                     const mat_ops = try self.alloc.alloc(ir.Instruction.Operand, num_cols);
                     for (col_ids, 0..) |cid, i| {
                         mat_ops[i] = .{ .id = cid };
                     }
                     self.alloc.free(col_ids);
+                    // CSE: reuse an already-emitted identical constant matrix
+                    // (e.g. `mat4(1.0)` used twice) instead of a duplicate
+                    // OpConstantComposite.
+                    const mat_key = self.constCompositeKey(result_ty, mat_ops);
+                    if (self.const_composite_cache.get(mat_key)) |existing_id| {
+                        self.alloc.free(mat_ops);
+                        return .{ .ty = result_ty, .id = existing_id };
+                    }
                     try self.instructions.append(self.alloc, .{
                         .tag = .composite_construct,
                         .result_type = null,
@@ -7264,6 +7299,10 @@ const Analyzer = struct {
                         .operands = mat_ops,
                         .ty = result_ty,
                     });
+                    // Fold the whole matrix to a constant_composite when all
+                    // columns are constant (e.g. `const mat4 M = mat4(2.0)`), so
+                    // a `mat4[](…)` array of these can fold in turn (#173 item1).
+                    _ = self.tryUpgradeToConstantComposite();
                     return .{ .ty = result_ty, .id = result_id };
                 }
 
@@ -7308,6 +7347,10 @@ const Analyzer = struct {
                             .operands = vec_ops,
                             .ty = col_type,
                         });
+                        // Fold the column to constant_composite when all its
+                        // scalars are constant, so the matrix (and any enclosing
+                        // const array) can fold too (#173 item1).
+                        _ = self.tryUpgradeToConstantComposite();
                         col_ids[col] = vec_result_id;
                     }
                     // Construct matrix from column vectors
@@ -7322,6 +7365,9 @@ const Analyzer = struct {
                         .operands = mat_ops,
                         .ty = result_ty,
                     });
+                    // Fold the whole matrix to constant_composite when all columns
+                    // are constant (#173 item1).
+                    _ = self.tryUpgradeToConstantComposite();
                     self.alloc.free(col_ids);
                     return .{ .ty = result_ty, .id = result_id };
                 }
