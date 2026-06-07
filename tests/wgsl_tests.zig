@@ -629,6 +629,11 @@ const ArrayTexCase = struct {
     /// (e.g. ".z)" for 2d_array, ".w)" for cube_array). Proves the layer was
     /// passed as its own integer argument, not folded into the coordinate.
     array_index: []const u8,
+    /// Whether the layer must be ROUNDED (`i32(round(coord.z))`). True for the
+    /// FLOAT-coord sample/lod/gather sites (glslang parity: floor(layer+0.5));
+    /// FALSE for the INTEGER-coord texelFetch site (layer already an integer,
+    /// `i32(coord.z)` with NO round). Defaults to true.
+    layer_rounded: bool = true,
 };
 
 fn runArrayTexValidTest(c: ArrayTexCase) !void {
@@ -645,8 +650,15 @@ fn runArrayTexValidTest(c: ArrayTexCase) !void {
     try assertContains(wgsl, builtin_call);
     // ...the spatial coordinate must be sliced to the texture dimension...
     try assertContains(wgsl, c.coord_swizzle);
-    // ...the array layer must be passed as its own i32 argument...
-    try assertContains(wgsl, "i32(");
+    // ...the array layer must be passed as its own i32 argument. The float-coord
+    // sample/lod/gather sites must ROUND it (`i32(round(coord.z))`) for glslang
+    // parity; the integer-coord texelFetch site must NOT round (`i32(coord.z)`).
+    if (c.layer_rounded) {
+        try assertContains(wgsl, "i32(round(");
+    } else {
+        try assertContains(wgsl, "i32(");
+        try assertNotContains(wgsl, "i32(round(");
+    }
     try assertContains(wgsl, c.array_index);
     // ...and no silent-wrong non-array sampled type must appear.
     try assertNotContains(wgsl, "texture_2d<f32>");
@@ -721,6 +733,8 @@ test "wgsl: texelFetch(sampler2DArray) emits textureLoad + separate layer arg" {
         .builtin = "textureLoad",
         .coord_swizzle = ".xy",
         .array_index = ".z)",
+        // texelFetch coord is INTEGER — the layer must NOT be rounded.
+        .layer_rounded = false,
     });
 }
 
