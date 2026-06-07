@@ -1742,3 +1742,155 @@ test "gap: textureGatherOffsets with NON-const offsets array is an honest error 
     try testing.expectEqualStrings("textureGatherOffsets-offsets-not-constant", semantic.last_error_inner);
     try testing.expectEqual(@as(usize, 0), countOp(words, .ImageGather));
 }
+
+// ─── Gap #183: OpTypeImage Format / Arrayed codegen ──────────────────────────
+// OpTypeImage layout: [header | result_id | sampled_type_id | Dim | Depth |
+//                      Arrayed | MS | Sampled | Format]
+// → Arrayed is operand word i+5; Format is operand word i+8 (when present).
+
+/// Collect the `Format` operand of every `OpTypeImage` whose `Sampled` operand
+/// is 2 (a storage image). Caller owns the returned slice.
+fn collectStorageImageFormats(alloc: std.mem.Allocator, words: []const u32) ![]u32 {
+    var out: std.ArrayListUnmanaged(u32) = .{};
+    errdefer out.deinit(alloc);
+    var i: usize = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        if (opcode == @intFromEnum(spirv.Op.TypeImage) and word_count >= 9) {
+            const sampled = words[i + 7];
+            const format = words[i + 8];
+            if (sampled == 2) try out.append(alloc, format);
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// Return the `Arrayed` operand of the first `OpTypeImage` whose `Dim` operand
+/// equals `dim` (1=2D, 3=Cube, …). null if none found.
+fn firstImageArrayedForDim(words: []const u32, dim: u32) ?u32 {
+    var i: usize = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        if (opcode == @intFromEnum(spirv.Op.TypeImage) and word_count >= 9 and words[i + 3] == dim) {
+            return words[i + 5]; // Arrayed
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    return null;
+}
+
+/// Return the `Arrayed` operand of the first `OpTypeImage` whose sampled-type ID
+/// resolves to `OpTypeInt` (an `i*` sampler) and whose `Dim` equals `dim`.
+fn firstIntImageArrayedForDim(words: []const u32, dim: u32) ?u32 {
+    // Pass 1: collect all OpTypeInt result IDs.
+    var int_ids: std.ArrayListUnmanaged(u32) = .{};
+    defer int_ids.deinit(testing.allocator);
+    var i: usize = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        if (opcode == @intFromEnum(spirv.Op.TypeInt) and word_count >= 4 and words[i + 3] == 1) {
+            int_ids.append(testing.allocator, words[i + 1]) catch return null;
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    // Pass 2: find an OpTypeImage with that sampled type and matching Dim.
+    i = 5;
+    while (i < words.len) {
+        const word = words[i];
+        const word_count = word >> 16;
+        const opcode = word & 0xFFFF;
+        if (opcode == @intFromEnum(spirv.Op.TypeImage) and word_count >= 9 and words[i + 3] == dim) {
+            const sampled_ty = words[i + 2];
+            for (int_ids.items) |id| {
+                if (id == sampled_ty) return words[i + 5];
+            }
+        }
+        if (word_count == 0) break;
+        i += word_count;
+    }
+    return null;
+}
+
+test "gap #183: two distinct storage images each carry their own Format" {
+    // Oracle (glslangValidator -V):
+    //   %7  = OpTypeImage %float 2D 0 0 0 2 Rgba8     (Format = 4)
+    //   %18 = OpTypeImage %float 2D 0 0 0 2 Rgba32f   (Format = 1)
+    // Pre-fix: the format-blind `emitted_types` dedup keyed on the enum alone
+    // reused the FIRST image's type for the second → BOTH spelled Rgba8 (4,4).
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(binding=0, rgba8) uniform image2D a;
+        \\layout(binding=1, rgba32f) uniform image2D b;
+        \\void main() {
+        \\    imageStore(a, ivec2(0), vec4(1.0));
+        \\    imageStore(b, ivec2(0), vec4(2.0));
+        \\}
+    ;
+    const words = try compileToWords(testing.allocator, source, .compute);
+    defer testing.allocator.free(words);
+    const fmts = try collectStorageImageFormats(testing.allocator, words);
+    defer testing.allocator.free(fmts);
+    try testing.expectEqual(@as(usize, 2), fmts.len);
+    // Both Rgba8 (4) and Rgba32f (1) must be present.
+    var has_rgba8 = false;
+    var has_rgba32f = false;
+    for (fmts) |f| {
+        if (f == 4) has_rgba8 = true;
+        if (f == 1) has_rgba32f = true;
+    }
+    try testing.expect(has_rgba8);
+    try testing.expect(has_rgba32f);
+}
+
+test "gap #183: array-of-storage-image carries its element Format" {
+    // Oracle (glslangValidator -V): %7 = OpTypeImage %float 2D 0 0 0 2 Rgba32f
+    // Pre-fix: the array element resolved via the format-blind ensureType path
+    // and emitted Unknown (0) — not Rgba32f (1).
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(binding=0, rgba32f) uniform image2D arr[3];
+        \\void main() { imageStore(arr[0], ivec2(0), vec4(1.0)); }
+    ;
+    const words = try compileToWords(testing.allocator, source, .compute);
+    defer testing.allocator.free(words);
+    const fmts = try collectStorageImageFormats(testing.allocator, words);
+    defer testing.allocator.free(fmts);
+    try testing.expect(fmts.len >= 1);
+    try testing.expectEqual(@as(u32, 1), fmts[0]); // Rgba32f
+}
+
+test "gap #183: samplerCubeArray emits OpTypeImage Arrayed=1" {
+    // Oracle (glslangValidator -V):
+    //   %10 = OpTypeImage %float Cube 0 1 0 1 Unknown  (Arrayed = 1)
+    //   %19 = OpTypeImage %int   Cube 0 1 0 1 Unknown  (Arrayed = 1, isampler anchor)
+    // Pre-fix: parser mapped samplerCubeArray → .sampler_cube → Arrayed=0.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform samplerCubeArray ca;
+        \\layout(binding=1) uniform isamplerCubeArray ica;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = texture(ca, vec4(0.5)) + vec4(texture(ica, vec4(0.5))); }
+    ;
+    const words = try compileToWords(testing.allocator, source, .fragment);
+    defer testing.allocator.free(words);
+    // The float cube image (samplerCubeArray) must be Arrayed=1.
+    const float_arrayed = firstImageArrayedForDim(words, 3);
+    try testing.expect(float_arrayed != null);
+    try testing.expectEqual(@as(u32, 1), float_arrayed.?);
+    // Regression anchor: the int cube image (isamplerCubeArray) was already 1.
+    const int_arrayed = firstIntImageArrayedForDim(words, 3);
+    try testing.expect(int_arrayed != null);
+    try testing.expectEqual(@as(u32, 1), int_arrayed.?);
+}
