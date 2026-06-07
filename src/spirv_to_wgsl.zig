@@ -619,6 +619,37 @@ const AtomicFieldKind = enum { scalar, array_element };
 const AtomicFieldKey = struct { struct_id: u32, member_idx: u32 };
 const AtomicFieldMap = std.AutoHashMap(AtomicFieldKey, AtomicFieldKind);
 
+// ---------------------------------------------------------------------------
+// Pass 4 (#170 G5 / A2): sub-16 uniform array members → array<vec4> + swizzle.
+//
+// WGSL's uniform address space requires every array element stride to be a
+// multiple of 16 bytes. A uniform block with a scalar-element (`float arr[N]`,
+// stride 4) or vec2-element (`vec2 arr[N]`, stride 8) array member is rejected
+// by naga: "array stride 4 is not a multiple of the required alignment 16".
+// `@stride(16)` is NOT valid WGSL, so the only portable lowering is to widen
+// the array element to a vec4 and swizzle it back on every access:
+//   `float arr[N]` → `arr: array<vec4<f32>, N>`, access `U.arr[i].x`
+//   `vec2  arr[N]` → `arr: array<vec4<f32>, N>`, access `U.arr[i].xy`
+// vec3/vec4/matrix array members are already 16-aligned → NOT wrapped.
+// Storage buffers (SSBO) tolerate stride 4/8, so this is UNIFORM-ONLY.
+//
+// `WrappedUniformMemberKind` records the swizzle to re-narrow the widened
+// element. The map is keyed by (struct_type_id, member_idx), mirroring
+// AtomicFieldMap, and is consulted at both struct-emission and access-site.
+const WrappedUniformMemberKind = enum {
+    x, // scalar element  → array<vec4<T>, N>, access `[i].x`
+    xy, // vec2 element    → array<vec4<T>, N>, access `[i].xy`
+
+    fn swizzle(self: WrappedUniformMemberKind) []const u8 {
+        return switch (self) {
+            .x => ".x",
+            .xy => ".xy",
+        };
+    }
+};
+const WrappedUniformMemberKey = struct { struct_id: u32, member_idx: u32 };
+const WrappedUniformMemberMap = std.AutoHashMap(WrappedUniformMemberKey, WrappedUniformMemberKind);
+
 fn getMemberName(module: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
     const raw = common.commonGetMemberName(module.instructions, struct_id, member_idx, buf, "_");
     if (!isWgslKeyword(raw)) return raw;
@@ -637,20 +668,44 @@ fn getArraySuffix(module: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
     return common.commonGetArraySuffix(module.instructions, module.id_defs, ptr_type_id, false);
 }
 
-fn emitStructForwardDecls(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), atomic_fields: *const AtomicFieldMap) !void {
+/// For a #170-A2 widened uniform array member, resolve the WGSL scalar base
+/// name (`f32`/`i32`/`u32`) of the innermost element. The element is widened to
+/// `vec4<base>`. `elem_type_id` is the array's element type (scalar, vec2, or a
+/// nested array whose innermost element is scalar/vec2). Falls back to `f32`.
+fn wrappedVec4ElemType(module: *const ParsedModule, elem_type_id: u32) []const u8 {
+    var cur = elem_type_id;
+    var depth: u32 = 0;
+    while (depth < 8) : (depth += 1) {
+        const d = getDef(module, cur) orelse break;
+        switch (d.op) {
+            .TypeArray, .TypeRuntimeArray, .TypeVector => {
+                if (d.words.len > 2) cur = d.words[2] else break;
+            },
+            .TypeFloat => return "f32",
+            .TypeInt => {
+                const signed = d.words.len > 3 and d.words[3] == 1;
+                return if (signed) "i32" else "u32";
+            },
+            else => break,
+        }
+    }
+    return "f32";
+}
+
+fn emitStructForwardDecls(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), atomic_fields: *const AtomicFieldMap, wrapped_members: *const WrappedUniformMemberMap) !void {
     const inst = getDef(module, root_type_id) orelse return;
     switch (inst.op) {
         .TypeStruct => {
-            try emitOneStructForwardDecl(module, names, root_type_id, w, alloc, emitted, emitted_names, atomic_fields);
+            try emitOneStructForwardDecl(module, names, root_type_id, w, alloc, emitted, emitted_names, atomic_fields, wrapped_members);
         },
-        .TypePointer => if (inst.words.len > 3) try emitStructForwardDecls(module, names, inst.words[3], w, alloc, emitted, emitted_names, atomic_fields),
-        .TypeArray => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names, atomic_fields),
-        .TypeMatrix, .TypeVector => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names, atomic_fields),
+        .TypePointer => if (inst.words.len > 3) try emitStructForwardDecls(module, names, inst.words[3], w, alloc, emitted, emitted_names, atomic_fields, wrapped_members),
+        .TypeArray => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names, atomic_fields, wrapped_members),
+        .TypeMatrix, .TypeVector => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names, atomic_fields, wrapped_members),
         else => {},
     }
 }
 
-fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), atomic_fields: *const AtomicFieldMap) !void {
+fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), atomic_fields: *const AtomicFieldMap, wrapped_members: *const WrappedUniformMemberMap) !void {
     const inst = getDef(module, type_id) orelse return;
     if (inst.op != .TypeStruct) return;
     if (inst.words.len > 2) {
@@ -675,7 +730,7 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
                 const cur_inst = getDef(module, cur_id) orelse break;
                 switch (cur_inst.op) {
                     .TypeStruct => {
-                        try emitOneStructForwardDecl(module, names, cur_id, w, alloc, emitted, emitted_names, atomic_fields);
+                        try emitOneStructForwardDecl(module, names, cur_id, w, alloc, emitted, emitted_names, atomic_fields, wrapped_members);
                         break;
                     },
                     .TypePointer => {
@@ -700,6 +755,9 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
         var mname_buf: [32]u8 = undefined;
         const mname = getMemberName(module, type_id, @as(u32, @intCast(mi)), &mname_buf);
         const atomic_kind: ?AtomicFieldKind = atomic_fields.get(.{ .struct_id = type_id, .member_idx = @intCast(mi) });
+        // #170 A2: a sub-16 array element in a UNIFORM block is widened to vec4.
+        // The matching swizzle is injected at the access site (buildAccessExprPlain).
+        const wrap_kind: ?WrappedUniformMemberKind = wrapped_members.get(.{ .struct_id = type_id, .member_idx = @intCast(mi) });
 
         // A row_major NON-square matrix needs swapped declared dimensions in
         // WGSL (which has no row_major feature) to read back the logical matrix
@@ -721,9 +779,17 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
 
         if (mti) |mi2| {
             if (mi2.op == .TypeArray and mi2.words.len > 3) {
-                const et = try wgslType(module, mi2.words[2], names, alloc);
                 const li = getDef(module, mi2.words[3]);
                 const lv: u32 = if (li) |l| l.words[3] else 1;
+                // #170 A2: widen a sub-16 element to vec4<base> for uniform-space
+                // alignment. The base scalar (f32/i32/u32) is read from the array's
+                // innermost element; the swizzle is appended at the access site.
+                if (wrap_kind != null) {
+                    const vbase = wrappedVec4ElemType(module, mi2.words[2]);
+                    try w.print("    {s}: array<vec4<{s}>, {d}>,\n", .{ mname, vbase, lv });
+                    continue;
+                }
+                const et = try wgslType(module, mi2.words[2], names, alloc);
                 if (atomic_kind == .array_element) {
                     try w.print("    {s}: array<atomic<{s}>, {d}>,\n", .{ mname, et, lv });
                 } else {
@@ -1056,6 +1122,22 @@ fn memberIsRowMajor(module: *const ParsedModule, struct_id: u32, member_index: u
     return false;
 }
 
+/// Read the ArrayStride decoration (6) off an ARRAY TYPE id. Unlike row_major /
+/// flat (which are `OpMemberDecorate` on the enclosing struct), ArrayStride is an
+/// `OpDecorate` on the array type id itself — mirror reflection.zig's lookup
+/// (`astrides`: array TYPE id → ArrayStride). Returns null if undecorated.
+fn arrayTypeStride(module: *const ParsedModule, array_type_id: u32) ?u32 {
+    for (module.instructions) |inst| {
+        if (inst.op == .Decorate and inst.words.len >= 4 and
+            inst.words[1] == array_type_id and
+            inst.words[2] == @intFromEnum(spirv.Decoration.array_stride))
+        {
+            return inst.words[3];
+        }
+    }
+    return null;
+}
+
 const RowMajorAccess = struct { boundary: usize, matrix_tid: u32 };
 
 /// Return where a row-major matrix VALUE is produced in `indices`, so the read
@@ -1142,13 +1224,13 @@ fn appendMatrixTail(module: *const ParsedModule, names: *std.AutoHashMap(u32, []
 /// transpose of the logical matrix, so transposing reconstructs it (matching the
 /// MSL backend). Whole-matrix loads ARE transposed too (WGSL has no row_major
 /// keyword to fix storage, so even `a.m` for `mul` reads Mᵀ).
-fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
+fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator, wrapped_members: *const WrappedUniformMemberMap) ![]const u8 {
     if (indices.len != 0) {
         if (findRowMajorMatrix(module, base_id, indices)) |hit| {
             var buf = std.ArrayList(u8).initCapacity(alloc, 64) catch return error.OutOfMemory;
             defer buf.deinit(alloc);
             try buf.appendSlice(alloc, "transpose(");
-            const inner = try buildAccessExprPlain(module, names, base_id, indices[0 .. hit.boundary + 1], alloc);
+            const inner = try buildAccessExprPlain(module, names, base_id, indices[0 .. hit.boundary + 1], alloc, wrapped_members);
             defer alloc.free(inner);
             try buf.appendSlice(alloc, inner);
             try buf.appendSlice(alloc, ")");
@@ -1156,10 +1238,10 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
             return buf.toOwnedSlice(alloc);
         }
     }
-    return buildAccessExprPlain(module, names, base_id, indices, alloc);
+    return buildAccessExprPlain(module, names, base_id, indices, alloc, wrapped_members);
 }
 
-fn buildAccessExprPlain(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
+fn buildAccessExprPlain(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator, wrapped_members: *const WrappedUniformMemberMap) ![]const u8 {
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) return try alloc.dupe(u8, base_name);
 
@@ -1168,6 +1250,14 @@ fn buildAccessExprPlain(module: *const ParsedModule, names: *std.AutoHashMap(u32
     try buf.appendSlice(alloc, base_name);
 
     var current_type_id: ?u32 = resolvePointee(module, base_id);
+
+    // #170 A2: when descending through a wrapped uniform array member, the leaf
+    // element was widened to vec4; the swizzle (`.x`/`.xy`) is appended once the
+    // immediately-following array index reaches the element. GUARD: the disjoint
+    // whole-UBO bare-array wrapper (`._wrapped_`) appends its own `.x` in the
+    // caller, so we skip injection on those bases.
+    const skip_wrap = std.mem.indexOf(u8, base_name, "._wrapped_") != null;
+    var pending_swizzle: ?[]const u8 = null;
 
     for (indices) |index_id| {
         const idx_inst = getDef(module, index_id);
@@ -1195,6 +1285,13 @@ fn buildAccessExprPlain(module: *const ParsedModule, names: *std.AutoHashMap(u32
                     var mname_buf: [32]u8 = undefined;
                     const mname = getMemberName(module, current_type_id.?, val, &mname_buf);
                     try buf.print(alloc, ".{s}", .{mname});
+                    // Record a pending swizzle if this member's array element was
+                    // widened to vec4 in the uniform struct (resolved on the
+                    // struct type id BEFORE we advance current_type_id below).
+                    if (!skip_wrap) {
+                        if (wrapped_members.get(.{ .struct_id = current_type_id.?, .member_idx = val })) |k|
+                            pending_swizzle = k.swizzle();
+                    }
                     if (current_type_id) |tid| {
                         const ti = getDef(module, tid);
                         if (ti) |tinst| {
@@ -1207,6 +1304,11 @@ fn buildAccessExprPlain(module: *const ParsedModule, names: *std.AutoHashMap(u32
                         const ti = getDef(module, tid);
                         if (ti) |tinst| current_type_id = tinst.words[2];
                     }
+                    // The array index that reaches the widened leaf — narrow it.
+                    if (pending_swizzle) |sw| {
+                        try buf.appendSlice(alloc, sw);
+                        pending_swizzle = null;
+                    }
                 }
             } else {
                 const idx_name = names.get(index_id) orelse "i";
@@ -1214,6 +1316,11 @@ fn buildAccessExprPlain(module: *const ParsedModule, names: *std.AutoHashMap(u32
                 if (current_type_id) |tid| {
                     const ti = getDef(module, tid);
                     if (ti) |tinst| current_type_id = tinst.words[2];
+                }
+                // Dynamic array index reaching the widened leaf — narrow it.
+                if (pending_swizzle) |sw| {
+                    try buf.appendSlice(alloc, sw);
+                    pending_swizzle = null;
                 }
             }
         }
@@ -1343,6 +1450,66 @@ fn collectAtomicFields(module: *const ParsedModule, out: *AtomicFieldMap) !void 
         if (last_struct_id) |sid| {
             const kind: AtomicFieldKind = if (indices_after_last_struct == 0) .scalar else .array_element;
             try out.put(.{ .struct_id = sid, .member_idx = last_member_idx }, kind);
+        }
+    }
+}
+
+/// Classify a uniform struct's array members that need vec4-widening (#170 A2).
+/// `struct_type_id` is the *resolved* pointee struct of a uniform (non-SSBO)
+/// cbuffer. For each member that is a (possibly nested) array whose innermost
+/// element is a sub-16 scalar (f32/i32/u32, .x) or vec2 (.xy), record the
+/// swizzle needed to re-narrow the widened element. vec3/vec4/matrix elements
+/// are already 16-aligned and are NOT recorded.
+///
+/// Nested *sub-struct* array members are NOT recursed into here (deferred —
+/// see #170): only the direct members of the uniform struct are classified.
+///
+/// DEFERRED (honest, not silent-wrong): a whole-array-member LOAD of a wrapped
+/// member (e.g. passing `u.arr` to a function taking `float a[N]`) drops the
+/// per-element swizzle and emits `array<vec4<f32>,N>` where `array<f32,N>` is
+/// expected → naga surfaces a TYPE error. That is honest-loud (caught by naga),
+/// not silent-wrong, so it is left for a follow-up; only indexed element reads
+/// (`u.arr[i]` → `.x`/`.xy`) are lowered correctly today.
+fn collectWrappedUniformMembersForStruct(module: *const ParsedModule, struct_type_id: u32, out: *WrappedUniformMemberMap) !void {
+    const sdef = getDef(module, struct_type_id) orelse return;
+    if (sdef.op != .TypeStruct or sdef.words.len <= 2) return;
+    for (sdef.words[2..], 0..) |mt_id, mi| {
+        // Only single-level sized/runtime arrays are handled. Multi-dimensional
+        // arrays (`float a[2][3]`) and arrays-of-sub-struct are DEFERRED (#170):
+        // their widened element type would need recursive nesting that the
+        // current emit/access plumbing does not yet build correctly.
+        const md = getDef(module, mt_id) orelse continue;
+        if (md.op != .TypeArray and md.op != .TypeRuntimeArray) continue;
+        if (md.words.len <= 2) continue;
+        // CORRECTNESS GATE (#170 review): only wrap when the SOURCE array's
+        // ArrayStride is 16. std140 ALWAYS rounds an array-element stride up to
+        // 16, so the host packs the scalar/vec2 at byte 0 of each 16-byte slot —
+        // exactly where the widened `arr[i].x`/`.xy` reads it. A stride of 4 or 8
+        // (scalar-block-layout `scalar` / std430 UNIFORM) means the host packs
+        // elements TIGHTLY (0,4,8,12); wrapping to vec4 then reads bytes
+        // 0,16,32,48 → WRONG DATA, which naga ACCEPTS (silent-wrong). When the
+        // stride is not 16 we DON'T record the member: it falls through to the
+        // unwrapped `array<base,N>` emission, which naga rejects loudly (honest),
+        // matching `main`'s behavior. (SSBOs are already excluded by the caller's
+        // `!cb.is_ssbo` filter; this guards scalar/std430 UNIFORM blocks.)
+        if (arrayTypeStride(module, mt_id) != 16) continue;
+        const elem_id = md.words[2];
+        const ed = getDef(module, elem_id) orelse continue;
+        // If the element is itself an array, it is a multi-dim array → defer.
+        if (ed.op == .TypeArray or ed.op == .TypeRuntimeArray) continue;
+        const kind: ?WrappedUniformMemberKind = switch (ed.op) {
+            // Scalar float/int element (4 bytes) → widen to vec4, narrow with .x.
+            .TypeFloat, .TypeInt => .x,
+            // Vector element: only vec2 (8 bytes) needs widening. vec3/vec4 are
+            // already 16-aligned (vec3 is padded to 16 in std140/std430).
+            .TypeVector => blk: {
+                const comp_count = if (ed.words.len > 3) ed.words[3] else 0;
+                break :blk if (comp_count == 2) .xy else null;
+            },
+            else => null,
+        };
+        if (kind) |k| {
+            try out.put(.{ .struct_id = struct_type_id, .member_idx = @intCast(mi) }, k);
         }
     }
 }
@@ -1935,6 +2102,29 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     defer atomic_fields.deinit();
     collectAtomicFields(&module, &atomic_fields) catch {};
 
+    // Detect sub-16 array members of UNIFORM (non-SSBO) blocks (#170 A2). Such
+    // members are widened to array<vec4<T>> at emission and swizzled at access
+    // (see WrappedUniformMemberMap). SSBOs tolerate sub-16 strides → skipped.
+    // Keyed by the resolved struct type id (same key space as atomic_fields and
+    // the `type_id` passed to emitOneStructForwardDecl / buildAccessExprPlain's
+    // current_type_id walk).
+    var wrapped_uniform_members = WrappedUniformMemberMap.init(arena);
+    defer wrapped_uniform_members.deinit();
+    for (cbuffers.items) |cb| {
+        if (cb.is_ssbo) continue;
+        // cb.type_id may be a TypePointer (resolve to the pointee struct) or
+        // already the pointee struct id, depending on the registration path.
+        var struct_id = cb.type_id;
+        if (getDef(&module, struct_id)) |pi| {
+            if (pi.op == .TypePointer and pi.words.len > 3) struct_id = pi.words[3];
+        }
+        collectWrappedUniformMembersForStruct(&module, struct_id, &wrapped_uniform_members) catch {};
+    }
+    // Empty wrap-map for NON-uniform struct emission (local/function/workgroup
+    // structs are not in uniform space, so their array members are never wrapped).
+    var no_wrapped_members = WrappedUniformMemberMap.init(arena);
+    defer no_wrapped_members.deinit();
+
     // Emit struct forward declarations for types used in cbuffers
     var emitted_structs = std.AutoHashMap(u32, void).init(arena);
     defer emitted_structs.deinit();
@@ -1942,8 +2132,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     defer emitted_names.deinit();
 
     for (cbuffers.items) |cb| {
-        try emitStructForwardDecls(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
-        try emitOneStructForwardDecl(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
+        try emitStructForwardDecls(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &wrapped_uniform_members);
+        try emitOneStructForwardDecl(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &wrapped_uniform_members);
     }
 
     // Emit struct forward declarations for types used as local variables
@@ -1973,7 +2163,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                         if (ti) |tinst| {
                             if (tinst.op == .TypeStruct and local_structs.get(tid) == null) {
                                 local_structs.put(tid, {}) catch {};
-                                try emitOneStructForwardDecl(&module, &names, tid, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
+                                try emitOneStructForwardDecl(&module, &names, tid, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
                             }
                         }
                     }
@@ -2127,7 +2317,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                             }
                         }
                         // Emit struct declaration for array element types
-                        try emitOneStructForwardDecl(&module, &names, pointee_type, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
+                        try emitOneStructForwardDecl(&module, &names, pointee_type, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
                         try w.print("var<workgroup> {s}: {s};\n\n", .{ var_name, type_name });
                     }
                 }
@@ -2289,10 +2479,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             const ft = getDef(&module, func_type_id);
             if (ft) |fti| {
                 if (fti.op == .TypeFunction and fti.words.len > 2) {
-                    try emitOneStructForwardDecl(&module, &names, fti.words[2], w, arena, &emitted_structs, &emitted_names, &atomic_fields);
+                    try emitOneStructForwardDecl(&module, &names, fti.words[2], w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
                     // Also emit for param types
                     for (fti.words[3..]) |param_tid| {
-                        try emitOneStructForwardDecl(&module, &names, param_tid, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
+                        try emitOneStructForwardDecl(&module, &names, param_tid, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
                     }
                 }
             }
@@ -2308,7 +2498,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             {
                 if (scan.words.len > 1) {
                     const type_id = scan.words[1];
-                    try emitOneStructForwardDecl(&module, &names, type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields);
+                    try emitOneStructForwardDecl(&module, &names, type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
                 }
             }
         }
@@ -2470,7 +2660,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
 
         const inout_ret_name: ?[]const u8 = if (has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members);
 
         try w.writeAll("}\n\n");
     }
@@ -2895,7 +3085,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members);
 
     // Re-resolve the direct-return value AFTER emitBody: a passthrough store
     // (`o = x`, or `o = -(-x)` after double-negate folding) feeds an OpLoad
@@ -3052,7 +3242,7 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void)) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap) !void {
     _ = decorations;
     _ = wrapped_uniform_arrays;
     var indent: u32 = 1; // base function body indentation (4 spaces)
@@ -3254,7 +3444,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             if (ac_inst.op == .AccessChain and ac_inst.words.len > 3) {
                 const result_id = ac_inst.words[2];
                 const base_id = ac_inst.words[3];
-                var expr = buildAccessExpr(module, names, base_id, ac_inst.words[4..], alloc) catch continue;
+                var expr = buildAccessExpr(module, names, base_id, ac_inst.words[4..], alloc, wrapped_members) catch continue;
                 if (expr.len > 0) {
                     // Append .x for wrapped uniform arrays (array<f32,N> → array<vec4f,N>)
                     // Check if base variable was renamed to include .values
@@ -3779,7 +3969,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         if (dinst.op == .Label and dinst.words.len > 1 and dinst.words[1] == merge_label.?) break;
                                         if (dinst.op == .Branch or dinst.op == .BranchConditional) break;
                                         if (dinst.op == .Switch) break;
-                                        try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind);
+                                        try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members);
                                     }
                                     break;
                                 }
@@ -3808,7 +3998,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         if (dinst.op == .Label) break;
                                         if (dinst.op == .Branch or dinst.op == .BranchConditional) break;
                                         if (dinst.op == .Switch) break;
-                                        try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind);
+                                        try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members);
                                     }
                                     break;
                                 }
@@ -3872,7 +4062,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             switch (dinst.op) {
                                 .BranchConditional, .Branch, .SelectionMerge, .LoopMerge, .Phi, .FunctionEnd => {},
                                 else => {
-                                    try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, indent);
+                                    try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, indent, wrapped_members);
                                 },
                             }
                         }
@@ -4011,7 +4201,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     }
                                                 }
                                                 if (is_phi_val) {
-                                                    try emitSimpleInstruction(module, names, &inline_exprs, cbinst, w, alloc, arena, indent + 1);
+                                                    try emitSimpleInstruction(module, names, &inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members);
                                                 }
                                             }
                                         }
@@ -4057,7 +4247,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     }
                                                 }
                                                 if (is_phi_val) {
-                                                    try emitSimpleInstruction(module, names, &inline_exprs, cbinst, w, alloc, arena, indent + 1);
+                                                    try emitSimpleInstruction(module, names, &inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members);
                                                 }
                                             }
                                         }
@@ -4264,7 +4454,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     var resolved_allocated = false;
                     if (ptr_inst) |pi| {
                         if (pi.op == .AccessChain) {
-                            const fresh_expr_opt: ?[]const u8 = buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc) catch null;
+                            const fresh_expr_opt: ?[]const u8 = buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc, wrapped_members) catch null;
                             if (fresh_expr_opt) |fe0| {
                                 var fresh_expr = fe0;
                                 // If wrapped uniform array, append .x
@@ -4291,7 +4481,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     var expr_allocated = false;
                     if (ptr_inst) |pi| {
                         if (pi.op == .AccessChain) {
-                            expr = try buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc);
+                            expr = try buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc, wrapped_members);
                             expr_allocated = true;
                             // If the base was renamed to include .values (wrapped uniform array), append .x
                             if (std.mem.indexOf(u8, expr, "._wrapped_[") != null) {
@@ -4323,7 +4513,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 var expr_allocated = false;
                 if (ptr_inst) |pi| {
                     if (pi.op == .AccessChain) {
-                        expr = try buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc);
+                        expr = try buildAccessExpr(module, names, pi.words[3], pi.words[4..], alloc, wrapped_members);
                         expr_allocated = true;
                     }
                 }
@@ -4335,7 +4525,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .AccessChain => {
                 const result_id = inst.words[2];
                 const base_id = inst.words[3];
-                const expr = try buildAccessExpr(module, names, base_id, inst.words[4..], alloc);
+                const expr = try buildAccessExpr(module, names, base_id, inst.words[4..], alloc, wrapped_members);
                 if (try names.fetchPut(result_id, expr)) |old| alloc.free(old.value);
             },
 
@@ -5589,7 +5779,7 @@ fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMa
 }
 
 // Emit a single instruction — used for replaying deferred loop header instructions
-fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32) !void {
+fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32, wrapped_members: *const WrappedUniformMemberMap) !void {
     switch (inst.op) {
         .Variable => {
             if (inst.words.len >= 4) {
@@ -5623,7 +5813,7 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             if (inst.words.len > 3) {
                 const result_id = inst.words[2];
                 const base_id = inst.words[3];
-                const expr = buildAccessExpr(module, names, base_id, inst.words[4..], alloc) catch return;
+                const expr = buildAccessExpr(module, names, base_id, inst.words[4..], alloc, wrapped_members) catch return;
                 if (try names.fetchPut(result_id, expr)) |old| alloc.free(old.value);
             }
         },
