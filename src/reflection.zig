@@ -35,6 +35,13 @@ pub const Member = struct {
     type_id: u32 = 0,
     type_kind: TypeKind = .unknown,
 
+    /// Human-readable SPIR-V type spelling for this member (#177 Item 2, for the
+    /// JSON serializer). For scalar/vector/matrix members this is the spirv-cross
+    /// spelling (`float`, `vec4`, `mat4`, ...). For a struct-typed member this is
+    /// the inner struct's declared NAME (e.g. `Light`) — the JSON serializer maps
+    /// it to a flat `types` map key (`_<type_id>`). Owned; freed by `freeMembers`.
+    type_name: []const u8 = "",
+
     // ── Layout metadata (read BACK from the SPIR-V decoration table — never recomputed) ──
     /// `ArrayStride` decoration (Decoration 6) on the member's array type. 0 if
     /// the member is not an array.
@@ -56,11 +63,19 @@ pub const Member = struct {
     /// members are RELATIVE to the nested struct (matching spirv-cross). Freed
     /// recursively by `freeMembers`.
     ///
-    /// LIMITATION: array-of-struct members are NOT expanded — a member whose type
-    /// is an array WHOSE ELEMENT is a struct (e.g. `Light lights[4];`) has
-    /// `members == null`. Only directly struct-typed members recurse. Consumers
-    /// must not assume full nested coverage. Tracked as a #177 follow-up.
+    /// Array-of-struct members ARE expanded as of #177 Item 2: a member whose
+    /// type is an array whose ELEMENT is a struct (e.g. `Light lights[4];` or a
+    /// runtime `Particle particles[];`) has `members` set to the ELEMENT struct's
+    /// inlined members, with the array fields (`array_dim` / `is_runtime_array` /
+    /// `array_stride`) describing the array itself.
     members: ?[]const Member = null,
+
+    /// When `members != null`, the SPIR-V type id of the STRUCT those members
+    /// belong to (#177 Item 2). For a directly struct-typed member this equals
+    /// `type_id`; for an array-of-struct member it is the ELEMENT struct's id.
+    /// The JSON serializer uses it to key the flat `types` map (`_<id>`). 0 when
+    /// `members == null`.
+    inner_type_id: u32 = 0,
 
     // ── Per-member access qualifiers (#177 Item 3) ──
     /// `Coherent` (Decoration 23) on this member (`OpMemberDecorate`).
@@ -80,6 +95,7 @@ pub const Member = struct {
 fn freeMembers(alloc: std.mem.Allocator, members: []const Member) void {
     for (members) |*m| {
         if (m.name.len > 0) alloc.free(m.name);
+        if (m.type_name.len > 0) alloc.free(m.type_name);
         if (m.members) |inner| freeMembers(alloc, inner);
     }
     alloc.free(members);
@@ -87,6 +103,12 @@ fn freeMembers(alloc: std.mem.Allocator, members: []const Member) void {
 
 pub const Resource = struct {
     name: []const u8 = "",
+    /// Human-readable SPIR-V type spelling for the JSON serializer (#177 Item 2).
+    /// For buffer blocks (UBO/SSBO/push-constant) this is the block struct's
+    /// declared NAME (e.g. `Scene`); the JSON serializer maps it to a flat
+    /// `types` map key (`_<type_id>`). For opaque/IO resources it is the type
+    /// spelling (e.g. `sampler2D`, `vec4`). Owned; freed by `deinit`.
+    type_name: []const u8 = "",
     id: u32 = 0,
     set: u32 = 0xFFFF_FFFF,
     binding: u32 = 0xFFFF_FFFF,
@@ -168,6 +190,7 @@ pub const ShaderResources = struct {
                 const slice: []const Resource = @field(self, field.name);
                 for (slice) |*res| {
                     if (res.name.len > 0) alloc.free(res.name);
+                    if (res.type_name.len > 0) alloc.free(res.type_name);
                     if (res.members.len > 0) freeMembers(alloc, res.members);
                 }
                 if (slice.len > 0) alloc.free(slice);
@@ -233,6 +256,12 @@ const TInfo = struct {
     image_sampled: u32 = 0,
     /// Image format qualifier from the `Format` operand.
     image_format: ImageFormat = .unknown,
+    /// `Depth` operand: 0=non-depth, 1=depth (shadow), 2=unknown. Drives the
+    /// `Shadow` suffix in the spirv-cross type spelling (e.g. `sampler2DShadow`).
+    image_depth: u32 = 0,
+    /// `Arrayed` operand: 0=non-arrayed, 1=arrayed. Drives the `Array` suffix in
+    /// the spirv-cross type spelling (e.g. `sampler2DArray`).
+    image_arrayed: u32 = 0,
 };
 
 // Pack (struct_id, member_index) into a single u64 key
@@ -380,6 +409,9 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                 }
             },
             // Types
+            20 => { // OpTypeBool
+                if (wc >= 2) try types.put(spirv_words[pos + 1], .{ .kind = .scalar_bool, .byte_size = 4 });
+            },
             21 => { // OpTypeInt
                 if (wc >= 2) {
                     var info = TInfo{ .kind = if (wc >= 4 and spirv_words[pos + 3] == 0) .scalar_uint else .scalar_int };
@@ -419,6 +451,8 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                         .kind = .image,
                         .element_type_id = spirv_words[pos + 2], // sampledType
                         .image_dim = spirv_words[pos + 3],
+                        .image_depth = spirv_words[pos + 4], // depth
+                        .image_arrayed = spirv_words[pos + 5], // arrayed
                         .image_sampled = spirv_words[pos + 7],
                         .image_format = ImageFormat.fromSpv(spirv_words[pos + 8]),
                     });
@@ -554,8 +588,18 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
         else
             null;
 
+        // `type_name` (#177 Item 2): for a buffer block (struct pointee) the
+        // block struct's declared OpName (mapped to `_<id>` by the JSON
+        // serializer); otherwise the spirv-cross type spelling (sampler2D /
+        // vec4 / ...).
+        const res_type_name: []const u8 = if (tk == .struct_type)
+            (if (names.get(pointee)) |sn| (alloc.dupe(u8, sn) catch "") else "")
+        else
+            spvTypeName(alloc, &types, pointee);
+
         const res = Resource{
             .name = if (nm.len > 0) alloc.dupe(u8, nm) catch "" else "",
+            .type_name = res_type_name,
             .id = v.id,
             .set = d.set,
             .binding = d.binding,
@@ -622,6 +666,7 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             const ctx = BuildCtx{
                 .alloc = alloc,
                 .types = &types,
+                .names = &names,
                 .mnames = &mnames,
                 .moffs = &moffs,
                 .astrides = &astrides,
@@ -656,8 +701,11 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
     for (spec_consts.items) |sc| {
         const d = decos.get(sc.id) orelse Deco{};
         const nm = names.get(sc.id) orelse "";
+        // Scalar type spelling (float/int/uint/bool) for the JSON serializer to
+        // (a) emit a `type` field and (b) decode `default_value_u32` correctly.
         try spec_list.append(alloc, .{
             .name = if (nm.len > 0) alloc.dupe(u8, nm) catch "" else "",
+            .type_name = spvTypeName(alloc, &types, sc.type_id),
             .id = sc.id,
             .type_id = sc.type_id,
             .location = d.spec_id, // legacy: kept for compatibility, mirrors spec_id
@@ -683,6 +731,393 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
     };
 }
 
+// ── #177 Item 2: JSON serialization matching spirv-cross --reflect ──────────
+
+/// Serialize a `ShaderResources` to a JSON document mirroring the schema emitted
+/// by `spirv-cross <file>.spv --reflect`. Opt-in (additive — codegen and the
+/// Zig-struct reflection API are unchanged). Caller owns the returned slice and
+/// must free it with `alloc.free`.
+///
+/// Schema mirrored (only the fields glslpp models): top-level `entryPoints`,
+/// `types` (flat map keyed `_<id>`), `ubos`, `ssbos`, `push_constants`,
+/// `textures` (= sampled_images), `images` (= storage_images),
+/// `separate_images`, `separate_samplers`, `subpass_inputs`,
+/// `acceleration_structures`, `inputs`, `outputs`, and `specialization_constants`
+/// (glslpp-specific superset). Empty sections are omitted, matching spirv-cross.
+///
+/// Struct types are emitted ONCE in `types`; resources and struct-typed members
+/// reference them by their `_<id>` key (the flat-map representation chosen for
+/// #177 Item 1's inlined Zig structs). Scalar/vector/matrix/sampler members
+/// carry their spirv-cross spelling in `type` (`float`/`vec4`/`mat4`/...).
+pub fn toJson(alloc: std.mem.Allocator, res: *const ShaderResources) ![]u8 {
+    var buf = std.ArrayList(u8){};
+    errdefer buf.deinit(alloc);
+    const w = JsonWriter{ .alloc = alloc, .buf = &buf };
+
+    try w.raw("{\n");
+    var first_section = true;
+
+    // entryPoints (always present)
+    {
+        try w.sectionHeader(&first_section, "entryPoints");
+        try w.raw("[");
+        for (res.entry_points, 0..) |ep, i| {
+            if (i != 0) try w.raw(",");
+            try w.raw("\n    {\n      \"name\" : ");
+            try w.jsonString(ep.name);
+            try w.raw(",\n      \"mode\" : ");
+            try w.jsonString(stageMode(ep.stage));
+            try w.raw("\n    }");
+        }
+        if (res.entry_points.len != 0) try w.raw("\n  ");
+        try w.raw("]");
+    }
+
+    // types map — collect every distinct struct type referenced by any buffer.
+    {
+        var collected = std.ArrayList(StructType){};
+        defer collected.deinit(alloc);
+        for (res.uniform_buffers) |r| try collectStructs(alloc, &collected, r.type_id, r.type_name, r.members);
+        for (res.storage_buffers) |r| try collectStructs(alloc, &collected, r.type_id, r.type_name, r.members);
+        for (res.push_constants) |r| try collectStructs(alloc, &collected, r.type_id, r.type_name, r.members);
+
+        if (collected.items.len != 0) {
+            try w.sectionHeader(&first_section, "types");
+            try w.raw("{");
+            for (collected.items, 0..) |st, i| {
+                if (i != 0) try w.raw(",");
+                try w.raw("\n    \"_");
+                try w.int(st.id);
+                try w.raw("\" : {\n      \"name\" : ");
+                try w.jsonString(st.name);
+                try w.raw(",\n      \"members\" : ");
+                try w.members(st.members, 3);
+                try w.raw("\n    }");
+            }
+            try w.raw("\n  }");
+        }
+    }
+
+    // ubos / ssbos / push_constants (block resources with type/name/block_size)
+    try w.blockSection(&first_section, "ubos", res.uniform_buffers, true);
+    try w.blockSection(&first_section, "ssbos", res.storage_buffers, true);
+    try w.blockSection(&first_section, "push_constants", res.push_constants, false);
+
+    // opaque resources keyed by set/binding
+    try w.bindingSection(&first_section, "textures", res.sampled_images);
+    try w.bindingSection(&first_section, "images", res.storage_images);
+    try w.bindingSection(&first_section, "separate_images", res.separate_images);
+    try w.bindingSection(&first_section, "separate_samplers", res.separate_samplers);
+    try w.bindingSection(&first_section, "subpass_inputs", res.subpass_inputs);
+    try w.bindingSection(&first_section, "acceleration_structures", res.acceleration_structures);
+
+    // stage IO keyed by location
+    try w.locationSection(&first_section, "inputs", res.inputs);
+    try w.locationSection(&first_section, "outputs", res.outputs);
+
+    // specialization constants (glslpp superset; spirv-cross emits a similar list)
+    if (res.specialization_constants.len != 0) {
+        try w.sectionHeader(&first_section, "specialization_constants");
+        try w.raw("[");
+        for (res.specialization_constants, 0..) |sc, i| {
+            if (i != 0) try w.raw(",");
+            try w.raw("\n    {\n      \"name\" : ");
+            try w.jsonString(sc.name);
+            try w.raw(",\n      \"id\" : ");
+            try w.int(sc.spec_id);
+            // `type` + a value DECODED per that type, matching spirv-cross:
+            //   float -> the float literal (e.g. 2.5); bool -> true/false;
+            //   int/uint -> the integer. The raw u32 is the SPIR-V operand bits.
+            try w.raw(",\n      \"type\" : ");
+            try w.jsonString(sc.type_name);
+            try w.raw(",\n      \"default_value\" : ");
+            try w.specDefaultValue(sc.type_name, sc.default_value_u32);
+            try w.raw("\n    }");
+        }
+        try w.raw("\n  ]");
+    }
+
+    try w.raw("\n}");
+    return buf.toOwnedSlice(alloc);
+}
+
+fn stageMode(s: Stage) []const u8 {
+    return switch (s) {
+        .vertex => "vert",
+        .fragment => "frag",
+        .compute => "comp",
+        .geometry => "geom",
+        .tessellation_control => "tesc",
+        .tessellation_evaluation => "tese",
+        .unknown => "unknown",
+    };
+}
+
+/// A struct type entry for the flat `types` map.
+const StructType = struct { id: u32, name: []const u8, members: []const Member };
+
+/// Recursively collect distinct struct types (deduped by id) referenced by a
+/// member tree, so they can be emitted once in the flat `types` map. `id` is the
+/// struct's SPIR-V type id, `name` its declared name, `members` its inlined
+/// members.
+fn collectStructs(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayList(StructType),
+    id: u32,
+    name: []const u8,
+    members: []const Member,
+) !void {
+    for (out.items) |e| if (e.id == id) return; // already collected
+    try out.append(alloc, .{ .id = id, .name = name, .members = members });
+    for (members) |m| {
+        if (m.members) |inner| {
+            try collectStructs(alloc, out, m.inner_type_id, m.type_name, inner);
+        }
+    }
+}
+
+/// Minimal JSON writer with correct string escaping. spirv-cross pretty-prints
+/// with 4-space-ish indentation; we approximate its layout closely (shape and
+/// values are what consumers parse — whitespace is not significant).
+const JsonWriter = struct {
+    alloc: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+
+    fn raw(self: JsonWriter, s: []const u8) !void {
+        try self.buf.appendSlice(self.alloc, s);
+    }
+
+    fn int(self: JsonWriter, v: anytype) !void {
+        var tmp: [24]u8 = undefined;
+        const s = std.fmt.bufPrint(&tmp, "{d}", .{v}) catch return error.OutOfMemory;
+        try self.buf.appendSlice(self.alloc, s);
+    }
+
+    /// Emit a spec-constant default value DECODED per its scalar type spelling,
+    /// from the raw 32-bit SPIR-V operand bits. Mirrors `spirv-cross --reflect`:
+    ///   float -> the float value; bool -> true/false; int -> signed; uint -> unsigned.
+    /// Unknown/empty type spelling falls back to the raw unsigned bits.
+    fn specDefaultValue(self: JsonWriter, type_name: []const u8, bits: u32) !void {
+        if (std.mem.eql(u8, type_name, "float")) {
+            const f: f32 = @bitCast(bits);
+            var tmp: [64]u8 = undefined;
+            // Shortest round-trippable decimal; matches spirv-cross (e.g. 2.5).
+            const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return error.OutOfMemory;
+            try self.buf.appendSlice(self.alloc, s);
+        } else if (std.mem.eql(u8, type_name, "bool")) {
+            try self.raw(if (bits != 0) "true" else "false");
+        } else if (std.mem.eql(u8, type_name, "int")) {
+            try self.int(@as(i32, @bitCast(bits)));
+        } else {
+            // uint and any unrecognized scalar: raw unsigned bits.
+            try self.int(bits);
+        }
+    }
+
+    /// Emit a JSON string literal with proper escaping of control chars,
+    /// quotes and backslashes.
+    fn jsonString(self: JsonWriter, s: []const u8) !void {
+        try self.buf.append(self.alloc, '"');
+        for (s) |c| {
+            switch (c) {
+                '"' => try self.buf.appendSlice(self.alloc, "\\\""),
+                '\\' => try self.buf.appendSlice(self.alloc, "\\\\"),
+                '\n' => try self.buf.appendSlice(self.alloc, "\\n"),
+                '\r' => try self.buf.appendSlice(self.alloc, "\\r"),
+                '\t' => try self.buf.appendSlice(self.alloc, "\\t"),
+                0x08 => try self.buf.appendSlice(self.alloc, "\\b"),
+                0x0C => try self.buf.appendSlice(self.alloc, "\\f"),
+                else => if (c < 0x20) {
+                    var tmp: [8]u8 = undefined;
+                    const e = std.fmt.bufPrint(&tmp, "\\u{x:0>4}", .{c}) catch return error.OutOfMemory;
+                    try self.buf.appendSlice(self.alloc, e);
+                } else {
+                    try self.buf.append(self.alloc, c);
+                },
+            }
+        }
+        try self.buf.append(self.alloc, '"');
+    }
+
+    fn sectionHeader(self: JsonWriter, first: *bool, key: []const u8) !void {
+        if (!first.*) try self.raw(",\n");
+        first.* = false;
+        try self.raw("  ");
+        try self.jsonString(key);
+        try self.raw(" : ");
+    }
+
+    /// Emit a member array (used by the `types` map). `depth` controls indent.
+    fn members(self: JsonWriter, ms: []const Member, depth: usize) !void {
+        try self.raw("[");
+        for (ms, 0..) |m, i| {
+            if (i != 0) try self.raw(",");
+            try self.raw("\n");
+            try self.indent(depth + 1);
+            try self.raw("{\n");
+            try self.indent(depth + 2);
+            try self.raw("\"name\" : ");
+            try self.jsonString(m.name);
+            try self.raw(",\n");
+            try self.indent(depth + 2);
+            try self.raw("\"type\" : ");
+            // struct-typed members reference the flat `types` map by `_<id>`.
+            if (m.members != null) {
+                try self.raw("\"_");
+                try self.int(m.inner_type_id);
+                try self.raw("\"");
+            } else {
+                try self.jsonString(m.type_name);
+            }
+            // array fields (only for array members)
+            if (m.is_runtime_array or m.array_dim != 0) {
+                try self.raw(",\n");
+                try self.indent(depth + 2);
+                try self.raw("\"array\" : [ ");
+                try self.int(if (m.is_runtime_array) @as(u32, 0) else m.array_dim);
+                try self.raw(" ],\n");
+                try self.indent(depth + 2);
+                try self.raw("\"array_size_is_literal\" : [ true ]");
+            }
+            // matrix_stride (matrices only)
+            if (m.matrix_stride != 0) {
+                try self.raw(",\n");
+                try self.indent(depth + 2);
+                try self.raw("\"matrix_stride\" : ");
+                try self.int(m.matrix_stride);
+            }
+            try self.raw(",\n");
+            try self.indent(depth + 2);
+            try self.raw("\"offset\" : ");
+            try self.int(m.offset);
+            // array_stride (arrays only)
+            if (m.array_stride != 0) {
+                try self.raw(",\n");
+                try self.indent(depth + 2);
+                try self.raw("\"array_stride\" : ");
+                try self.int(m.array_stride);
+            }
+            // access qualifiers (#177 Item 3) where present
+            if (m.coherent) try self.boolField(depth + 2, "coherent");
+            if (m.is_volatile) try self.boolField(depth + 2, "volatile");
+            if (m.@"restrict") try self.boolField(depth + 2, "restrict");
+            try self.raw("\n");
+            try self.indent(depth + 1);
+            try self.raw("}");
+        }
+        try self.raw("\n");
+        try self.indent(depth);
+        try self.raw("]");
+    }
+
+    fn boolField(self: JsonWriter, depth: usize, key: []const u8) !void {
+        try self.raw(",\n");
+        try self.indent(depth);
+        try self.jsonString(key);
+        try self.raw(" : true");
+    }
+
+    fn indent(self: JsonWriter, depth: usize) !void {
+        var n: usize = 0;
+        while (n < depth) : (n += 1) try self.raw("  ");
+    }
+
+    /// ubos / ssbos / push_constants: type (`_<id>` ref), name, block_size,
+    /// and (when `with_binding`) set + binding.
+    fn blockSection(self: JsonWriter, first: *bool, key: []const u8, list: []const Resource, with_binding: bool) !void {
+        if (list.len == 0) return;
+        try self.sectionHeader(first, key);
+        try self.raw("[");
+        for (list, 0..) |r, i| {
+            if (i != 0) try self.raw(",");
+            try self.raw("\n    {\n      \"type\" : \"_");
+            try self.int(r.type_id);
+            try self.raw("\",\n      \"name\" : ");
+            // spirv-cross falls back to the block TYPE name when the block has no
+            // instance variable name (anonymous block). `Resource.type_name` holds
+            // the block struct's declared name; do NOT mutate `Resource.name`
+            // (other reflection consumers depend on the empty-instance signal).
+            try self.jsonString(if (r.name.len > 0) r.name else r.type_name);
+            try self.raw(",\n      \"block_size\" : ");
+            try self.int(r.block_size);
+            if (with_binding) {
+                try self.raw(",\n      \"set\" : ");
+                try self.int(r.set);
+                try self.raw(",\n      \"binding\" : ");
+                try self.int(r.binding);
+            }
+            if (r.readonly) try self.raw(",\n      \"readonly\" : true");
+            if (r.writeonly) try self.raw(",\n      \"writeonly\" : true");
+            try self.raw("\n    }");
+        }
+        try self.raw("\n  ]");
+    }
+
+    /// textures / images / separate_* / subpass_inputs / accel: type spelling,
+    /// name, set, binding.
+    fn bindingSection(self: JsonWriter, first: *bool, key: []const u8, list: []const Resource) !void {
+        if (list.len == 0) return;
+        try self.sectionHeader(first, key);
+        try self.raw("[");
+        for (list, 0..) |r, i| {
+            if (i != 0) try self.raw(",");
+            try self.raw("\n    {\n      \"type\" : ");
+            try self.jsonString(r.type_name);
+            try self.raw(",\n      \"name\" : ");
+            try self.jsonString(r.name);
+            try self.raw(",\n      \"set\" : ");
+            try self.int(r.set);
+            try self.raw(",\n      \"binding\" : ");
+            try self.int(r.binding);
+            if (r.array_size != 0) {
+                try self.raw(",\n      \"array\" : [ ");
+                try self.int(r.array_size);
+                // Descriptor arrays declared with a literal count (the only kind
+                // glslpp models here) pair `array` with `array_size_is_literal`,
+                // matching spirv-cross and the member serializer's shape.
+                try self.raw(" ],\n      \"array_size_is_literal\" : [ true ]");
+            }
+            // Storage-image format qualifier (e.g. `rgba8`); present only for
+            // images that carry a SPIR-V `Format` operand.
+            if (r.image_format) |fmt| {
+                if (fmt != .unknown) {
+                    try self.raw(",\n      \"format\" : ");
+                    try self.jsonString(@tagName(fmt));
+                }
+            }
+            try self.raw("\n    }");
+        }
+        try self.raw("\n  ]");
+    }
+
+    /// inputs / outputs: type spelling, name, location. Built-in IO (no
+    /// `Location` decoration, sentinel 0xFFFF_FFFF) is skipped to match
+    /// spirv-cross, which only lists user-declared locations.
+    fn locationSection(self: JsonWriter, first: *bool, key: []const u8, list: []const Resource) !void {
+        var count: usize = 0;
+        for (list) |r| {
+            if (r.location != 0xFFFF_FFFF) count += 1;
+        }
+        if (count == 0) return;
+        try self.sectionHeader(first, key);
+        try self.raw("[");
+        var emitted: usize = 0;
+        for (list) |r| {
+            if (r.location == 0xFFFF_FFFF) continue;
+            if (emitted != 0) try self.raw(",");
+            emitted += 1;
+            try self.raw("\n    {\n      \"type\" : ");
+            try self.jsonString(r.type_name);
+            try self.raw(",\n      \"name\" : ");
+            try self.jsonString(r.name);
+            try self.raw(",\n      \"location\" : ");
+            try self.int(r.location);
+            try self.raw("\n    }");
+        }
+        try self.raw("\n  ]");
+    }
+};
+
 /// Max nested-struct recursion depth (#177 Item 1). SPIR-V structs can't cycle
 /// by value, but we guard anyway against malformed input.
 const MAX_STRUCT_DEPTH = 32;
@@ -691,6 +1126,9 @@ const MAX_STRUCT_DEPTH = 32;
 const BuildCtx = struct {
     alloc: std.mem.Allocator,
     types: *const std.AutoHashMap(u32, TInfo),
+    /// `OpName` table (result id → name). Used to recover struct type NAMES for
+    /// struct-typed members so the JSON `types` map can label them (#177 Item 2).
+    names: *const std.AutoHashMap(u32, []const u8),
     mnames: *const std.AutoHashMap(u64, []const u8),
     moffs: *const std.AutoHashMap(u64, u32),
     astrides: *const std.AutoHashMap(u32, u32),
@@ -719,6 +1157,7 @@ fn buildMembers(ctx: BuildCtx, struct_type_id: u32, visited: []u32, depth: u32) 
     errdefer {
         for (members.items) |*m| {
             if (m.name.len > 0) ctx.alloc.free(m.name);
+            if (m.type_name.len > 0) ctx.alloc.free(m.type_name);
             if (m.members) |inner| freeMembers(ctx.alloc, inner);
         }
         members.deinit(ctx.alloc);
@@ -761,21 +1200,42 @@ fn buildMembers(ctx: BuildCtx, struct_type_id: u32, visited: []u32, depth: u32) 
             }
         }
 
-        // Recurse when the member's resolved type is a struct. We recurse on the
-        // member TYPE id directly (a struct-typed member references the struct
-        // type id, not an array/pointer in the std140/std430 buffer case the
-        // oracle covers); inner offsets are already relative to that struct.
+        // Resolve the member's VALUE type id: for an array member this is the
+        // element type id (so an array-of-struct references the element struct);
+        // for a direct member it is the member type id itself.
+        const value_type_id: u32 = if (mt) |t|
+            (if (t.kind == .array) t.element_type_id else mid)
+        else
+            mid;
+
+        // Recurse when the member's value type is a struct (directly OR as an
+        // array element). Inner offsets are relative to that struct (matching
+        // spirv-cross). `inner_type_id` records the struct id for the flat JSON
+        // `types` map.
         var inner: ?[]const Member = null;
-        if (mt) |t| {
-            if (t.kind == .struct_type) {
-                const sub = try buildMembers(ctx, mid, visited, depth + 1);
-                if (sub.len > 0) inner = sub;
+        var inner_type_id: u32 = 0;
+        if (ctx.types.get(value_type_id)) |vt| {
+            if (vt.kind == .struct_type) {
+                const sub = try buildMembers(ctx, value_type_id, visited, depth + 1);
+                if (sub.len > 0) {
+                    inner = sub;
+                    inner_type_id = value_type_id;
+                }
             }
         }
+
+        // `type_name` (#177 Item 2): for a struct value type, the struct's
+        // declared OpName (mapped to `_<id>` by the JSON serializer); otherwise
+        // the spirv-cross scalar/vector/matrix/sampler spelling.
+        const type_name: []const u8 = if (inner != null)
+            (if (ctx.names.get(value_type_id)) |sn| (ctx.alloc.dupe(u8, sn) catch "") else "")
+        else
+            spvTypeName(ctx.alloc, ctx.types, value_type_id);
 
         const dup_name = if (mname.len > 0) ctx.alloc.dupe(u8, mname) catch "" else "";
         members.appendAssumeCapacity(.{
             .name = dup_name,
+            .type_name = type_name,
             .offset = offset,
             .type_id = mid,
             .type_kind = resolveKind(ctx.types, mid),
@@ -786,6 +1246,7 @@ fn buildMembers(ctx: BuildCtx, struct_type_id: u32, visited: []u32, depth: u32) 
             .array_dim = array_dim,
             .is_runtime_array = is_runtime_array,
             .members = inner,
+            .inner_type_id = inner_type_id,
             .coherent = coherent,
             .is_volatile = is_volatile,
             .@"restrict" = @"restrict",
@@ -829,6 +1290,81 @@ fn memberExtent(
         return m.matrix_stride * t.component_count;
     }
     return m.size;
+}
+
+/// Produce the spirv-cross type SPELLING for a non-struct type id (#177 Item 2).
+/// Maps scalar/vector/matrix/image/sampler kinds to spirv-cross's names
+/// (`float`, `int`, `uint`, `bool`, `vec4`, `ivec2`, `mat4`, `mat2x3`,
+/// `sampler2D`, ...). For struct types and unknowns returns an empty string —
+/// struct members are referenced via the flat `types` map by NAME, handled by
+/// the caller (which has the `OpName` table). Result is owned by the caller.
+fn spvTypeName(alloc: std.mem.Allocator, types: *const std.AutoHashMap(u32, TInfo), type_id: u32) []const u8 {
+    const ti = types.get(type_id) orelse return alloc.dupe(u8, "") catch "";
+    switch (ti.kind) {
+        .scalar_float => return alloc.dupe(u8, "float") catch "",
+        .scalar_int => return alloc.dupe(u8, "int") catch "",
+        .scalar_uint => return alloc.dupe(u8, "uint") catch "",
+        .scalar_bool => return alloc.dupe(u8, "bool") catch "",
+        .vector => {
+            const elem = types.get(ti.element_type_id);
+            // A SPIR-V vector's component type is always a scalar; any other kind
+            // (or a missing element type) is malformed input. Surface a
+            // clearly-wrong prefix rather than guessing the common `vec` spelling.
+            const prefix: []const u8 = if (elem) |e| switch (e.kind) {
+                .scalar_float => "vec",
+                .scalar_int => "ivec",
+                .scalar_uint => "uvec",
+                .scalar_bool => "bvec",
+                else => "UNKNOWNvec",
+            } else "UNKNOWNvec";
+            return std.fmt.allocPrint(alloc, "{s}{d}", .{ prefix, ti.component_count }) catch "";
+        },
+        .matrix => {
+            // element_type_id is the column vector; its component_count is the row count.
+            // ti.component_count is the column count.
+            const cols = ti.component_count;
+            const rows: u32 = if (types.get(ti.element_type_id)) |col| col.component_count else cols;
+            if (cols == rows) return std.fmt.allocPrint(alloc, "mat{d}", .{cols}) catch "";
+            // spirv-cross spells non-square as matCxR (columns x rows).
+            return std.fmt.allocPrint(alloc, "mat{d}x{d}", .{ cols, rows }) catch "";
+        },
+        .sampled_image => return spvSampledImageName(alloc, types, ti.element_type_id),
+        .image => return spvImageName(alloc, types, type_id, false),
+        .sampler => return alloc.dupe(u8, "sampler") catch "",
+        .acceleration_structure => return alloc.dupe(u8, "accelerationStructure") catch "",
+        else => return alloc.dupe(u8, "") catch "",
+    }
+}
+
+/// Spell a sampled image (combined sampler) like spirv-cross: `sampler2D`,
+/// `samplerCube`, `sampler2DArray`, `sampler2DShadow`, etc. `image_type_id` is
+/// the `OpTypeImage` referenced by the `OpTypeSampledImage`.
+fn spvSampledImageName(alloc: std.mem.Allocator, types: *const std.AutoHashMap(u32, TInfo), image_type_id: u32) []const u8 {
+    return spvImageName(alloc, types, image_type_id, true);
+}
+
+fn spvImageName(alloc: std.mem.Allocator, types: *const std.AutoHashMap(u32, TInfo), image_type_id: u32, combined: bool) []const u8 {
+    const ti = types.get(image_type_id) orelse return alloc.dupe(u8, if (combined) "sampler2D" else "image2D") catch "";
+    const prefix: []const u8 = if (combined) "sampler" else "image";
+    // SPIR-V `Dim` enum: 0=1D, 1=2D, 2=3D, 3=Cube, 4=Rect, 5=Buffer, 6=SubpassData.
+    // SubpassData (6) is spelled `subpassInput` by spirv-cross; the caller routes
+    // subpass inputs separately, but handle it here too rather than mis-spell.
+    const dim: []const u8 = switch (ti.image_dim) {
+        0 => "1D",
+        1 => "2D",
+        2 => "3D",
+        3 => "Cube",
+        4 => "Rect",
+        5 => "Buffer",
+        6 => return alloc.dupe(u8, "subpassInput") catch "",
+        // Unknown Dim: surface a clearly-wrong token rather than a plausible "2D".
+        else => "Unknown",
+    };
+    // spirv-cross suffixes: `Array` (arrayed==1) then `Shadow` (depth==1), e.g.
+    // `sampler2DArrayShadow`, `samplerCubeArray`, `sampler2DShadow`.
+    const arr: []const u8 = if (ti.image_arrayed == 1) "Array" else "";
+    const shadow: []const u8 = if (ti.image_depth == 1) "Shadow" else "";
+    return std.fmt.allocPrint(alloc, "{s}{s}{s}{s}", .{ prefix, dim, arr, shadow }) catch "";
 }
 
 fn resolvePointee(types: *const std.AutoHashMap(u32, TInfo), type_id: u32) u32 {
