@@ -21,7 +21,7 @@ pub fn main() !void {
             \\  glsl      Cross-compile GLSL/SPIR-V to GLSL (round-trip)
             \\  msl       Cross-compile GLSL/SPIR-V to MSL
             \\  wgsl      Cross-compile GLSL/SPIR-V to WGSL
-            \\  reflect   Reflect on SPIR-V binary
+            \\  reflect   Reflect on SPIR-V binary (add --json for spirv-cross-style JSON)
             \\  validate  Validate SPIR-V binary with spirv-val
             \\
             \\Options:
@@ -40,6 +40,7 @@ pub fn main() !void {
             \\  --bind <set:bind:reg> Remap a (set, binding) to an explicit HLSL register /
             \\                        MSL slot number (repeatable). Class b/t/s/u (HLSL) or
             \\                        buffer/texture/sampler (MSL) is inferred from the type.
+            \\  --json                (reflect) Emit spirv-cross-style reflection JSON
             \\  --stdin               Read input from stdin
             \\  --help                Show this help
             \\
@@ -59,6 +60,7 @@ pub fn main() !void {
     var metal_version: u32 = 21;
     var msl_arg_buffers = false;
     var use_stdin = false;
+    var json_output = false;
 
     var include_paths = std.ArrayList([]const u8).initCapacity(alloc, 4) catch return;
     defer include_paths.deinit(alloc);
@@ -162,6 +164,8 @@ pub fn main() !void {
             }) catch return;
         } else if (std.mem.eql(u8, args[i], "--msl-argument-buffers")) {
             msl_arg_buffers = true;
+        } else if (std.mem.eql(u8, args[i], "--json")) {
+            json_output = true;
         } else if (std.mem.eql(u8, args[i], "--stdin")) {
             use_stdin = true;
         } else {
@@ -214,7 +218,7 @@ pub fn main() !void {
             try doGlslToWgsl(alloc, source, output_path, stage, include_paths.items, defines.items, entry_point);
         }
     } else if (std.mem.eql(u8, command, "reflect")) {
-        try doReflect(alloc, input);
+        try doReflect(alloc, input, json_output);
     } else if (std.mem.eql(u8, command, "validate")) {
         try doValidate(alloc, input);
     } else {
@@ -450,7 +454,7 @@ fn printMembers(members: []const glslpp.reflection.Member, indent: usize) void {
     }
 }
 
-fn doReflect(alloc: std.mem.Allocator, input: []const u8) !void {
+fn doReflect(alloc: std.mem.Allocator, input: []const u8, json_output: bool) !void {
     const spv = try readSpv(alloc, input);
     defer alloc.free(spv);
     var resources = glslpp.reflectSPIRV(alloc, spv) catch |err| {
@@ -458,6 +462,18 @@ fn doReflect(alloc: std.mem.Allocator, input: []const u8) !void {
         std.process.exit(1);
     };
     defer resources.deinit(alloc);
+
+    // `--json`: emit the spirv-cross-style reflection JSON to stdout instead of
+    // the human-readable text dump (#177 Item 2).
+    if (json_output) {
+        const json = glslpp.reflectionToJson(alloc, &resources) catch |err| {
+            std.debug.print("error: JSON serialization failed: {}\n", .{err});
+            std.process.exit(1);
+        };
+        defer alloc.free(json);
+        try writeOutput(null, json);
+        return;
+    }
 
     const p = std.debug.print;
     p("Entry Points: {d}\n", .{resources.entry_points.len});
