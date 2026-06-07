@@ -5411,7 +5411,7 @@ const Analyzer = struct {
                             .isampler2d_ms_array, .usampler2d_ms_array,
                             .image2d, .iimage2d, .uimage2d, .image2d_ms => .ivec2,
                             .sampler2d_array, .sampler2d_array_shadow, .sampler3d,
-                            .sampler_cube_array_shadow,
+                            .sampler_cube_array, .sampler_cube_array_shadow,
                             .sampler2d_ms_array,
                             .isampler2d_array, .usampler2d_array,
                             .isampler_cube_array, .usampler_cube_array,

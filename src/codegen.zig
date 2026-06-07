@@ -81,6 +81,7 @@ fn generateInternal(
         .name_section = std.ArrayList(u32).initCapacity(alloc, 0) catch unreachable,
         .next_id = module.next_id_start,
         .emitted_types = .{},
+        .emitted_storage_image_types = .{},
         .emitted_array_types = .{},
         .emitted_tensor_types = .{},
         .emitted_array_stride = .{},
@@ -96,6 +97,7 @@ fn generateInternal(
         .default_row_major = false,
         .default_layout = default_layout,
         .ptr_storage_class = .{},
+        .storage_image_format_by_ptr = .{},
         .sampled_image_inner_id = 0,
         .sampled_image_3d_inner_id = 0,
         .sampled_image_2d_array_inner_id = 0,
@@ -112,6 +114,9 @@ fn generateInternal(
         .sampled_image_int_1d_inner_id = 0,
         .sampled_image_uint_1d_inner_id = 0,
         .sampled_image_cube_inner_id = 0,
+        .sampled_image_cube_array_inner_id = 0,
+        .sampled_image_cube_shadow_inner_id = 0,
+        .sampled_image_cube_array_shadow_inner_id = 0,
         .glsl_std_450_id = 0,
         .access_chain_cache = .{},
         .interface_bool_ptrs = .{},
@@ -385,6 +390,13 @@ const Codegen = struct {
     array_layout_ctx: ?LayoutKind = null,
     next_id: u32,
     emitted_types: std.AutoHashMapUnmanaged(u32, u32), // @intFromEnum(ty) -> type_id
+    // Format-aware dedup for STORAGE images (#183): keyed by
+    // `(@intFromEnum(ty) << 8) | @intFromEnum(fmt)` so two `image2D`s with
+    // distinct `layout(rgbaN)` qualifiers get distinct OpTypeImage ids.
+    // The format-blind `emitted_types` would collapse them and drop the second
+    // image's Format. Sampled images (always Unknown format) keep using
+    // `emitted_types` — only storage images route here.
+    emitted_storage_image_types: std.AutoHashMapUnmanaged(u64, u32),
     emitted_array_types: std.AutoHashMapUnmanaged(u64, u32), // hash -> type_id
     emitted_tensor_types: std.AutoHashMapUnmanaged(u64, u32), // hash -> type_id
     emitted_array_stride: std.AutoHashMapUnmanaged(u32, void), // array type_ids with ArrayStride already emitted
@@ -400,6 +412,11 @@ const Codegen = struct {
     default_row_major: bool, // current block-level matrix layout
     default_layout: LayoutKind, // default block layout when no std140/std430 qualifier is present
     ptr_storage_class: std.AutoHashMapUnmanaged(u32, ir.SPIRVStorageClass), // result_id -> storage class for pointers
+    // #183: per-storage-image-global result_id -> declared `layout(rgbaN)` format.
+    // Threads each variable's own format into loads of that image so the format
+    // survives even when several images share the same GLSL enum (the
+    // format-blind `emitted_types` would otherwise reuse the first one's type).
+    storage_image_format_by_ptr: std.AutoHashMapUnmanaged(u32, ast.ImageFormat),
     sampled_image_inner_id: u32, // TypeImage (Sampled=1) for use with OpImage extraction
     sampled_image_3d_inner_id: u32,
     sampled_image_2d_array_inner_id: u32,
@@ -415,7 +432,10 @@ const Codegen = struct {
     sampled_image_uint_ms_array_inner_id: u32,
     sampled_image_int_1d_inner_id: u32,
     sampled_image_uint_1d_inner_id: u32,
-    sampled_image_cube_inner_id: u32, // TypeImage (Dim=Cube, Sampled=1)
+    sampled_image_cube_inner_id: u32, // TypeImage (Dim=Cube, Arrayed=0, Sampled=1)
+    sampled_image_cube_array_inner_id: u32, // TypeImage (Dim=Cube, Arrayed=1, Sampled=1)
+    sampled_image_cube_shadow_inner_id: u32, // TypeImage (Dim=Cube, Depth=1, Arrayed=0, Sampled=1)
+    sampled_image_cube_array_shadow_inner_id: u32, // TypeImage (Dim=Cube, Depth=1, Arrayed=1, Sampled=1)
     glsl_std_450_id: u32,
     access_chain_cache: std.AutoHashMapUnmanaged(u64, u32), // (base_id << 32 | index_id) -> result_id, cleared per function
     interface_bool_ptrs: std.AutoHashMapUnmanaged(u32, ast.Type), // ptr_id -> original AST type (bool/bvecN) for interface bool conversion
@@ -428,6 +448,7 @@ const Codegen = struct {
 
     fn deinit(self: *Codegen) void {
         self.emitted_types.deinit(self.alloc);
+        self.emitted_storage_image_types.deinit(self.alloc);
         self.emitted_array_types.deinit(self.alloc);
         self.emitted_array_stride.deinit(self.alloc);
         self.emitted_struct_layout.deinit(self.alloc);
@@ -440,6 +461,7 @@ const Codegen = struct {
         self.emitted_struct_layouts.deinit(self.alloc);
         self.layout_visited.deinit(self.alloc);
         self.ptr_storage_class.deinit(self.alloc);
+        self.storage_image_format_by_ptr.deinit(self.alloc);
         self.access_chain_cache.deinit(self.alloc);
         self.interface_bool_ptrs.deinit(self.alloc);
         self.codegen_pure_cache.deinit(self.alloc);
@@ -707,7 +729,7 @@ const Codegen = struct {
                     has_storage_image_ms = true;
                 },
                 .image2d_ms, .sampler2d_ms, .isampler2d_ms, .usampler2d_ms => has_storage_image_ms = true,
-                .sampler_cube_array_shadow, .isampler_cube_array, .usampler_cube_array,
+                .sampler_cube_array, .sampler_cube_array_shadow, .isampler_cube_array, .usampler_cube_array,
                 .image_cube_array, .iimage_cube_array, .uimage_cube_array => has_cube_array = true,
                 else => {},
             }
@@ -921,7 +943,7 @@ const Codegen = struct {
             .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer,
             .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow,
             .sampler2d_array_shadow, .sampler_cube_array_shadow,
-            .sampler_cube, .sampler_plain,
+            .sampler_cube, .sampler_cube_array, .sampler_plain,
             .image2d, .iimage2d, .uimage2d, .image1d, .iimage1d, .uimage1d,
             .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube,
             .image2d_array, .iimage2d_array, .uimage2d_array,
@@ -1508,6 +1530,85 @@ const Codegen = struct {
         return id;
     }
 
+    /// Format-aware dedup key for a storage-image type (#183). Distinct
+    /// `(enum, format)` pairs map to distinct OpTypeImage ids so that two
+    /// `image2D`s with different `layout(rgbaN)` qualifiers don't collapse.
+    fn storageImageKey(ty: ast.Type, fmt: ast.ImageFormat) u64 {
+        return (@as(u64, @intFromEnum(ty)) << 8) | @as(u64, @intFromEnum(fmt));
+    }
+
+    /// Get (or emit + cache) a format-aware storage-image `OpTypeImage` id.
+    /// Routes through `emitted_storage_image_types`, NEVER the format-blind
+    /// `emitted_types`, so per-image formats are preserved (#183).
+    fn ensureStorageImageType(self: *Codegen, ty: ast.Type, fmt: ast.ImageFormat) error{OutOfMemory}!u32 {
+        const key = storageImageKey(ty, fmt);
+        if (self.emitted_storage_image_types.get(key)) |cached| return cached;
+        const id = try self.emitStorageImageType(ty, fmt);
+        try self.emitted_storage_image_types.put(self.alloc, key, id);
+        return id;
+    }
+
+    /// Resolve the base TYPE id for a storage-image global with format `fmt`
+    /// (#183). For a scalar `image2D` this is the format-aware OpTypeImage; for
+    /// an array `image2D arr[N]` it is an OpTypeArray whose element is that
+    /// format-aware image. Recurses through nested arrays. The array element id
+    /// is threaded explicitly so the format-blind `ensureType(.array)` →
+    /// `ensureType(.image2d)` path (which emits Unknown) is bypassed.
+    fn ensureStorageImageBaseType(self: *Codegen, ty: ast.Type, fmt: ast.ImageFormat) error{OutOfMemory}!u32 {
+        switch (ty) {
+            .array => |arr| {
+                const elem_id = try self.ensureStorageImageBaseType(arr.base.*, fmt);
+                // Key the array on the format-aware element id so two arrays of
+                // distinct-format images stay distinct.
+                const cache_key = arrayCacheKey(elem_id, arr.size, self.array_layout_ctx);
+                if (self.emitted_array_types.get(cache_key)) |cached| return cached;
+                const id = self.allocId();
+                if (arr.size == 0) {
+                    try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeRuntimeArray)));
+                    try self.emitTypeWord(id);
+                    try self.emitTypeWord(elem_id);
+                } else {
+                    const const_id = try self.emitIntConstant(arr.size);
+                    try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeArray)));
+                    try self.emitTypeWord(id);
+                    try self.emitTypeWord(elem_id);
+                    try self.emitTypeWord(const_id);
+                }
+                try self.emitted_array_types.put(self.alloc, cache_key, id);
+                return id;
+            },
+            else => return try self.ensureStorageImageType(ty, fmt),
+        }
+    }
+
+    /// Resolve the declared storage-image format for a pointer id (#183),
+    /// following `constant_alias` (e.g. a reloaded pointer). Returns the format
+    /// recorded for the originating global, or null if the ptr is not a tracked
+    /// storage image. Used to thread per-image formats into access chains and
+    /// loads so they match the OpVariable's format-aware pointee type.
+    fn storageImageFormatForPtr(self: *Codegen, ptr_id: u32) ?ast.ImageFormat {
+        if (self.storage_image_format_by_ptr.get(ptr_id)) |fmt| return fmt;
+        if (self.constant_alias.get(ptr_id)) |aliased| {
+            if (aliased != ptr_id) return self.storage_image_format_by_ptr.get(aliased);
+        }
+        return null;
+    }
+
+    /// Emit a pointer type whose pointee is the format-aware storage-image
+    /// (or array-of-image) type for a global declared `layout(rgbaN)` (#183).
+    fn ensureStorageImagePointerType(self: *Codegen, ty: ast.Type, fmt: ast.ImageFormat, storage_class: ir.SPIRVStorageClass) error{OutOfMemory}!u32 {
+        const base_id = try self.ensureStorageImageBaseType(ty, fmt);
+        const key: u64 = (@as(u64, base_id) << 32) | @as(u64, @intFromEnum(storage_class));
+        if (self.emitted_ptr_types.get(key)) |cached| return cached;
+        const ptr_id = self.allocId();
+        try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
+        try self.emitTypeWord(ptr_id);
+        try self.emitTypeWord(@intFromEnum(storage_class));
+        try self.emitTypeWord(base_id);
+        try self.emitted_ptr_types.put(self.alloc, key, ptr_id);
+        return ptr_id;
+    }
+
     fn ensureType(self: *Codegen, ty: ast.Type) error{OutOfMemory}!u32 {
         // Normalize aliases for dedup: mat2 == mat2x2, mat3 == mat3x3, mat4 == mat4x4
         const normalized = switch (ty) {
@@ -2017,6 +2118,23 @@ const Codegen = struct {
                 try self.emitTypeWord(id);
                 try self.emitTypeWord(image_id);
             },
+            .sampler_cube_array => {
+                const float_id = try self.ensureType(.float);
+                const image_id = self.allocId();
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(3); // Dim = Cube
+                try self.emitTypeWord(0); // Depth = 0
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(1); // Sampled = 1 (with sampler)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
+                self.sampled_image_cube_array_inner_id = image_id;
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
+            },
             .sampler2d_shadow => {
                 const float_id = try self.ensureType(.float);
                 const image_id = self.allocId();
@@ -2045,7 +2163,7 @@ const Codegen = struct {
                 try self.emitTypeWord(0); // Not multisampled
                 try self.emitTypeWord(1); // Sampled = 1
                 try self.emitTypeWord(0); // ImageFormat = Unknown
-                self.sampled_image_cube_inner_id = image_id;
+                self.sampled_image_cube_shadow_inner_id = image_id;
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
                 try self.emitTypeWord(image_id);
@@ -2062,7 +2180,7 @@ const Codegen = struct {
                 try self.emitTypeWord(0); // Not multisampled
                 try self.emitTypeWord(1); // Sampled = 1
                 try self.emitTypeWord(0); // ImageFormat = Unknown
-                self.sampled_image_cube_inner_id = image_id; // Cube array uses same inner
+                self.sampled_image_cube_array_shadow_inner_id = image_id;
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
                 try self.emitTypeWord(image_id);
@@ -4016,25 +4134,33 @@ const Codegen = struct {
                 _ = try self.ensureType(.{ .named = entry.key_ptr.* });
             }
         }
-        // Pre-pass: for storage-image globals that carry an explicit
-        // `layout(rgbaN)` qualifier, pre-emit a format-aware `OpTypeImage`
-        // and seed `emitted_types` so subsequent `ensureType(image2d)` calls
-        // (both here for the variable's pointer type, and later during
-        // function-body emission for loads of this image) all resolve to the
-        // same id. Globals without a format qualifier fall through to the
-        // generic `ensureType` path that emits `ImageFormat=Unknown`.
+        // Pre-pass (#183): record each storage-image global's explicit
+        // `layout(rgbaN)` format keyed by the variable's result_id. Both the
+        // scalar `image2D` and the array-of-image (`image2D arr[N]`) forms are
+        // captured here, recursing through the array base. The format is later
+        // threaded into the OpVariable pointer type and into loads of the image
+        // via `ensureStorageImagePointerType` / the `.load` arm, so each image
+        // keeps its OWN format even when several share the same GLSL enum.
+        // (The format-blind `emitted_types` would otherwise collapse them and
+        // drop the 2nd image's Format — that was the bug.)
         for (self.module.globals) |global| {
-            if (!global.ty.isStorageImage()) continue;
             const layout = global.layout orelse continue;
             const fmt = layout.image_format orelse continue;
-            const key = @intFromEnum(global.ty);
-            if (self.emitted_types.contains(key)) continue; // already pinned
-            const id = try self.emitStorageImageType(global.ty, fmt);
-            try self.emitted_types.put(self.alloc, key, id);
+            var base_ty = global.ty;
+            while (base_ty == .array) base_ty = base_ty.array.base.*;
+            if (!base_ty.isStorageImage()) continue;
+            try self.storage_image_format_by_ptr.put(self.alloc, global.result_id, fmt);
         }
         for (self.module.globals) |global| {
-            _ = try self.ensureType(global.ty);
-            _ = try self.ensurePointerType(global.ty, global.storage_class);
+            // Storage-image globals get a format-aware pointer type so each
+            // variable carries its own `layout(rgbaN)` Format (#183). Others
+            // resolve through the generic, format-blind path.
+            if (self.storage_image_format_by_ptr.get(global.result_id)) |fmt| {
+                _ = try self.ensureStorageImagePointerType(global.ty, fmt, global.storage_class);
+            } else {
+                _ = try self.ensureType(global.ty);
+                _ = try self.ensurePointerType(global.ty, global.storage_class);
+            }
             // Track storage class for this global's result_id
             try self.ptr_storage_class.put(self.alloc, global.result_id, global.storage_class);
             // Struct member types are emitted on-demand during function codegen via two-buffer
@@ -4095,7 +4221,10 @@ const Codegen = struct {
                 }
             }
 
-            const ptr_type_id = try self.ensurePointerType(effective_ty, global.storage_class);
+            const ptr_type_id = if (self.storage_image_format_by_ptr.get(global.result_id)) |fmt|
+                try self.ensureStorageImagePointerType(effective_ty, fmt, global.storage_class)
+            else
+                try self.ensurePointerType(effective_ty, global.storage_class);
             // Design A — a module-scope `const` global lowered to a Private
             // OpVariable carries its folded constant-composite as an initializer
             // (word-count 5). The composite was emitted in emitTypesAndConstants
@@ -4304,6 +4433,19 @@ const Codegen = struct {
     fn emitInstruction(self: *Codegen, inst: ir.Instruction) !void {
         // Resolve null result_type from ast type
         var resolved = inst;
+        // #183: a `.load` of a storage image must resolve its result type to the
+        // FORMAT-AWARE OpTypeImage of the source variable, not the format-blind
+        // `ensureType(.image2d)` (which would emit a fresh Unknown-format image
+        // that also fails to match the variable's pointee type). Resolve the
+        // declared format from the loaded pointer (operand 0).
+        if (resolved.result_type == null and resolved.result_id != null and
+            resolved.tag == .load and inst.ty.isStorageImage())
+        {
+            const ptr_id = self.operandId(resolved, 0);
+            if (self.storageImageFormatForPtr(ptr_id)) |fmt| {
+                resolved.result_type = try self.ensureStorageImageType(inst.ty, fmt);
+            }
+        }
         if (resolved.result_type == null and resolved.result_id != null and resolved.tag != .extract_image and resolved.tag != .image_sample_dref and resolved.tag != .image_sample_dref_explicit_lod and resolved.tag != .image_sample_dref_proj and resolved.tag != .image_dref_gather) {
             resolved.result_type = try self.ensureType(inst.ty);
         }
@@ -4859,7 +5001,33 @@ const Codegen = struct {
                             else => access_ty,
                         };
                     }
-                    const ptr_type_id = try self.ensurePointerType(access_ty, sc);
+                    // #183: an access chain into an array-of-storage-image
+                    // (`arr[i]`) must produce a pointer to the FORMAT-AWARE
+                    // element image type, and the resulting pointer must itself
+                    // be tracked so the subsequent `.load` resolves the same
+                    // format-aware image. Without this the element type would be
+                    // the format-blind Unknown image.
+                    const storage_img_fmt: ?ast.ImageFormat = if (access_ty.isStorageImage())
+                        self.storageImageFormatForPtr(base_id_val)
+                    else
+                        null;
+                    const ptr_type_id = if (storage_img_fmt) |fmt| blk: {
+                        const elem_id = try self.ensureStorageImageType(access_ty, fmt);
+                        const ptr_key: u64 = (@as(u64, elem_id) << 32) | @as(u64, @intFromEnum(sc));
+                        if (self.emitted_ptr_types.get(ptr_key)) |cached| break :blk cached;
+                        const new_ptr_id = self.allocId();
+                        try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypePointer)));
+                        try self.emitTypeWord(new_ptr_id);
+                        try self.emitTypeWord(@intFromEnum(sc));
+                        try self.emitTypeWord(elem_id);
+                        try self.emitted_ptr_types.put(self.alloc, ptr_key, new_ptr_id);
+                        break :blk new_ptr_id;
+                    } else try self.ensurePointerType(access_ty, sc);
+                    // Propagate the element's format to the access-chain result so
+                    // the following load is format-aware too.
+                    if (storage_img_fmt) |fmt| {
+                        try self.storage_image_format_by_ptr.put(self.alloc, result_id, fmt);
+                    }
                     // Check if we've already computed this AccessChain
                     const cache_key = (@as(u64, base_id_val) << 32) | @as(u64, index_id);
                     if (self.access_chain_cache.get(cache_key)) |cached_result| {
@@ -5259,8 +5427,16 @@ const Codegen = struct {
                     break :blk self.sampled_image_ms_array_inner_id;
                 } else if (inst.ty == .sampler1d or inst.ty == .sampler1d_shadow) blk: {
                     break :blk self.sampled_image_1d_inner_id;
-                } else if (inst.ty == .sampler_cube or inst.ty == .sampler_cube_shadow or inst.ty == .sampler_cube_array_shadow) blk: {
+                } else if (inst.ty == .sampler_cube) blk: {
                     break :blk self.sampled_image_cube_inner_id;
+                } else if (inst.ty == .sampler_cube_array) blk: {
+                    // Arrayed=1 inner; must NOT alias the non-array cube type, else
+                    // spirv-val rejects "Sample Image image type != Result Type".
+                    break :blk if (self.sampled_image_cube_array_inner_id != 0) self.sampled_image_cube_array_inner_id else self.sampled_image_cube_inner_id;
+                } else if (inst.ty == .sampler_cube_shadow) blk: {
+                    break :blk if (self.sampled_image_cube_shadow_inner_id != 0) self.sampled_image_cube_shadow_inner_id else self.sampled_image_cube_inner_id;
+                } else if (inst.ty == .sampler_cube_array_shadow) blk: {
+                    break :blk if (self.sampled_image_cube_array_shadow_inner_id != 0) self.sampled_image_cube_array_shadow_inner_id else self.sampled_image_cube_array_inner_id;
                 } else if (inst.ty == .isampler2d or inst.ty == .isampler3d or inst.ty == .isampler_cube or inst.ty == .isampler2d_array) blk: {
                     break :blk if (self.sampled_image_int_inner_id != 0) self.sampled_image_int_inner_id else self.sampled_image_inner_id;
                 } else if (inst.ty == .usampler2d or inst.ty == .usampler3d or inst.ty == .usampler_cube or inst.ty == .usampler2d_array) blk: {

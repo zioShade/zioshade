@@ -170,6 +170,7 @@ pub const Type = union(enum) {
     sampler2d_array_shadow,
     sampler_cube_array_shadow,
     sampler_cube,
+    sampler_cube_array,
     // Integer samplers (return ivec4 from texture ops)
     isampler2d,
     isampler3d,
@@ -215,7 +216,7 @@ pub const Type = union(enum) {
             .float16 => 2,
             .float => 4,
             .double => 8,
-            .void, .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .iimage_buffer, .uimage_buffer, .image2d_ms, .image2d_ms_array, .image1d, .iimage1d, .uimage1d, .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube, .image2d_array, .iimage2d_array, .uimage2d_array, .image_cube_array, .iimage_cube_array, .uimage_cube_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer, .sampler_plain, .texture2d_plain, .texture3d_plain, .texture_cube_plain, .texture2d_array_plain, .texture2d_ms_plain, .acceleration_structure_ext, .ray_query_ext, .tensor_arm, .subpass_input, .subpass_input_ms, .named, .array => 0,
+            .void, .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .iimage_buffer, .uimage_buffer, .image2d_ms, .image2d_ms_array, .image1d, .iimage1d, .uimage1d, .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube, .image2d_array, .iimage2d_array, .uimage2d_array, .image_cube_array, .iimage_cube_array, .uimage_cube_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .sampler_cube_array, .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer, .sampler_plain, .texture2d_plain, .texture3d_plain, .texture_cube_plain, .texture2d_array_plain, .texture2d_ms_plain, .acceleration_structure_ext, .ray_query_ext, .tensor_arm, .subpass_input, .subpass_input_ms, .named, .array => 0,
             else => 4,
         };
     }
@@ -233,7 +234,7 @@ pub const Type = union(enum) {
             .mat2x3 => 6, .mat2x4 => 8,
             .mat3x2 => 6, .mat3x4 => 12,
             .mat4x2 => 8, .mat4x3 => 12,
-            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .iimage_buffer, .uimage_buffer, .image2d_ms, .image2d_ms_array, .image1d, .iimage1d, .uimage1d, .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube, .image2d_array, .iimage2d_array, .uimage2d_array, .image_cube_array, .iimage_cube_array, .uimage_cube_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer, .sampler_plain, .texture2d_plain, .texture3d_plain, .texture_cube_plain, .texture2d_array_plain, .texture2d_ms_plain, .acceleration_structure_ext, .ray_query_ext, .tensor_arm, .subpass_input, .subpass_input_ms, .named, .array => 0,
+            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .iimage_buffer, .uimage_buffer, .image2d_ms, .image2d_ms_array, .image1d, .iimage1d, .uimage1d, .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube, .image2d_array, .iimage2d_array, .uimage2d_array, .image_cube_array, .iimage_cube_array, .uimage_cube_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .sampler_cube_array, .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer, .sampler_plain, .texture2d_plain, .texture3d_plain, .texture_cube_plain, .texture2d_array_plain, .texture2d_ms_plain, .acceleration_structure_ext, .ray_query_ext, .tensor_arm, .subpass_input, .subpass_input_ms, .named, .array => 0,
         };
     }
 
@@ -334,7 +335,7 @@ pub const Type = union(enum) {
 
     pub fn isSampler(self: Type) bool {
         return switch (self) {
-            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .iimage_buffer, .uimage_buffer, .image2d_ms, .image2d_ms_array, .image1d, .iimage1d, .uimage1d, .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube, .image2d_array, .iimage2d_array, .uimage2d_array, .image_cube_array, .iimage_cube_array, .uimage_cube_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer, .sampler_plain, .texture2d_plain, .texture3d_plain, .texture_cube_plain, .texture2d_array_plain, .texture2d_ms_plain, .acceleration_structure_ext, .ray_query_ext, .subpass_input, .subpass_input_ms, .tensor_arm => true,
+            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .iimage_buffer, .uimage_buffer, .image2d_ms, .image2d_ms_array, .image1d, .iimage1d, .uimage1d, .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube, .image2d_array, .iimage2d_array, .uimage2d_array, .image_cube_array, .iimage_cube_array, .uimage_cube_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .sampler_cube_array, .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer, .sampler_plain, .texture2d_plain, .texture3d_plain, .texture_cube_plain, .texture2d_array_plain, .texture2d_ms_plain, .acceleration_structure_ext, .ray_query_ext, .subpass_input, .subpass_input_ms, .tensor_arm => true,
             else => false,
         };
     }
@@ -354,7 +355,7 @@ pub const Type = union(enum) {
     /// True for combined image-sampler types (need OpImage extraction)
     pub fn isCombinedSampler(self: Type) bool {
         return switch (self) {
-            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .sampler_cube,
+            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .sampler_cube, .sampler_cube_array,
             .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow,
             .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer,
             .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer => true,
@@ -417,7 +418,7 @@ pub const Type = union(enum) {
             .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer,
             .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow,
             .sampler_cube_array_shadow,
-            .sampler_cube, .image2d, .image_buffer, .iimage_buffer, .uimage_buffer, .image2d_ms, .image2d_ms_array,
+            .sampler_cube, .sampler_cube_array, .image2d, .image_buffer, .iimage_buffer, .uimage_buffer, .image2d_ms, .image2d_ms_array,
             .image1d, .image3d, .image_cube, .image2d_array, .image_cube_array => .float,
             .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms,
             .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array,
