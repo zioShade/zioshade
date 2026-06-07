@@ -854,3 +854,180 @@ test "toJson: ubo + texture, valid JSON with escaped names" {
     const outputs = root.get("outputs").?.array;
     try std.testing.expectEqualStrings("vec4", outputs.items[0].object.get("type").?.string);
 }
+
+// ── #177 review: sampler array / shadow JSON spelling fidelity ──────────────
+// Oracle = `spirv-cross <glslpp-binary>.spv --reflect` (the SAME binary this
+// test reflects):
+//   texArr       -> "sampler2DArray"
+//   texShadow    -> "sampler2DShadow"
+//   texArrShadow -> "sampler2DArrayShadow"   (Array BEFORE Shadow)
+//   texCube      -> "samplerCube"
+// Before the fix the serializer keyed only off `image_dim` and spelled all of
+// these `sampler2D` (and `samplerCube` for cube). Now it appends `Array`
+// (arrayed==1) then `Shadow` (depth==1) from the previously-unstored
+// OpTypeImage `arrayed`/`depth` operands.
+//
+// NOTE: `samplerCubeArray` is intentionally NOT asserted. glslpp's CODEGEN
+// currently emits a cube-array as a plain cube (arrayed==0) — a pre-existing
+// codegen bug, NOT a reflection bug: spirv-cross on the SAME glslpp binary also
+// reports `samplerCube`, so the serializer is faithful. The 2D Array/Shadow
+// cases above exercise the full Array+Shadow suffix logic.
+test "toJson #177-review: sampler array/shadow type spelling matches oracle" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DArray texArr;
+        \\layout(binding = 1) uniform sampler2DShadow texShadow;
+        \\layout(binding = 2) uniform sampler2DArrayShadow texArrShadow;
+        \\layout(binding = 3) uniform samplerCube texCube;
+        \\layout(location = 0) in vec3 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    o = texture(texArr, uv)
+        \\      + vec4(texture(texShadow, vec3(0.5)))
+        \\      + vec4(texture(texArrShadow, vec4(0.5)))
+        \\      + texture(texCube, uv);
+        \\}
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+
+    const json = try glslpp.reflection.toJson(alloc, &res);
+    defer alloc.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const textures = parsed.value.object.get("textures").?.array;
+
+    var by_name = std.StringHashMap([]const u8).init(alloc);
+    defer by_name.deinit();
+    for (textures.items) |t| {
+        try by_name.put(t.object.get("name").?.string, t.object.get("type").?.string);
+    }
+    try std.testing.expectEqualStrings("sampler2DArray", by_name.get("texArr").?);
+    try std.testing.expectEqualStrings("sampler2DShadow", by_name.get("texShadow").?);
+    try std.testing.expectEqualStrings("sampler2DArrayShadow", by_name.get("texArrShadow").?);
+    try std.testing.expectEqualStrings("samplerCube", by_name.get("texCube").?);
+}
+
+// ── #177 review MINOR 1: images section emits format + array_size_is_literal ──
+// Oracle = `spirv-cross <glslpp-binary>.spv --reflect` (reflecting glslpp's OWN
+// SPIR-V, the same binary this test reflects):
+//   destImg -> image2D, format "rgba8"
+//   arr     -> image2D, format "rgba8", array [3], array_size_is_literal [true]
+// NOTE: the source declares `arr` as `rgba32f`, but glslpp's CODEGEN currently
+// drops the per-element format qualifier on a storage-image ARRAY and emits the
+// first image's format (rgba8) — a pre-existing codegen bug, NOT a reflection
+// bug. spirv-cross on the SAME glslpp binary reports rgba8 too, so the JSON
+// serializer is faithful. We assert glslpp's actual (rgba8) value; the
+// `format` + `array_size_is_literal` KEYS are the #177-review MINOR 1 deliverable.
+test "toJson #177-review: storage images carry format + array_size_is_literal" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(set = 0, binding = 0, rgba8) uniform image2D destImg;
+        \\layout(set = 0, binding = 1, rgba32f) uniform image2D arr[3];
+        \\void main() {
+        \\    imageStore(destImg, ivec2(0), vec4(1.0));
+        \\    imageStore(arr[0], ivec2(0), vec4(1.0));
+        \\}
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+
+    const json = try glslpp.reflection.toJson(alloc, &res);
+    defer alloc.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const images = parsed.value.object.get("images").?.array;
+    try std.testing.expectEqual(@as(usize, 2), images.items.len);
+
+    var dest: ?std.json.ObjectMap = null;
+    var arr: ?std.json.ObjectMap = null;
+    for (images.items) |im| {
+        const n = im.object.get("name").?.string;
+        if (std.mem.eql(u8, n, "destImg")) dest = im.object;
+        if (std.mem.eql(u8, n, "arr")) arr = im.object;
+    }
+    const d = dest.?;
+    try std.testing.expectEqualStrings("image2D", d.get("type").?.string);
+    try std.testing.expectEqualStrings("rgba8", d.get("format").?.string);
+
+    // Array image: the `format`, `array`, and `array_size_is_literal` keys are
+    // all present (the keys are the fix); value is glslpp's actual rgba8.
+    const a = arr.?;
+    try std.testing.expectEqualStrings("rgba8", a.get("format").?.string);
+    const a_arr = a.get("array").?.array;
+    try std.testing.expectEqual(@as(i64, 3), a_arr.items[0].integer);
+    const a_lit = a.get("array_size_is_literal").?.array;
+    try std.testing.expectEqual(true, a_lit.items[0].bool);
+}
+
+// ── #177 review MINOR 2: spec-constant typed + decoded default_value ──
+// Oracle (`spirv-cross <fixture>.spv --reflect`):
+//   SCALE  id 0, type "float", default_value 2.5
+//   ENABLE id 1, type "bool",  default_value true
+//   COUNT  id 2, type "int",   default_value 7
+test "toJson #177-review: spec constants typed + decoded default_value" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(constant_id = 0) const float SCALE = 2.5;
+        \\layout(constant_id = 1) const bool ENABLE = true;
+        \\layout(constant_id = 2) const int COUNT = 7;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(SCALE * float(COUNT) * (ENABLE ? 1.0 : 0.0)); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+
+    const json = try glslpp.reflection.toJson(alloc, &res);
+    defer alloc.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const specs = parsed.value.object.get("specialization_constants").?.array;
+    try std.testing.expectEqual(@as(usize, 3), specs.items.len);
+
+    var by_id = std.AutoHashMap(i64, std.json.ObjectMap).init(alloc);
+    defer by_id.deinit();
+    for (specs.items) |s| try by_id.put(s.object.get("id").?.integer, s.object);
+
+    const scale = by_id.get(0).?;
+    try std.testing.expectEqualStrings("float", scale.get("type").?.string);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.5), scale.get("default_value").?.float, 1e-9);
+
+    const enable = by_id.get(1).?;
+    try std.testing.expectEqualStrings("bool", enable.get("type").?.string);
+    try std.testing.expectEqual(true, enable.get("default_value").?.bool);
+
+    const count = by_id.get(2).?;
+    try std.testing.expectEqualStrings("int", count.get("type").?.string);
+    try std.testing.expectEqual(@as(i64, 7), count.get("default_value").?.integer);
+}
+
+// ── #177 review MINOR 3: block with no instance name falls back to type name ──
+// Oracle (`spirv-cross <fixture>.spv --reflect`): a UBO with no instance variable
+// reports the block TYPE name ("Scene"), not "".
+test "toJson #177-review: anonymous block name falls back to type name" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(std140, binding = 0) uniform Scene { mat4 mvp; vec4 tint; };
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = mvp * tint; }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var res = try glslpp.reflectSPIRV(alloc, spv);
+    defer res.deinit(alloc);
+
+    const json = try glslpp.reflection.toJson(alloc, &res);
+    defer alloc.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const ubos = parsed.value.object.get("ubos").?.array;
+    try std.testing.expectEqual(@as(usize, 1), ubos.items.len);
+    try std.testing.expectEqualStrings("Scene", ubos.items[0].object.get("name").?.string);
+}

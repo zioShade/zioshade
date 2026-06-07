@@ -256,6 +256,12 @@ const TInfo = struct {
     image_sampled: u32 = 0,
     /// Image format qualifier from the `Format` operand.
     image_format: ImageFormat = .unknown,
+    /// `Depth` operand: 0=non-depth, 1=depth (shadow), 2=unknown. Drives the
+    /// `Shadow` suffix in the spirv-cross type spelling (e.g. `sampler2DShadow`).
+    image_depth: u32 = 0,
+    /// `Arrayed` operand: 0=non-arrayed, 1=arrayed. Drives the `Array` suffix in
+    /// the spirv-cross type spelling (e.g. `sampler2DArray`).
+    image_arrayed: u32 = 0,
 };
 
 // Pack (struct_id, member_index) into a single u64 key
@@ -403,6 +409,9 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                 }
             },
             // Types
+            20 => { // OpTypeBool
+                if (wc >= 2) try types.put(spirv_words[pos + 1], .{ .kind = .scalar_bool, .byte_size = 4 });
+            },
             21 => { // OpTypeInt
                 if (wc >= 2) {
                     var info = TInfo{ .kind = if (wc >= 4 and spirv_words[pos + 3] == 0) .scalar_uint else .scalar_int };
@@ -442,6 +451,8 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                         .kind = .image,
                         .element_type_id = spirv_words[pos + 2], // sampledType
                         .image_dim = spirv_words[pos + 3],
+                        .image_depth = spirv_words[pos + 4], // depth
+                        .image_arrayed = spirv_words[pos + 5], // arrayed
                         .image_sampled = spirv_words[pos + 7],
                         .image_format = ImageFormat.fromSpv(spirv_words[pos + 8]),
                     });
@@ -690,8 +701,11 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
     for (spec_consts.items) |sc| {
         const d = decos.get(sc.id) orelse Deco{};
         const nm = names.get(sc.id) orelse "";
+        // Scalar type spelling (float/int/uint/bool) for the JSON serializer to
+        // (a) emit a `type` field and (b) decode `default_value_u32` correctly.
         try spec_list.append(alloc, .{
             .name = if (nm.len > 0) alloc.dupe(u8, nm) catch "" else "",
+            .type_name = spvTypeName(alloc, &types, sc.type_id),
             .id = sc.id,
             .type_id = sc.type_id,
             .location = d.spec_id, // legacy: kept for compatibility, mirrors spec_id
@@ -811,8 +825,13 @@ pub fn toJson(alloc: std.mem.Allocator, res: *const ShaderResources) ![]u8 {
             try w.jsonString(sc.name);
             try w.raw(",\n      \"id\" : ");
             try w.int(sc.spec_id);
+            // `type` + a value DECODED per that type, matching spirv-cross:
+            //   float -> the float literal (e.g. 2.5); bool -> true/false;
+            //   int/uint -> the integer. The raw u32 is the SPIR-V operand bits.
+            try w.raw(",\n      \"type\" : ");
+            try w.jsonString(sc.type_name);
             try w.raw(",\n      \"default_value\" : ");
-            try w.int(sc.default_value_u32);
+            try w.specDefaultValue(sc.type_name, sc.default_value_u32);
             try w.raw("\n    }");
         }
         try w.raw("\n  ]");
@@ -872,6 +891,27 @@ const JsonWriter = struct {
         var tmp: [24]u8 = undefined;
         const s = std.fmt.bufPrint(&tmp, "{d}", .{v}) catch return error.OutOfMemory;
         try self.buf.appendSlice(self.alloc, s);
+    }
+
+    /// Emit a spec-constant default value DECODED per its scalar type spelling,
+    /// from the raw 32-bit SPIR-V operand bits. Mirrors `spirv-cross --reflect`:
+    ///   float -> the float value; bool -> true/false; int -> signed; uint -> unsigned.
+    /// Unknown/empty type spelling falls back to the raw unsigned bits.
+    fn specDefaultValue(self: JsonWriter, type_name: []const u8, bits: u32) !void {
+        if (std.mem.eql(u8, type_name, "float")) {
+            const f: f32 = @bitCast(bits);
+            var tmp: [64]u8 = undefined;
+            // Shortest round-trippable decimal; matches spirv-cross (e.g. 2.5).
+            const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return error.OutOfMemory;
+            try self.buf.appendSlice(self.alloc, s);
+        } else if (std.mem.eql(u8, type_name, "bool")) {
+            try self.raw(if (bits != 0) "true" else "false");
+        } else if (std.mem.eql(u8, type_name, "int")) {
+            try self.int(@as(i32, @bitCast(bits)));
+        } else {
+            // uint and any unrecognized scalar: raw unsigned bits.
+            try self.int(bits);
+        }
     }
 
     /// Emit a JSON string literal with proper escaping of control chars,
@@ -993,7 +1033,11 @@ const JsonWriter = struct {
             try self.raw("\n    {\n      \"type\" : \"_");
             try self.int(r.type_id);
             try self.raw("\",\n      \"name\" : ");
-            try self.jsonString(r.name);
+            // spirv-cross falls back to the block TYPE name when the block has no
+            // instance variable name (anonymous block). `Resource.type_name` holds
+            // the block struct's declared name; do NOT mutate `Resource.name`
+            // (other reflection consumers depend on the empty-instance signal).
+            try self.jsonString(if (r.name.len > 0) r.name else r.type_name);
             try self.raw(",\n      \"block_size\" : ");
             try self.int(r.block_size);
             if (with_binding) {
@@ -1028,7 +1072,18 @@ const JsonWriter = struct {
             if (r.array_size != 0) {
                 try self.raw(",\n      \"array\" : [ ");
                 try self.int(r.array_size);
-                try self.raw(" ]");
+                // Descriptor arrays declared with a literal count (the only kind
+                // glslpp models here) pair `array` with `array_size_is_literal`,
+                // matching spirv-cross and the member serializer's shape.
+                try self.raw(" ],\n      \"array_size_is_literal\" : [ true ]");
+            }
+            // Storage-image format qualifier (e.g. `rgba8`); present only for
+            // images that carry a SPIR-V `Format` operand.
+            if (r.image_format) |fmt| {
+                if (fmt != .unknown) {
+                    try self.raw(",\n      \"format\" : ");
+                    try self.jsonString(@tagName(fmt));
+                }
             }
             try self.raw("\n    }");
         }
@@ -1252,13 +1307,16 @@ fn spvTypeName(alloc: std.mem.Allocator, types: *const std.AutoHashMap(u32, TInf
         .scalar_bool => return alloc.dupe(u8, "bool") catch "",
         .vector => {
             const elem = types.get(ti.element_type_id);
+            // A SPIR-V vector's component type is always a scalar; any other kind
+            // (or a missing element type) is malformed input. Surface a
+            // clearly-wrong prefix rather than guessing the common `vec` spelling.
             const prefix: []const u8 = if (elem) |e| switch (e.kind) {
                 .scalar_float => "vec",
                 .scalar_int => "ivec",
                 .scalar_uint => "uvec",
                 .scalar_bool => "bvec",
-                else => "vec",
-            } else "vec";
+                else => "UNKNOWNvec",
+            } else "UNKNOWNvec";
             return std.fmt.allocPrint(alloc, "{s}{d}", .{ prefix, ti.component_count }) catch "";
         },
         .matrix => {
@@ -1289,6 +1347,8 @@ fn spvImageName(alloc: std.mem.Allocator, types: *const std.AutoHashMap(u32, TIn
     const ti = types.get(image_type_id) orelse return alloc.dupe(u8, if (combined) "sampler2D" else "image2D") catch "";
     const prefix: []const u8 = if (combined) "sampler" else "image";
     // SPIR-V `Dim` enum: 0=1D, 1=2D, 2=3D, 3=Cube, 4=Rect, 5=Buffer, 6=SubpassData.
+    // SubpassData (6) is spelled `subpassInput` by spirv-cross; the caller routes
+    // subpass inputs separately, but handle it here too rather than mis-spell.
     const dim: []const u8 = switch (ti.image_dim) {
         0 => "1D",
         1 => "2D",
@@ -1296,9 +1356,15 @@ fn spvImageName(alloc: std.mem.Allocator, types: *const std.AutoHashMap(u32, TIn
         3 => "Cube",
         4 => "Rect",
         5 => "Buffer",
-        else => "2D",
+        6 => return alloc.dupe(u8, "subpassInput") catch "",
+        // Unknown Dim: surface a clearly-wrong token rather than a plausible "2D".
+        else => "Unknown",
     };
-    return std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, dim }) catch "";
+    // spirv-cross suffixes: `Array` (arrayed==1) then `Shadow` (depth==1), e.g.
+    // `sampler2DArrayShadow`, `samplerCubeArray`, `sampler2DShadow`.
+    const arr: []const u8 = if (ti.image_arrayed == 1) "Array" else "";
+    const shadow: []const u8 = if (ti.image_depth == 1) "Shadow" else "";
+    return std.fmt.allocPrint(alloc, "{s}{s}{s}{s}", .{ prefix, dim, arr, shadow }) catch "";
 }
 
 fn resolvePointee(types: *const std.AutoHashMap(u32, TInfo), type_id: u32) u32 {
