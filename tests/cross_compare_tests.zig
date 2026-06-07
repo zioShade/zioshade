@@ -745,3 +745,127 @@ test "glsl-version structural: vertex output location dropped below 410, kept at
         try std.testing.expect(std.mem.indexOf(u8, g, "layout(location = 0) out vec3") != null);
     }
 }
+
+// ============================================================================
+// #173 (items 1+2): frontend const-array folding gaps
+// ============================================================================
+
+/// Resolve the spirv-val executable. Prefer `$VULKAN_SDK\Bin\spirv-val[.exe]`
+/// (caller owns the returned slice); fall back to the bare name on PATH when the
+/// env var is unset. Mirrors `nagaValidateOrSkip`'s degrade-don't-hardcode style
+/// instead of a machine-specific absolute path.
+fn resolveSpirvVal(allocator: std.mem.Allocator) ![]const u8 {
+    const exe = if (@import("builtin").os.tag == .windows) "spirv-val.exe" else "spirv-val";
+    if (std.process.getEnvVarOwned(allocator, "VULKAN_SDK")) |sdk| {
+        defer allocator.free(sdk);
+        return try std.fs.path.join(allocator, &.{ sdk, "Bin", exe });
+    } else |_| {
+        // Not set — fall back to PATH lookup by bare name.
+        return try allocator.dupe(u8, exe);
+    }
+}
+
+/// Run spirv-val on glslpp-produced SPIR-V bytes. Returns true if spirv-val
+/// accepts the module (exit 0), false otherwise. spirv-val is the authority on
+/// whether the OpTypeArray/OpConstantComposite layout is structurally valid.
+/// Skips (error.SkipZigTest) when spirv-val cannot be spawned at all.
+fn spirvValAccepts(allocator: std.mem.Allocator, spirv_words: []const u32) !bool {
+    const io = compat.testIo();
+    const dir = compat.cwd();
+    compat.dirMakePath(io, dir, ".zig-cache") catch {};
+
+    const spirv_val = try resolveSpirvVal(allocator);
+    defer allocator.free(spirv_val);
+
+    const spirv_bytes = std.mem.sliceAsBytes(spirv_words);
+    var tmp_buf: [compat.max_path_bytes]u8 = undefined;
+    const spv_path = std.fmt.bufPrint(&tmp_buf, ".zig-cache/val{d}.spv", .{compat.randomInt(u32)}) catch return error.OutOfMemory;
+    const f = compat.dirCreateFile(io, dir, spv_path, .{}) catch return error.FileNotFound;
+    compat.fileWriteAll(io, f, spirv_bytes) catch {};
+    compat.fileClose(io, f);
+    defer compat.dirDeleteFile(io, dir, spv_path) catch {};
+
+    const result = compat.processRun(io, allocator, &.{ spirv_val, spv_path }) catch return error.SkipZigTest;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    const ok = (result.term.exitedCode() orelse 1) == 0;
+    if (!ok) {
+        std.debug.print("\nspirv-val REJECTED glslpp output:\n--- stdout ---\n{s}\n--- stderr ---\n{s}\n", .{ result.stdout, result.stderr });
+    }
+    return ok;
+}
+
+test "#173 item2: sized multi-dim const array folds to spirv-val-valid SPIR-V" {
+    // `const float m[2][3]` indexed at runtime. Pre-fix the parser wrapped the
+    // bracket dims inner-first, so the OpConstantComposite array length did not
+    // match its OpTypeArray length → spirv-val "Constituent count does not match
+    // NumElements". Post-fix the dims wrap outermost→innermost and it validates.
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 FragColor;
+        \\void main(){
+        \\  const float m[2][3] = float[2][3](float[3](1.0,2.0,3.0), float[3](4.0,5.0,6.0));
+        \\  int i = int(gl_FragCoord.x) & 1;
+        \\  int j = int(gl_FragCoord.y) % 3;
+        \\  FragColor = vec4(m[i][j]);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expect(try spirvValAccepts(alloc, spirv));
+}
+
+test "#173 review: mat3x4 const-array fold stays spirv-val-valid when body folds away" {
+    // Regression for the dangling-type-id MAJOR. `acc += m[0]` with acc==vec4(0)
+    // hits the algebraicSimpl `0.0 + x → x` identity, so the OpStore's stored
+    // value becomes an identity-folded id. The Phase-4 rewrite used to treat
+    // `words[pos+2]` as a result id for ALL wc>=3 instructions, so it deleted the
+    // live OpStore (whose word[pos+2] is the OBJECT operand, not a result),
+    // orphaning the matrix/vector type chain → `OpTypeVector %float` with %float
+    // DCE'd away → spirv-val "requires a previous definition". mat3x4 (3 vec4
+    // columns) was the only case the existing fixtures exercised this shape on.
+    const folded =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\layout(location=0) flat in int idx;
+        \\const mat3x4 M[2] = mat3x4[2](mat3x4(1.,2.,3.,4.,5.,6.,7.,8.,9.,10.,11.,12.), mat3x4(1.,2.,3.,4.,5.,6.,7.,8.,9.,10.,11.,12.));
+        \\void main(){ mat3x4 m = M[idx]; vec4 acc = vec4(0.0); acc += m[0]; o = acc; }
+    ;
+    const spirv_folded = try glslpp.compileToSPIRV(alloc, folded, .{ .stage = .fragment });
+    defer alloc.free(spirv_folded);
+    try std.testing.expect(try spirvValAccepts(alloc, spirv_folded));
+
+    // Body-surviving variant: every column contributes so nothing folds away,
+    // confirming the const-array fold itself is valid (not just the DCE path).
+    const survives =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\layout(location=0) flat in int idx;
+        \\const mat3x4 M[2] = mat3x4[2](mat3x4(1.,2.,3.,4.,5.,6.,7.,8.,9.,10.,11.,12.), mat3x4(1.,2.,3.,4.,5.,6.,7.,8.,9.,10.,11.,12.));
+        \\void main(){ mat3x4 m = M[idx]; o = m[0] + m[1] + m[2]; }
+    ;
+    const spirv_survives = try glslpp.compileToSPIRV(alloc, survives, .{ .stage = .fragment });
+    defer alloc.free(spirv_survives);
+    try std.testing.expect(try spirvValAccepts(alloc, spirv_survives));
+}
+
+test "#173 item1: matrix-element const-array global cross-compiles to glslang-valid GLSL" {
+    // `const mat4 M[2]` indexed at runtime. Pre-fix the frontend never folded the
+    // matrix ctors to constant_composite, so the Private `M` got no initializer
+    // and was never declared → the body referenced an undefined `M` (glslang
+    // rejects). Post-fix the array folds and `M` is declared with an initializer.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out vec4 FragColor;
+        \\const mat4 M[2] = mat4[](mat4(1.0), mat4(2.0));
+        \\void main(){
+        \\  int i = int(gl_FragCoord.x) & 1;
+        \\  FragColor = M[i] * vec4(1.0);
+        \\}
+    ;
+    const spirv = try compileToSpirvViaGlslang(alloc, source, .fragment);
+    defer alloc.free(spirv);
+    const g = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    defer alloc.free(g);
+    try assertGlslangAccepts(alloc, "matrix-const-array", g, .fragment);
+}
