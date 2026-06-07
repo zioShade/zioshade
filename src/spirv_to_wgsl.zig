@@ -17,6 +17,128 @@ const DecorationEntry = common.DecorationEntry;
 pub threadlocal var last_error_detail: ?[]const u8 = null;
 threadlocal var last_error_detail_buf: [192]u8 = undefined;
 
+/// Emit-once tracking for the generated `spvInverseN` matrix-inverse helpers.
+/// WGSL has no `inverse` builtin (naga: "no definition in scope"), so GLSL
+/// inverse() (GLSL.std.450 MatrixInverse=34) is lowered to a generated cofactor/
+/// determinant helper. Each helper is emitted into the module preamble at most
+/// once; these flags are set during the pre-emit scan and consumed when the
+/// preamble is written. (Mirrors the spirit of the MSL backend injecting its
+/// spvUnsafeArray template once.) Reset at `spirvToWGSL` entry.
+threadlocal var needs_inverse_2: bool = false;
+threadlocal var needs_inverse_3: bool = false;
+threadlocal var needs_inverse_4: bool = false;
+
+/// Square dimension (2/3/4) of the matrix operand of a MatrixInverse ExtInst, or
+/// null if the operand is not a square float matrix of a supported size. Used by
+/// both the pre-emit helper-detection scan and the ExtInst arms so the chosen
+/// helper name (spvInverse2/3/4) and the emitted helper agree.
+fn inverseMatrixDim(module: *const ParsedModule, result_type_id: u32) ?u32 {
+    const ti = getDef(module, result_type_id) orelse return null;
+    if (ti.op != .TypeMatrix or ti.words.len < 4) return null;
+    const cols = ti.words[3];
+    const col_inst = getDef(module, ti.words[2]) orelse return null;
+    if (col_inst.op != .TypeVector or col_inst.words.len < 4) return null;
+    const rows = col_inst.words[3];
+    if (cols != rows) return null; // non-square has no inverse
+    return switch (cols) {
+        2, 3, 4 => cols,
+        else => null,
+    };
+}
+
+/// Write the generated WGSL inverse helper(s) flagged by the pre-emit scan into
+/// the module preamble. Each is a closed-form cofactor/determinant inverse and is
+/// naga-validated. Called once, before any function body, so the helper is in
+/// scope at every call site.
+fn writeInverseHelpers(w: anytype) !void {
+    if (needs_inverse_2) {
+        try w.writeAll(
+            \\fn spvInverse2(m: mat2x2<f32>) -> mat2x2<f32> {
+            \\    let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+            \\    return mat2x2<f32>(m[1][1], -m[0][1], -m[1][0], m[0][0]) * (1.0 / det);
+            \\}
+            \\
+            \\
+        );
+    }
+    if (needs_inverse_3) {
+        try w.writeAll(
+            \\fn spvInverse3(m: mat3x3<f32>) -> mat3x3<f32> {
+            \\    // Row-major element naming of the column-major matrix:
+            \\    //   | a b c |
+            \\    //   | d e f |
+            \\    //   | g h i |
+            \\    let a = m[0][0]; let b = m[1][0]; let c = m[2][0];
+            \\    let d = m[0][1]; let e = m[1][1]; let f = m[2][1];
+            \\    let g = m[0][2]; let h = m[1][2]; let i = m[2][2];
+            \\    let A = (e * i - f * h);
+            \\    let B = (f * g - d * i);
+            \\    let C = (d * h - e * g);
+            \\    let det = a * A + b * B + c * C;
+            \\    let inv_det = 1.0 / det;
+            \\    // mat3x3(col0, col1, col2); each value is inv[row][col].
+            \\    return mat3x3<f32>(
+            \\        A * inv_det,             // inv[0][0]
+            \\        B * inv_det,             // inv[1][0]
+            \\        C * inv_det,             // inv[2][0]
+            \\        (c * h - b * i) * inv_det, // inv[0][1]
+            \\        (a * i - c * g) * inv_det, // inv[1][1]
+            \\        (b * g - a * h) * inv_det, // inv[2][1]
+            \\        (b * f - c * e) * inv_det, // inv[0][2]
+            \\        (c * d - a * f) * inv_det, // inv[1][2]
+            \\        (a * e - b * d) * inv_det, // inv[2][2]
+            \\    );
+            \\}
+            \\
+            \\
+        );
+    }
+    if (needs_inverse_4) {
+        try w.writeAll(
+            \\fn spvInverse4(m: mat4x4<f32>) -> mat4x4<f32> {
+            \\    let a00 = m[0][0]; let a01 = m[0][1]; let a02 = m[0][2]; let a03 = m[0][3];
+            \\    let a10 = m[1][0]; let a11 = m[1][1]; let a12 = m[1][2]; let a13 = m[1][3];
+            \\    let a20 = m[2][0]; let a21 = m[2][1]; let a22 = m[2][2]; let a23 = m[2][3];
+            \\    let a30 = m[3][0]; let a31 = m[3][1]; let a32 = m[3][2]; let a33 = m[3][3];
+            \\    let b00 = a00 * a11 - a01 * a10;
+            \\    let b01 = a00 * a12 - a02 * a10;
+            \\    let b02 = a00 * a13 - a03 * a10;
+            \\    let b03 = a01 * a12 - a02 * a11;
+            \\    let b04 = a01 * a13 - a03 * a11;
+            \\    let b05 = a02 * a13 - a03 * a12;
+            \\    let b06 = a20 * a31 - a21 * a30;
+            \\    let b07 = a20 * a32 - a22 * a30;
+            \\    let b08 = a20 * a33 - a23 * a30;
+            \\    let b09 = a21 * a32 - a22 * a31;
+            \\    let b10 = a21 * a33 - a23 * a31;
+            \\    let b11 = a22 * a33 - a23 * a32;
+            \\    let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+            \\    let inv_det = 1.0 / det;
+            \\    return mat4x4<f32>(
+            \\        ( a11 * b11 - a12 * b10 + a13 * b09) * inv_det,
+            \\        (-a01 * b11 + a02 * b10 - a03 * b09) * inv_det,
+            \\        ( a31 * b05 - a32 * b04 + a33 * b03) * inv_det,
+            \\        (-a21 * b05 + a22 * b04 - a23 * b03) * inv_det,
+            \\        (-a10 * b11 + a12 * b08 - a13 * b07) * inv_det,
+            \\        ( a00 * b11 - a02 * b08 + a03 * b07) * inv_det,
+            \\        (-a30 * b05 + a32 * b02 - a33 * b01) * inv_det,
+            \\        ( a20 * b05 - a22 * b02 + a23 * b01) * inv_det,
+            \\        ( a10 * b10 - a11 * b08 + a13 * b06) * inv_det,
+            \\        (-a00 * b10 + a01 * b08 - a03 * b06) * inv_det,
+            \\        ( a30 * b04 - a31 * b02 + a33 * b00) * inv_det,
+            \\        (-a20 * b04 + a21 * b02 - a23 * b00) * inv_det,
+            \\        (-a10 * b09 + a11 * b07 - a12 * b06) * inv_det,
+            \\        ( a00 * b09 - a01 * b07 + a02 * b06) * inv_det,
+            \\        (-a30 * b03 + a31 * b01 - a32 * b00) * inv_det,
+            \\        ( a20 * b03 - a21 * b01 + a22 * b00) * inv_det,
+            \\    );
+            \\}
+            \\
+            \\
+        );
+    }
+}
+
 /// Canonical GLSL.std.450 instruction name, for diagnostics only.
 fn glslStd450Name(op: u32) []const u8 {
     return switch (op) {
@@ -464,6 +586,31 @@ fn isWgslKeyword(name: []const u8) bool {
     return wgsl_reserved_words.has(name);
 }
 
+/// True iff `s` is a bare, untyped numeric literal: an optional leading `-`,
+/// digits, at most one `.`, and NOTHING else (no type suffix, no identifier
+/// chars, no parens). Used to gate scalar-constant `f`/`i` typing so it never
+/// touches an OpName alias (an identifier), an already-typed literal (`1.0f`,
+/// `7u`), or a composite-constructor string (contains `(`).
+fn isPlainNumericLiteral(s: []const u8) bool {
+    if (s.len == 0) return false;
+    var i: usize = 0;
+    if (s[0] == '-') i = 1;
+    if (i >= s.len) return false;
+    var seen_digit = false;
+    var seen_dot = false;
+    while (i < s.len) : (i += 1) {
+        switch (s[i]) {
+            '0'...'9' => seen_digit = true,
+            '.' => {
+                if (seen_dot) return false;
+                seen_dot = true;
+            },
+            else => return false, // letter (suffix/identifier), '(', etc.
+        }
+    }
+    return seen_digit;
+}
+
 /// Marks a struct member as the target of WGSL atomic ops.
 /// `scalar` → wrap whole field in `atomic<T>` (e.g. `counter: atomic<u32>`)
 /// `array_element` → wrap element type (e.g. `data: array<atomic<u32>>`)
@@ -797,6 +944,38 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
         if (!isWgslKeyword(current)) continue;
         const renamed = std.fmt.allocPrint(alloc, "{s}_", .{current}) catch continue;
         if (names.fetchPut(id, renamed) catch null) |old| alloc.free(old.value);
+    }
+
+    // Post-process: type SCALAR float constant literals concretely (#170 G5).
+    // naga rejects all-constant-arg builtin calls whose args are abstract
+    // (e.g. `smoothstep(0.08, 0.03, 1.0)` → "Abstract types may only appear in
+    // constant expressions"). Suffixing a scalar float literal with `f` types it
+    // concretely, which naga accepts in all contexts. SCALAR FLOAT ONLY — the
+    // composite path already emits concrete `vec3<f32>(...)`/`mat..` forms, and
+    // bare abstract INTs coerce fine in the contexts they appear (typing them
+    // with `i` instead regressed correct, already-passing output such as the
+    // `textureGather` component index and inline arithmetic literals). We
+    // re-derive the literal here (so a name overwritten by an OpName alias is
+    // left alone) and only rewrite a plain numeric literal.
+    {
+        var lit_reps = std.ArrayList(struct { key: u32, val: []const u8 }).initCapacity(alloc, 16) catch return;
+        defer lit_reps.deinit(alloc);
+        for (module.instructions) |inst| {
+            if (inst.op != .Constant or inst.words.len <= 3) continue;
+            const rid = inst.words[2];
+            const ti = getDef(module, inst.words[1]) orelse continue;
+            if (ti.op != .TypeFloat) continue; // scalar float only
+            const cur = names.get(rid) orelse continue;
+            if (!isPlainNumericLiteral(cur)) continue; // OpName alias / already typed
+            const typed = std.fmt.allocPrint(alloc, "{s}f", .{cur}) catch continue;
+            lit_reps.append(alloc, .{ .key = rid, .val = typed }) catch {
+                alloc.free(typed);
+                continue;
+            };
+        }
+        for (lit_reps.items) |r| {
+            if (names.fetchPut(r.key, r.val) catch null) |old| alloc.free(old.value);
+        }
     }
 
     // Post-process: simplify uniform vector constructors like vec3f(0.0, 0.0, 0.0) → vec3f(0.0)
@@ -1230,6 +1409,9 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     defer if (_norm) |n| alloc.free(n);
     const spirv_words = _norm orelse spirv_words_in;
     last_error_detail = null; // clear any detail from a prior compile on this thread
+    needs_inverse_2 = false;
+    needs_inverse_3 = false;
+    needs_inverse_4 = false;
     var module = try common.parseModule(alloc, spirv_words);
     defer module.deinit(alloc);
 
@@ -1351,6 +1533,25 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
+    // Pre-emit scan for GLSL.std.450 MatrixInverse (34): WGSL has no inverse
+    // builtin, so each used square size (2/3/4) needs its generated spvInverseN
+    // helper written into the preamble exactly once. A non-square or unsupported
+    // size leaves all flags clear; the ExtInst arm then honest-errors (no inverse
+    // exists for a non-square matrix). Done upfront so the helper precedes every
+    // call site — WGSL functions must be declared before use.
+    for (module.instructions) |minst| {
+        if (minst.op == .ExtInst and minst.words.len > 4 and minst.words[4] == 34) {
+            if (inverseMatrixDim(&module, minst.words[1])) |dim| {
+                switch (dim) {
+                    2 => needs_inverse_2 = true,
+                    3 => needs_inverse_3 = true,
+                    4 => needs_inverse_4 = true,
+                    else => {},
+                }
+            }
+        }
+    }
+
     // Descriptor sampler/image ARRAYS not yet supported by the WGSL backend
     // (would need binding_array) — fail loud rather than emit broken output.
     if (common.hasOpaqueArrayResource(&module)) {
@@ -1440,6 +1641,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     const w = out.writer(alloc);
 
     try w.writeAll("// Generated by glslpp SPIR-V → WGSL cross-compiler\n\n");
+
+    // Emit-once generated matrix-inverse helper(s) flagged by the pre-emit scan
+    // (WGSL has no inverse builtin). Written before any struct/function so they
+    // are in scope at every call site.
+    try writeInverseHelpers(w);
 
     const is_fragment = module.execution_model == .Fragment;
     const is_vertex = module.execution_model == .Vertex;
@@ -4370,6 +4576,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try emitBinOp(module, names, &inline_exprs, inst, "*", w, arena, indent);
             },
 
+            // OuterProduct(u, v): u is the result's column vector type (R rows),
+            // v supplies the columns (C components). The result is a CxR matrix
+            // whose column i is `u * v[i]`. WGSL has no outerProduct builtin —
+            // construct the matrix explicitly (matCxR(u*v.x, u*v.y, ...)).
+            .OuterProduct => try emitOuterProduct(module, names, inst, w, arena, indent),
+
             // Dot product
             .Dot => try emitCall(module, names, inst, "dot", w, arena, indent),
 
@@ -4517,7 +4729,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // result to `.fract` and the out-pointer's variable to the
                         // second field. (Emitting the old `frexp(x, ptr)` was a naga
                         // reject — "too many arguments" — and dropped the exponent.)
-                        if (instruction == 51 or instruction == 35) {
+                        if (instruction == 34) {
+                            // MatrixInverse → generated spvInverseN helper (WGSL
+                            // has no inverse builtin). The pre-emit scan flagged
+                            // the size; a non-square / unsupported size has no
+                            // inverse → honest-error.
+                            const dim = inverseMatrixDim(module, inst.words[1]) orelse {
+                                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL inverse() unsupported for this matrix (only square mat2/mat3/mat4)", .{}) catch null;
+                                return error.UnsupportedExtInst;
+                            };
+                            const m = names.get(inst.words[5]) orelse "m";
+                            try writeInd(w, indent); try w.print("let {s}: {s} = spvInverse{d}({s});\n", .{ result_name, rt, dim, m });
+                        } else if (instruction == 51 or instruction == 35) {
                             const x = names.get(inst.words[5]) orelse "0";
                             const builtin = if (instruction == 51) "frexp" else "modf";
                             const second_field = if (instruction == 51) "exp" else "whole";
@@ -4674,92 +4897,30 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .FwidthCoarse => try emitCall(module, names, inst, "fwidthCoarse", w, arena, indent),
             .Fwidth => try emitCall(module, names, inst, "fwidth", w, arena, indent),
 
-            // Subgroup operations (WGSL subgroup functions)
-            .SubgroupAllKHR, .GroupNonUniformAll => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const rn = names.get(inst.words[2]) orelse "v";
-                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "true" else "true";
-                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupAll({s});\n", .{ rn, rt, val });
-            },
-            .SubgroupAnyKHR, .GroupNonUniformAny => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const rn = names.get(inst.words[2]) orelse "v";
-                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "false" else "false";
-                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupAny({s});\n", .{ rn, rt, val });
-            },
-            .GroupNonUniformElect => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const rn = names.get(inst.words[2]) orelse "v";
-                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupElect();\n", .{ rn, rt });
-            },
-            .GroupNonUniformBroadcast => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const rn = names.get(inst.words[2]) orelse "v";
-                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
-                const id = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupBroadcast({s}, {s});\n", .{ rn, rt, val, id });
-            },
-            .GroupNonUniformBroadcastFirst => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const rn = names.get(inst.words[2]) orelse "v";
-                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupBroadcastFirst({s});\n", .{ rn, rt, val });
-            },
-            .GroupNonUniformBallot => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const rn = names.get(inst.words[2]) orelse "v";
-                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "false" else "false";
-                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupBallot({s});\n", .{ rn, rt, val });
-            },
-            .GroupNonUniformShuffle => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const rn = names.get(inst.words[2]) orelse "v";
-                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
-                const id = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupShuffle({s}, {s});\n", .{ rn, rt, val, id });
-            },
-            .GroupNonUniformShuffleXor => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const rn = names.get(inst.words[2]) orelse "v";
-                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
-                const mask = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupShuffleXor({s}, {s});\n", .{ rn, rt, val, mask });
-            },
-            .GroupNonUniformShuffleUp => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const rn = names.get(inst.words[2]) orelse "v";
-                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
-                const delta = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupShuffleUp({s}, {s});\n", .{ rn, rt, val, delta });
-            },
-            .GroupNonUniformShuffleDown => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const rn = names.get(inst.words[2]) orelse "v";
-                const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
-                const delta = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = subgroupShuffleDown({s}, {s});\n", .{ rn, rt, val, delta });
-            },
-            // GroupNonUniform arithmetic: IAdd, FAdd, IMul, FMul
-            .GroupNonUniformIAdd, .GroupNonUniformFAdd => {
-                try emitSubgroupArith(module, names, inst, "Add", w, arena, indent);
-            },
-            .GroupNonUniformIMul, .GroupNonUniformFMul => {
-                try emitSubgroupArith(module, names, inst, "Mul", w, arena, indent);
-            },
-            .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => {
-                try emitSubgroupArith(module, names, inst, "Min", w, arena, indent);
-            },
-            .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => {
-                try emitSubgroupArith(module, names, inst, "Max", w, arena, indent);
-            },
-            .GroupNonUniformBitwiseAnd, .GroupNonUniformLogicalAnd => {
-                try emitSubgroupArith(module, names, inst, "And", w, arena, indent);
-            },
-            .GroupNonUniformBitwiseOr, .GroupNonUniformLogicalOr => {
-                try emitSubgroupArith(module, names, inst, "Or", w, arena, indent);
-            },
-            .GroupNonUniformBitwiseXor => {
-                try emitSubgroupArith(module, names, inst, "Xor", w, arena, indent);
+            // Subgroup operations (AUDIT FIX, #170 G5 Pass 2). These previously
+            // emitted WGSL subgroup builtins (subgroupElect/Ballot/Broadcast/
+            // BroadcastFirst/All/Any/Shuffle*/Inclusive*/Exclusive* and the scan/
+            // reduction forms) directly, with NO `enable subgroups;`. naga 29.0.3
+            // rejects subgroups entirely (even `enable subgroups;` is unsupported),
+            // so that output was SILENT-WRONG (glslpp exited 0 but naga rejected).
+            // Fail loud with a named error instead.
+            .SubgroupAllKHR, .GroupNonUniformAll,
+            .SubgroupAnyKHR, .GroupNonUniformAny,
+            .GroupNonUniformElect,
+            .GroupNonUniformBroadcast, .GroupNonUniformBroadcastFirst,
+            .GroupNonUniformBallot,
+            .GroupNonUniformShuffle, .GroupNonUniformShuffleXor,
+            .GroupNonUniformShuffleUp, .GroupNonUniformShuffleDown,
+            .GroupNonUniformIAdd, .GroupNonUniformFAdd,
+            .GroupNonUniformIMul, .GroupNonUniformFMul,
+            .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin,
+            .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax,
+            .GroupNonUniformBitwiseAnd, .GroupNonUniformLogicalAnd,
+            .GroupNonUniformBitwiseOr, .GroupNonUniformLogicalOr,
+            .GroupNonUniformBitwiseXor,
+            => {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL/naga does not support subgroup operations ({s})", .{@tagName(inst.op)}) catch null;
+                return error.UnsupportedOp;
             },
 
             // Return value
@@ -5132,6 +5293,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .AtomicUMax, .AtomicSMax => try emitAtomicBinOp(module, names, inst, "Max", w, arena, indent),
             .AtomicFAddEXT => try emitAtomicBinOp(module, names, inst, "Add", w, arena, indent),
             .AtomicExchange => {
+                if (atomicPtrIsImage(module, names, inst.words[3])) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no image atomic operations (atomicExchange on a storage image)", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const ptr = names.get(inst.words[3]) orelse "ptr";
@@ -5139,6 +5304,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try writeInd(w, indent); try w.print("let {s}: {s} = atomicExchange(&{s}, {s});\n", .{ rn, rt, ptr, val });
             },
             .AtomicCompareExchange => {
+                if (atomicPtrIsImage(module, names, inst.words[3])) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no image atomic operations (atomicCompareExchangeWeak on a storage image)", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const ptr = names.get(inst.words[3]) orelse "ptr";
@@ -5187,6 +5356,34 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 // ---------------------------------------------------------------------------
 // Emit helpers
 // ---------------------------------------------------------------------------
+
+/// Emit OpOuterProduct as an explicit WGSL matrix construction. SPIR-V
+/// `OpOuterProduct %resultMatrix %u %v` produces a matrix whose column i is the
+/// R-vector `u` scaled by the scalar `v[i]`; the result matrix has `v`'s
+/// component count (C) columns of `u`'s component count (R) rows — i.e. a
+/// `matCxR` (WGSL `matCxRf`). WGSL has no outerProduct builtin, so we emit
+/// `matCxRf(u * v.x, u * v.y, ...)`. naga-validated for square and non-square.
+fn emitOuterProduct(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    const u = names.get(inst.words[3]) orelse "u";
+    const v = names.get(inst.words[4]) orelse "v";
+    // Column count = the result matrix's column count = v's component count.
+    const mt = getDef(module, inst.words[1]) orelse return error.UnsupportedOp;
+    if (mt.op != .TypeMatrix or mt.words.len < 4) return error.UnsupportedOp;
+    const cols = mt.words[3];
+    var buf = std.ArrayList(u8).initCapacity(arena, 96) catch return error.OutOfMemory;
+    defer buf.deinit(arena);
+    try buf.writer(arena).print("{s}(", .{rt});
+    var i: u32 = 0;
+    while (i < cols) : (i += 1) {
+        if (i > 0) try buf.appendSlice(arena, ", ");
+        // v[i] selected via swizzle for a vector (x/y/z/w).
+        try buf.writer(arena).print("{s} * {s}.{s}", .{ u, v, common.swizzleChar(i) });
+    }
+    try buf.appendSlice(arena, ")");
+    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, buf.items });
+}
 
 fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
     const rt = try wgslType(module, inst.words[1], names, arena);
@@ -5475,6 +5672,17 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                 // Shared name mapping (same source of truth as the main emit path —
                 // previously this replay switch had drifted and was missing
                 // ldexp/pack*/unpack*/findILsb/findSMsb etc.).
+                if (instruction == 34) {
+                    // MatrixInverse → generated spvInverseN helper (mirrors the
+                    // main emit path; WGSL has no inverse builtin).
+                    const dim = inverseMatrixDim(module, inst.words[1]) orelse {
+                        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL inverse() unsupported for this matrix (only square mat2/mat3/mat4)", .{}) catch null;
+                        return error.UnsupportedExtInst;
+                    };
+                    const m = names.get(inst.words[5]) orelse "m";
+                    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = spvInverse{d}({s});\n", .{ result_name, rt, dim, m });
+                    return;
+                }
                 if (scalarGeomLower(arena, module, names, instruction, inst.words[1], inst.words[5..])) |sexpr| {
                     try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, sexpr });
                     return;
@@ -5498,6 +5706,7 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                 }
             }
         },
+        .OuterProduct => try emitOuterProduct(module, names, inst, w, arena, indent),
         .CompositeConstruct => {
             // Loop/switch-replay path: a CompositeConstruct whose result is USED
             // (not inlined into a store) must construct via its result type, e.g.
@@ -5615,26 +5824,33 @@ fn emitCall(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     try writeIndentStatic(w, indent); try w.print("var {s}: {s} = {s}({s});\n", .{ result_name, rt, func, args.items });
 }
 
-fn emitSubgroupArith(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
-    const rt = try wgslType(module, inst.words[1], names, arena);
-    const result_name = names.get(inst.words[2]) orelse "v";
-    // words[3] = scope, words[4] = group_op (reduce/scan/etc), words[5] = value
-    const val = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-    // Map group_op to WGSL function
-    // 0=Reduce, 1=InclusiveScan, 2=ExclusiveScan, 3=ClusteredReduce
-    const group_op: u32 = if (inst.words.len > 4) inst.words[4] else 0;
-    if (group_op == 0) {
-        try writeIndentStatic(w, indent); try w.print("var {s}: {s} = subgroup{s}({s});\n", .{ result_name, rt, op, val });
-    } else if (group_op == 1) {
-        try writeIndentStatic(w, indent); try w.print("var {s}: {s} = subgroupInclusive{s}({s});\n", .{ result_name, rt, op, val });
-    } else if (group_op == 2) {
-        try writeIndentStatic(w, indent); try w.print("var {s}: {s} = subgroupExclusive{s}({s});\n", .{ result_name, rt, op, val });
-    } else {
-        try writeIndentStatic(w, indent); try w.print("var {s}: {s} = subgroup{s}({s});\n", .{ result_name, rt, op, val });
+// (emitSubgroupArith removed in #170 G5 Pass 2: subgroup ops are now an honest
+// error — naga 29.0.3 has no subgroup support — so no subgroup builtin is ever
+// emitted. See the consolidated subgroup arm in emitBody.)
+
+/// True iff an OpAtomic* pointer operand resolves to an IMAGE texel (the pointer
+/// is produced by OpImageTexelPointer, which the WGSL backend names as a
+/// `textureLoad(...)` rvalue). WGSL has NO image atomics: emitting
+/// `atomicAdd(&textureLoad(img, ...))` makes naga reject ("operand of & must be a
+/// reference"). The caller must honest-error such atomics rather than emit that
+/// silent-wrong WGSL. (Buffer/workgroup atomics on a real pointer are fine.)
+fn atomicPtrIsImage(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32) bool {
+    if (getDef(module, ptr_id)) |d| {
+        if (d.op == .ImageTexelPointer) return true;
     }
+    // Defensive: even if a future path renames it, an image texel pointer is
+    // spelled as a textureLoad rvalue — never a valid `&`-able reference.
+    if (names.get(ptr_id)) |n| {
+        if (std.mem.indexOf(u8, n, "textureLoad(") != null) return true;
+    }
+    return false;
 }
 
 fn emitAtomicBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    if (atomicPtrIsImage(module, names, inst.words[3])) {
+        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no image atomic operations (atomic{s} on a storage image)", .{op}) catch null;
+        return error.UnsupportedOp;
+    }
     const rt = try wgslType(module, inst.words[1], names, arena);
     const result_name = names.get(inst.words[2]) orelse "v";
     const ptr = names.get(inst.words[3]) orelse "ptr";

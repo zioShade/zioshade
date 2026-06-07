@@ -275,12 +275,14 @@ test "wgsl unmapped ext-inst errors honestly instead of emitting unknown()" {
 }
 
 // WGSL has no matrix-inverse builtin. GLSL inverse() (GLSL.std.450 MatrixInverse)
-// must fail loud rather than emit `matrixInverse(m)`, which naga rejects with
-// "no definition in scope" — the silent-wrong this milestone forbids.
-test "wgsl inverse() errors honestly (WGSL has no matrix-inverse builtin)" {
+// must NOT silently emit `matrixInverse(m)` (naga: "no definition in scope").
+// Pass 2 lowers it to an emit-once generated `spvInverseN` helper (cofactor /
+// determinant inverse), so the result must now be naga-validated WGSL that both
+// declares the helper and calls it. Covers mat4/mat3/mat2.
+test "wgsl inverse(mat4) lowers to spvInverse4 helper (naga-validated)" {
     // Build the matrix from vertex inputs (not a UBO) so this targets only the
-    // MatrixInverse honest-error path. (A separate pre-existing struct-name
-    // error-path leak in spirvToWGSL is tracked as a follow-up.)
+    // MatrixInverse path. (A separate pre-existing struct-name error-path leak in
+    // spirvToWGSL is tracked as a follow-up.)
     const source: [:0]const u8 =
         \\#version 450
         \\layout(location = 0) in vec4 c0;
@@ -295,11 +297,54 @@ test "wgsl inverse() errors honestly (WGSL has no matrix-inverse builtin)" {
     ;
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "fn spvInverse4(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "spvInverse4(") != null);
+    // The unmapped GLSL spelling must NEVER leak.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "matrixInverse") == null);
+    try nagaValidateOrSkip(wgsl, "inverse-mat4");
+}
 
-    try std.testing.expectError(
-        error.UnsupportedExtInst,
-        glslpp.spirvToWGSL(alloc, spirv, .{}),
-    );
+test "wgsl inverse(mat3) lowers to spvInverse3 helper (naga-validated)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec3 c0;
+        \\layout(location = 1) in vec3 c1;
+        \\layout(location = 2) in vec3 c2;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat3 m = mat3(c0, c1, c2);
+        \\    fragColor = vec4(inverse(m) * vec3(1.0), 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "fn spvInverse3(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "spvInverse3(") != null);
+    try nagaValidateOrSkip(wgsl, "inverse-mat3");
+}
+
+test "wgsl inverse(mat2) lowers to spvInverse2 helper (naga-validated)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 c0;
+        \\layout(location = 1) in vec2 c1;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat2 m = mat2(c0, c1);
+        \\    fragColor = vec4(inverse(m) * vec2(1.0), 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "fn spvInverse2(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "spvInverse2(") != null);
+    try nagaValidateOrSkip(wgsl, "inverse-mat2");
 }
 
 // textureGatherOffsets lowers (correctly, for the SPIR-V target) to
@@ -1155,7 +1200,9 @@ test "wgsl: heavily-used immutable input load inlines to its name in inline expr
     const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The immutable input `u` must appear in the arithmetic; no undefined `v9`.
-    try std.testing.expect(std.mem.indexOf(u8, wgsl, "(u - 0.25)") != null);
+    // (Scalar float constants are now typed with an `f` suffix — #170 G5 Pass 2 —
+    // so the literal renders as `0.25f`.)
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "(u - 0.25f)") != null);
     // No bare reference to an undefined load temp like `v9 ` (the input is `u`).
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "v9 -") == null);
     for (wgsl) |c| try std.testing.expect(c != 0xAA);
@@ -1848,4 +1895,138 @@ test "wgsl: matrix-element const-array global folds to an mat4x4 array initializ
     try assertContains(wgsl, "mat4x4f(vec4f(1.0, 0.0, 0.0, 0.0)");
     try assertContains(wgsl, "mat4x4f(vec4f(2.0, 0.0, 0.0, 0.0)");
     try nagaValidateOrSkip(wgsl, "matrix-const-array-#173");
+}
+
+// ---------------------------------------------------------------------------
+// Pass 2 (#170 G5): OpOuterProduct → matrix construction.
+// outerProduct(u, v) (u is an R-vector, v is a C-vector) yields a CxR matrix
+// whose column i is u*v[i]. WGSL has no outerProduct builtin; the backend must
+// construct the matrix explicitly. Previously OpOuterProduct fell through to the
+// honest-error else-arm. naga is the ground truth.
+// ---------------------------------------------------------------------------
+
+test "wgsl: outerProduct(vec3,vec3) builds a mat3x3 (naga-validated)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec3 a;
+        \\layout(location=1) in vec3 b;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ mat3 m = outerProduct(a, b); o = vec4(m[0], 1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "mat3x3") != null);
+    try nagaValidateOrSkip(wgsl, "outerProduct-mat3");
+}
+
+test "wgsl: outerProduct(vec2,vec2) builds a mat2x2 (naga-validated)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec2 a;
+        \\layout(location=1) in vec2 b;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ mat2 m = outerProduct(a, b); o = vec4(m[0], m[1]); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "mat2x2") != null);
+    try nagaValidateOrSkip(wgsl, "outerProduct-mat2");
+}
+
+test "wgsl: outerProduct(vec4,vec2) builds a non-square mat2x4 (naga-validated)" {
+    // u is a 4-vector (rows), v is a 2-vector (cols) → a 2-column, 4-row matrix
+    // (WGSL mat2x4). The result has v's column count and u's row count.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec4 a;
+        \\layout(location=1) in vec2 b;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ mat2x4 m = outerProduct(a, b); o = m[0] + m[1]; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "mat2x4") != null);
+    try nagaValidateOrSkip(wgsl, "outerProduct-mat2x4");
+}
+
+// ---------------------------------------------------------------------------
+// Pass 2 (#170 G5): abstract scalar-literal typing.
+// naga rejects all-constant-arg builtin calls (e.g. smoothstep(0.08, 0.03, 1.0))
+// with "Abstract types may only appear in constant expressions". Suffixing scalar
+// float constants with `f` types them concretely, which naga accepts.
+// ---------------------------------------------------------------------------
+
+test "wgsl: all-constant smoothstep is naga-valid (abstract-literal typing)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float t = smoothstep(0.08, 0.03, 1.0); o = vec4(t); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // A scalar float constant must be typed (e.g. `0.08f`) rather than abstract.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "0.08f") != null);
+    try nagaValidateOrSkip(wgsl, "abstract-smoothstep");
+}
+
+test "wgsl: all-constant mix is naga-valid (abstract-literal typing)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float t = mix(0.25, 0.75, 0.5); o = vec4(t); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "abstract-mix");
+}
+
+// ---------------------------------------------------------------------------
+// Pass 2 (#170 G5) AUDIT FIX: subgroup ops were emitted directly (e.g.
+// subgroupElect()) with NO `enable subgroups;`. naga 29.0.3 rejects subgroups
+// entirely, so this was silent-wrong. They must now honest-error.
+// ---------------------------------------------------------------------------
+
+test "wgsl: subgroupElect errors honestly (WGSL/naga has no subgroups)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\#extension GL_KHR_shader_subgroup_basic : require
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(subgroupElect() ? 1.0 : 0.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "subgroup") != null);
+}
+
+// ---------------------------------------------------------------------------
+// Pass 2 (#170 G5) AUDIT FIX: image atomics emitted atomicAdd(&textureLoad(...))
+// which naga rejects ("operand of & must be a reference"). WGSL has no image
+// atomics; the OpAtomic* handler must honest-error when the pointer resolves to
+// an image / textureLoad.
+// ---------------------------------------------------------------------------
+
+test "wgsl: image atomic errors honestly (WGSL has no image atomics)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0, r32ui) uniform uimage2D img;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ uint old = imageAtomicAdd(img, ivec2(0,0), 1u); o = vec4(float(old)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "image atomic") != null);
 }
