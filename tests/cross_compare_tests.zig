@@ -15,9 +15,6 @@ const compat = @import("glslpp").compat;
 
 const alloc = std.testing.allocator;
 
-const GlslangValidator = "C:\\VulkanSDK\\1.4.341.1\\Bin\\glslangValidator.exe";
-const SpirvCross = "C:\\VulkanSDK\\1.4.341.1\\Bin\\spirv-cross.exe";
-
 /// Compile GLSL to SPIR-V using glslangValidator, return the SPIR-V words
 fn compileToSpirvViaGlslang(allocator: std.mem.Allocator, source: [:0]const u8, stage: glslpp.Stage) ![]u32 {
     const io = compat.testIo();
@@ -46,7 +43,9 @@ fn compileToSpirvViaGlslang(allocator: std.mem.Allocator, source: [:0]const u8, 
     const spv_path = try std.fmt.allocPrint(allocator, "{s}.spv", .{tmp_path_ext});
     defer allocator.free(spv_path);
 
-    const result = try compat.processRun(io, allocator, &.{ GlslangValidator, "-V", "-o", spv_path, tmp_path_ext });
+    const glslang = compat.resolveVulkanTool(allocator, "glslangValidator") catch return error.SkipZigTest;
+    defer allocator.free(glslang);
+    const result = compat.processRun(io, allocator, &.{ glslang, "-V", "-o", spv_path, tmp_path_ext }) catch return error.SkipZigTest;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -91,10 +90,12 @@ fn spirvCrossToGlslVersion(allocator: std.mem.Allocator, spirv: []const u32, ver
 
     var ver_buf: [16]u8 = undefined;
     const ver_str = std.fmt.bufPrint(&ver_buf, "{d}", .{version}) catch return error.OutOfMemory;
+    const spirv_cross = compat.resolveVulkanTool(allocator, "spirv-cross") catch return error.SkipZigTest;
+    defer allocator.free(spirv_cross);
     const result = if (vulkan_semantics)
-        try compat.processRun(io, allocator, &.{ SpirvCross, tmp_path, "--version", ver_str, "--vulkan-semantics" })
+        compat.processRun(io, allocator, &.{ spirv_cross, tmp_path, "--version", ver_str, "--vulkan-semantics" }) catch return error.SkipZigTest
     else
-        try compat.processRun(io, allocator, &.{ SpirvCross, tmp_path, "--version", ver_str });
+        compat.processRun(io, allocator, &.{ spirv_cross, tmp_path, "--version", ver_str }) catch return error.SkipZigTest;
     defer allocator.free(result.stderr);
     return result.stdout;
 }
@@ -614,7 +615,9 @@ fn assertGlslangAccepts(allocator: std.mem.Allocator, name: []const u8, glsl: []
         .compute => "comp",
         else => "frag",
     };
-    const result = try compat.processRun(io, allocator, &.{ GlslangValidator, tmp_path, "-S", stage_arg });
+    const glslang = compat.resolveVulkanTool(allocator, "glslangValidator") catch return error.SkipZigTest;
+    defer allocator.free(glslang);
+    const result = compat.processRun(io, allocator, &.{ glslang, tmp_path, "-S", stage_arg }) catch return error.SkipZigTest;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
