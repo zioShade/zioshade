@@ -531,6 +531,12 @@ fn arrayedSampleShape(module: *const ParsedModule, sampled_image_value_id: u32) 
 /// `textureNumLayers`. `spatial` is the textureDimensions component count
 /// (1 for 1D, 2 for 2D/Cube, 3 for 3D). Accepts the pointer / sampled-image
 /// unwrap chain used by the other image-shape helpers.
+/// A vertex stage `out matNxM` flattened into N column @location members
+/// (`{base}_0 … {base}_{cols-1}`, each `col_type`). WGSL forbids a matrix at a
+/// single @location, so the struct emits the columns and the Store site splits a
+/// whole-matrix write into per-column writes. Keyed by the output variable id.
+const MatrixOutput = struct { base_name: []const u8, cols: u32, col_type: []const u8 };
+
 const ImageQueryShape = struct { arrayed: bool, spatial: u32 };
 fn imageQueryShape(module: *const ParsedModule, image_value_id: u32) ImageQueryShape {
     const fallback = ImageQueryShape{ .arrayed = false, .spatial = 2 };
@@ -2593,6 +2599,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // Track uniform arrays wrapped in vec4 structs (for alignment)
     var wrapped_uniform_arrays = std.AutoHashMap(u32, void).init(arena);
 
+    // #170 (H): vertex `out matNxM` outputs flattened into N column @location
+    // members. Populated during VertexOutput field construction; consumed at the
+    // Store site (emitBody) to split a whole-matrix write into per-column writes.
+    var matrix_outputs = std.AutoHashMap(u32, MatrixOutput).init(arena);
+
     // Emit uniform buffers
     for (cbuffers.items) |cb| {
         const shifted_cb_binding = common.applyBindingShift(cb.binding, options.binding_shift);
@@ -3071,7 +3082,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
 
         const inout_ret_name: ?[]const u8 = if (has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs);
 
         try w.writeAll("}\n\n");
     }
@@ -3143,6 +3154,26 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                     try vertex_output_fields.append(arena, .{ .name = try arena.dupe(u8, mname), .type_name = mtype, .builtin = null, .location = base + @as(u32, @intCast(mi)), .flat = mflat });
                 }
                 continue;
+            }
+            // #170 (H): a matrix output cannot be a single @location member —
+            // WGSL forbids it. Flatten matNxM into N consecutive vecM @location
+            // members (one per column) and record the var so the Store site
+            // writes each column. (Vertex-only: fragment outputs are vec4 colors.)
+            if (builtin_val == null) {
+                if (getDef(&module, actual_type)) |mdef| {
+                    if (mdef.op == .TypeMatrix and mdef.words.len > 3) {
+                        const cols = mdef.words[3];
+                        const col_type = try wgslType(&module, mdef.words[2], &names, arena);
+                        const base: u32 = loc_val orelse 0;
+                        var c: u32 = 0;
+                        while (c < cols) : (c += 1) {
+                            const fname = try std.fmt.allocPrint(arena, "{s}_{d}", .{ var_name, c });
+                            try vertex_output_fields.append(arena, .{ .name = fname, .type_name = col_type, .builtin = null, .location = base + c, .flat = false });
+                        }
+                        try matrix_outputs.put(ovid, .{ .base_name = try arena.dupe(u8, var_name), .cols = cols, .col_type = col_type });
+                        continue;
+                    }
+                }
             }
             const type_name = try wgslType(&module, actual_type, &names, arena);
             var bi_name: ?[]const u8 = null;
@@ -3538,7 +3569,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs);
 
     // Re-resolve the direct-return value AFTER emitBody: a passthrough store
     // (`o = x`, or `o = -(-x)` after double-negate folding) feeds an OpLoad
@@ -3702,7 +3733,7 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput)) !void {
     _ = decorations;
     _ = wrapped_uniform_arrays;
     var indent: u32 = 1; // base function body indentation (4 spaces)
@@ -4993,6 +5024,32 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (skip_store_target != null and inst.words[1] == skip_store_target.?) continue;
                 // Skip stores to MRT output variables
                 if (skip_store_targets != null and skip_store_targets.?.contains(inst.words[1])) continue;
+                // #170 (H): a whole-matrix store to a flattened matrix output var
+                // becomes per-column writes into the vecN @location members
+                // (`vertex_out.{base}_{c} = ({val})[{c}]`). The matrix value is
+                // wrapped in parens so an inlined access-chain expression indexes
+                // correctly. (Matrix values are pure, so per-column re-reference is
+                // value-safe.)
+                if (matrix_outputs.get(inst.words[1])) |mo| {
+                    const mval = names.get(inst.words[2]) orelse "mat4x4f()";
+                    var c: u32 = 0;
+                    while (c < mo.cols) : (c += 1) {
+                        try writeInd(w, indent);
+                        try w.print("vertex_out.{s}_{d} = ({s})[{d}];\n", .{ mo.base_name, c, mval, c });
+                    }
+                    continue;
+                }
+                // #170 (H): a PARTIAL write to one column of a flattened matrix
+                // output (`M[c] = col;`) targets an AccessChain into the matrix
+                // var — its flattened `{base}_{c}` members can't be addressed that
+                // way, so emitting `vertex_out.M[c]` is naga-invalid (no member
+                // `M`). Out of corpus; fail loud rather than emit invalid WGSL.
+                if (getDef(module, inst.words[1])) |ti| {
+                    if (ti.op == .AccessChain and ti.words.len > 3 and matrix_outputs.contains(ti.words[3])) {
+                        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL matrix-output flattening does not support partial column writes (matrix out[c] = …)", .{}) catch null;
+                        return error.UnsupportedOp;
+                    }
+                }
                 // Skip store to depth output (handled by FragmentOutput struct return)
                 const ptr_name = names.get(inst.words[1]);
                 if (ptr_name != null and std.mem.eql(u8, ptr_name.?, "gl_FragDepth")) continue;
