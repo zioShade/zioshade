@@ -2683,3 +2683,49 @@ test "wgsl: textureSamples result is converted to the signed GLSL type" {
     try assertContains(wgsl, "i32(textureNumSamples(");
     try nagaValidateOrSkip(wgsl, "textureSamples signed result");
 }
+
+// #170 (E): a storage image's WGSL texel format was hardcoded to `rgba8unorm`
+// (a float format) regardless of the GLSL `layout(...)` format qualifier, so an
+// `r32i` (signed-int) image emitted `texture_storage_2d<rgba8unorm, …>` and its
+// `textureLoad` returned `vec4<f32>` — but the result was annotated `vec4<i32>`,
+// so naga rejected ("expected vec4<i32>, got vec4<f32>"). The texel format must
+// be derived from the SPIR-V ImageFormat operand: `r32i` → `r32sint`.
+test "wgsl: storage image texel format follows the GLSL format qualifier (r32i)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(r32i, binding = 0) uniform readonly iimage2D uImage;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { ivec4 v = imageLoad(uImage, ivec2(10)); o = vec4(v); }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "r32sint");
+    try assertNotContains(wgsl, "rgba8unorm");
+    try nagaValidateOrSkip(wgsl, "storage image r32i format");
+}
+
+// #170 (E): r32f stays a float format (rgba8unorm was wrong even for floats —
+// the channel count differs); rgba32f → rgba32float; r32ui → r32uint.
+test "wgsl: storage image texel format follows r32f / rgba32f / r32ui" {
+    const r32f: [:0]const u8 =
+        \\#version 450
+        \\layout(r32f, binding = 0) uniform readonly image2D uImage;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = imageLoad(uImage, ivec2(3)); }
+    ;
+    const wf = try compileToWgsl(r32f);
+    defer alloc.free(wf);
+    try assertContains(wf, "r32float");
+    try nagaValidateOrSkip(wf, "storage image r32f format");
+
+    const rgba32ui: [:0]const u8 =
+        \\#version 450
+        \\layout(rgba32ui, binding = 0) uniform readonly uimage2D uImage;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { uvec4 v = imageLoad(uImage, ivec2(3)); o = vec4(v); }
+    ;
+    const wu = try compileToWgsl(rgba32ui);
+    defer alloc.free(wu);
+    try assertContains(wu, "rgba32uint");
+    try nagaValidateOrSkip(wu, "storage image rgba32ui format");
+}

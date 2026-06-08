@@ -306,6 +306,34 @@ fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
     return common.getTypeOf(module, id);
 }
 
+/// Map a SPIR-V `ImageFormat` operand (OpTypeImage word 8) to the WGSL storage
+/// texel-format keyword, or null if WGSL cannot represent it. Only the formats
+/// valid in `texture_storage_*` per the WGSL spec are listed; anything else
+/// (Unknown, or a format with no WGSL storage equivalent like Rg16f/R8/Rgb10A2)
+/// returns null so the caller can fail loud or fall back, never silently emit
+/// the wrong format. (SPIR-V ImageFormat enumerants, from the spec.)
+fn spirvImageFormatToWgsl(fmt: u32) ?[]const u8 {
+    return switch (fmt) {
+        1 => "rgba32float", // Rgba32f
+        2 => "rgba16float", // Rgba16f
+        3 => "r32float", // R32f
+        4 => "rgba8unorm", // Rgba8
+        5 => "rgba8snorm", // Rgba8Snorm
+        6 => "rg32float", // Rg32f
+        21 => "rgba32sint", // Rgba32i
+        22 => "rgba16sint", // Rgba16i
+        23 => "rgba8sint", // Rgba8i
+        24 => "r32sint", // R32i
+        25 => "rg32sint", // Rg32i
+        30 => "rgba32uint", // Rgba32ui
+        31 => "rgba16uint", // Rgba16ui
+        32 => "rgba8uint", // Rgba8ui
+        33 => "r32uint", // R32ui
+        35 => "rg32uint", // Rg32ui
+        else => null, // Unknown(0) or a non-WGSL-storage format
+    };
+}
+
 /// Resolve a stage-input variable to the struct type id of its GLSL interface
 /// block (`in Block { … } inst;`), or null if it is a built-in or its
 /// (one-TypePointer-unwrapped) pointee is not a TypeStruct. A struct-typed stage
@@ -1035,12 +1063,40 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
                     2 => "read_write",
                     else => "write",
                 };
-                const format: []const u8 = switch (dim) {
-                    1 => try std.fmt.allocPrint(alloc, "texture_storage_2d<rgba8unorm, {s}>", .{access_mode}),
-                    2 => try std.fmt.allocPrint(alloc, "texture_storage_3d<rgba8unorm, {s}>", .{access_mode}),
-                    else => try std.fmt.allocPrint(alloc, "texture_storage_2d<rgba8unorm, {s}>", .{access_mode}),
+                // The WGSL texel format comes from the SPIR-V ImageFormat operand
+                // (word 8), NOT a hardcoded rgba8unorm — an `r32i` image must be
+                // `texture_storage_2d<r32sint, …>` so its textureLoad returns
+                // vec4<i32> (else naga rejects the typed result). For an Unknown
+                // or non-WGSL-storage format, fall back to a COMPONENT-correct
+                // r32 format keyed off the image's sampled type (sint/uint/float)
+                // so the load's component type still matches its annotation; the
+                // channel count may be approximate, but it is never silently a
+                // float format for an integer image (the silent-wrong this fixes).
+                const img_fmt = if (inst.words.len > 8) inst.words[8] else 0;
+                const texel: []const u8 = spirvImageFormatToWgsl(img_fmt) orelse fallback: {
+                    const sti = getDef(module, sampled_type_id) orelse break :fallback "rgba8unorm";
+                    if (sti.op == .TypeInt) {
+                        break :fallback if (sti.words.len > 3 and sti.words[3] == 0) "r32uint" else "r32sint";
+                    }
+                    break :fallback "rgba8unorm";
                 };
-                break :blk format;
+                // WGSL storage textures: texture_storage_1d / _2d / _2d_array /
+                // _3d. There is NO storage cube, NO 1d-array, NO multisampled
+                // storage — fail loud on those rather than emit an invalid type.
+                const storage_dim: []const u8 = switch (dim) {
+                    0 => if (arrayed_nondepth) {
+                        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no 1D-array storage texture (image1DArray)", .{}) catch null;
+                        return error.UnsupportedOp;
+                    } else "texture_storage_1d",
+                    1 => if (arrayed_nondepth) "texture_storage_2d_array" else "texture_storage_2d",
+                    2 => "texture_storage_3d",
+                    3 => {
+                        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no storage cube texture (imageCube)", .{}) catch null;
+                        return error.UnsupportedOp;
+                    },
+                    else => "texture_storage_2d",
+                };
+                break :blk try std.fmt.allocPrint(alloc, "{s}<{s}, {s}>", .{ storage_dim, texel, access_mode });
             } else if (is_ms) {
                 // WGSL spells the multisampled 2D texture `texture_multisampled_2d<T>`
                 // (NOT `texture_2d_multisampled<T>`), and has NO multisampled 3D/cube
