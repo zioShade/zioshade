@@ -466,6 +466,119 @@ fn spirvHasWord(spv: []const u32, word: u32) bool {
     return false;
 }
 
+// Scan the SPIR-V module for an OpTypeImage (opcode 25) with Dim==Buffer (5)
+// whose sampled-type id resolves to a scalar of the requested kind:
+//   .float → OpTypeFloat, .int → signed OpTypeInt, .uint → unsigned OpTypeInt.
+// Used by the #194 isamplerBuffer/usamplerBuffer regression tests to prove the
+// emitted texel-buffer image carries the correct component type (not an empty
+// OpTypeStruct, the pre-fix silent-wrong fallthrough).
+const SampledKind = enum { float, int, uint };
+fn spirvHasBufferImageOfKind(spv: []const u32, want: SampledKind) bool {
+    // First pass: record result-id → scalar kind for OpTypeFloat / OpTypeInt.
+    var idx: usize = 5; // skip 5-word header
+    // result_id → 0:none, 1:float, 2:int-signed, 3:int-unsigned
+    var kinds = std.AutoHashMap(u32, SampledKind).init(std.testing.allocator);
+    defer kinds.deinit();
+    while (idx < spv.len) {
+        const word_count = spv[idx] >> 16;
+        const opcode = spv[idx] & 0xFFFF;
+        if (word_count == 0) break;
+        if (opcode == 22 and idx + 2 < spv.len) { // OpTypeFloat result, width
+            kinds.put(spv[idx + 1], .float) catch {};
+        } else if (opcode == 21 and idx + 3 < spv.len) { // OpTypeInt result, width, signedness
+            kinds.put(spv[idx + 1], if (spv[idx + 3] == 1) .int else .uint) catch {};
+        }
+        idx += word_count;
+    }
+    // Second pass: find OpTypeImage with Dim==Buffer and matching sampled type.
+    idx = 5;
+    while (idx < spv.len) {
+        const word_count = spv[idx] >> 16;
+        const opcode = spv[idx] & 0xFFFF;
+        if (word_count == 0) break;
+        // OpTypeImage: result(1) sampled_type(2) Dim(3) ...
+        if (opcode == 25 and idx + 3 < spv.len) {
+            const sampled_type = spv[idx + 2];
+            const dim = spv[idx + 3];
+            if (dim == 5) { // Buffer
+                if (kinds.get(sampled_type)) |k| {
+                    if (k == want) return true;
+                }
+            }
+        }
+        idx += word_count;
+    }
+    return false;
+}
+
+fn spirvHasOp(spv: []const u32, opcode: u32) bool {
+    var idx: usize = 5;
+    while (idx < spv.len) {
+        const word_count = spv[idx] >> 16;
+        if (word_count == 0) break;
+        if ((spv[idx] & 0xFFFF) == opcode) return true;
+        idx += word_count;
+    }
+    return false;
+}
+
+// #194: isamplerBuffer/usamplerBuffer used to have no parser keyword and (had it
+// reached codegen) fell through to an empty OpTypeStruct → "Expected Image to be
+// of type OpTypeImage" in spirv-val. Now they emit OpTypeImage <int|uint> Buffer.
+test "gap#194: isamplerBuffer emits OpTypeImage with int component (texelFetch/textureSize)" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding = 0) uniform isamplerBuffer s;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    ivec4 v = texelFetch(s, 3);
+        \\    int n = textureSize(s);
+        \\    o = vec4(v) + vec4(float(n));
+        \\}
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasBufferImageOfKind(spv, .int));
+    try std.testing.expect(spirvHasOp(spv, 95)); // OpImageFetch
+    try std.testing.expect(spirvHasOp(spv, 104)); // OpImageQuerySize
+}
+
+test "gap#194: usamplerBuffer emits OpTypeImage with uint component (texelFetch/textureSize)" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding = 0) uniform usamplerBuffer s;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    uvec4 v = texelFetch(s, 3);
+        \\    int n = textureSize(s);
+        \\    o = vec4(v) + vec4(float(n));
+        \\}
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasBufferImageOfKind(spv, .uint));
+    try std.testing.expect(spirvHasOp(spv, 95)); // OpImageFetch
+    try std.testing.expect(spirvHasOp(spv, 104)); // OpImageQuerySize
+}
+
+test "gap#194 regression: float samplerBuffer still emits OpTypeImage with float component" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding = 0) uniform samplerBuffer s;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec4 v = texelFetch(s, 3);
+        \\    int n = textureSize(s);
+        \\    o = v + vec4(float(n));
+        \\}
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasBufferImageOfKind(spv, .float));
+    try std.testing.expect(!spirvHasBufferImageOfKind(spv, .int));
+    try std.testing.expect(!spirvHasBufferImageOfKind(spv, .uint));
+}
+
 test "fold: signed int literal in float-vector ctor wraps (two's complement) like glslang" {
     // Regression: `vec2(2147483648, 0)` — a bare decimal literal is a 32-bit
     // SIGNED int in GLSL, so 2^31 wraps to -2147483648; glslang folds the vec
