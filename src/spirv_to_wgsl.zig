@@ -3282,6 +3282,26 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     const InputCopy = struct { global: []const u8, param: []const u8 };
     var input_copies = std.ArrayList(InputCopy).initCapacity(arena, 2) catch return error.OutOfMemory;
 
+    // #170 (H): GLSL `layout(location=N, component=M)` packs several bindings
+    // into one location's component slots. WGSL has no @component, so two stage
+    // inputs sharing an explicit @location is invalid (naga: "Multiple bindings
+    // at location N are present"). glslpp does not reconstruct component packing,
+    // so fail loud rather than emit the naga-rejected duplicate-location
+    // interface. (Builtins carry no @location; interface-block members carry
+    // their own locations, so only plain @location varyings can collide here.)
+    for (input_vars.items, 0..) |a, ai| {
+        if (a.builtin != null or io_block_inputs.contains(a.id)) continue;
+        const la = getDecVal(&decorations, a.id, .location) orelse continue;
+        for (input_vars.items[ai + 1 ..]) |b| {
+            if (b.builtin != null or io_block_inputs.contains(b.id)) continue;
+            const lb = getDecVal(&decorations, b.id, .location) orelse continue;
+            if (la == lb) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no @component: multiple inputs at @location({d}) (GLSL layout(component=…) packing) is not supported", .{la}) catch null;
+                return error.UnsupportedOp;
+            }
+        }
+    }
+
     // Input parameters
     for (input_vars.items, 0..) |iv, i| {
         if (i > 0) try w.writeAll(", ");
