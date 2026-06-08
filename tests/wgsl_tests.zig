@@ -122,6 +122,15 @@ fn compileFileToWgsl(path: []const u8) ![]const u8 {
     return compileToWgsl(src);
 }
 
+/// Same as compileFileToWgsl but compiles at the VERTEX stage (for `.vert` fixtures).
+fn compileFileVertToWgsl(path: []const u8) ![]const u8 {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    const src = try file.readToEndAllocOptions(alloc, 1 << 20, null, .of(u8), 0);
+    defer alloc.free(src);
+    return compileVertToWgsl(src);
+}
+
 /// True if the SPIR-V module carries any `OpDecorate <target> <decoration>`
 /// (opcode 71) with the given decoration value. Word layout: [0]=magic,
 /// [1]=version, [2]=generator, [3]=bound, [4]=schema, then instructions; each
@@ -2934,6 +2943,48 @@ test "wgsl: vertex out mat4 is flattened into 4 vec4 @location members" {
     try assertContains(wgsl, "@location(4) OutM_3: vec4f");
     try assertNotContains(wgsl, "@location(1) OutM: mat4x4f");
     try nagaValidateOrSkip(wgsl, "vertex mat4 output flattening");
+}
+
+// #170 (H): a vertex `out` interface block with an ARRAY member (`out Foo { float
+// a[4]; }`) emitted `@location(0) a: array<f32, 4>` — WGSL forbids an array at a
+// @location (naga: "only numeric scalars and vectors are allowed"). The array is
+// written by a dynamic-index loop (`a[i] = …`), which cannot target separate
+// @location members directly. Fix: flatten the array into N scalar @location
+// members (`a_0 … a_3`), keep the body writing a reconstructed local nested
+// struct (`io_foo.a[i]`), and copy each element out into the flattened members
+// before return. Pinned to the corpus fixture.
+test "wgsl: vertex out interface-block array member is flattened to per-element @location" {
+    const wgsl = try compileFileVertToWgsl("tests/spirv-cross/struct-flatten-inner-array.legacy.vert");
+    defer alloc.free(wgsl);
+    // 4 scalar members at consecutive locations; no bare array @location.
+    try assertContains(wgsl, "@location(0) a_0: f32");
+    try assertContains(wgsl, "@location(3) a_3: f32");
+    try assertNotContains(wgsl, "a: array<f32, 4>,\n    @location");
+    try assertNotContains(wgsl, "@location(0) a: array");
+    // Each element copied out of the reconstructed local before return.
+    try assertContains(wgsl, "vertex_out.a_0 = io_foo.a[0]");
+    try assertContains(wgsl, "vertex_out.a_3 = io_foo.a[3]");
+    try nagaValidateOrSkip(wgsl, "vertex array output-member flattening");
+}
+
+// #170 (H): the same reassembly path also flattens a vertex `out` block with a
+// NESTED-STRUCT member (`out Blk { Mid m; }`, Mid has an Inner struct + a vec4) —
+// recursively into leaf @location members (`m_i_x`, `m_y`) copied out of the
+// reassembled local. (Bonus coverage of the recursion; no corpus fixture.)
+test "wgsl: vertex out interface-block nested-struct member is recursively flattened" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\struct Inner { vec4 x; };
+        \\struct Mid { Inner i; vec4 y; };
+        \\out Blk { Mid m; } blk;
+        \\void main() { blk.m.i.x = vec4(1.0); blk.m.y = vec4(2.0); gl_Position = vec4(0.0); }
+    ;
+    const wgsl = try compileVertToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "@location(0) m_i_x: vec4f");
+    try assertContains(wgsl, "@location(1) m_y: vec4f");
+    try assertContains(wgsl, "vertex_out.m_i_x = io_blk.m.i.x");
+    try nagaValidateOrSkip(wgsl, "vertex nested-struct output-member flattening");
 }
 
 // #170 (H): a PARTIAL write to one column of a flattened matrix output

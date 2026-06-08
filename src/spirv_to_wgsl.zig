@@ -921,6 +921,84 @@ fn buildIoReconExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []
     try buf.appendSlice(arena, ")");
 }
 
+/// #170 (H): a leaf of a flattened vertex OUTPUT interface block — a
+/// scalar/vector that becomes one `@location` member of VertexOutput, copied out
+/// of the reassembled local at return. `flat_name` is the folded member name
+/// (`a_0`), `src` the access path into the local (`io_foo.a[0]`).
+const OutputLeaf = struct { flat_name: []const u8, type_name: []const u8, is_int: bool, src: []const u8 };
+
+/// True if any member of this struct is an aggregate (struct/array/matrix) — i.e.
+/// it cannot be a flat list of scalar/vector `@location` members and must be
+/// deep-flattened + reassembled (see collectOutputLeaves).
+fn outputBlockNeedsDeepFlatten(module: *const ParsedModule, struct_id: u32) bool {
+    const sdef = getDef(module, struct_id) orelse return false;
+    if (sdef.op != .TypeStruct) return false;
+    for (sdef.words[2..]) |mt_id| {
+        const md = getDef(module, mt_id) orelse continue;
+        switch (md.op) {
+            .TypeStruct, .TypeArray, .TypeRuntimeArray, .TypeMatrix => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// #170 (H): recursively collect the scalar/vector leaves of a vertex OUTPUT
+/// interface block, folding member names into `flat_prefix` (`a` → `a_0` per array
+/// element) and access paths into `src_path` (`io_foo` → `io_foo.a[0]`). A
+/// struct member recurses; a scalar/vector-element array expands per element; a
+/// matrix member or an array of aggregates is the unrepresentable case and fails
+/// loud (rather than emit a struct/array/matrix at a `@location` that naga rejects).
+fn collectOutputLeaves(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, flat_prefix: []const u8, src_path: []const u8, leaves: *std.ArrayList(OutputLeaf), arena: std.mem.Allocator) !void {
+    const sdef = getDef(module, struct_id) orelse return;
+    for (sdef.words[2..], 0..) |mt_id, mi| {
+        var mb: [32]u8 = undefined;
+        const mname = getMemberName(module, struct_id, @intCast(mi), &mb);
+        const child_flat = if (flat_prefix.len == 0)
+            try arena.dupe(u8, mname)
+        else
+            try std.fmt.allocPrint(arena, "{s}_{s}", .{ flat_prefix, mname });
+        const child_src = try std.fmt.allocPrint(arena, "{s}.{s}", .{ src_path, mname });
+        const md = getDef(module, mt_id) orelse continue;
+        switch (md.op) {
+            .TypeStruct => try collectOutputLeaves(module, names, mt_id, child_flat, child_src, leaves, arena),
+            .TypeArray => {
+                const elem = md.words[2];
+                const ed = getDef(module, elem);
+                const len: u32 = blk: {
+                    const ld = getDef(module, md.words[3]);
+                    break :blk if (ld != null and ld.?.op == .Constant and ld.?.words.len > 3) ld.?.words[3] else 0;
+                };
+                const elem_is_struct = ed != null and ed.?.op == .TypeStruct;
+                const elem_is_aggregate = ed != null and (ed.?.op == .TypeArray or ed.?.op == .TypeRuntimeArray or ed.?.op == .TypeMatrix);
+                if (elem_is_aggregate) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL output-block flattening does not support an array of arrays/matrices at a @location", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
+                const etype = if (!elem_is_struct) try wgslType(module, elem, names, arena) else "";
+                var k: u32 = 0;
+                while (k < len) : (k += 1) {
+                    const ef = try std.fmt.allocPrint(arena, "{s}_{d}", .{ child_flat, k });
+                    const es = try std.fmt.allocPrint(arena, "{s}[{d}]", .{ child_src, k });
+                    if (elem_is_struct) {
+                        try collectOutputLeaves(module, names, elem, ef, es, leaves, arena);
+                    } else {
+                        try leaves.append(arena, .{ .flat_name = ef, .type_name = etype, .is_int = isIntegerWgslType(etype), .src = es });
+                    }
+                }
+            },
+            .TypeMatrix => {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL output-block flattening does not support a matrix member at a @location", .{}) catch null;
+                return error.UnsupportedOp;
+            },
+            else => {
+                const mtype = try wgslType(module, mt_id, names, arena);
+                try leaves.append(arena, .{ .flat_name = child_flat, .type_name = mtype, .is_int = isIntegerWgslType(mtype), .src = child_src });
+            },
+        }
+    }
+}
+
 /// For a #170-A2 widened uniform array member, resolve the WGSL scalar base
 /// name (`f32`/`i32`/`u32`) of the innermost element. The element is widened to
 /// `vec4<base>`. `elem_type_id` is the array's element type (scalar, vec2, or a
@@ -3302,6 +3380,16 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // block's members into VertexOutput directly and alias the block var to
     // `vertex_out` (so the body's `vout.m` access becomes `vertex_out.m`).
     var io_block_outputs = std.AutoHashMap(u32, void).init(arena);
+    // #170 (H): vertex OUTPUT interface blocks whose member is an aggregate
+    // (array/struct/matrix) cannot live one-per-`@location`. Such a block is
+    // reassembled into a local of its original (nested) type — the body writes
+    // `io_<name>.member[i]` normally — its leaves are emitted as scalar/vector
+    // `@location` members of VertexOutput, and each leaf is copied out before
+    // return. `output_recons` keys the block var → local; `output_copyouts` is
+    // the per-leaf copy-out list. Empty for any shader without such a block.
+    const OutputRecon = struct { local_name: []const u8, type_name: []const u8, struct_type: u32 };
+    var output_recons = std.AutoHashMap(u32, OutputRecon).init(arena);
+    var output_copyouts = std.ArrayList(struct { flat: []const u8, src: []const u8 }).initCapacity(arena, 4) catch return error.OutOfMemory;
     if (is_vertex and output_vars.items.len > 1) {
         for (output_vars.items) |ovid| {
             const builtin_val = getDecVal(&decorations, ovid, .built_in);
@@ -3316,6 +3404,22 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             // A struct-typed (non-builtin) output is an interface block — flatten.
             const adef = getDef(&module, actual_type);
             if (builtin_val == null and adef != null and adef.?.op == .TypeStruct) {
+                // #170 (H): a member is itself an aggregate (array/struct/matrix) —
+                // deep-flatten the block into scalar/vector leaves and reassemble a
+                // local for the body, copying each leaf out before return.
+                if (outputBlockNeedsDeepFlatten(&module, actual_type)) {
+                    const base: u32 = loc_val orelse 0;
+                    const local = try std.fmt.allocPrint(arena, "io_{s}", .{var_name});
+                    var leaves = std.ArrayList(OutputLeaf).initCapacity(arena, 4) catch return error.OutOfMemory;
+                    try collectOutputLeaves(&module, &names, actual_type, "", local, &leaves, arena);
+                    for (leaves.items, 0..) |leaf, li| {
+                        try vertex_output_fields.append(arena, .{ .name = leaf.flat_name, .type_name = leaf.type_name, .builtin = null, .location = base + @as(u32, @intCast(li)), .flat = leaf.is_int });
+                        try output_copyouts.append(arena, .{ .flat = leaf.flat_name, .src = leaf.src });
+                    }
+                    const tn = try wgslType(&module, actual_type, &names, arena);
+                    try output_recons.put(ovid, .{ .local_name = local, .type_name = tn, .struct_type = actual_type });
+                    continue;
+                }
                 try io_block_outputs.put(ovid, {});
                 const base: u32 = loc_val orelse 0;
                 for (adef.?.words[2..], 0..) |mt_id, mi| {
@@ -3395,6 +3499,19 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         }
         try w.writeAll("}\n\n");
+    }
+
+    // #170 (H): a deep-flattened output block is reassembled into a local of its
+    // original (nested) struct type, so that struct (and its inner structs) must
+    // be declared. The block was flattened away from VertexOutput, so nothing else
+    // forces it — emit it here (deduped via emitted_structs). Inner structs first.
+    {
+        var ri = output_recons.iterator();
+        while (ri.next()) |e| {
+            const sty = e.value_ptr.struct_type;
+            try emitStructForwardDecls(&module, &names, sty, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
+            try emitOneStructForwardDecl(&module, &names, sty, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
+        }
     }
 
     // Stage I/O interface blocks: a GLSL `in/out Block {…} inst;` lowers to a
@@ -3776,12 +3893,25 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         } else if (use_vertex_struct) {
             try w.writeAll("    var vertex_out: VertexOutput;\n");
+            // #170 (H): declare the reassembly local for each deep-flattened output
+            // block; the body writes it (`io_foo.a[i] = …`) and the leaves are
+            // copied into vertex_out before return.
+            {
+                var ri = output_recons.iterator();
+                while (ri.next()) |e| {
+                    try w.print("    var {s}: {s};\n", .{ e.value_ptr.local_name, e.value_ptr.type_name });
+                }
+            }
             for (output_vars.items) |ovid| {
                 const var_name = names.get(ovid) orelse continue;
                 // A flattened output block aliases to `vertex_out` itself, so the
                 // body's `vout.member` access chain resolves to `vertex_out.member`
                 // (the flattened field) rather than the (nonexistent) nested field.
-                const alias = if (io_block_outputs.contains(ovid))
+                // A deep-flattened block instead aliases to its reassembly local so
+                // `vout.member[i]` resolves against the real nested struct.
+                const alias = if (output_recons.get(ovid)) |rec|
+                    try alloc.dupe(u8, rec.local_name)
+                else if (io_block_outputs.contains(ovid))
                     try std.fmt.allocPrint(alloc, "vertex_out", .{})
                 else
                     try std.fmt.allocPrint(alloc, "vertex_out.{s}", .{var_name});
@@ -3857,6 +3987,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
         try w.print("    return FragmentOutput({s});\n", .{mrt_parts.items});
     } else if (use_vertex_struct) {
+        // #170 (H): copy each deep-flattened output leaf out of its reassembly
+        // local into the flattened VertexOutput member, just before returning.
+        for (output_copyouts.items) |co| {
+            try w.print("    vertex_out.{s} = {s};\n", .{ co.flat, co.src });
+        }
         try w.writeAll("    return vertex_out;\n");
     } else if (direct_return_value != null) {
         try w.print("    return {s};\n", .{direct_return_value.?});
