@@ -1700,6 +1700,38 @@ fn collectAtomicFields(module: *const ParsedModule, out: *AtomicFieldMap) !void 
     }
 }
 
+/// Scan for OpAtomic* RMW ops whose pointer operand is a Workgroup (or Private)
+/// OpVariable DIRECTLY — a GLSL `shared` SCALAR that is an atomic target (an SSBO
+/// struct member goes through collectAtomicFields instead). WGSL requires such a
+/// variable to be declared `atomic<T>` and its plain OpLoad/OpStore lowered to
+/// atomicLoad/atomicStore (a bare `var<workgroup> s: u32` + `atomicAdd(&s, …)` is
+/// naga-rejected: "atomic operation is done on a pointer to a non-atomic").
+fn collectAtomicVars(module: *const ParsedModule, out: *std.AutoHashMap(u32, void)) !void {
+    for (module.instructions) |inst| {
+        const is_atomic = switch (inst.op) {
+            .AtomicIAdd, .AtomicISub, .AtomicAnd, .AtomicOr, .AtomicXor,
+            .AtomicUMin, .AtomicSMin, .AtomicUMax, .AtomicSMax,
+            .AtomicFAddEXT, .AtomicExchange, .AtomicCompareExchange,
+            => true,
+            else => false,
+        };
+        if (!is_atomic) continue;
+        if (inst.words.len < 4) continue;
+        const ptr_inst = common.getDef(module, inst.words[3]) orelse continue;
+        if (ptr_inst.op != .Variable or ptr_inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(ptr_inst.words[3]);
+        // Workgroup only: the decl-wrapping below rewrites `var<workgroup>` to
+        // `atomic<T>`. A Private-storage atomic target would get its load/store
+        // rewritten to atomicLoad/atomicStore WITHOUT an atomic<> decl (mismatch),
+        // but GLSL has no construct that produces a Private-storage atomic target,
+        // so restricting here keeps the load/store rewrites consistent with the
+        // decl. (Review follow-up.)
+        if (sc == .Workgroup) {
+            try out.put(inst.words[3], {});
+        }
+    }
+}
+
 /// Classify a uniform struct's array members that need vec4-widening (#170 A2).
 /// `struct_type_id` is the *resolved* pointee struct of a uniform (non-SSBO)
 /// cbuffer. For each member that is a (possibly nested) array whose innermost
@@ -2460,6 +2492,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     defer atomic_fields.deinit();
     collectAtomicFields(&module, &atomic_fields) catch {};
 
+    // #170 (F): GLSL `shared` scalars that are direct atomic targets must be
+    // declared `atomic<T>` and their plain load/store lowered to atomicLoad/
+    // atomicStore. Empty for shaders with no workgroup-scalar atomics, so all
+    // other shaders are byte-identical.
+    var atomic_vars = std.AutoHashMap(u32, void).init(arena);
+    collectAtomicVars(&module, &atomic_vars) catch {};
+
     // Detect sub-16 array members of UNIFORM (non-SSBO) blocks (#170 A2). Such
     // members are widened to array<vec4<T>> at emission and swizzled at access
     // (see WrappedUniformMemberMap). SSBOs tolerate sub-16 strides → skipped.
@@ -2722,7 +2761,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                         }
                         // Emit struct declaration for array element types
                         try emitOneStructForwardDecl(&module, &names, pointee_type, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
-                        try w.print("var<workgroup> {s}: {s};\n\n", .{ var_name, type_name });
+                        // #170 (F): a `shared` scalar that is a direct atomic target
+                        // must be `atomic<T>` (else naga rejects the atomic op).
+                        const wg_type: []const u8 = if (atomic_vars.contains(inst.words[2]))
+                            (std.fmt.allocPrint(arena, "atomic<{s}>", .{type_name}) catch type_name)
+                        else
+                            type_name;
+                        try w.print("var<workgroup> {s}: {s};\n\n", .{ var_name, wg_type });
                     }
                 }
             }
@@ -3082,7 +3127,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
 
         const inout_ret_name: ?[]const u8 = if (has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars);
 
         try w.writeAll("}\n\n");
     }
@@ -3589,7 +3634,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars);
 
     // Re-resolve the direct-return value AFTER emitBody: a passthrough store
     // (`o = x`, or `o = -(-x)` after double-negate folding) feeds an OpLoad
@@ -3753,7 +3798,7 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput)) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void)) !void {
     _ = decorations;
     _ = wrapped_uniform_arrays;
     var indent: u32 = 1; // base function body indentation (4 spaces)
@@ -4952,6 +4997,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const ptr = names.get(inst.words[3]) orelse "var";
+                // #170 (F): a plain load of a `shared` atomic scalar lowers to
+                // atomicLoad. Materialize as a `let` (one atomic read) so a
+                // multi-use value isn't re-read per use. The result id is already
+                // named (result_name), so downstream uses resolve to it.
+                if (atomic_vars.contains(inst.words[3])) {
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = atomicLoad(&{s});\n", .{ result_name, rt, ptr });
+                    continue;
+                }
                 const ptr_inst = getDef(module, inst.words[3]);
                 var is_tex = false;
                 var is_output_load = false;
@@ -5057,6 +5111,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         try writeInd(w, indent);
                         try w.print("vertex_out.{s}_{d} = ({s})[{d}];\n", .{ mo.base_name, c, mval, c });
                     }
+                    continue;
+                }
+                // #170 (F): a plain store to a `shared` atomic scalar lowers to
+                // atomicStore (the var is declared `atomic<T>`, so `s = x;` is
+                // naga-invalid).
+                if (atomic_vars.contains(inst.words[1])) {
+                    const aval = names.get(inst.words[2]) orelse "0";
+                    const aptr = names.get(inst.words[1]) orelse "v";
+                    try writeInd(w, indent);
+                    try w.print("atomicStore(&{s}, {s});\n", .{ aptr, aval });
                     continue;
                 }
                 // #170 (H): a PARTIAL write to one column of a flattened matrix
