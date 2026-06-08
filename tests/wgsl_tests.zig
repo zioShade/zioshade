@@ -2787,3 +2787,17 @@ test "wgsl: sampler1DArray is an honest error (WGSL has no 1D-array texture)" {
     ;
     try std.testing.expectError(error.UnsupportedOp, compileToWgsl(src));
 }
+
+// #170 (J): GL_ARB_shader_stencil_export's gl_FragStencilRef has NO WGSL
+// equivalent (WGSL fragment shaders cannot write the stencil ref). It must fail
+// loud rather than emit the int stencil value into an auto-assigned @location
+// vec4f color output (naga: "cannot convert {AbstractInt} to vec4<f32>").
+test "wgsl: gl_FragStencilRef output is an honest error (no WGSL stencil export)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\#extension GL_ARB_shader_stencil_export : require
+        \\layout(location = 0) out vec4 MRT0;
+        \\void main() { MRT0 = vec4(1.0); gl_FragStencilRefARB = 100; }
+    ;
+    try std.testing.expectError(error.UnsupportedOp, compileToWgsl(src));
+}
