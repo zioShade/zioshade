@@ -522,6 +522,46 @@ fn arrayedSampleShape(module: *const ParsedModule, sampled_image_value_id: u32) 
     return .{ .comps = comps, .arrayed = true };
 }
 
+/// Shape of an image-size query (OpImageQuerySize[Lod]) on `image_value_id`:
+/// whether the image is arrayed and how many components `textureDimensions`
+/// returns (its spatial dims). GLSL `textureSize`/`imageSize` on an arrayed
+/// sampler returns the spatial dims PLUS a trailing layer count, but WGSL
+/// `textureDimensions` returns only the spatial dims — the layer count is a
+/// separate `textureNumLayers` call. `arrayed` true means the caller must append
+/// `textureNumLayers`. `spatial` is the textureDimensions component count
+/// (1 for 1D, 2 for 2D/Cube, 3 for 3D). Accepts the pointer / sampled-image
+/// unwrap chain used by the other image-shape helpers.
+const ImageQueryShape = struct { arrayed: bool, spatial: u32 };
+fn imageQueryShape(module: *const ParsedModule, image_value_id: u32) ImageQueryShape {
+    const fallback = ImageQueryShape{ .arrayed = false, .spatial = 2 };
+    const type_id = getTypeOf(module, image_value_id) orelse return fallback;
+    var inst = getDef(module, type_id) orelse return fallback;
+    if (inst.op == .TypePointer and inst.words.len > 3) {
+        inst = getDef(module, inst.words[3]) orelse return fallback;
+    }
+    if (inst.op == .TypeSampledImage and inst.words.len > 2) {
+        inst = getDef(module, inst.words[2]) orelse return fallback;
+    }
+    if (inst.op != .TypeImage or inst.words.len <= 5) return fallback;
+    const spatial: u32 = switch (inst.words[3]) {
+        0 => 1, // 1D
+        2 => 3, // 3D
+        else => 2, // 2D / Cube
+    };
+    return .{ .arrayed = inst.words[5] == 1, .spatial = spatial };
+}
+
+/// The signed WGSL vector/scalar type alias for `n` integer components
+/// (1→"i32", 2→"vec2i", 3→"vec3i"), used to convert an unsigned
+/// `textureDimensions` result to the signed GLSL query type.
+fn signedIntVecType(n: u32) []const u8 {
+    return switch (n) {
+        1 => "i32",
+        3 => "vec3i",
+        else => "vec2i",
+    };
+}
+
 /// The spatial-coordinate swizzle (".x"/".xy"/".xyz") and the layer-component
 /// swizzle (".y"/".z"/".w") for an `ArrayedSampleShape`. At the FLOAT-coord
 /// sample sites (ImageSample{Implicit,Explicit}Lod, ImageGather) the layer is
@@ -1109,6 +1149,15 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
                 }
                 break :blk std.fmt.allocPrint(alloc, "texture_multisampled_2d<{s}>", .{st}) catch "texture_multisampled_2d<f32>";
             } else {
+                // WGSL has NO 1D-array sampled texture (`texture_1d_array` is not
+                // a real WGSL type — only 2d/2d_array/3d/cube/cube_array and the
+                // non-array 1d exist). A GLSL sampler1DArray cannot be lowered;
+                // fail loud rather than emit an invalid type name that naga
+                // rejects downstream (matches the storage 1D-array guard).
+                if (dim == 0 and arrayed_nondepth) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no 1D-array texture (sampler1DArray)", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
                 break :blk std.fmt.allocPrint(alloc, "{s}<{s}>", .{ tex_type, st }) catch "texture_2d<f32>";
             }
         },
@@ -5752,21 +5801,38 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // but GLSL imageSize/textureSize is SIGNED (int/ivecN). Wrap in the
             // signed result type so the value matches its declared type (else naga
             // rejects: "expected vec2<i32>, got vec2<u32>" — silent-wrong).
+            // For an ARRAYED sampler, GLSL's result is the spatial dims PLUS a
+            // trailing layer count, but textureDimensions returns ONLY the spatial
+            // dims — so append `i32(textureNumLayers(img))` as the last component
+            // (else naga rejects "cannot cast vec2<u32> to vec3<i32>").
             .ImageQuerySize => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = {s}(textureDimensions({s}));\n", .{ result_name, rt, rt, image });
+                const shape = imageQueryShape(module, inst.words[3]);
+                try writeInd(w, indent);
+                if (shape.arrayed) {
+                    try w.print("let {s}: {s} = {s}({s}(textureDimensions({s})), i32(textureNumLayers({s})));\n", .{ result_name, rt, rt, signedIntVecType(shape.spatial), image, image });
+                } else {
+                    try w.print("let {s}: {s} = {s}(textureDimensions({s}));\n", .{ result_name, rt, rt, image });
+                }
             },
 
             // ImageQuerySizeLod — see ImageQuerySize: convert unsigned dims to the
-            // signed GLSL result type.
+            // signed GLSL result type, appending textureNumLayers for arrayed
+            // samplers. (textureNumLayers takes NO lod argument.)
             .ImageQuerySizeLod => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
                 const lod = names.get(inst.words[4]) orelse "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = {s}(textureDimensions({s}, {s}));\n", .{ result_name, rt, rt, image, lod });
+                const shape = imageQueryShape(module, inst.words[3]);
+                try writeInd(w, indent);
+                if (shape.arrayed) {
+                    try w.print("let {s}: {s} = {s}({s}(textureDimensions({s}, {s})), i32(textureNumLayers({s})));\n", .{ result_name, rt, rt, signedIntVecType(shape.spatial), image, lod, image });
+                } else {
+                    try w.print("let {s}: {s} = {s}(textureDimensions({s}, {s}));\n", .{ result_name, rt, rt, image, lod });
+                }
             },
 
             // ImageQueryLevels — WGSL textureNumLevels returns UNSIGNED (u32),
