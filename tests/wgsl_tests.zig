@@ -2840,3 +2840,32 @@ test "wgsl: gl_FragStencilRef output is an honest error (no WGSL stencil export)
     ;
     try std.testing.expectError(error.UnsupportedOp, compileToWgsl(src));
 }
+
+// #170 (H): GLSL `layout(location=N, component=M)` packs several bindings into
+// one location's component slots. WGSL has no @component, so two inputs sharing
+// @location(0) is invalid (naga: "Multiple bindings at location 0 are present").
+// glslpp does not reconstruct component packing, so it must fail loud rather
+// than emit the naga-rejected duplicate-location interface (silent-wrong).
+// Pinned to the real corpus fixture (no other driver runs it through the WGSL
+// backend), and the detail is asserted so the catch-all UnsupportedOp can't
+// silently start meaning a different unsupported op.
+test "wgsl: layout(component) duplicate-location inputs are an honest error" {
+    try std.testing.expectError(error.UnsupportedOp, compileFileToWgsl("tests/spirv-cross/layout-component.desktop.frag"));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "@component") != null);
+}
+
+// Negative control: two inputs at DISTINCT locations must still compile to valid
+// WGSL — guards the collision check above from firing over-eagerly.
+test "wgsl: inputs at distinct locations still compile (component check control)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 v0;
+        \\layout(location = 1) in float v1;
+        \\layout(location = 0) out vec2 FragColor;
+        \\void main() { FragColor = v0 + v1; }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "distinct-location inputs control");
+}
