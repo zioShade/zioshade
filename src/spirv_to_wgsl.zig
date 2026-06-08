@@ -2112,6 +2112,18 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             if (sc == .Output) {
                 const location = getDecVal(&decorations, inst.words[2], .location);
                 const builtin = getDecVal(&decorations, inst.words[2], .built_in);
+                // GL_ARB_shader_stencil_export's gl_FragStencilRef has NO WGSL
+                // equivalent (WGSL fragment shaders cannot write the stencil ref).
+                // glslpp's SPIR-V emits it as an undecorated scalar-int Output, so
+                // the backend would otherwise auto-assign it an @location and force
+                // the int into a vec4f color slot (naga reject). Fail loud instead.
+                // OpName preserves the GLSL builtin name, so match on it.
+                if (names.get(inst.words[2])) |oname| {
+                    if (std.mem.indexOf(u8, oname, "FragStencilRef") != null) {
+                        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no fragment stencil-ref output (gl_FragStencilRef)", .{}) catch null;
+                        return error.UnsupportedOp;
+                    }
+                }
                 if (location != null or is_fragment or is_vertex) {
                     try output_vars.append(arena, inst.words[2]);
                     if (is_fragment) {
