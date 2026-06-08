@@ -466,6 +466,20 @@ fn spirvHasWord(spv: []const u32, word: u32) bool {
     return false;
 }
 
+/// True if the SPIR-V module contains at least one instruction with `opcode`
+/// (low 16 bits of the instruction header word). Walks instructions by word
+/// count, skipping the 5-word module header.
+fn spirvHasOpcode(spv: []const u32, opcode: u16) bool {
+    var idx: usize = 5;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (@as(u16, @truncate(spv[idx] & 0xFFFF)) == opcode) return true;
+        if (wc == 0) break;
+        idx += wc;
+    }
+    return false;
+}
+
 // Scan the SPIR-V module for an OpTypeImage (opcode 25) with Dim==Buffer (5)
 // whose sampled-type id resolves to a scalar of the requested kind:
 //   .float → OpTypeFloat, .int → signed OpTypeInt, .uint → unsigned OpTypeInt.
@@ -627,15 +641,21 @@ test "frontend: separate sampler2DShadow(tex,samp) emits a depth-compare, not Op
         \\void main() { o = texture(sampler2DShadow(uT, uS), vec3(0.5)); }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    // OpImageSampleDref{Implicit,Explicit}Lod = 89/90, ProjDref = 93/94.
-    var found_dref = false;
-    var idx: usize = 5; // skip the 5-word SPIR-V header
-    while (idx < spv.len) {
-        const wc = spv[idx] >> 16;
-        const op = spv[idx] & 0xFFFF;
-        if (op == 89 or op == 90 or op == 93 or op == 94) found_dref = true;
-        if (wc == 0) break;
-        idx += wc;
-    }
-    try std.testing.expect(found_dref);
+    // OpImageSampleDrefImplicitLod = 89.
+    try std.testing.expect(spirvHasOpcode(spv, 89));
+}
+
+test "frontend: separate sampler2DShadow with textureLod emits explicit-lod depth-compare" {
+    // Same root cause via the EXPLICIT-LOD path: textureLod(sampler2DShadow(...),
+    // …) must lower to OpImageSampleDrefExplicitLod (90), not be dropped.
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(set = 0, binding = 0) uniform samplerShadow uS;
+        \\layout(set = 0, binding = 1) uniform texture2D uT;
+        \\layout(location = 0) out float o;
+        \\void main() { o = textureLod(sampler2DShadow(uT, uS), vec3(0.5), 0.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 90)); // OpImageSampleDrefExplicitLod
 }
