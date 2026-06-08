@@ -1466,6 +1466,23 @@ fn resolveConstantExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32,
     return null;
 }
 
+/// Resolve the sampler argument for a WGSL texture-sample call. When the SPIR-V
+/// "sampled image" operand is an OpSampledImage built AT THE CALL SITE from a
+/// SEPARATE texture + sampler (Vulkan `sampler2D(tex, samp)`), the real sampler
+/// is its sampler operand (words[4]) — use that name (a standalone `var uS:
+/// sampler;` global, or a function sampler parameter). Otherwise (a combined
+/// sampler2D loaded directly, the common case) fall back to the texture's
+/// implicit `<tex>_sampler` partner. The fallback keeps every combined-sampler
+/// shader byte-identical; only the separate-sampler path changes.
+fn resolveSamplerArg(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), sampled_image_id: u32, tex_name: []const u8, arena: std.mem.Allocator) []const u8 {
+    if (getDef(module, sampled_image_id)) |d| {
+        if (d.op == .SampledImage and d.words.len > 4) {
+            if (names.get(d.words[4])) |sn| return sn;
+        }
+    }
+    return std.fmt.allocPrint(arena, "{s}_sampler", .{tex_name}) catch tex_name;
+}
+
 fn resolvePointee(module: *const ParsedModule, id: u32) ?u32 {
     // First try direct TypePointer
     if (common.resolvePointeeType(module, id)) |pt| return pt;
@@ -1731,6 +1748,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         }
     }
+
 
     // Built-ins with no representable standard-WGSL entry-point I/O form must fail
     // loud, not leak the identifier (naga reject) or get misclassified as a
@@ -2019,7 +2037,18 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     {
         var input_id_set = std.AutoHashMap(u32, void).init(arena);
         for (input_vars.items) |iv| {
-            if (iv.builtin == null) input_id_set.put(iv.id, {}) catch {};
+            // @location inputs are entry-param-only in WGSL, so a helper that
+            // reads one needs the var<private> bridge. The SAME is true of input
+            // BUILT-INS (e.g. gl_FragCoord is `@builtin(position)` — only the
+            // entry param, not a global): a helper reading it hits the same
+            // undefined-identifier reject. Bridge the builtins with a clean
+            // var<private> form (frag_coord/front_facing — NO u32 coercion,
+            // unlike vertex_index/instance_index, which take the `_b` path).
+            const bridgeable = if (iv.builtin) |bi| switch (bi) {
+                .frag_coord, .front_facing => true,
+                else => false,
+            } else true;
+            if (bridgeable) input_id_set.put(iv.id, {}) catch {};
         }
         if (input_id_set.count() > 0) {
             var cur_fn: u32 = 0;
@@ -2047,9 +2076,49 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
+    // Cross-function OUTPUTS (mirror of promoted_inputs): a stage output WRITTEN
+    // (or read) inside a non-entry helper references an identifier that, by
+    // default, exists only as the entry function's local `var` — naga reject
+    // ("no definition in scope"). Promote such an output to a module-scope
+    // `var<private>` so helpers can write it; the entry returns it by name at
+    // the end (the writes happen via the calls main makes). Scoped to the simple
+    // SINGLE-color-output case — MRT / depth / vertex-struct outputs have their
+    // own struct-return machinery and are left untouched (zero regression risk:
+    // if nothing qualifies, every path below is byte-identical).
+    var promoted_outputs = std.AutoHashMap(u32, void).init(arena);
+    if (output_vars.items.len == 1 and output_var_id != null and depth_output_var_id == null) {
+        const ovid = output_var_id.?;
+        var cur_fn: u32 = 0;
+        var in_entry = false;
+        for (module.instructions) |inst| {
+            if (inst.op == .Function and inst.words.len >= 3) {
+                cur_fn = inst.words[2];
+                in_entry = (module.entry_point_id != null and cur_fn == module.entry_point_id.?);
+            } else if (inst.op == .FunctionEnd) {
+                cur_fn = 0;
+                in_entry = false;
+            } else if (cur_fn != 0 and !in_entry) {
+                const ptr_id: ?u32 = switch (inst.op) {
+                    .Load, .AccessChain, .CopyObject => if (inst.words.len > 3) inst.words[3] else null,
+                    .Store => if (inst.words.len > 1) inst.words[1] else null,
+                    else => null,
+                };
+                if (ptr_id) |pid| {
+                    if (pid == ovid) promoted_outputs.put(pid, {}) catch {};
+                }
+            }
+        }
+    }
+
     // Collect cbuffers and textures
     var cbuffers = std.ArrayList(struct { name: []const u8, type_id: u32, binding: u32, is_ssbo: bool, result_id: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
     var textures = std.ArrayList(struct { name: []const u8, binding: u32, image_type_id: u32, is_storage: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    // Standalone Vulkan separate samplers (GLSL `uniform sampler uS;` — a bare
+    // OpTypeSampler in UniformConstant, combined with a separate texture at each
+    // `sampler2D(tex, samp)` call site). These have no implicit texture partner,
+    // so unlike a combined sampler2D they were dropped here and never declared
+    // (`var uS: sampler;`), leaving call args referencing an undeclared name.
+    var samplers = std.ArrayList(struct { name: []const u8, binding: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
 
     for (module.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
@@ -2104,6 +2173,9 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                     .TypeImage => {
                         if (pointee_inst.words.len > 7 and pointee_inst.words[7] == 2) is_storage = true;
                         try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = pointee_type, .is_storage = is_storage });
+                    },
+                    .TypeSampler => {
+                        try samplers.append(arena, .{ .name = name, .binding = binding * 2 + set });
                     },
                     else => continue,
                 }
@@ -2174,6 +2246,20 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
+    // Promoted cross-function output: emit the module-scope var<private> so
+    // helper functions can write it (the entry returns it by name). The local
+    // `var` decl in the entry body is suppressed below (skip_output_var_decl).
+    if (promoted_outputs.count() > 0) {
+        const ovid = output_var_id.?;
+        const name = names.get(ovid) orelse "out";
+        var actual_type = getDef(&module, ovid).?.words[1];
+        if (getDef(&module, actual_type)) |pi| {
+            if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3];
+        }
+        const rt = wgslType(&module, actual_type, &names, arena) catch unreachable;
+        try w.print("var<private> {s}: {s};\n", .{ name, rt });
+    }
+
     // Detect SSBO struct fields that are the target of OpAtomic* ops.
     // WGSL requires such fields to be declared as `atomic<T>` (or `array<atomic<T>>`
     // when the atomic op indexes into an array field). naga rejects atomic ops on
@@ -2219,11 +2305,17 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // Emit struct forward declarations for types used as local variables
     var local_structs = std.AutoHashMap(u32, void).init(arena);
     defer local_structs.deinit();
-    // Scan for Function-scoped variables
+    // Scan for Function-scoped variables AND Private globals. A module-scope
+    // `const`/`var<private>` whose (possibly nested-array) element type is a
+    // struct (e.g. `const foos: array<Foo, 2>`) is emitted above WITHOUT its
+    // `struct Foo { … }` decl — that decl was only gathered for Function-scope
+    // vars, so `Foo` was referenced but never declared (naga "no definition in
+    // scope"). naga accepts module-scope forward references, so emitting the
+    // struct here (after the global) is fine.
     for (module.instructions) |inst| {
         if (inst.op == .Variable and inst.words.len >= 4) {
             const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-            if (sc == .Function) {
+            if (sc == .Function or sc == .Private) {
                 const ptr_type = getDef(&module, inst.words[1]);
                 if (ptr_type) |pt| {
                     if (pt.op == .TypePointer and pt.words.len > 3) {
@@ -2454,6 +2546,24 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             try sampler_names.append(arena, .{ .name = sampler_name, .binding = tex.binding + 1 });
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, shifted_sampler, sampler_name, sampler_kind });
         }
+    }
+
+    // Emit standalone Vulkan separate samplers (`var uS: sampler;`). Each is
+    // combined with a texture at the `sampler2D(tex, samp)` call site, where the
+    // sample handlers resolve the sampler argument from the OpSampledImage's
+    // sampler operand (see resolveSamplerArg). Bindings are allocated from the
+    // same collision-avoiding pool as textures so they never alias.
+    for (samplers.items) |samp| {
+        var b = samp.binding;
+        if (used_tex_bindings.contains(b)) {
+            while (used_tex_bindings.contains(next_tex_binding)) : (next_tex_binding += 1) {}
+            b = next_tex_binding;
+            next_tex_binding += 1;
+        }
+        used_tex_bindings.put(b, {}) catch {};
+        const shifted = common.applyBindingShift(b, options.binding_shift);
+        const group = @divFloor(shifted, 2);
+        try w.print("@group({d}) @binding({d})\nvar {s}: sampler;\n\n", .{ group, shifted, samp.name });
     }
 
     // Emit specialization constants as `@id(N) override NAME: TYPE = DEFAULT;`.
@@ -2969,6 +3079,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 const pname = try std.fmt.allocPrint(arena, "{s}_b", .{var_name});
                 try w.print("@builtin({s}) {s}: u32", .{ builtin_name, pname });
                 try builtin_coercions.append(arena, .{ .name = var_name, .src = pname });
+            } else if (promoted_inputs.contains(iv.id)) {
+                // Builtin read inside a helper: bridge the entry param `<name>_in`
+                // → module-scope `var<private> <name>` (emitted above), copied at
+                // body start, so helpers can reference the name in scope.
+                const pname = try std.fmt.allocPrint(arena, "{s}_in", .{var_name});
+                try w.print("@builtin({s}) {s}: {s}", .{ builtin_name, pname, type_name });
+                try input_copies.append(arena, .{ .global = var_name, .param = pname });
             } else {
                 try w.print("@builtin({s}) {s}: {s}", .{ builtin_name, var_name, type_name });
             }
@@ -3070,6 +3187,15 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     var depth_return_id: ?u32 = null;
     var mrt_return_values = std.ArrayList(struct { var_name: []const u8, value: []const u8, value_id: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
     var skip_output_var_decl = false;
+    // Whether any MRT output is READ BACK or PARTIALLY written (e.g. `vo0.x += …`,
+    // which lowers to an OpAccessChain rooted at the output). The simple MRT path
+    // assumes each output is whole-var-stored exactly once and never read, builds
+    // the return from those captured store values, and declares no `var`. That
+    // breaks a read/partial-write output two ways: the access-chain reference is
+    // undeclared (naga reject) AND the increment is silently dropped from the
+    // return. When this is set we instead declare real local `var`s, emit every
+    // store normally, and return the locals — see below.
+    var mrt_is_read = false;
     if (!use_vertex_struct and output_var_id != null) {
         const ov = output_var_id.?;
         var store_count: usize = 0;
@@ -3111,6 +3237,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                     }
                 }
             }
+            // Detect an MRT output read back or partially written (access-chain
+            // rooted at the output, e.g. `vo0.x`): triggers the real-local-var path.
+            if (use_frag_mrt_struct and (si.op == .Load or si.op == .AccessChain or si.op == .CopyObject) and si.words.len > 3) {
+                for (output_vars.items) |ovid| {
+                    if (si.words[3] == ovid) mrt_is_read = true;
+                }
+            }
         }
         if (store_count == 1 and last_stored_value != null and !output_is_read) {
             // Dupe into the arena: `last_stored_value` aliases an entry in the
@@ -3121,15 +3254,37 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             direct_return_id = last_stored_id;
             skip_output_var_decl = true;
         }
-        // MRT: check all output vars have exactly 1 store
-        if (use_frag_mrt_struct) {
+        // MRT: simple case (each output whole-var-stored once, never read) skips
+        // the local decl and returns the captured store values. If any output is
+        // read/partially written, keep the locals (declared below) and emit stores.
+        if (use_frag_mrt_struct and !mrt_is_read) {
+            skip_output_var_decl = true;
+        }
+        // Promoted cross-function output: declared as a module-scope var<private>
+        // above, so suppress the entry-local `var` decl (the `return <name>` at
+        // the end resolves to the global).
+        if (promoted_outputs.contains(ov)) {
             skip_output_var_decl = true;
         }
     }
 
     // Declare output variable(s) as local (skip if direct return)
     if (!skip_output_var_decl) {
-        if (use_vertex_struct) {
+        if (use_frag_mrt_struct and mrt_is_read) {
+            // Complex MRT: declare every color output as a real local `var` so the
+            // body's stores AND access-chain read/partial-writes resolve; the
+            // return builds FragmentOutput from these locals (below).
+            for (output_vars.items) |ovid| {
+                const var_inst = getDef(&module, ovid) orelse continue;
+                var actual_type: u32 = var_inst.words[1];
+                if (getDef(&module, actual_type)) |pi| {
+                    if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3];
+                }
+                const type_name = try wgslType(&module, actual_type, &names, arena);
+                const var_name = names.get(ovid) orelse continue;
+                try w.print("    var {s}: {s};\n", .{ var_name, type_name });
+            }
+        } else if (use_vertex_struct) {
             try w.writeAll("    var vertex_out: VertexOutput;\n");
             for (output_vars.items) |ovid| {
                 const var_name = names.get(ovid) orelse continue;
@@ -3156,9 +3311,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
-    // Build MRT skip set for stores
+    // Build MRT skip set for stores. Only in the simple case — when an output is
+    // read/partially written we MUST let its stores emit (to the local `var`),
+    // otherwise the increment is dropped (silent-wrong).
     var mrt_skip_set = std.AutoHashMap(u32, void).init(arena);
-    if (use_frag_mrt_struct) {
+    if (use_frag_mrt_struct and !mrt_is_read) {
         for (output_vars.items) |ovid| {
             try mrt_skip_set.put(ovid, {});
         }
@@ -3189,17 +3346,24 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         const depth_val = depth_return_value orelse "0.0";
         try w.print("    return FragmentOutput({s}, {s});\n", .{ color_val, depth_val });
     } else if (use_frag_mrt_struct) {
-        // Build FragmentOutput with stored values for each output
+        // Build FragmentOutput. Complex case (any output read/partially written):
+        // the outputs are real local `var`s holding their final values, so return
+        // them BY NAME (preserves `vo0.x += …` increments). Simple case: use the
+        // captured whole-var store values.
         var mrt_parts = std.ArrayList(u8).initCapacity(arena, 256) catch return error.OutOfMemory;
         for (output_vars.items) |ovid| {
             const vn = names.get(ovid) orelse continue;
-            // Find the last stored value for this output var
-            var stored_val: ?[]const u8 = null;
-            for (mrt_return_values.items) |rv| {
-                if (std.mem.eql(u8, rv.var_name, vn)) stored_val = rv.value;
-            }
             if (mrt_parts.items.len > 0) try mrt_parts.appendSlice(arena, ", ");
-            try mrt_parts.appendSlice(arena, stored_val orelse "vec4f()");
+            if (mrt_is_read) {
+                try mrt_parts.appendSlice(arena, vn);
+            } else {
+                // Find the last stored value for this output var
+                var stored_val: ?[]const u8 = null;
+                for (mrt_return_values.items) |rv| {
+                    if (std.mem.eql(u8, rv.var_name, vn)) stored_val = rv.value;
+                }
+                try mrt_parts.appendSlice(arena, stored_val orelse "vec4f()");
+            }
         }
         try w.print("    return FragmentOutput({s});\n", .{mrt_parts.items});
     } else if (use_vertex_struct) {
@@ -4179,13 +4343,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         try names.put(phi_result_id, name_copy);
                         phi_result = name_copy;
                     }
-                    if (!already_declared) {
-                        const phi_type = try wgslType(module, inst.words[1], names, arena);
-                        const init_val = names.get(inst.words[3]) orelse "0";
-                        try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val });
-                    }
-                    // Record phi update: result = value from second pair (words[5])
-                    // If LoopMerge follows, this phi belongs to a new loop
+                    // If a LoopMerge follows, this phi is a LOOP-HEADER phi.
                     var lm_follows = false;
                     {
                         var pk = i + 1;
@@ -4194,6 +4352,42 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             if (module.instructions[pk].op == .FunctionEnd or module.instructions[pk].op == .Label) break;
                         }
                     }
+                    // Classify the phi's incoming (value, label) pairs. SPIR-V does
+                    // NOT fix their order, so a loop-header phi's pairs may be either
+                    // (preheader, back-edge) or (back-edge, preheader). Pick the
+                    // PREHEADER pair (its label's OpLabel is defined BEFORE this
+                    // header block, index < i) as the `var` initializer, and the
+                    // BACK-EDGE pair (label defined AFTER, inside the loop body) as
+                    // the continue-block update. The old code hardcoded words[3]=init
+                    // / words[5]=update; when glslang emitted the pairs reversed, the
+                    // loop var was initialized from the not-yet-defined increment →
+                    // naga "no definition in scope for identifier: vN". Non-loop
+                    // (selection-merge) phis are handled elsewhere; here we keep the
+                    // positional default unless we positively identify the preheader.
+                    var init_value_id = inst.words[3];
+                    var update_value_id = inst.words[5];
+                    if (lm_follows) {
+                        var pp: usize = 3;
+                        while (pp + 1 < inst.words.len) : (pp += 2) {
+                            const val_id = inst.words[pp];
+                            const lbl_id = inst.words[pp + 1];
+                            var lbl_idx: ?usize = null;
+                            for (module.instructions, 0..) |li, lii| {
+                                if (li.op == .Label and li.words.len > 1 and li.words[1] == lbl_id) {
+                                    lbl_idx = lii;
+                                    break;
+                                }
+                            }
+                            if (lbl_idx) |lx| {
+                                if (lx < i) init_value_id = val_id else update_value_id = val_id;
+                            }
+                        }
+                    }
+                    if (!already_declared) {
+                        const phi_type = try wgslType(module, inst.words[1], names, arena);
+                        const init_val = names.get(init_value_id) orelse "0";
+                        try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val });
+                    }
                     if (lm_follows and !phi_group_open) {
                         // First loop-header phi of this loop: open the group once so
                         // ALL of the header's phis are captured (set BEFORE adding).
@@ -4201,7 +4395,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         phi_group_open = true;
                     }
                     if (inst.words.len >= 7) {
-                        phi_updates.appendAssumeCapacity(.{ .result_id = inst.words[2], .value_id = inst.words[5] });
+                        phi_updates.appendAssumeCapacity(.{ .result_id = inst.words[2], .value_id = update_value_id });
                     }
                     // Check if LoopMerge follows (within the next 30 instructions)
                     // Don't stop at Labels — loop header may have Labels between Phi and LoopMerge
@@ -4962,6 +5156,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const coord = names.get(inst.words[4]) orelse "uv";
                 // Get texture name directly from combined sampler ID
                 const tex_name = names.get(inst.words[3]) orelse "tex";
+                const sampler_arg = resolveSamplerArg(module, names, inst.words[3], tex_name, arena);
                 // Arrayed (non-depth) textures take the layer as a SEPARATE i32 arg:
                 // textureSample(t, s, coord.xy, i32(round(coord.z))). The layer is
                 // ROUNDED (floor(layer+0.5)) for glslang parity — mirrors the depth-
@@ -4970,9 +5165,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (shape.arrayed) {
                     const cs = arrayedCoordSwizzle(shape.comps);
                     const ls = arrayedLayerSwizzle(shape.comps);
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s}, i32(round({s}{s})));\n", .{ result_name, rt, tex_name, tex_name, coord, cs, coord, ls });
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s}, i32(round({s}{s})));\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls });
                 } else {
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s});\n", .{ result_name, rt, tex_name, tex_name, coord });
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}, {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord });
                 }
             },
 
@@ -4982,15 +5177,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
+                const sampler_arg = resolveSamplerArg(module, names, inst.words[3], tex_name, arena);
                 // Arrayed: textureSampleLevel(t, s, coord.xy, i32(round(coord.z)), lod).
                 // Layer rounded for glslang parity (see ImageSampleImplicitLod).
                 const shape = arrayedSampleShape(module, inst.words[3]);
                 if (shape.arrayed) {
                     const cs = arrayedCoordSwizzle(shape.comps);
                     const ls = arrayedLayerSwizzle(shape.comps);
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, tex_name, tex_name, coord, cs, coord, ls, lod });
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, lod });
                 } else {
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lod });
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, lod });
                 }
             },
 

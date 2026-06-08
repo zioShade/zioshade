@@ -99,6 +99,17 @@ fn compileToWgsl(source: [:0]const u8) ![]const u8 {
     return try glslpp.spirvToWGSL(alloc, spirv, .{});
 }
 
+/// Compile a GLSL fixture FILE (relative to the repo root) → WGSL via glslpp's
+/// frontend. Used for cases whose cross-function structure glslpp's inliner
+/// collapses for small inline shaders — the real fixture preserves the helper.
+fn compileFileToWgsl(path: []const u8) ![]const u8 {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    const src = try file.readToEndAllocOptions(alloc, 1 << 20, null, .of(u8), 0);
+    defer alloc.free(src);
+    return compileToWgsl(src);
+}
+
 fn runWgslTest(test_case: ShaderTest) !void {
     const spirv = compileToSpirv(test_case.name, test_case.source) catch |err| {
         std.debug.print("FAIL [{s}]: glslang failed: {}\n", .{ test_case.name, err });
@@ -2415,4 +2426,121 @@ test "wgsl: A2 std140 uniform still wraps at ArrayStride 16 (#170 review regress
     try assertContains(wgsl, "array<vec4<f32>, 4>");
     try assertContains(wgsl, ".x");
     try nagaValidateOrSkip(wgsl, "A2-std140-stride16-wrap");
+}
+
+// ---------------------------------------------------------------------------
+// WGSL undefined-identifier (def-drop) sweep — 6 distinct root causes that each
+// left an emitted identifier undeclared (naga "no definition in scope"). Each
+// test reproduces one and asserts the fix + naga validity.
+// ---------------------------------------------------------------------------
+
+test "wgsl: module-scope struct-array global forward-declares its struct" {
+    // A Private global whose element type is a struct (`array<Foo, N>`) was
+    // emitted without `struct Foo { … }` — the struct scan only covered
+    // Function-scope vars. naga: "no definition in scope for identifier: Foo".
+    const src: [:0]const u8 =
+        \\#version 310 es
+        \\precision mediump float;
+        \\struct Foo { float a; float b; };
+        \\Foo foos[2] = Foo[](Foo(10.0, 20.0), Foo(30.0, 40.0));
+        \\layout(location = 0) flat in int idx;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(foos[idx].a + foos[1 - idx].b); }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "struct Foo");
+    try nagaValidateOrSkip(wgsl, "private struct-array global");
+}
+
+test "wgsl: input built-in read in a helper is bridged to var<private>" {
+    // gl_FragCoord is `@builtin(position)` — an entry-param only. A helper that
+    // reads it referenced an out-of-scope identifier. Bridge it (like @location
+    // inputs) to a module-scope var<private> copied from the renamed entry param.
+    // Uses the witness fixture: glslpp inlines a trivial helper, collapsing the
+    // cross-function pattern, but raymarch_simple's scene() is preserved.
+    const wgsl = try compileFileToWgsl("tests/spirv-cross/raymarch_simple.frag");
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var<private> gl_FragCoord");
+    try assertContains(wgsl, "gl_FragCoord_in");
+    try nagaValidateOrSkip(wgsl, "gl_FragCoord-in-helper bridge");
+}
+
+test "wgsl: stage output written in a helper is promoted to var<private>" {
+    // An output written only inside non-entry functions referenced an identifier
+    // that existed only as main's local `var`. Promote it to a module-scope
+    // var<private> (mirror of the input bridge); the entry returns it by name.
+    // Witness fixture (its func0/func1/func2 write the output `ov`).
+    const wgsl = try compileFileToWgsl("tests/spirv-cross/shader-debug-info-line-directives.line.gV.frag");
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var<private> ov");
+    try nagaValidateOrSkip(wgsl, "cross-function output promotion");
+}
+
+test "wgsl: loop-header phi classifies init/update by label, not position" {
+    // SPIR-V does not fix the order of an OpPhi's (value, label) pairs. The old
+    // code hardcoded words[3]=init / words[5]=update; when glslang emitted them
+    // reversed, the loop var was initialized from the not-yet-defined back-edge
+    // increment → `var v52 = v56;` with v56 undeclared. Inline the exact fixture
+    // whose last loop trips this.
+    const src: [:0]const u8 =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out int FragColor;
+        \\void main() {
+        \\   FragColor = 16;
+        \\   for (int i = 0; i < 25; i++) FragColor += 10;
+        \\   for (int i = 1, j = 4; i < 30; i++, j += 4) FragColor += 11;
+        \\   int k = 0;
+        \\   for (; k < 20; k++) FragColor += 12;
+        \\   k += 3; FragColor += k;
+        \\   int m = 0; m = k; int o = m;
+        \\   for (; m < 40; m++) FragColor += m;
+        \\   FragColor += o;
+        \\}
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "loop phi pair classification");
+}
+
+test "wgsl: MRT output read-back declares locals and preserves the increment" {
+    // A multiple-render-target output read back / partially written (`vo0.x +=`)
+    // hit the simple-MRT path that declares no var and returns captured store
+    // values — leaving `vo0` undeclared AND dropping the increment (silent-wrong).
+    // The fix declares real local vars, emits the stores, and returns the locals.
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 vo0;
+        \\layout(location = 1) out vec4 vo1;
+        \\void main() { vo0 = v; vo1 = v; vo0.x += 1.0; vo1.x += 2.0; }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var vo0");
+    try assertContains(wgsl, "return FragmentOutput(vo0, vo1)");
+    try nagaValidateOrSkip(wgsl, "MRT output read-back");
+}
+
+test "wgsl: Vulkan separate sampler is declared and combined per call site" {
+    // A standalone `uniform sampler uS;` (no implicit texture partner) was never
+    // declared, and the sampler argument was synthesized as `<tex>_sampler`
+    // instead of the real separate sampler — both an undefined identifier and a
+    // silent-wrong (a sampler param was ignored). Declare `var uS: sampler;` and
+    // route the sampler from the OpSampledImage's sampler operand.
+    const src: [:0]const u8 =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(set = 0, binding = 0) uniform mediump sampler uS;
+        \\layout(set = 0, binding = 1) uniform mediump texture2D uT;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\vec4 f(mediump texture2D t) { return texture(sampler2D(t, uS), uv); }
+        \\void main() { o = f(uT); }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var uS: sampler");
+    try nagaValidateOrSkip(wgsl, "Vulkan separate sampler");
 }
