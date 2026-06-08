@@ -5713,20 +5713,25 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try writeInd(w, indent); try w.print("let {s}: {s} = {s}(textureDimensions({s}, {s}));\n", .{ result_name, rt, rt, image, lod });
             },
 
-            // ImageQueryLevels
+            // ImageQueryLevels — WGSL textureNumLevels returns UNSIGNED (u32),
+            // but GLSL textureQueryLevels is a SIGNED `int`, so glslpp's result
+            // type (`rt`) is i32; emit `i32(textureNumLevels(t))` to convert
+            // (matching the ImageQuerySize/textureDimensions wrap above). A bare
+            // builtin would leave `let v: i32 = textureNumLevels(t)` → naga reject.
             .ImageQueryLevels => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureNumLevels({s});\n", .{ result_name, rt, image });
+                try writeInd(w, indent); try w.print("let {s}: {s} = {s}(textureNumLevels({s}));\n", .{ result_name, rt, rt, image });
             },
 
-            // ImageQuerySamples
+            // ImageQuerySamples — WGSL textureNumSamples returns UNSIGNED (u32);
+            // GLSL textureSamples is signed `int`. Convert like ImageQueryLevels.
             .ImageQuerySamples => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureNumSamples({s});\n", .{ result_name, rt, image });
+                try writeInd(w, indent); try w.print("let {s}: {s} = {s}(textureNumSamples({s}));\n", .{ result_name, rt, rt, image });
             },
 
             // ImageQueryLod (GLSL textureQueryLod) — WGSL has NO equivalent
