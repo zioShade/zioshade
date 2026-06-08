@@ -314,24 +314,40 @@ pub fn processRun(io: IoType, alloc: std.mem.Allocator, argv: []const []const u8
 
 // ---- Tooling paths ----
 
-/// Resolve the spirv-val executable. Prefer `$VULKAN_SDK\Bin\spirv-val[.exe]`
-/// (caller owns the returned slice and must free it); fall back to the bare name
-/// on PATH when the env var is unset. Avoids a machine-specific absolute path so
-/// test/conformance runners stay portable across machines / CI / non-Windows.
-pub fn resolveSpirvVal(allocator: std.mem.Allocator) ![]const u8 {
-    const exe = if (builtin.os.tag == .windows) "spirv-val.exe" else "spirv-val";
+/// Resolve a Vulkan SDK CLI tool by basename. Prefer `$VULKAN_SDK/Bin/<tool>[.exe]`
+/// (`.exe` appended only on Windows); fall back to the bare name on PATH when
+/// VULKAN_SDK is unset or set-but-empty. Caller owns the returned slice.
+///
+/// Keeps machine-specific absolute SDK paths out of the tree so tests/tools stay
+/// portable across machines / CI / non-Windows. Callers that spawn the result
+/// should degrade a spawn failure to a skip rather than a hard failure.
+pub fn resolveVulkanTool(allocator: std.mem.Allocator, tool: []const u8) ![]const u8 {
+    const exe = if (builtin.os.tag == .windows)
+        try std.fmt.allocPrint(allocator, "{s}.exe", .{tool})
+    else
+        try allocator.dupe(u8, tool);
     if (std.process.getEnvVarOwned(allocator, "VULKAN_SDK")) |sdk| {
         defer allocator.free(sdk);
         // Treat a set-but-empty value as unset so we fall back to PATH rather
-        // than building a bogus relative "Bin/spirv-val" path.
-        if (sdk.len == 0) return try allocator.dupe(u8, exe);
+        // than building a bogus relative "Bin/<tool>" path.
+        if (sdk.len == 0) return exe;
+        defer allocator.free(exe);
         return try std.fs.path.join(allocator, &.{ sdk, "Bin", exe });
     } else |err| switch (err) {
         // Not set — fall back to PATH lookup by bare name.
-        error.EnvironmentVariableNotFound => return try allocator.dupe(u8, exe),
+        error.EnvironmentVariableNotFound => return exe,
         // Propagate real failures (OOM; InvalidWtf8 can't occur for an ASCII key).
-        else => |e| return e,
+        else => |e| {
+            allocator.free(exe);
+            return e;
+        },
     }
+}
+
+/// Resolve the spirv-val executable; thin wrapper over `resolveVulkanTool`.
+/// Caller owns the returned slice and must free it.
+pub fn resolveSpirvVal(allocator: std.mem.Allocator) ![]const u8 {
+    return resolveVulkanTool(allocator, "spirv-val");
 }
 
 // ---- List writer ----

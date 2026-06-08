@@ -342,7 +342,7 @@ pub fn build(b: *std.Build) void {
     // Stage-aware: detects each SPIR-V fixture's execution model and selects
     // the matching DXC target profile (ps_*, cs_*, ms_*, as_*); stages we don't
     // yet emit valid HLSL for (vertex/raygen/...) are reported as SKIP.
-    // Defaults: dxc=C:/VulkanSDK/.../dxc.exe, spv_dir=tests/spirv_bins, sm=60.
+    // Defaults: dxc=$VULKAN_SDK/Bin/dxc[.exe] (or `dxc` on PATH), spv_dir=tests/spirv_bins, sm=60.
     // Opt-in only: not wired into the main `test` step because it needs DXC.
     const dxc_test_step = b.step("test-dxc", "Run DXC compilation test on all SPIR-V → HLSL outputs (stage-aware)");
     const dxc_test_mod = b.createModule(.{
@@ -709,7 +709,14 @@ pub fn build(b: *std.Build) void {
     // msvc ABI (glslpp is pure Zig and recompiles cleanly for it).
     //   zig build lib-bench [-Dvulkan-sdk=<path>] -- --iters 2000
     const lib_bench_step = b.step("lib-bench", "Benchmark glslpp vs SPIRV-Cross (in-process, SPIR-V→GLSL/HLSL/MSL)");
-    const vk_sdk = b.option([]const u8, "vulkan-sdk", "Vulkan SDK root (for spirv-cross libs/headers)") orelse "C:/VulkanSDK/1.4.341.1";
+    // Default the SDK root from $VULKAN_SDK when `-Dvulkan-sdk` isn't passed, so we
+    // don't pin a machine-specific version path. Treat a set-but-empty value as
+    // unset; fall back to a last-resort hardcoded path only if the env var is gone.
+    const env_vk_sdk: ?[]const u8 = blk: {
+        const v = std.process.getEnvVarOwned(b.allocator, "VULKAN_SDK") catch break :blk null;
+        break :blk if (v.len == 0) null else v;
+    };
+    const vk_sdk = b.option([]const u8, "vulkan-sdk", "Vulkan SDK root (for spirv-cross libs/headers); defaults to $VULKAN_SDK") orelse env_vk_sdk orelse "C:/VulkanSDK/1.4.341.1";
     const spvc_inc = b.fmt("{s}/Include/spirv_cross", .{vk_sdk});
     const spvc_lib = b.fmt("{s}/Lib", .{vk_sdk});
     const msvc_target = b.resolveTargetQuery(.{ .os_tag = .windows, .abi = .msvc });
