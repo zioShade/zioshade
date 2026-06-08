@@ -609,3 +609,33 @@ test "fold: unsigned literal in float-vector ctor stays positive" {
     try std.testing.expect(spirvHasWord(spv, 0x4F000000)); // +2.147e9 (correct)
     try std.testing.expect(!spirvHasWord(spv, 0xCF000000));
 }
+
+test "frontend: separate sampler2DShadow(tex,samp) emits a depth-compare, not OpUndef" {
+    // A Vulkan SEPARATE comparison sampler — `texture(sampler2DShadow(tex, samp),
+    // coord)` built from a distinct texture2D + samplerShadow — was DROPPED by the
+    // frontend: parsePrimary did not list the shadow sampler keywords as
+    // constructors, so the constructor (and the whole statement) never parsed and
+    // the depth compare vanished (empty main / OpUndef result = silent-wrong).
+    // Assert the emitted SPIR-V now contains an OpImageSampleDref* op.
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(set = 0, binding = 0) uniform mediump samplerShadow uS;
+        \\layout(set = 0, binding = 1) uniform texture2D uT;
+        \\layout(location = 0) out float o;
+        \\void main() { o = texture(sampler2DShadow(uT, uS), vec3(0.5)); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // OpImageSampleDref{Implicit,Explicit}Lod = 89/90, ProjDref = 93/94.
+    var found_dref = false;
+    var idx: usize = 5; // skip the 5-word SPIR-V header
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        const op = spv[idx] & 0xFFFF;
+        if (op == 89 or op == 90 or op == 93 or op == 94) found_dref = true;
+        if (wc == 0) break;
+        idx += wc;
+    }
+    try std.testing.expect(found_dref);
+}
