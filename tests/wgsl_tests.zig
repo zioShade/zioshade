@@ -3047,3 +3047,27 @@ test "wgsl: inputs at distinct locations still compile (component check control)
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "distinct-location inputs control");
 }
+
+// #170 (H): a stage-IO interface block whose member is itself a struct
+// (`in VertexIn { Foo a; Foo b; }` / `in Baz baz;`) emitted a struct-typed
+// `@location` member (`@location(0) a: Foo`) — naga rejects ("only numeric
+// scalars and vectors are allowed"). WGSL cannot put a struct at a @location, so
+// the block's entry interface is flattened into consecutive leaf @location params
+// (`VertexIn_a_a`@0 … `baz_bar_b`@7) and the original nested struct is reassembled
+// into a local at body start (`VertexIn(Foo(VertexIn_a_a, …), …)`), leaving the
+// body's nested accesses (`io_VertexIn.a.a`) untouched. Pinned to the corpus fixture.
+test "wgsl: nested-struct stage-IO members are flattened to leaf @location params" {
+    const wgsl = try compileFileToWgsl("tests/spirv-cross/multiple-struct-flattening.legacy.frag");
+    defer alloc.free(wgsl);
+    // Flattened leaf params at consecutive locations (VertexIn: 0–3; Baz: 4–7).
+    try assertContains(wgsl, "@location(0) VertexIn_a_a: vec4f");
+    try assertContains(wgsl, "@location(3) VertexIn_b_b: vec4f");
+    try assertContains(wgsl, "@location(4) baz_foo_a: vec4f");
+    try assertContains(wgsl, "@location(7) baz_bar_b: vec4f");
+    // The nested struct is reassembled from the leaf params for the body to use.
+    try assertContains(wgsl, "VertexIn(Foo(VertexIn_a_a, VertexIn_a_b)");
+    try assertContains(wgsl, "io_baz.foo.a");
+    // No struct/array survives at a @location (naga's actual rule).
+    try assertNotContains(wgsl, "@location(0) a: Foo");
+    try nagaValidateOrSkip(wgsl, "nested-struct IO flattening");
+}

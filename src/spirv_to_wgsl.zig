@@ -848,6 +848,79 @@ fn getArraySuffix(module: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
     return common.commonGetArraySuffix(module.instructions, module.id_defs, ptr_type_id, false);
 }
 
+/// #170 (H): does this struct have a struct-typed member? Such a member cannot be
+/// emitted at a single `@location` (WGSL forbids a struct/array there), so a
+/// stage-IO interface block containing one is flattened to leaf `@location`
+/// parameters and reassembled into a local at entry. Gates that path.
+fn structHasStructMember(module: *const ParsedModule, struct_id: u32) bool {
+    const sdef = getDef(module, struct_id) orelse return false;
+    if (sdef.op != .TypeStruct) return false;
+    for (sdef.words[2..]) |mt_id| {
+        const mt = getDef(module, mt_id) orelse continue;
+        if (mt.op == .TypeStruct) return true;
+    }
+    return false;
+}
+
+/// #170 (H): emit the flattened leaf `@location` entry parameters of a
+/// nested stage-IO block. A struct-typed member recurses with its name folded
+/// into `prefix` (`VertexIn` → `VertexIn_a` → leaf `VertexIn_a_b`); a
+/// scalar/vector leaf emits one param and bumps `*loc`. Each param is written
+/// comma-separated; `*first` tracks whether the leading separator is owed (the
+/// outer param loop already wrote the comma before this block, so the first leaf
+/// emits none). A matrix/array leaf cannot live at a `@location` — fail loud.
+fn emitFlattenedIoParams(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, prefix: []const u8, loc: *u32, is_fragment: bool, w: anytype, arena: std.mem.Allocator, first: *bool) !void {
+    const sdef = getDef(module, struct_id) orelse return;
+    for (sdef.words[2..], 0..) |mt_id, mi| {
+        var mname_buf: [32]u8 = undefined;
+        const mname = getMemberName(module, struct_id, @intCast(mi), &mname_buf);
+        const child = try std.fmt.allocPrint(arena, "{s}_{s}", .{ prefix, mname });
+        const mt_def = getDef(module, mt_id);
+        if (mt_def != null and mt_def.?.op == .TypeStruct) {
+            try emitFlattenedIoParams(module, names, mt_id, child, loc, is_fragment, w, arena, first);
+            continue;
+        }
+        if (mt_def) |md| {
+            if (md.op == .TypeMatrix or md.op == .TypeArray or md.op == .TypeRuntimeArray) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL stage-IO struct flattening does not support a matrix/array leaf member at a @location", .{}) catch null;
+                return error.UnsupportedOp;
+            }
+        }
+        const mtype = try wgslType(module, mt_id, names, arena);
+        const flat = memberHasFlat(module, struct_id, @intCast(mi)) or isIntegerWgslType(mtype);
+        // Fragment integer/flat varyings need @interpolate(flat); vertex inputs are
+        // attributes (never interpolated) so the attribute would be illegal there.
+        const interp: []const u8 = if (is_fragment and flat) "@interpolate(flat) " else "";
+        if (!first.*) try w.writeAll(", ");
+        first.* = false;
+        try w.print("@location({d}) {s}{s}: {s}", .{ loc.*, interp, child, mtype });
+        loc.* += 1;
+    }
+}
+
+/// #170 (H): build the constructor expression that reassembles a nested stage-IO
+/// block value from its flattened leaf params — `VertexIn(Foo(VertexIn_a_a,
+/// VertexIn_a_b), Foo(VertexIn_b_a, VertexIn_b_b))`. The leaf-name folding mirrors
+/// emitFlattenedIoParams exactly so names line up.
+fn buildIoReconExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, prefix: []const u8, buf: *std.ArrayList(u8), arena: std.mem.Allocator) !void {
+    const sdef = getDef(module, struct_id) orelse return;
+    const tname = names.get(struct_id) orelse "Block";
+    try buf.print(arena, "{s}(", .{tname});
+    for (sdef.words[2..], 0..) |mt_id, mi| {
+        if (mi > 0) try buf.appendSlice(arena, ", ");
+        var mname_buf: [32]u8 = undefined;
+        const mname = getMemberName(module, struct_id, @intCast(mi), &mname_buf);
+        const child = try std.fmt.allocPrint(arena, "{s}_{s}", .{ prefix, mname });
+        const mt_def = getDef(module, mt_id);
+        if (mt_def != null and mt_def.?.op == .TypeStruct) {
+            try buildIoReconExpr(module, names, mt_id, child, buf, arena);
+        } else {
+            try buf.appendSlice(arena, child);
+        }
+    }
+    try buf.appendSlice(arena, ")");
+}
+
 /// For a #170-A2 widened uniform array member, resolve the WGSL scalar base
 /// name (`f32`/`i32`/`u32`) of the innermost element. The element is widened to
 /// `vec4<base>`. `elem_type_id` is the array's element type (scalar, vec2, or a
@@ -3331,6 +3404,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // scalar/vector — so this only affects the currently-naga-rejected cluster;
     // no passing shader has a struct I/O param.)
     var io_block_inputs = std.AutoHashMap(u32, void).init(arena);
+    // #170 (H): stage-IO blocks whose members are THEMSELVES structs
+    // (`in Block { Foo a; … }`) cannot put a struct at a single `@location`. Such
+    // a block is emitted as a PLAIN struct (no @location) and its entry interface
+    // becomes flattened leaf @location params, reassembled into a local var at
+    // body start (see io_recons). This set holds those blocks' struct type ids.
+    var nested_io_block_types = std.AutoHashMap(u32, void).init(arena);
     {
         var declared = std.AutoHashMap(u32, void).init(arena);
         for (input_vars.items) |iv| {
@@ -3341,22 +3420,40 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             const sty = ioBlockStructType(&module, iv.type_id, iv.builtin) orelse continue;
             const sdef = getDef(&module, sty) orelse continue;
             try io_block_inputs.put(iv.id, {});
+            if (structHasStructMember(&module, sty)) try nested_io_block_types.put(sty, {});
             if (declared.contains(sty)) continue;
             try declared.put(sty, {});
             const sname = names.get(sty) orelse "Block";
             const base_loc = getDecVal(&decorations, iv.id, .location) orelse 0;
             try w.print("struct {s} {{\n", .{sname});
-            for (sdef.words[2..], 0..) |mt_id, mi| {
-                var mname_buf: [32]u8 = undefined;
-                const mname = getMemberName(&module, sty, @intCast(mi), &mname_buf);
-                const mtype = try wgslType(&module, mt_id, &names, arena);
-                const flat = memberHasFlat(&module, sty, @intCast(mi)) or isIntegerWgslType(mtype);
-                const interp: []const u8 = if (flat) "@interpolate(flat) " else "";
-                try w.print("    @location({d}) {s}{s}: {s},\n", .{ base_loc + @as(u32, @intCast(mi)), interp, mname, mtype });
+            if (nested_io_block_types.contains(sty)) {
+                // Nested block: emit as a PLAIN struct (members keep their original
+                // — possibly struct — types). The @location interface lives on the
+                // flattened entry params instead; the body uses the reassembled local.
+                for (sdef.words[2..], 0..) |mt_id, mi| {
+                    var mname_buf: [32]u8 = undefined;
+                    const mname = getMemberName(&module, sty, @intCast(mi), &mname_buf);
+                    const mtype = try wgslType(&module, mt_id, &names, arena);
+                    try w.print("    {s}: {s},\n", .{ mname, mtype });
+                }
+            } else {
+                for (sdef.words[2..], 0..) |mt_id, mi| {
+                    var mname_buf: [32]u8 = undefined;
+                    const mname = getMemberName(&module, sty, @intCast(mi), &mname_buf);
+                    const mtype = try wgslType(&module, mt_id, &names, arena);
+                    const flat = memberHasFlat(&module, sty, @intCast(mi)) or isIntegerWgslType(mtype);
+                    const interp: []const u8 = if (flat) "@interpolate(flat) " else "";
+                    try w.print("    @location({d}) {s}{s}: {s},\n", .{ base_loc + @as(u32, @intCast(mi)), interp, mname, mtype });
+                }
             }
             try w.writeAll("}\n\n");
         }
     }
+    // #170 (H): nested stage-IO blocks to reassemble from flattened params at body
+    // start. Collected in the entry-param loop; emitted in the prologue (and each
+    // block var renamed to its local so the body reads the reassembled struct).
+    const IoRecon = struct { recon_name: []const u8, type_name: []const u8, ctor: []const u8 };
+    var io_recons = std.ArrayList(IoRecon).initCapacity(arena, 2) catch return error.OutOfMemory;
 
     // Emit entry function
     const entry_stage: []const u8 = if (is_fragment) "@fragment" else if (is_vertex) "@vertex" else if (is_compute) "@compute" else "@fragment";
@@ -3456,10 +3553,30 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 try w.print("@builtin({s}) {s}: {s}", .{ builtin_name, var_name, type_name });
             }
         } else if (io_block_inputs.contains(iv.id)) {
-            // Interface-block input: a by-value struct parameter. Its MEMBERS
-            // carry @location (emitted in the struct decl above); the parameter
-            // itself must NOT have @location.
-            try w.print("{s}: {s}", .{ var_name, type_name });
+            if (nested_io_block_types.contains(actual_type)) {
+                // #170 (H): nested block — emit flattened leaf @location params and
+                // queue a reassembly of the original (nested) struct into a local
+                // `io_<name>` at body start. The block var is renamed to that local
+                // so the body's nested accesses (`blk.a.b`) work unchanged. The
+                // outer loop already wrote the leading ", " (when i>0), so the
+                // first leaf emits no separator.
+                const base_loc = getDecVal(&decorations, iv.id, .location) orelse 0;
+                var loc: u32 = base_loc;
+                var first_leaf = true;
+                try emitFlattenedIoParams(&module, &names, actual_type, var_name, &loc, is_fragment, w, arena, &first_leaf);
+                var ctor_buf = std.ArrayList(u8).initCapacity(arena, 64) catch return error.OutOfMemory;
+                try buildIoReconExpr(&module, &names, actual_type, var_name, &ctor_buf, arena);
+                // `names` values are freed with `alloc` at cleanup, so the renamed
+                // value MUST be alloc-allocated (not arena). Free the displaced old.
+                const recon_name = try std.fmt.allocPrint(alloc, "io_{s}", .{var_name});
+                try io_recons.append(arena, .{ .recon_name = recon_name, .type_name = type_name, .ctor = try ctor_buf.toOwnedSlice(arena) });
+                if (try names.fetchPut(iv.id, recon_name)) |old| alloc.free(old.value); // body now reads the local
+            } else {
+                // Interface-block input: a by-value struct parameter. Its MEMBERS
+                // carry @location (emitted in the struct decl above); the parameter
+                // itself must NOT have @location.
+                try w.print("{s}: {s}", .{ var_name, type_name });
+            }
         } else {
             const loc = getDecVal(&decorations, iv.id, .location) orelse i;
             // Fragment INPUTS that are integer-typed (or GLSL `flat`-qualified)
@@ -3543,6 +3660,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // BEFORE any body statement reads them (var<private> is zero-initialised).
     for (input_copies.items) |c| {
         try w.print("    {s} = {s};\n", .{ c.global, c.param });
+    }
+    // #170 (H): reassemble each nested stage-IO block from its flattened leaf
+    // params into a local of the original (nested) struct type, BEFORE any body
+    // statement reads it. The block var was renamed to this local, so the body's
+    // `blk.a.b` member accesses resolve against the real nested struct.
+    for (io_recons.items) |r| {
+        try w.print("    var {s}: {s} = {s};\n", .{ r.recon_name, r.type_name, r.ctor });
     }
 
     // Pre-scan: detect simple output variable pattern (single store before return)
