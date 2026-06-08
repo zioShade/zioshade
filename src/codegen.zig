@@ -723,7 +723,12 @@ const Codegen = struct {
         var has_storage_image_ms = false;
         for (self.module.globals) |global| {
             var check_ty = global.ty;
-            if (check_ty == .array) check_ty = check_ty.array.base.*;
+            // Unwrap EVERY array level (arrays-of-arrays of samplers are legal):
+            // the inner opaque type drives the required capability, and the
+            // OpTypeImage is emitted regardless of array nesting depth. A
+            // single-level unwrap left nested sampler arrays (e.g.
+            // `sampler1D s[2][2]`) without their Sampled1D capability.
+            while (check_ty == .array) check_ty = check_ty.array.base.*;
             switch (check_ty) {
                 .sampler1d, .sampler1d_array, .sampler1d_shadow, .isampler1d, .isampler1d_array, .usampler1d, .usampler1d_array => has_sampler1d = true,
                 .image1d, .iimage1d, .uimage1d => has_image1d = true,
