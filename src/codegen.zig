@@ -693,6 +693,7 @@ const Codegen = struct {
         // Check for specific image-related capabilities based on actual usage
         var has_image_query = false;
         var has_sampler1d = false;
+        var has_image1d = false;
         var has_sampler_buffer = false;
         var has_derivative_control = false;
         var has_cube_array = false;
@@ -724,7 +725,8 @@ const Codegen = struct {
             var check_ty = global.ty;
             if (check_ty == .array) check_ty = check_ty.array.base.*;
             switch (check_ty) {
-                .sampler1d, .isampler1d, .usampler1d, .image1d, .iimage1d, .uimage1d => has_sampler1d = true,
+                .sampler1d, .sampler1d_array, .sampler1d_shadow, .isampler1d, .isampler1d_array, .usampler1d, .usampler1d_array => has_sampler1d = true,
+                .image1d, .iimage1d, .uimage1d => has_image1d = true,
                 .sampler_buffer, .isampler_buffer, .usampler_buffer, .image_buffer, .iimage_buffer, .uimage_buffer => has_sampler_buffer = true,
                 .sampler2d_ms_array, .isampler2d_ms_array, .usampler2d_ms_array, .image2d_ms_array => {
                     has_sampler2d_ms_array = true;
@@ -742,6 +744,12 @@ const Codegen = struct {
             try self.emitWord(@intFromEnum(spirv.Capability.image_query));
         }
         if (has_sampler1d) {
+            // Sampled 1D images require the Sampled1D capability (matches glslang).
+            try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
+            try self.emitWord(@intFromEnum(spirv.Capability.sampled_1d));
+        }
+        if (has_image1d) {
+            // Storage 1D images require the Image1D capability.
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.image_1d));
         }
@@ -1792,6 +1800,23 @@ const Codegen = struct {
                 try self.emitTypeWord(1); // Sampled = 1 (yes)
                 try self.emitTypeWord(0); // ImageFormat = Unknown
                 self.sampled_image_1d_inner_id = image_id;
+                try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
+                try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
+                try self.emitTypeWord(id);
+                try self.emitTypeWord(image_id);
+            },
+            .sampler1d_array => {
+                const float_id = try self.ensureType(.float);
+                const image_id = self.allocId();
+                try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
+                try self.emitTypeWord(image_id);
+                try self.emitTypeWord(float_id);
+                try self.emitTypeWord(0); // Dim = 1D
+                try self.emitTypeWord(0); // Not depth
+                try self.emitTypeWord(1); // Arrayed = 1
+                try self.emitTypeWord(0); // Not multisampled
+                try self.emitTypeWord(1); // Sampled = 1 (yes)
+                try self.emitTypeWord(0); // ImageFormat = Unknown
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
