@@ -2802,3 +2802,36 @@ test "T19.8: texelFetch(sampler2D) stays unchanged (no array-layer split)" {
     try assertNotContains(msl, "uint(rint(");
     try assertNotContains(msl, ".xy), uint(");
 }
+
+test "T19.9: int/uint sampler component type (#203) — texture2d<int>/<uint>" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform isampler2D i2;
+        \\layout(binding=1) uniform usampler2D u2;
+        \\layout(binding=2) uniform sampler2D  f2;
+        \\layout(location=0) in vec2 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(texture(i2,c)) + vec4(texture(u2,c)) + texture(f2,c); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "texture2d<int>");
+    try assertContains(msl, "texture2d<uint>");
+    try assertContains(msl, "texture2d<float>"); // float sampler unchanged
+}
+
+test "T19.10: int sampler array + depth component types (#203)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform isampler1DArray i1a;
+        \\layout(binding=1) uniform sampler2DShadow sh;
+        \\layout(location=0) in vec2 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(texelFetch(i1a, ivec2(c), 0)) + vec4(texture(sh, vec3(c,0.5))); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "texture1d_array<int>"); // int array sampler
+    try assertContains(msl, "depth2d<float>");        // depth always float
+    try assertNotContains(msl, "depth2d<int>");
+}
