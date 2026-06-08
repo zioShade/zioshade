@@ -2578,3 +2578,68 @@ test "wgsl: separate comparison sampler is an honest error (unrepresentable)" {
     ;
     try std.testing.expectError(error.UnsupportedOp, compileToWgsl(src));
 }
+
+// #170 (A3): a GLSL `in Inputs { … } vin;` stage-input interface block must emit
+// the struct EXACTLY ONCE — as the @location-decorated entry-parameter struct.
+// Previously the whole-struct `OpLoad %Inputs %vin` in the body also triggered a
+// plain (un-decorated) `struct Inputs { … }` forward-decl, so glslpp emitted the
+// type twice and naga rejected the WGSL with "redefinition of `Inputs`".
+test "wgsl: stage-input interface block struct is emitted once (no redefinition)" {
+    const src: [:0]const u8 =
+        \\#version 310 es
+        \\precision highp float;
+        \\struct Inputs { vec4 a; vec2 b; };
+        \\layout(location = 0) in Inputs vin;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    Inputs v0 = vin;
+        \\    FragColor = v0.a + v0.b.xxyy + vin.a;
+        \\}
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    // The struct name must appear in exactly one `struct Inputs {` definition.
+    var count: usize = 0;
+    var idx: usize = 0;
+    const needle = "struct Inputs {";
+    while (std.mem.indexOfPos(u8, wgsl, idx, needle)) |p| {
+        count += 1;
+        idx = p + needle.len;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try nagaValidateOrSkip(wgsl, "stage-input interface block (no redefinition)");
+}
+
+// #170 (A3) DUAL-USE GUARD: a struct used BOTH as a stage-input interface block
+// AND as a UBO data member must NOT be de-duplicated by the redefinition fix —
+// suppressing the plain decl would leave the uniform referencing a struct whose
+// only definition carries @location, which the naga CLI leniently accepts but
+// Tint/Dawn reject (a silent-wrong). The fix detects the dual use and keeps the
+// prior LOUD behavior (both decls emitted → naga "redefinition" reject) rather
+// than emit silently-wrong @location-on-uniform. A full fix (renamed IO struct)
+// is deferred. This test pins that the guard fires: the plain data decl survives
+// alongside the @location IO decl (two `struct Inputs {`), so glslpp never emits
+// the lenient-but-wrong single-struct form.
+test "wgsl: struct used as both interface block and UBO member is not silently merged" {
+    const src: [:0]const u8 =
+        \\#version 310 es
+        \\precision highp float;
+        \\struct Inputs { vec4 a; vec2 b; };
+        \\layout(location = 0) in Inputs vin;
+        \\layout(binding = 0) uniform UBO { Inputs u; } ubo;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = vin.a + ubo.u.a + vin.b.xxyy; }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    var count: usize = 0;
+    var idx: usize = 0;
+    const needle = "struct Inputs {";
+    while (std.mem.indexOfPos(u8, wgsl, idx, needle)) |p| {
+        count += 1;
+        idx = p + needle.len;
+    }
+    // Dual-use is NOT de-duplicated (the plain data decl is preserved): the
+    // @location version is not allowed to stand in for the uniform's data type.
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
