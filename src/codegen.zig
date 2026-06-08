@@ -3352,8 +3352,18 @@ const Codegen = struct {
             if ((global.qualifier.is_pervertex_ext or global.qualifier.is_pervertex_nv) and global.storage_class == .input) {
                 try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.per_vertex_nv));
             }
-            // Emit NonWritable/NonReadable/Coherent/Restrict for buffer and image variables
-            if (global.storage_class == .storage_buffer) {
+            // Emit NonWritable/NonReadable for readonly/writeonly storage buffers
+            // and storage images. glslang emits NonWritable on a `readonly imageN`
+            // and NonReadable on a `writeonly imageN`, which the WGSL backend reads
+            // to pick the storage-texture access mode (read/write) instead of the
+            // less-portable read_write default. The image case is gated on
+            // isStorageImage() — NOT the whole uniform_constant class — because
+            // spirv-val rejects these decorations on a sampled image / combined
+            // sampler, and glslpp (unlike glslang) does not reject a bogus
+            // `readonly sampler2D`; decorating it would emit invalid SPIR-V.
+            if (global.storage_class == .storage_buffer or
+                (global.storage_class == .uniform_constant and global.ty.isStorageImage()))
+            {
                 if (global.qualifier.is_readonly) {
                     try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.non_writable));
                 }

@@ -122,6 +122,25 @@ fn compileFileToWgsl(path: []const u8) ![]const u8 {
     return compileToWgsl(src);
 }
 
+/// True if the SPIR-V module carries any `OpDecorate <target> <decoration>`
+/// (opcode 71) with the given decoration value. Word layout: [0]=magic,
+/// [1]=version, [2]=generator, [3]=bound, [4]=schema, then instructions; each
+/// instruction's first word is (wordCount << 16) | opcode and OpDecorate's
+/// operands are [target, decoration, ...]. `compileToSPIRV` yields []const u32,
+/// so words are indexed directly.
+fn spirvHasDecoration(words: []const u32, decoration: u32) bool {
+    if (words.len < 5) return false;
+    var i: usize = 5;
+    while (i < words.len) {
+        const wc = words[i] >> 16;
+        const op = words[i] & 0xFFFF;
+        if (wc == 0) break;
+        if (op == 71 and i + 2 < words.len and words[i + 2] == decoration) return true;
+        i += wc;
+    }
+    return false;
+}
+
 fn runWgslTest(test_case: ShaderTest) !void {
     const spirv = compileToSpirv(test_case.name, test_case.source) catch |err| {
         std.debug.print("FAIL [{s}]: glslang failed: {}\n", .{ test_case.name, err });
@@ -2740,6 +2759,103 @@ test "wgsl: storage image texel format follows r32f / rgba32f / r32ui" {
     defer alloc.free(wu);
     try assertContains(wu, "rgba32uint");
     try nagaValidateOrSkip(wu, "storage image rgba32ui format");
+}
+
+// #217 review [MINOR]: storage textures were always emitted with access mode
+// `read_write`, ignoring the GLSL `readonly` / `writeonly` qualifiers (which
+// lower to SPIR-V NonWritable / NonReadable decorations on the image variable).
+// A `readonly image2D` must emit `…, read>` and a `writeonly image2D` must emit
+// `…, write>` — `write` is core-WGSL while `read`/`read_write` need the
+// readonly_and_readwrite_storage_textures language feature, so emitting
+// read_write for a writeonly image is needlessly less portable (Dawn/wgpu).
+test "wgsl: readonly storage image emits read access mode (NonWritable)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(r32i, binding = 0) uniform readonly iimage2D uImage;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { ivec4 v = imageLoad(uImage, ivec2(10)); o = vec4(v); }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "texture_storage_2d<r32sint, read>");
+    try assertNotContains(wgsl, "read_write");
+    try nagaValidateOrSkip(wgsl, "readonly storage image read access");
+}
+
+// #217 review [MINOR]: a `writeonly` image lowers to NonReadable and must emit
+// the `write` access mode — the only core-WGSL storage access.
+test "wgsl: writeonly storage image emits write access mode (NonReadable)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(rgba8, binding = 0) uniform writeonly image2D uImage;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { imageStore(uImage, ivec2(3), vec4(1.0)); o = vec4(0.0); }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "texture_storage_2d<rgba8unorm, write>");
+    try assertNotContains(wgsl, "read_write");
+    try nagaValidateOrSkip(wgsl, "writeonly storage image write access");
+}
+
+// #217 review [MAJOR]: NonWritable/NonReadable are valid (per spirv-val) only on
+// storage images and buffers. glslpp — unlike glslang, which rejects
+// `readonly sampler2D` — does NOT reject memory qualifiers on a combined
+// sampler, so the frontend gate that emits these decorations must fire only for
+// storage IMAGES, never for any uniform_constant resource. A too-broad gate
+// decorated the sampler variable with NonWritable, which spirv-val rejects
+// ("Target of NonWritable decoration is invalid: must point to a storage
+// image…"). The bogus qualifier must be silently ignored (as it was before).
+test "wgsl: readonly/writeonly on a non-storage-image sampler emits no NonWritable/NonReadable" {
+    const ro: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0) uniform readonly sampler2D uTex;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texture(uTex, vec2(0.5)); }
+    ;
+    const ro_spv = try glslpp.compileToSPIRV(alloc, ro, .{ .stage = .fragment });
+    defer alloc.free(ro_spv);
+    try std.testing.expect(!spirvHasDecoration(ro_spv, 24)); // NonWritable
+    try std.testing.expect(!spirvHasDecoration(ro_spv, 25)); // NonReadable
+
+    const wo: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0) uniform writeonly sampler2D uTex;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texture(uTex, vec2(0.5)); }
+    ;
+    const wo_spv = try glslpp.compileToSPIRV(alloc, wo, .{ .stage = .fragment });
+    defer alloc.free(wo_spv);
+    try std.testing.expect(!spirvHasDecoration(wo_spv, 24)); // NonWritable
+    try std.testing.expect(!spirvHasDecoration(wo_spv, 25)); // NonReadable
+}
+
+// #217 review: conversely, a real `readonly` / `writeonly` storage image MUST
+// carry NonWritable / NonReadable in the emitted SPIR-V — this is the decoration
+// the WGSL backend reads to pick the read / write access mode. Asserts the
+// frontend half of the fix directly at the SPIR-V level.
+test "wgsl: readonly/writeonly storage image emits NonWritable/NonReadable in SPIR-V" {
+    const ro: [:0]const u8 =
+        \\#version 450
+        \\layout(r32f, binding = 0) uniform readonly image2D uImage;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = imageLoad(uImage, ivec2(0)); }
+    ;
+    const ro_spv = try glslpp.compileToSPIRV(alloc, ro, .{ .stage = .fragment });
+    defer alloc.free(ro_spv);
+    try std.testing.expect(spirvHasDecoration(ro_spv, 24)); // NonWritable present
+    try std.testing.expect(!spirvHasDecoration(ro_spv, 25)); // but not NonReadable
+
+    const wo: [:0]const u8 =
+        \\#version 450
+        \\layout(rgba8, binding = 0) uniform writeonly image2D uImage;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { imageStore(uImage, ivec2(0), vec4(1.0)); o = vec4(0.0); }
+    ;
+    const wo_spv = try glslpp.compileToSPIRV(alloc, wo, .{ .stage = .fragment });
+    defer alloc.free(wo_spv);
+    try std.testing.expect(spirvHasDecoration(wo_spv, 25)); // NonReadable present
+    try std.testing.expect(!spirvHasDecoration(wo_spv, 24)); // but not NonWritable
 }
 
 // #170 (C): textureSize on an ARRAYED sampler must combine the spatial dims
