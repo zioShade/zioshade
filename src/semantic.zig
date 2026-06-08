@@ -5409,6 +5409,7 @@ const Analyzer = struct {
                             .isampler_cube, .usampler_cube,
                             .isampler2d_ms, .usampler2d_ms,
                             .isampler2d_ms_array, .usampler2d_ms_array,
+                            .isampler1d_array, .usampler1d_array,
                             .image2d, .iimage2d, .uimage2d, .image2d_ms => .ivec2,
                             .sampler2d_array, .sampler2d_array_shadow, .sampler3d,
                             .isampler3d, .usampler3d,
@@ -5416,7 +5417,6 @@ const Analyzer = struct {
                             .sampler2d_ms_array,
                             .isampler2d_array, .usampler2d_array,
                             .isampler_cube_array, .usampler_cube_array,
-                            .isampler1d_array, .usampler1d_array,
                             .image2d_ms_array => .ivec3,
                             else => .ivec2,
                         } else .ivec2;
@@ -5908,7 +5908,7 @@ const Analyzer = struct {
                             const fetch_args = arg_tids.items;
                             // For texelFetchOffset with only 3 args (rect sampler, no lod), insert lod=0
                             const needs_dummy_lod = std.mem.eql(u8, node.data.name, "texelFetchOffset") and fetch_args.len == 3;
-                            if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler3d or fetch_args[0].ty == .sampler2d_array or fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array or fetch_args[0].ty == .sampler_cube or fetch_args[0].ty == .sampler_buffer or fetch_args[0].ty == .sampler1d or fetch_args[0].ty == .isampler2d or fetch_args[0].ty == .usampler2d or fetch_args[0].ty == .isampler3d or fetch_args[0].ty == .usampler3d or fetch_args[0].ty == .isampler_cube or fetch_args[0].ty == .usampler_cube or fetch_args[0].ty == .isampler2d_array or fetch_args[0].ty == .usampler2d_array or fetch_args[0].ty == .isampler2d_ms or fetch_args[0].ty == .usampler2d_ms or fetch_args[0].ty == .isampler2d_ms_array or fetch_args[0].ty == .usampler2d_ms_array or fetch_args[0].ty == .isampler_buffer or fetch_args[0].ty == .usampler_buffer or fetch_args[0].ty == .isampler1d or fetch_args[0].ty == .usampler1d)) {
+                            if (fetch_args.len > 0 and (fetch_args[0].ty == .sampler2d or fetch_args[0].ty == .sampler3d or fetch_args[0].ty == .sampler2d_array or fetch_args[0].ty == .sampler2d_ms or fetch_args[0].ty == .sampler2d_ms_array or fetch_args[0].ty == .sampler_cube or fetch_args[0].ty == .sampler_buffer or fetch_args[0].ty == .sampler1d or fetch_args[0].ty == .isampler2d or fetch_args[0].ty == .usampler2d or fetch_args[0].ty == .isampler3d or fetch_args[0].ty == .usampler3d or fetch_args[0].ty == .isampler_cube or fetch_args[0].ty == .usampler_cube or fetch_args[0].ty == .isampler2d_array or fetch_args[0].ty == .usampler2d_array or fetch_args[0].ty == .isampler2d_ms or fetch_args[0].ty == .usampler2d_ms or fetch_args[0].ty == .isampler2d_ms_array or fetch_args[0].ty == .usampler2d_ms_array or fetch_args[0].ty == .isampler_buffer or fetch_args[0].ty == .usampler_buffer or fetch_args[0].ty == .isampler1d or fetch_args[0].ty == .usampler1d or fetch_args[0].ty == .sampler1d_array or fetch_args[0].ty == .isampler1d_array or fetch_args[0].ty == .usampler1d_array)) {
                                 const extract_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                                 extract_operands[0] = .{ .id = fetch_args[0].id };
                                 const extracted_id = try self.emitPureOp(.extract_image, extract_operands, fetch_args[0].ty);
