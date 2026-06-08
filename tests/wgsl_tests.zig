@@ -2643,3 +2643,43 @@ test "wgsl: struct used as both interface block and UBO member is not silently m
     // @location version is not allowed to stand in for the uniform's data type.
     try std.testing.expectEqual(@as(usize, 2), count);
 }
+
+// #170 (B): GLSL `textureQueryLevels` returns a SIGNED `int`, but WGSL
+// `textureNumLevels` returns `u32`. glslpp annotates the `let` with the GLSL
+// (signed) result type, so emitting the bare builtin left `let v: i32 =
+// textureNumLevels(t);` — naga rejects ("type of `v` is expected to be `i32`,
+// but got `u32`"). The result must be wrapped `i32(textureNumLevels(t))`, just
+// like the ImageQuerySize (textureDimensions) path already does.
+test "wgsl: textureQueryLevels result is converted to the signed GLSL type" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D uSampler;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    int lv = textureQueryLevels(uSampler);
+        \\    o = vec4(float(lv));
+        \\}
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "i32(textureNumLevels(");
+    try nagaValidateOrSkip(wgsl, "textureQueryLevels signed result");
+}
+
+// #170 (B): GLSL `textureSamples` returns a SIGNED `int`; WGSL
+// `textureNumSamples` returns `u32`. Same signed-conversion requirement.
+test "wgsl: textureSamples result is converted to the signed GLSL type" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DMS uMS;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    int ns = textureSamples(uMS);
+        \\    o = vec4(float(ns));
+        \\}
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "i32(textureNumSamples(");
+    try nagaValidateOrSkip(wgsl, "textureSamples signed result");
+}
