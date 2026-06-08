@@ -21,7 +21,12 @@ const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32, descr
 /// array texture (sampler2DArray, samplerCubeArray, …). Both feed mslTextureType
 /// to build the correct `textureNd[_array]` / `depthNd[_array]` spelling, and
 /// the sample-call layer split at the OpImageSample sites.
-const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0, is_depth: bool = false, dim: u32 = 1, arrayed: bool = false, msl_type: []const u8 = "texture2d<float>" };
+// `msl_type` is the full prebuilt MSL texture spelling incl. the `<component>`
+// (e.g. `texture2d<int>`, `depthcube<float>`), populated in collectResources by
+// `buildMslTextureType` and read at the emit sites. It is intentionally NOT
+// defaulted: a construction site that forgets it should be a compile error, not
+// a silent `texture2d<float>` for an int/cube/array sampler (#203).
+const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0, is_depth: bool = false, dim: u32 = 1, arrayed: bool = false, msl_type: []const u8 };
 const MemberKey = struct { struct_id: u32, member_index: u32 };
 /// A stage input that becomes a `main0_in` field and is referenced in the body
 /// as `in.<name>`. For fragment the field is `T name [[user(locnN)]]`; for
