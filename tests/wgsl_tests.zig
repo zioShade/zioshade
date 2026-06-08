@@ -2736,6 +2736,43 @@ test "wgsl: storage image texel format follows r32f / rgba32f / r32ui" {
     try nagaValidateOrSkip(wu, "storage image rgba32ui format");
 }
 
+// #217 review [MINOR]: storage textures were always emitted with access mode
+// `read_write`, ignoring the GLSL `readonly` / `writeonly` qualifiers (which
+// lower to SPIR-V NonWritable / NonReadable decorations on the image variable).
+// A `readonly image2D` must emit `…, read>` and a `writeonly image2D` must emit
+// `…, write>` — `write` is core-WGSL while `read`/`read_write` need the
+// readonly_and_readwrite_storage_textures language feature, so emitting
+// read_write for a writeonly image is needlessly less portable (Dawn/wgpu).
+test "wgsl: readonly storage image emits read access mode (NonWritable)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(r32i, binding = 0) uniform readonly iimage2D uImage;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { ivec4 v = imageLoad(uImage, ivec2(10)); o = vec4(v); }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "texture_storage_2d<r32sint, read>");
+    try assertNotContains(wgsl, "read_write");
+    try nagaValidateOrSkip(wgsl, "readonly storage image read access");
+}
+
+// #217 review [MINOR]: a `writeonly` image lowers to NonReadable and must emit
+// the `write` access mode — the only core-WGSL storage access.
+test "wgsl: writeonly storage image emits write access mode (NonReadable)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(rgba8, binding = 0) uniform writeonly image2D uImage;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { imageStore(uImage, ivec2(3), vec4(1.0)); o = vec4(0.0); }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "texture_storage_2d<rgba8unorm, write>");
+    try assertNotContains(wgsl, "read_write");
+    try nagaValidateOrSkip(wgsl, "writeonly storage image write access");
+}
+
 // #170 (C): textureSize on an ARRAYED sampler must combine the spatial dims
 // (WGSL textureDimensions — vec2 for 2D/cube) with the layer count (WGSL
 // textureNumLayers), because GLSL textureSize(sampler2DArray) returns ivec3

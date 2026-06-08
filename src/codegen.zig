@@ -3352,8 +3352,14 @@ const Codegen = struct {
             if ((global.qualifier.is_pervertex_ext or global.qualifier.is_pervertex_nv) and global.storage_class == .input) {
                 try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.per_vertex_nv));
             }
-            // Emit NonWritable/NonReadable/Coherent/Restrict for buffer and image variables
-            if (global.storage_class == .storage_buffer) {
+            // Emit NonWritable/NonReadable/Coherent/Restrict for buffer and image variables.
+            // readonly/writeonly are memory qualifiers valid only on images
+            // (uniform_constant) and buffers (storage_buffer), so gating on the
+            // qualifier flag covers both: glslang emits NonWritable on a
+            // `readonly imageN` and NonReadable on a `writeonly imageN`, which the
+            // WGSL backend reads to pick the storage-texture access mode
+            // (read/write) instead of the less-portable read_write default.
+            if (global.storage_class == .storage_buffer or global.storage_class == .uniform_constant) {
                 if (global.qualifier.is_readonly) {
                     try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.non_writable));
                 }

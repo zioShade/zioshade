@@ -1104,45 +1104,16 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
                     else => if (arrayed) "texture_depth_2d_array" else "texture_depth_2d",
                 };
             } else if (is_storage) {
-                const access_mode: []const u8 = switch (access_qualifier) {
-                    1 => "write",
-                    2 => "read_write",
-                    else => "write",
-                };
-                // The WGSL texel format comes from the SPIR-V ImageFormat operand
-                // (word 8), NOT a hardcoded rgba8unorm — an `r32i` image must be
-                // `texture_storage_2d<r32sint, …>` so its textureLoad returns
-                // vec4<i32> (else naga rejects the typed result). For an Unknown
-                // or non-WGSL-storage format, fall back to a COMPONENT-correct
-                // r32 format keyed off the image's sampled type (sint/uint/float)
-                // so the load's component type still matches its annotation; the
-                // channel count may be approximate, but it is never silently a
-                // float format for an integer image (the silent-wrong this fixes).
-                const img_fmt = if (inst.words.len > 8) inst.words[8] else 0;
-                const texel: []const u8 = spirvImageFormatToWgsl(img_fmt) orelse fallback: {
-                    const sti = getDef(module, sampled_type_id) orelse break :fallback "rgba8unorm";
-                    if (sti.op == .TypeInt) {
-                        break :fallback if (sti.words.len > 3 and sti.words[3] == 0) "r32uint" else "r32sint";
-                    }
-                    break :fallback "rgba8unorm";
-                };
-                // WGSL storage textures: texture_storage_1d / _2d / _2d_array /
-                // _3d. There is NO storage cube, NO 1d-array, NO multisampled
-                // storage — fail loud on those rather than emit an invalid type.
-                const storage_dim: []const u8 = switch (dim) {
-                    0 => if (arrayed_nondepth) {
-                        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no 1D-array storage texture (image1DArray)", .{}) catch null;
-                        return error.UnsupportedOp;
-                    } else "texture_storage_1d",
-                    1 => if (arrayed_nondepth) "texture_storage_2d_array" else "texture_storage_2d",
-                    2 => "texture_storage_3d",
-                    3 => {
-                        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no storage cube texture (imageCube)", .{}) catch null;
-                        return error.UnsupportedOp;
-                    },
-                    else => "texture_storage_2d",
-                };
-                break :blk try std.fmt.allocPrint(alloc, "{s}<{s}, {s}>", .{ storage_dim, texel, access_mode });
+                // The access mode normally tracks the GLSL readonly/writeonly
+                // qualifier, which lives in the NonWritable/NonReadable
+                // decorations on the *variable* — invisible from the type id
+                // alone. The binding-emission site (which knows the variable)
+                // calls wgslStorageTextureType directly with the resolved mode;
+                // reaching wgslType here (e.g. a storage image nested in some
+                // other type, with no variable context) falls back to
+                // `read_write`, matching the Sampled=2 operand. See
+                // wgslStorageTextureType for the texel-format and dim logic.
+                break :blk try wgslStorageTextureType(module, type_id, "read_write", alloc);
             } else if (is_ms) {
                 // WGSL spells the multisampled 2D texture `texture_multisampled_2d<T>`
                 // (NOT `texture_2d_multisampled<T>`), and has NO multisampled 3D/cube
@@ -1170,6 +1141,61 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
         .TypeSampledImage => if (inst.words.len > 2) try wgslType(module, inst.words[2], names, alloc) else "texture_2d<f32>",
         else => "vec4f",
     };
+}
+
+/// Build the WGSL storage-texture type for an OpTypeImage, with the access mode
+/// supplied by the caller (`read` / `write` / `read_write`). The access mode
+/// cannot be inferred from the image type alone — GLSL `readonly` / `writeonly`
+/// lower to NonWritable / NonReadable decorations on the *variable*, so the
+/// binding-emission site (which knows the variable) resolves it via
+/// `storageAccessMode` and passes it here. `write` is the only core-WGSL storage
+/// access; `read` / `read_write` require the readonly_and_readwrite_storage_textures
+/// language feature, so honoring the qualifier keeps the output as portable as
+/// the source allows.
+fn wgslStorageTextureType(module: *const ParsedModule, image_type_id: u32, access_mode: []const u8, alloc: std.mem.Allocator) ![]const u8 {
+    const inst = getDef(module, image_type_id) orelse return error.UnsupportedOp;
+    const dim = if (inst.words.len > 3) inst.words[3] else 1;
+    const sampled_type_id = inst.words[2];
+    const arrayed_nondepth = inst.words.len > 5 and inst.words[5] == 1;
+    // Dim=Buffer (imageBuffer, Dim=5) has no WGSL texel-buffer equivalent —
+    // fail loud rather than emit an invalid type (mirrors the wgslType guard).
+    if (dim == 5) {
+        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no texel buffer / texture_buffer type", .{}) catch null;
+        return error.UnsupportedOp;
+    }
+    // The WGSL texel format comes from the SPIR-V ImageFormat operand (word 8),
+    // NOT a hardcoded rgba8unorm — an `r32i` image must be
+    // `texture_storage_2d<r32sint, …>` so its textureLoad returns vec4<i32>
+    // (else naga rejects the typed result). For an Unknown or non-WGSL-storage
+    // format, fall back to a COMPONENT-correct r32 format keyed off the image's
+    // sampled type (sint/uint/float) so the load's component type still matches
+    // its annotation; the channel count may be approximate, but it is never
+    // silently a float format for an integer image (the silent-wrong this fixes).
+    const img_fmt = if (inst.words.len > 8) inst.words[8] else 0;
+    const texel: []const u8 = spirvImageFormatToWgsl(img_fmt) orelse fallback: {
+        const sti = getDef(module, sampled_type_id) orelse break :fallback "rgba8unorm";
+        if (sti.op == .TypeInt) {
+            break :fallback if (sti.words.len > 3 and sti.words[3] == 0) "r32uint" else "r32sint";
+        }
+        break :fallback "rgba8unorm";
+    };
+    // WGSL storage textures: texture_storage_1d / _2d / _2d_array / _3d. There
+    // is NO storage cube, NO 1d-array, NO multisampled storage — fail loud on
+    // those rather than emit an invalid type.
+    const storage_dim: []const u8 = switch (dim) {
+        0 => if (arrayed_nondepth) {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no 1D-array storage texture (image1DArray)", .{}) catch null;
+            return error.UnsupportedOp;
+        } else "texture_storage_1d",
+        1 => if (arrayed_nondepth) "texture_storage_2d_array" else "texture_storage_2d",
+        2 => "texture_storage_3d",
+        3 => {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no storage cube texture (imageCube)", .{}) catch null;
+            return error.UnsupportedOp;
+        },
+        else => "texture_storage_2d",
+    };
+    return std.fmt.allocPrint(alloc, "{s}<{s}, {s}>", .{ storage_dim, texel, access_mode });
 }
 
 /// Whether a WGSL type name (as produced by `wgslType`) is an integer scalar or
@@ -1208,6 +1234,20 @@ fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id:
         if (e.decoration == dec) return true;
     }
     return false;
+}
+
+/// WGSL storage-texture access mode for an image *variable*, derived from the
+/// NonWritable (24) / NonReadable (25) decorations the GLSL `readonly` /
+/// `writeonly` qualifiers lower to: `readonly` → NonWritable → "read",
+/// `writeonly` → NonReadable → "write", neither → "read_write". A degenerate
+/// readonly+writeonly image (both decorations) also maps to "read_write" — WGSL
+/// has no no-access mode, and read_write is the safe superset.
+fn storageAccessMode(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), var_id: u32) []const u8 {
+    const non_writable = hasDec(decs, var_id, .non_writable);
+    const non_readable = hasDec(decs, var_id, .non_readable);
+    if (non_writable and !non_readable) return "read";
+    if (non_readable and !non_writable) return "write";
+    return "read_write";
 }
 
 fn collectDecorations(alloc: std.mem.Allocator, module: *const ParsedModule, decorations: *std.AutoHashMap(u32, std.ArrayList(DecorationEntry))) !void {
@@ -2304,7 +2344,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
 
     // Collect cbuffers and textures
     var cbuffers = std.ArrayList(struct { name: []const u8, type_id: u32, binding: u32, is_ssbo: bool, result_id: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
-    var textures = std.ArrayList(struct { name: []const u8, binding: u32, image_type_id: u32, is_storage: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    // `access` is the WGSL storage-texture access mode (read / write /
+    // read_write) resolved from the variable's NonWritable/NonReadable
+    // decorations; it is only consulted when `is_storage` is true.
+    var textures = std.ArrayList(struct { name: []const u8, binding: u32, image_type_id: u32, is_storage: bool, access: []const u8 }).initCapacity(arena, 4) catch return error.OutOfMemory;
     // Standalone Vulkan separate samplers (GLSL `uniform sampler uS;` — a bare
     // OpTypeSampler in UniformConstant, combined with a separate texture at each
     // `sampler2D(tex, samp)` call site). These have no implicit texture partner,
@@ -2360,11 +2403,15 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 switch (pointee_inst.op) {
                     .TypeSampledImage => {
                         const img_type_id = if (pointee_inst.words.len > 2) pointee_inst.words[2] else pointee_type;
-                        try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = img_type_id, .is_storage = false });
+                        try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = img_type_id, .is_storage = false, .access = "read_write" });
                     },
                     .TypeImage => {
                         if (pointee_inst.words.len > 7 and pointee_inst.words[7] == 2) is_storage = true;
-                        try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = pointee_type, .is_storage = is_storage });
+                        // readonly/writeonly come from NonWritable/NonReadable on
+                        // the VARIABLE (result_id), not the image type, so the
+                        // access mode is resolved here where the variable is known.
+                        const access = storageAccessMode(&decorations, result_id);
+                        try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = pointee_type, .is_storage = is_storage, .access = access });
                     },
                     .TypeSampler => {
                         try samplers.append(arena, .{ .name = name, .binding = binding * 2 + set });
@@ -2765,7 +2812,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         // form (textureGatherCompare) is not yet wired for the array_index arg,
         // so it stays an honest error in its own handler rather than emitting
         // wrong-arity WGSL.
-        const tex_type = try wgslType(&module, tex.image_type_id, &names, arena);
+        // Storage textures route through wgslStorageTextureType so the access
+        // mode reflects the GLSL readonly/writeonly qualifier (resolved into
+        // tex.access from the variable's decorations); the plain wgslType path
+        // has no variable context and would emit read_write unconditionally.
+        const tex_type = if (tex.is_storage)
+            try wgslStorageTextureType(&module, tex.image_type_id, tex.access, arena)
+        else
+            try wgslType(&module, tex.image_type_id, &names, arena);
         if (tex.is_storage) {
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, binding, tex.name, tex_type });
         } else {
