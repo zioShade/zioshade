@@ -306,6 +306,44 @@ fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
     return common.getTypeOf(module, id);
 }
 
+/// Resolve a stage-input variable to the struct type id of its GLSL interface
+/// block (`in Block { … } inst;`), or null if it is a built-in or its
+/// (one-TypePointer-unwrapped) pointee is not a TypeStruct. A struct-typed stage
+/// input is ALWAYS an interface block here — plain non-block stage I/O is
+/// scalar/vector. Single source of truth shared by the redefinition pre-seed and
+/// the IO-block emit path near `fn main`, so the two never drift (a divergence
+/// would silently drop or duplicate the struct).
+fn ioBlockStructType(module: *const ParsedModule, type_id: u32, builtin: ?spirv.BuiltIn) ?u32 {
+    if (builtin != null) return null;
+    var sty = type_id;
+    if (getDef(module, type_id)) |pi| {
+        if (pi.op == .TypePointer and pi.words.len > 3) sty = pi.words[3];
+    }
+    const sdef = getDef(module, sty) orelse return null;
+    if (sdef.op != .TypeStruct) return null;
+    return sty;
+}
+
+/// True if `target` is reachable from `root_type_id` by descending through
+/// pointer / array / matrix / vector wrappers and struct members. Used to detect
+/// a struct that is BOTH a stage-input interface block AND a data (UBO/SSBO)
+/// member — see the redefinition pre-seed. Depth-capped against malformed cycles.
+fn typeReachesStruct(module: *const ParsedModule, root_type_id: u32, target: u32, depth: u32) bool {
+    if (depth > 16) return false;
+    if (root_type_id == target) return true;
+    const inst = getDef(module, root_type_id) orelse return false;
+    switch (inst.op) {
+        .TypePointer => if (inst.words.len > 3) return typeReachesStruct(module, inst.words[3], target, depth + 1),
+        .TypeArray, .TypeRuntimeArray, .TypeMatrix, .TypeVector => if (inst.words.len > 2)
+            return typeReachesStruct(module, inst.words[2], target, depth + 1),
+        .TypeStruct => for (inst.words[2..]) |mt| {
+            if (typeReachesStruct(module, mt, target, depth + 1)) return true;
+        },
+        else => {},
+    }
+    return false;
+}
+
 /// GLSL allows scalar overloads of the geometric builtins (`normalize(float)`,
 /// `length(float)`, …) but WGSL defines `normalize`/`length`/`distance`/
 /// `reflect` only on vectors — naga rejects the scalar call ("wrong type passed
@@ -2328,6 +2366,41 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     var emitted_names = std.StringHashMap(void).init(arena);
     defer emitted_names.deinit();
 
+    // #170 (A3): a GLSL `in Block { … } inst;` stage-input interface block is
+    // emitted below (near `fn main`) as the @location-decorated entry-parameter
+    // struct. But the body's whole-struct `OpLoad %Block %inst` ALSO makes the
+    // generic forward-decl scans (function-body / cbuffer / local) emit a plain,
+    // un-decorated `struct Block { … }` — so the type lands twice and naga
+    // rejects the WGSL ("redefinition of `Block`"). Pre-seed those struct ids
+    // (and names) into the emitted-sets so ONLY the IO-decorated version below is
+    // written. Uses the SAME `ioBlockStructType` predicate as the emit path, so
+    // the suppress side and emit side cannot drift. Gated precisely: when no
+    // non-builtin stage input has a TypeStruct pointee, the sets are untouched
+    // and every existing emission path is byte-identical.
+    //
+    // DUAL-USE GUARD: if the same struct is ALSO reachable as a data member of a
+    // UBO/SSBO, suppressing the plain decl would leave the uniform referencing a
+    // struct whose only definition carries @location — invalid WGSL that the
+    // naga CLI leniently accepts but Tint/Dawn reject (a silent-wrong). That case
+    // was already a loud "redefinition" reject before this change; keep it loud
+    // by NOT pre-seeding (the dual emit returns, naga rejects) rather than
+    // emitting silently-wrong @location-on-uniform. A full fix (a renamed IO
+    // struct) is deferred — no corpus shader hits this.
+    for (input_vars.items) |iv| {
+        const sty = ioBlockStructType(&module, iv.type_id, iv.builtin) orelse continue;
+        var data_used = false;
+        for (cbuffers.items) |cb| {
+            if (typeReachesStruct(&module, cb.type_id, sty, 0)) {
+                data_used = true;
+                break;
+            }
+        }
+        if (data_used) continue;
+        if ((try emitted_structs.fetchPut(sty, {})) == null) {
+            if (names.get(sty)) |sname| try emitted_names.put(sname, {});
+        }
+    }
+
     for (cbuffers.items) |cb| {
         try emitStructForwardDecls(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &wrapped_uniform_members);
         try emitOneStructForwardDecl(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &wrapped_uniform_members);
@@ -3014,17 +3087,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     {
         var declared = std.AutoHashMap(u32, void).init(arena);
         for (input_vars.items) |iv| {
-            if (iv.builtin != null) continue;
-            const ptr_inst = getDef(&module, iv.type_id);
-            var sty = iv.type_id;
-            if (ptr_inst) |pi| {
-                if (pi.op == .TypePointer and pi.words.len > 3) sty = pi.words[3];
-            }
-            const sdef = getDef(&module, sty) orelse continue;
-            // A struct-typed stage input is ALWAYS a GLSL interface block (plain
+            // Same predicate as the redefinition pre-seed (ioBlockStructType): a
+            // struct-typed stage input is ALWAYS a GLSL interface block (plain
             // structs cannot be non-block I/O), so the struct shape alone is the
             // signal — glslpp's SPIR-V does not emit the `Block` decoration.
-            if (sdef.op != .TypeStruct) continue;
+            const sty = ioBlockStructType(&module, iv.type_id, iv.builtin) orelse continue;
+            const sdef = getDef(&module, sty) orelse continue;
             try io_block_inputs.put(iv.id, {});
             if (declared.contains(sty)) continue;
             try declared.put(sty, {});
