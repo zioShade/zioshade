@@ -4525,7 +4525,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         if (dinst.op == .Label and dinst.words.len > 1 and dinst.words[1] == merge_label.?) break;
                                         if (dinst.op == .Branch or dinst.op == .BranchConditional) break;
                                         if (dinst.op == .Switch) break;
-                                        try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members);
+                                        try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
                                     }
                                     break;
                                 }
@@ -4554,7 +4554,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         if (dinst.op == .Label) break;
                                         if (dinst.op == .Branch or dinst.op == .BranchConditional) break;
                                         if (dinst.op == .Switch) break;
-                                        try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members);
+                                        try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
                                     }
                                     break;
                                 }
@@ -4618,7 +4618,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             switch (dinst.op) {
                                 .BranchConditional, .Branch, .SelectionMerge, .LoopMerge, .Phi, .FunctionEnd => {},
                                 else => {
-                                    try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, indent, wrapped_members);
+                                    try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, indent, wrapped_members, matrix_outputs);
                                 },
                             }
                         }
@@ -4787,7 +4787,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     }
                                                 }
                                                 if (is_phi_val) {
-                                                    try emitSimpleInstruction(module, names, &inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members);
+                                                    try emitSimpleInstruction(module, names, &inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs);
                                                 }
                                             }
                                         }
@@ -4833,7 +4833,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     }
                                                 }
                                                 if (is_phi_val) {
-                                                    try emitSimpleInstruction(module, names, &inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members);
+                                                    try emitSimpleInstruction(module, names, &inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs);
                                                 }
                                             }
                                         }
@@ -6473,7 +6473,7 @@ fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMa
 }
 
 // Emit a single instruction — used for replaying deferred loop header instructions
-fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32, wrapped_members: *const WrappedUniformMemberMap) !void {
+fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32, wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput)) !void {
     switch (inst.op) {
         .Variable => {
             if (inst.words.len >= 4) {
@@ -6495,6 +6495,17 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             }
         },
         .Store => {
+            // #170 (H): a whole-matrix store to a flattened matrix output that
+            // lands here (a switch/conditional replay body) cannot be split
+            // correctly — the sibling `default` case body is dropped by a
+            // separate frontend miscompile, so emitting per-column writes would
+            // turn an honest naga-reject into silent-wrong. Emitting the raw
+            // `vertex_out.M = …` is naga-invalid (no member `M`; it was
+            // flattened to `M_0…M_{n}`). Fail loud. (Out-of-corpus.)
+            if (matrix_outputs.contains(inst.words[1])) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL matrix-output flattening does not support a matrix store inside a switch/conditional case body", .{}) catch null;
+                return error.UnsupportedOp;
+            }
             const ptr = names.get(inst.words[1]) orelse "var";
             const val = names.get(inst.words[2]) orelse "0";
             // Skip store to depth output (handled by FragmentOutput struct return)

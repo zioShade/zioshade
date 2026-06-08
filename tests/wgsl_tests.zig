@@ -2861,6 +2861,34 @@ test "wgsl: workgroup atomic scalar is typed atomic<u32> with atomicStore/atomic
     try nagaValidateOrSkip(wgsl, "workgroup atomic scalar");
 }
 
+// #170 (H): a whole-matrix store to a flattened matrix output that lands inside
+// a `switch` case body is replayed through `emitSimpleInstruction` — a separate
+// Store path that has no access to the matrix-output map — so it emitted
+// `vertex_out.M = mat4x4f(…)` (naga-invalid: no member `M`, it was flattened to
+// `M_0…M_3`). It cannot be split correctly there either: the sibling switch
+// `default` case body is dropped entirely (a separate, deeper frontend
+// miscompile affecting all backends), so emitting per-column writes would turn
+// an honest naga-reject into silent-wrong. Fail loud instead. (Out-of-corpus.)
+test "wgsl: matrix-output store inside a switch case is an honest error" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 1) out mat4 OutM;
+        \\layout(location = 0) flat in int sel;
+        \\void main() {
+        \\    switch (sel) {
+        \\        case 0: OutM = mat4(2.0); break;
+        \\        default: OutM = mat4(3.0); break;
+        \\    }
+        \\    gl_Position = vec4(1.0);
+        \\}
+    ;
+    try std.testing.expectError(error.UnsupportedOp, compileVertToWgsl(src));
+    // Pin the detail so the catch-all UnsupportedOp can't silently start meaning
+    // a different unsupported op in this matrix-heavy shader.
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "switch") != null);
+}
+
 // #170 (J): GL_ARB_shader_stencil_export's gl_FragStencilRef has NO WGSL
 // equivalent (WGSL fragment shaders cannot write the stencil ref). It must fail
 // loud rather than emit the int stencil value into an auto-assigned @location
