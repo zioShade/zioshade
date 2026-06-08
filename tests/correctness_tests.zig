@@ -466,6 +466,20 @@ fn spirvHasWord(spv: []const u32, word: u32) bool {
     return false;
 }
 
+/// True if the SPIR-V module contains at least one instruction with `opcode`
+/// (low 16 bits of the instruction header word). Walks instructions by word
+/// count, skipping the 5-word module header.
+fn spirvHasOpcode(spv: []const u32, opcode: u16) bool {
+    var idx: usize = 5;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (@as(u16, @truncate(spv[idx] & 0xFFFF)) == opcode) return true;
+        if (wc == 0) break;
+        idx += wc;
+    }
+    return false;
+}
+
 // Scan the SPIR-V module for an OpTypeImage (opcode 25) with Dim==Buffer (5)
 // whose sampled-type id resolves to a scalar of the requested kind:
 //   .float → OpTypeFloat, .int → signed OpTypeInt, .uint → unsigned OpTypeInt.
@@ -608,4 +622,40 @@ test "fold: unsigned literal in float-vector ctor stays positive" {
     defer alloc.free(spv);
     try std.testing.expect(spirvHasWord(spv, 0x4F000000)); // +2.147e9 (correct)
     try std.testing.expect(!spirvHasWord(spv, 0xCF000000));
+}
+
+test "frontend: separate sampler2DShadow(tex,samp) emits a depth-compare, not OpUndef" {
+    // A Vulkan SEPARATE comparison sampler — `texture(sampler2DShadow(tex, samp),
+    // coord)` built from a distinct texture2D + samplerShadow — was DROPPED by the
+    // frontend: parsePrimary did not list the shadow sampler keywords as
+    // constructors, so the constructor (and the whole statement) never parsed and
+    // the depth compare vanished (empty main / OpUndef result = silent-wrong).
+    // Assert the emitted SPIR-V now contains an OpImageSampleDref* op.
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(set = 0, binding = 0) uniform mediump samplerShadow uS;
+        \\layout(set = 0, binding = 1) uniform texture2D uT;
+        \\layout(location = 0) out float o;
+        \\void main() { o = texture(sampler2DShadow(uT, uS), vec3(0.5)); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // OpImageSampleDrefImplicitLod = 89.
+    try std.testing.expect(spirvHasOpcode(spv, 89));
+}
+
+test "frontend: separate sampler2DShadow with textureLod emits explicit-lod depth-compare" {
+    // Same root cause via the EXPLICIT-LOD path: textureLod(sampler2DShadow(...),
+    // …) must lower to OpImageSampleDrefExplicitLod (90), not be dropped.
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(set = 0, binding = 0) uniform samplerShadow uS;
+        \\layout(set = 0, binding = 1) uniform texture2D uT;
+        \\layout(location = 0) out float o;
+        \\void main() { o = textureLod(sampler2DShadow(uT, uS), vec3(0.5), 0.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 90)); // OpImageSampleDrefExplicitLod
 }

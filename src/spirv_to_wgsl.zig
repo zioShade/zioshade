@@ -1749,6 +1749,37 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
+    // Separate comparison sampler: a depth-COMPARE op (OpImageSampleDref*/
+    // OpImageDrefGather) whose sampled image is an OpSampledImage built AT THE
+    // CALL SITE from a distinct texture + samplerShadow (Vulkan
+    // `sampler2DShadow(tex, samp)`). WGSL pins depth-ness to the TEXTURE type
+    // (texture_depth_2d + sampler_comparison), but such a texture is routinely
+    // ALSO sampled non-compare (`sampler2D(tex, s)` returning vec4) — and a
+    // texture binding cannot be both texture_depth_2d and texture_2d<f32>. The
+    // backend does not route separate comparison samplers, so fail loud rather
+    // than emit an undeclared `<tex>_sampler` (naga reject) or wrong types. A
+    // COMBINED sampler2DShadow global (no call-site OpSampledImage) is unaffected
+    // — it is handled by the texture's sampler_comparison partner.
+    for (module.instructions) |inst| {
+        const is_dref = switch (inst.op) {
+            .ImageSampleDrefImplicitLod, .ImageSampleDrefExplicitLod,
+            .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod,
+            .ImageDrefGather,
+            => true,
+            else => false,
+        };
+        if (!is_dref or inst.words.len < 4) continue;
+        const si = getDef(&module, inst.words[3]) orelse continue;
+        if (si.op == .SampledImage) {
+            last_error_detail = std.fmt.bufPrint(
+                &last_error_detail_buf,
+                "WGSL cannot represent a separate comparison sampler (sampler2DShadow built from a distinct texture + samplerShadow)",
+                .{},
+            ) catch null;
+            return error.UnsupportedOp;
+        }
+    }
+
 
     // Built-ins with no representable standard-WGSL entry-point I/O form must fail
     // loud, not leak the identifier (naga reject) or get misclassified as a
