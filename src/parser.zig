@@ -2177,6 +2177,19 @@ const Parser = struct {
             .kw_float, .kw_int, .kw_uint, .kw_bool,
             .kw_int8, .kw_uint8,
             .kw_sampler2d, .kw_sampler3d, .kw_sampler_cube, .kw_sampler2d_array, .kw_sampler2d_ms,
+            // Vulkan SHADOW combined-sampler constructors built from a separate
+            // texture + samplerShadow (e.g. `sampler2DShadow(tex, samp)`). These
+            // were omitted, so a `texture(sampler2DShadow(t, s), …)` expression was
+            // not parsed as a constructor and the whole statement was silently
+            // DROPPED — the depth compare vanished (frontend silent-wrong).
+            // ONLY the variants with an EXACT ast.Type are listed: sampler1D-
+            // ArrayShadow and sampler2DRectShadow fold to a DIFFERENT dimension in
+            // tryType (no dedicated ast.Type variant), so enabling them as
+            // constructors would trade the drop for a wrong-dimension silent-wrong.
+            // They remain unsupported (rare/legacy types) rather than mis-lowered.
+            .kw_sampler2d_shadow, .kw_sampler1d_shadow,
+            .kw_sampler2d_array_shadow,
+            .kw_sampler_cube_shadow, .kw_sampler_cube_array_shadow,
             => {
                 var ty = self.tryType().?;
                 // Handle array constructors: float[](1.0, 2.0, ...), vec4[](...),

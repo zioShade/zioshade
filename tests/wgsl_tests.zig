@@ -2544,3 +2544,37 @@ test "wgsl: Vulkan separate sampler is declared and combined per call site" {
     try assertContains(wgsl, "var uS: sampler");
     try nagaValidateOrSkip(wgsl, "Vulkan separate sampler");
 }
+
+test "wgsl: combined sampler2DShadow emits sampler_comparison + textureSampleCompare" {
+    // A COMBINED shadow sampler global (no call-site OpSampledImage) must keep
+    // working: the texture's implicit `<tex>_sampler` partner is a
+    // sampler_comparison and the depth read uses textureSampleCompare.
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DShadow uShadow;
+        \\layout(location = 0) out float o;
+        \\void main() { o = texture(uShadow, vec3(0.5)); }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "sampler_comparison");
+    try assertContains(wgsl, "textureSampleCompare");
+    try nagaValidateOrSkip(wgsl, "combined sampler2DShadow");
+}
+
+test "wgsl: separate comparison sampler is an honest error (unrepresentable)" {
+    // `sampler2DShadow(tex, samp)` from a distinct texture + samplerShadow pins
+    // depth-ness to the SAMPLE op, but WGSL pins it to the TEXTURE type — and the
+    // texture is routinely also sampled non-compare, so a single binding cannot be
+    // both texture_depth_2d and texture_2d<f32>. Must fail loud (error.UnsupportedOp),
+    // never emit an undeclared `<tex>_sampler` (naga reject) or wrong types.
+    const src: [:0]const u8 =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(set = 0, binding = 0) uniform mediump samplerShadow uS;
+        \\layout(set = 0, binding = 1) uniform texture2D uT;
+        \\layout(location = 0) out float o;
+        \\void main() { o = texture(sampler2DShadow(uT, uS), vec3(0.5)); }
+    ;
+    try std.testing.expectError(error.UnsupportedOp, compileToWgsl(src));
+}
