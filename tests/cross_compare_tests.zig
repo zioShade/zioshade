@@ -746,26 +746,6 @@ test "glsl-version structural: vertex output location dropped below 410, kept at
 // #173 (items 1+2): frontend const-array folding gaps
 // ============================================================================
 
-/// Resolve the spirv-val executable. Prefer `$VULKAN_SDK\Bin\spirv-val[.exe]`
-/// (caller owns the returned slice); fall back to the bare name on PATH when the
-/// env var is unset. Mirrors `nagaValidateOrSkip`'s degrade-don't-hardcode style
-/// instead of a machine-specific absolute path.
-fn resolveSpirvVal(allocator: std.mem.Allocator) ![]const u8 {
-    const exe = if (@import("builtin").os.tag == .windows) "spirv-val.exe" else "spirv-val";
-    if (std.process.getEnvVarOwned(allocator, "VULKAN_SDK")) |sdk| {
-        defer allocator.free(sdk);
-        // Treat a set-but-empty value as unset so we fall back to PATH rather
-        // than building a bogus relative "Bin/spirv-val" path.
-        if (sdk.len == 0) return try allocator.dupe(u8, exe);
-        return try std.fs.path.join(allocator, &.{ sdk, "Bin", exe });
-    } else |err| switch (err) {
-        // Not set — fall back to PATH lookup by bare name.
-        error.EnvironmentVariableNotFound => return try allocator.dupe(u8, exe),
-        // Propagate real failures (OOM; InvalidWtf8 can't occur for an ASCII key).
-        else => |e| return e,
-    }
-}
-
 /// Run spirv-val on glslpp-produced SPIR-V bytes. Returns true if spirv-val
 /// accepts the module (exit 0), false otherwise. spirv-val is the authority on
 /// whether the OpTypeArray/OpConstantComposite layout is structurally valid.
@@ -775,7 +755,7 @@ fn spirvValAccepts(allocator: std.mem.Allocator, spirv_words: []const u32) !bool
     const dir = compat.cwd();
     compat.dirMakePath(io, dir, ".zig-cache") catch {};
 
-    const spirv_val = try resolveSpirvVal(allocator);
+    const spirv_val = try compat.resolveSpirvVal(allocator);
     defer allocator.free(spirv_val);
 
     const spirv_bytes = std.mem.sliceAsBytes(spirv_words);
