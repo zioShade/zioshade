@@ -99,6 +99,12 @@ fn compileToWgsl(source: [:0]const u8) ![]const u8 {
     return try glslpp.spirvToWGSL(alloc, spirv, .{});
 }
 
+fn compileVertToWgsl(source: [:0]const u8) ![]const u8 {
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    defer alloc.free(spirv);
+    return try glslpp.spirvToWGSL(alloc, spirv, .{});
+}
+
 /// Compile a GLSL fixture FILE (relative to the repo root) → WGSL via glslpp's
 /// frontend. Used for cases whose cross-function structure glslpp's inliner
 /// collapses for small inline shaders — the real fixture preserves the helper.
@@ -2786,6 +2792,39 @@ test "wgsl: sampler1DArray is an honest error (WGSL has no 1D-array texture)" {
         \\void main() { ivec2 s = textureSize(t, 0); o = vec4(float(s.x + s.y)); }
     ;
     try std.testing.expectError(error.UnsupportedOp, compileToWgsl(src));
+}
+
+// #170 (H): WGSL forbids a matrix at a single @location — a vertex `out mat4`
+// must be flattened into N consecutive @location vecN members (one per column),
+// and each whole-matrix store split into per-column writes. The old code emitted
+// `@location(1) M: mat4x4f` which naga rejects.
+test "wgsl: vertex out mat4 is flattened into 4 vec4 @location members" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec4 P;
+        \\layout(location = 1) out mat4 OutM;
+        \\void main() { OutM = mat4(2.0); gl_Position = P; }
+    ;
+    const wgsl = try compileVertToWgsl(src);
+    defer alloc.free(wgsl);
+    // 4 column members at consecutive locations, all vec4f, no bare mat4 @location.
+    try assertContains(wgsl, "@location(1) OutM_0: vec4f");
+    try assertContains(wgsl, "@location(4) OutM_3: vec4f");
+    try assertNotContains(wgsl, "@location(1) OutM: mat4x4f");
+    try nagaValidateOrSkip(wgsl, "vertex mat4 output flattening");
+}
+
+// #170 (H): a PARTIAL write to one column of a flattened matrix output
+// (`M[c] = col;`) can't address the flattened `{base}_{c}` members via an access
+// chain, so it fails loud rather than emit naga-invalid `vertex_out.M[c]`.
+// (Out-of-corpus deferred sub-case; whole-matrix writes are the supported path.)
+test "wgsl: partial matrix-output column write is an honest error" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 1) out mat4 M;
+        \\void main() { M[2] = vec4(1.0); gl_Position = vec4(0.0); }
+    ;
+    try std.testing.expectError(error.UnsupportedOp, compileVertToWgsl(src));
 }
 
 // #170 (J): GL_ARB_shader_stencil_export's gl_FragStencilRef has NO WGSL
