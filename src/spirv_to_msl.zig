@@ -77,9 +77,12 @@ fn imageTypeIsDepth(m: *const ParsedModule, pointee: Instruction) bool {
         img = getDef(m, img.words[2]) orelse return false;
     }
     if (img.op != .TypeImage or img.words.len <= 4) return false;
-    const dim = img.words[3]; // SPIR-V Dim: 1 == 2D
+    const dim = img.words[3]; // SPIR-V Dim: 1 == 2D, 3 == Cube
     const depth = img.words[4]; // 0 = non-depth, 1 = depth, 2 = no indication
-    return depth == 1 and dim == 1;
+    // MSL has `depth2d`/`depthcube` (+ _array) but no `depth1d`/`depth3d`, so
+    // only 2D and Cube depth/shadow samplers map to the depth family (#208);
+    // a 1D shadow keeps the texture family (no MSL depth type exists for it).
+    return depth == 1 and (dim == 1 or dim == 3);
 }
 
 /// Component count of a result type id: 1 for a scalar, else the OpTypeVector

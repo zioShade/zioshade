@@ -2820,6 +2820,22 @@ test "T19.9: int/uint sampler component type (#203) — texture2d<int>/<uint>" {
     try assertContains(msl, "texture2d<float>"); // float sampler unchanged
 }
 
+test "T19.11: samplerCubeShadow -> depthcube<float> (#208)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform samplerCubeShadow cs;
+        \\layout(binding=1) uniform samplerCube cube;
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out float o;
+        \\void main(){ o = texture(cs, c) + texture(cube, c.xyz).x; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "depthcube<float>");   // cube shadow -> depth family
+    try assertContains(msl, "texturecube<float>");  // non-shadow cube unchanged
+    try assertNotContains(msl, "texturecube<float> cs");
+}
+
 test "T19.10: int sampler array + depth component types (#203)" {
     const source =
         \\#version 450
