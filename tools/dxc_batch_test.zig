@@ -159,7 +159,11 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, args);
 
-    const dxc_path = if (args.len > 1) args[1] else "C:/VulkanSDK/1.4.341.1/Bin/dxc.exe";
+    // Default the dxc path from $VULKAN_SDK/Bin/dxc[.exe] (or bare `dxc` on PATH)
+    // so the tool stays portable; an explicit `<dxc>` arg overrides it.
+    const dxc_resolved: ?[]const u8 = if (args.len > 1) null else glslpp.compat.resolveVulkanTool(alloc, "dxc") catch null;
+    defer if (dxc_resolved) |p| alloc.free(p);
+    const dxc_path = if (args.len > 1) args[1] else (dxc_resolved orelse "dxc");
     const spv_dir = if (args.len > 2) args[2] else "tests/spirv_bins";
     const sm: u32 = if (args.len > 3) try std.fmt.parseInt(u32, args[3], 10) else 60;
 

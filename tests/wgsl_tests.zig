@@ -24,10 +24,12 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
         try src_file.writeAll(std.mem.sliceTo(source, 0));
     }
 
-    const result = try std.process.Child.run(.{
+    const glslang = glslpp.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    const result = std.process.Child.run(.{
         .allocator = alloc,
-        .argv = &.{ "C:/VulkanSDK/1.4.341.1/Bin/glslangValidator.exe", "-V", tmp_src, "-o", tmp_spv },
-    });
+        .argv = &.{ glslang, "-V", tmp_src, "-o", tmp_spv },
+    }) catch return error.SkipZigTest;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
 
