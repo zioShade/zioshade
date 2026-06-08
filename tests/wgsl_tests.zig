@@ -2729,3 +2729,61 @@ test "wgsl: storage image texel format follows r32f / rgba32f / r32ui" {
     try assertContains(wu, "rgba32uint");
     try nagaValidateOrSkip(wu, "storage image rgba32ui format");
 }
+
+// #170 (C): textureSize on an ARRAYED sampler must combine the spatial dims
+// (WGSL textureDimensions — vec2 for 2D/cube) with the layer count (WGSL
+// textureNumLayers), because GLSL textureSize(sampler2DArray) returns ivec3
+// (w,h,layers) while WGSL textureDimensions returns only vec2<u32>. The old code
+// emitted `vec3i(textureDimensions(t))` — naga: "cannot cast a vec2<u32> to a
+// vec3<i32>". Correct lowering: vec3<i32>(vec2<i32>(textureDimensions(t)),
+// i32(textureNumLayers(t))).
+test "wgsl: textureSize on 2D-array / cube-array appends textureNumLayers" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DArray s2a;
+        \\layout(binding = 1) uniform samplerCubeArray sca;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    ivec3 a = textureSize(s2a, 0);
+        \\    ivec3 b = textureSize(sca, 0);
+        \\    o = vec4(float(a.x + a.y + a.z + b.x + b.y + b.z));
+        \\}
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureNumLayers(s2a)");
+    try assertContains(wgsl, "textureNumLayers(sca)");
+    try nagaValidateOrSkip(wgsl, "arrayed textureSize layer count");
+}
+
+// #170 (C): a NON-arrayed textureSize stays the plain dimension wrap (no
+// textureNumLayers) — guards against over-applying the arrayed path.
+test "wgsl: textureSize on a non-arrayed 2D sampler stays a plain dimension query" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s2;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    ivec2 a = textureSize(s2, 0);
+        \\    o = vec4(float(a.x + a.y));
+        \\}
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertNotContains(wgsl, "textureNumLayers");
+    try nagaValidateOrSkip(wgsl, "non-arrayed textureSize");
+}
+
+// #170 (C, review follow-up): WGSL has NO 1D-array texture type
+// (`texture_1d_array` is not a real WGSL type). A GLSL sampler1DArray must fail
+// LOUD (error.UnsupportedOp) rather than emit an invalid type name that naga
+// rejects downstream — mirroring the storage 1D-array and texel-buffer guards.
+test "wgsl: sampler1DArray is an honest error (WGSL has no 1D-array texture)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler1DArray t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { ivec2 s = textureSize(t, 0); o = vec4(float(s.x + s.y)); }
+    ;
+    try std.testing.expectError(error.UnsupportedOp, compileToWgsl(src));
+}
