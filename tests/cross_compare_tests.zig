@@ -754,10 +754,15 @@ fn resolveSpirvVal(allocator: std.mem.Allocator) ![]const u8 {
     const exe = if (@import("builtin").os.tag == .windows) "spirv-val.exe" else "spirv-val";
     if (std.process.getEnvVarOwned(allocator, "VULKAN_SDK")) |sdk| {
         defer allocator.free(sdk);
+        // Treat a set-but-empty value as unset so we fall back to PATH rather
+        // than building a bogus relative "Bin/spirv-val" path.
+        if (sdk.len == 0) return try allocator.dupe(u8, exe);
         return try std.fs.path.join(allocator, &.{ sdk, "Bin", exe });
-    } else |_| {
+    } else |err| switch (err) {
         // Not set — fall back to PATH lookup by bare name.
-        return try allocator.dupe(u8, exe);
+        error.EnvironmentVariableNotFound => return try allocator.dupe(u8, exe),
+        // Propagate real failures (OOM; InvalidWtf8 can't occur for an ASCII key).
+        else => |e| return e,
     }
 }
 
