@@ -312,6 +312,28 @@ pub fn processRun(io: IoType, alloc: std.mem.Allocator, argv: []const []const u8
     }
 }
 
+// ---- Tooling paths ----
+
+/// Resolve the spirv-val executable. Prefer `$VULKAN_SDK\Bin\spirv-val[.exe]`
+/// (caller owns the returned slice and must free it); fall back to the bare name
+/// on PATH when the env var is unset. Avoids a machine-specific absolute path so
+/// test/conformance runners stay portable across machines / CI / non-Windows.
+pub fn resolveSpirvVal(allocator: std.mem.Allocator) ![]const u8 {
+    const exe = if (builtin.os.tag == .windows) "spirv-val.exe" else "spirv-val";
+    if (std.process.getEnvVarOwned(allocator, "VULKAN_SDK")) |sdk| {
+        defer allocator.free(sdk);
+        // Treat a set-but-empty value as unset so we fall back to PATH rather
+        // than building a bogus relative "Bin/spirv-val" path.
+        if (sdk.len == 0) return try allocator.dupe(u8, exe);
+        return try std.fs.path.join(allocator, &.{ sdk, "Bin", exe });
+    } else |err| switch (err) {
+        // Not set — fall back to PATH lookup by bare name.
+        error.EnvironmentVariableNotFound => return try allocator.dupe(u8, exe),
+        // Propagate real failures (OOM; InvalidWtf8 can't occur for an ASCII key).
+        else => |e| return e,
+    }
+}
+
 // ---- List writer ----
 
 pub fn ListWriterPtr(comptime T: type) type {
