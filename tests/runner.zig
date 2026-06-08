@@ -2,7 +2,25 @@ const std = @import("std");
 const glslpp = @import("glslpp");
 const compat = glslpp.compat;
 
-const SpirvVal = "C:\\VulkanSDK\\1.4.341.1\\Bin\\spirv-val.exe";
+/// Resolve the spirv-val executable. Prefer `$VULKAN_SDK\Bin\spirv-val[.exe]`
+/// (caller owns the returned slice); fall back to the bare name on PATH when the
+/// env var is unset. Avoids a machine-specific absolute path so the conformance
+/// runner is portable across machines / CI / non-Windows.
+fn resolveSpirvVal(allocator: std.mem.Allocator) ![]const u8 {
+    const exe = if (@import("builtin").os.tag == .windows) "spirv-val.exe" else "spirv-val";
+    if (std.process.getEnvVarOwned(allocator, "VULKAN_SDK")) |sdk| {
+        defer allocator.free(sdk);
+        // Treat a set-but-empty value as unset so we fall back to PATH rather
+        // than building a bogus relative "Bin/spirv-val" path.
+        if (sdk.len == 0) return try allocator.dupe(u8, exe);
+        return try std.fs.path.join(allocator, &.{ sdk, "Bin", exe });
+    } else |err| switch (err) {
+        // Not set — fall back to PATH lookup by bare name.
+        error.EnvironmentVariableNotFound => return try allocator.dupe(u8, exe),
+        // Propagate real failures (OOM; InvalidWtf8 can't occur for an ASCII key).
+        else => |e| return e,
+    }
+}
 
 const Result = enum { pass, fail, skip, compile_error };
 
@@ -185,8 +203,12 @@ fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, sav
     }
     compat.fileWriteAll(io, tmp_file, std.mem.sliceAsBytes(words)) catch return .skip;
 
-    // Run spirv-val
-    const val_result = compat.processRun(io, alloc, &.{ SpirvVal, tmp_path }) catch return .fail;
+    // Run spirv-val. Degrade to .skip (not .fail) when it cannot be spawned at
+    // all — e.g. VULKAN_SDK unset and no spirv-val on PATH — so a missing tool
+    // doesn't masquerade as a conformance failure.
+    const spirv_val = resolveSpirvVal(alloc) catch return .skip;
+    defer alloc.free(spirv_val);
+    const val_result = compat.processRun(io, alloc, &.{ spirv_val, tmp_path }) catch return .skip;
     defer alloc.free(val_result.stdout);
     defer alloc.free(val_result.stderr);
 
