@@ -3122,3 +3122,82 @@ test "wgsl: nested-struct stage-IO members are flattened to leaf @location param
     try assertNotContains(wgsl, "@location(0) a: Foo");
     try nagaValidateOrSkip(wgsl, "nested-struct IO flattening");
 }
+
+// A mid-body early `return` inside an entry function must actually EXIT — the
+// void OpReturn used to be dropped ("handled by wrapper"), so the early branch
+// fell through to later stage-IO writes and its output was unconditionally
+// overwritten (silent-wrong: naga ACCEPTS the miscompiled output). The fix emits
+// an explicit `return <output>;` at the early-return point so the branch's value
+// survives.
+test "wgsl: vertex early return is honored (value preserved, not dropped)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 col;
+        \\layout(location=1) in float cond;
+        \\void main() {
+        \\    if (cond > 0.0) { col = vec4(10.0); return; }
+        \\    col = vec4(20.0);
+        \\    gl_Position = vec4(0.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+
+    // Semantic, naga-free guard: a `return` MUST appear between the early-branch
+    // write (col = 10) and the fall-through write (col = 20). If the return is
+    // dropped, the only `return` is the trailing one — after col = 20 — and the
+    // 10.0 path is dead.
+    const a10 = std.mem.indexOf(u8, wgsl, "vec4<f32>(10.0)") orelse return error.TestExpectedFind;
+    const a20 = std.mem.indexOf(u8, wgsl, "vec4<f32>(20.0)") orelse return error.TestExpectedFind;
+    const aret = std.mem.indexOfPos(u8, wgsl, a10, "return") orelse return error.TestExpectedFind;
+    try std.testing.expect(aret < a20);
+
+    try nagaValidateOrSkip(wgsl, "vertex-early-return");
+}
+
+// The simple-fragment form (output accumulates in a single named local that is
+// returned by name) must also honor the early return.
+test "wgsl: fragment early return is honored (value preserved, not dropped)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 fragColor;
+        \\layout(location=1) in float cond;
+        \\void main() {
+        \\    if (cond > 0.0) { fragColor = vec4(10.0); return; }
+        \\    fragColor = vec4(20.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+
+    const a10 = std.mem.indexOf(u8, wgsl, "vec4<f32>(10.0)") orelse return error.TestExpectedFind;
+    const a20 = std.mem.indexOf(u8, wgsl, "vec4<f32>(20.0)") orelse return error.TestExpectedFind;
+    const aret = std.mem.indexOfPos(u8, wgsl, a10, "return") orelse return error.TestExpectedFind;
+    try std.testing.expect(aret < a20);
+
+    try nagaValidateOrSkip(wgsl, "fragment-early-return");
+}
+
+// When the early return targets an output that is ASSEMBLED at the trailing
+// return from end-captured values (e.g. a frag_depth struct, whose depth is the
+// LAST store), an early `return FragmentOutput(color, <last-depth>)` would use
+// the wrong (later) depth. Rather than silently miscompile, glslpp must fail loud.
+test "wgsl: early return into an assembled frag_depth output errors honestly" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 fragColor;
+        \\layout(location=1) in float cond;
+        \\void main() {
+        \\    if (cond > 0.0) { fragColor = vec4(10.0); gl_FragDepth = 0.3; return; }
+        \\    fragColor = vec4(20.0);
+        \\    gl_FragDepth = 0.7;
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedEarlyReturn, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
