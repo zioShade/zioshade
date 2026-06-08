@@ -9,10 +9,10 @@ zig-out/
 *.so
 *.dylib
 
-# SPIR-V dump artifacts at repo root
-/dump_*.spv
-/tmp_*.spv
-/frag.spv
+# SPIR-V dump artifacts at repo root (ad-hoc oracle/diff dumps like glslpp.spv,
+# glslang.spv, min.spv). Root-anchored so it never hides the real fixtures under
+# tests/spirv_bins/.
+/*.spv
 
 # Throwaway DXC validation outputs (just validate-dxc)
 tests/wintty/*.dxil
