@@ -105,6 +105,12 @@ fn compileVertToWgsl(source: [:0]const u8) ![]const u8 {
     return try glslpp.spirvToWGSL(alloc, spirv, .{});
 }
 
+fn compileCompToWgsl(source: [:0]const u8) ![]const u8 {
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    return try glslpp.spirvToWGSL(alloc, spirv, .{});
+}
+
 /// Compile a GLSL fixture FILE (relative to the repo root) → WGSL via glslpp's
 /// frontend. Used for cases whose cross-function structure glslpp's inliner
 /// collapses for small inline shaders — the real fixture preserves the helper.
@@ -2825,6 +2831,34 @@ test "wgsl: partial matrix-output column write is an honest error" {
         \\void main() { M[2] = vec4(1.0); gl_Position = vec4(0.0); }
     ;
     try std.testing.expectError(error.UnsupportedOp, compileVertToWgsl(src));
+}
+
+// #170 (F): a `shared` (workgroup) scalar that is the target of an atomic op
+// must be declared `atomic<u32>` in WGSL, and its NON-atomic accesses lowered to
+// atomicStore/atomicLoad. The old code emitted `var<workgroup> s: u32` + a bare
+// `atomicAdd(&s, …)` (naga: "atomic operation is done on a pointer to a
+// non-atomic") and bare `s = 0u;` / `let v = s;`.
+test "wgsl: workgroup atomic scalar is typed atomic<u32> with atomicStore/atomicLoad" {
+    const src: [:0]const u8 =
+        \\#version 310 es
+        \\layout(local_size_x = 32) in;
+        \\shared uint s_counter;
+        \\layout(std430, binding = 0) buffer Result { uint total; } result;
+        \\void main() {
+        \\    uint idx = gl_LocalInvocationID.x;
+        \\    if (idx == 0u) s_counter = 0u;
+        \\    barrier();
+        \\    atomicAdd(s_counter, 1u);
+        \\    barrier();
+        \\    if (idx == 0u) result.total = s_counter;
+        \\}
+    ;
+    const wgsl = try compileCompToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var<workgroup> s_counter: atomic<u32>");
+    try assertContains(wgsl, "atomicStore(&s_counter,");
+    try assertContains(wgsl, "atomicLoad(&s_counter)");
+    try nagaValidateOrSkip(wgsl, "workgroup atomic scalar");
 }
 
 // #170 (J): GL_ARB_shader_stencil_export's gl_FragStencilRef has NO WGSL
