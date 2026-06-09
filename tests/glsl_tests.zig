@@ -2018,3 +2018,51 @@ test "arrayed: plain sampler2D keeps no Array suffix (no regression)" {
     try assertContains(glsl, "sampler2D tex");
     try assertNotContains(glsl, "sampler2DArray");
 }
+
+// ---------------------------------------------------------------------------
+// Loop-counter OpPhi lowering (regression): the loop counter must ADVANCE,
+// not be frozen at its constant init value. Before the fix, GLSL/HLSL/MSL
+// rendered the loop-header OpPhi as its init constant (0), so the condition
+// folded to `0 < 20` (infinite loop) and the back-edge increment was dropped.
+// spirv-cross renders the same SPIR-V as `for (int i = 0; i < 20; i++)`.
+// ---------------------------------------------------------------------------
+
+test "loop-phi: for-loop counter advances (not frozen constant)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float x=0.0; for(int i=0;i<20;i++){ x=x+float(i);} o=vec4(x);}
+    ;
+    const glsl = try compileToGlslStage(source, .fragment);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "while (true)");
+    try assertContains(glsl, "< 20");
+    // The counter is a live variable, NOT the folded constant `0 < 20`.
+    try assertNotContains(glsl, "0 < 20");
+}
+
+test "loop-phi: nested loop counters both advance" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float s=0.0; for(int i=0;i<4;i++){ for(int j=0;j<3;j++){ s+=float(i*j);}} o=vec4(s);}
+    ;
+    const glsl = try compileToGlslStage(source, .fragment);
+    defer alloc.free(glsl);
+    // Neither the outer nor the inner counter may freeze to its init constant.
+    try assertNotContains(glsl, "0 < 4");
+    try assertNotContains(glsl, "0 < 3");
+}
+
+test "loop-phi: counter advances on early-break fall-through" {
+    // A for-loop with a mid-body `break` generates an explicit back-edge whose
+    // counter advance must still run on the fall-through path.
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float s=0.0; for(int i=0;i<100;i++){ s+=float(i); if(s>10.0) break;} o=vec4(s);}
+    ;
+    const glsl = try compileToGlslStage(source, .fragment);
+    defer alloc.free(glsl);
+    try assertNotContains(glsl, "0 < 100");
+}

@@ -753,6 +753,103 @@ pub fn localGetDef(instructions: anytype, id_defs: anytype, id: u32) ?@TypeOf(in
 }
 
 // ---------------------------------------------------------------------------
+// Loop-header OpPhi analysis (used by GLSL, HLSL, MSL backends)
+// ---------------------------------------------------------------------------
+
+/// A loop-counter (loop-header) OpPhi, classified into its preheader-init and
+/// back-edge incoming values. The GLSL/HLSL/MSL backends render this as a
+/// mutable local: declared once, initialised from `init_val` at the loop
+/// preheader, and re-assigned `backedge_val` at the end of each iteration.
+pub const LoopHeaderPhi = struct {
+    result_id: u32,
+    type_id: u32,
+    init_val: u32, // incoming value from the loop preheader
+    backedge_val: u32, // incoming value from the continue block (loop tail)
+    header_label: u32,
+    continue_label: u32,
+};
+
+/// If the OpPhi at `phi_idx` is a *loop-header* phi — i.e. an OpLoopMerge
+/// follows it in the same block, before any Label or terminator — classify its
+/// incoming (value, label) pairs into the preheader-init value and the
+/// back-edge value, and return it. Returns null for non-loop (e.g.
+/// selection-merge) phis.
+///
+/// Classification: the pair whose predecessor is the continue block — or,
+/// failing that, whose label is defined *after* this phi (i.e. inside the loop
+/// body) — is the back-edge; the other is the preheader init. SPIR-V does not
+/// fix the operand order, so this handles either ordering.
+///
+/// `instructions`/`id_defs` are any slices matching the backends' (structurally
+/// identical) ParsedModule fields, so this works across GLSL/HLSL/MSL.
+pub fn classifyLoopPhi(instructions: anytype, id_defs: anytype, phi_idx: usize) ?LoopHeaderPhi {
+    if (phi_idx >= instructions.len) return null;
+    const phi = instructions[phi_idx];
+    if (phi.op != .Phi or phi.words.len < 7) return null;
+
+    // An OpLoopMerge must follow in the same block (before any Label /
+    // terminator). The header may also hold the loop condition (Pattern B)
+    // between the phis and the LoopMerge, so plain value ops don't stop us.
+    var cont_label: u32 = 0;
+    var found = false;
+    {
+        var k = phi_idx + 1;
+        while (k < instructions.len) : (k += 1) {
+            const o = instructions[k].op;
+            if (o == .LoopMerge) {
+                if (instructions[k].words.len >= 3) cont_label = instructions[k].words[2];
+                found = true;
+                break;
+            }
+            switch (o) {
+                .Label, .FunctionEnd, .Branch, .BranchConditional, .Switch, .Return, .ReturnValue, .Kill, .Unreachable => break,
+                else => {}, // Phi (more header phis) or value ops: keep scanning
+            }
+        }
+    }
+    if (!found) return null;
+
+    // Header label: the OpLabel preceding this phi's block.
+    var header_label: u32 = 0;
+    {
+        var b = phi_idx;
+        while (b > 0) {
+            b -= 1;
+            if (instructions[b].op == .Label and instructions[b].words.len > 1) {
+                header_label = instructions[b].words[1];
+                break;
+            }
+        }
+    }
+
+    var init_val: ?u32 = null;
+    var be_val: ?u32 = null;
+    var p: usize = 3;
+    while (p + 1 < phi.words.len) : (p += 2) {
+        const val = phi.words[p];
+        const lbl = phi.words[p + 1];
+        var is_be = (lbl == cont_label);
+        if (!is_be and lbl < id_defs.len) {
+            if (id_defs[lbl]) |li| {
+                if (li > phi_idx) is_be = true; // label defined inside the loop body
+            }
+        }
+        if (is_be) be_val = val else init_val = val;
+    }
+
+    // Positional fallback if classification was ambiguous (single edge, or
+    // labels not found): SPIR-V's first pair is the most common preheader edge.
+    return .{
+        .result_id = phi.words[2],
+        .type_id = phi.words[1],
+        .init_val = init_val orelse phi.words[3],
+        .backedge_val = be_val orelse phi.words[5],
+        .header_label = header_label,
+        .continue_label = cont_label,
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Unified Backend Helpers (used by GLSL, HLSL, MSL, WGSL backends)
 // ---------------------------------------------------------------------------
 

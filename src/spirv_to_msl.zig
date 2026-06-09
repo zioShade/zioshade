@@ -3109,8 +3109,109 @@ fn emitBody(
             continue;
         }
 
+        if (isLoopHeaderCondSkip(m, idx)) continue; // Pattern-B loop condition, re-emitted inside the loop
         try emitInstruction(m, names, decs, inst, w, alloc, is_frag, output_var_id, cbuffers, textures);
     }
+}
+
+/// See spirv_to_glsl.zig:isLoopHeaderCondSkip — identical analysis.
+fn isLoopHeaderCondSkip(m: *const ParsedModule, idx: usize) bool {
+    const ins = m.instructions[idx];
+    switch (ins.op) {
+        .Label, .Phi, .LoopMerge, .SelectionMerge, .Branch, .BranchConditional, .Switch, .Return, .ReturnValue, .Kill, .Unreachable, .FunctionEnd => return false,
+        else => {},
+    }
+    var lm_idx: ?usize = null;
+    {
+        var k = idx + 1;
+        while (k < m.instructions.len) : (k += 1) {
+            const o = m.instructions[k].op;
+            if (o == .LoopMerge) { lm_idx = k; break; }
+            switch (o) {
+                .Label, .FunctionEnd, .Branch, .BranchConditional, .Switch, .Return, .ReturnValue, .Kill, .Unreachable => return false,
+                else => {},
+            }
+        }
+    }
+    const lm = lm_idx orelse return false;
+    if (lm + 1 >= m.instructions.len or m.instructions[lm + 1].op != .BranchConditional) return false;
+    var b = idx;
+    var has_phi = false;
+    while (b > 0) {
+        b -= 1;
+        const o = m.instructions[b].op;
+        if (o == .Phi) has_phi = true;
+        if (o == .Label) break;
+    }
+    return has_phi;
+}
+
+/// True if the loop header preceding the OpLoopMerge at `loop_idx` has phis.
+fn loopHasHeaderPhi(m: *const ParsedModule, loop_idx: usize) bool {
+    var hidx = loop_idx;
+    while (hidx > 0) {
+        hidx -= 1;
+        if (m.instructions[hidx].op == .Label) break;
+    }
+    var k = hidx + 1;
+    while (k < loop_idx) : (k += 1) {
+        if (m.instructions[k].op == .Phi) return true;
+    }
+    return false;
+}
+
+/// Emit `<counter> = <back-edge value>;` for each loop-header phi, at `indent`.
+fn emitLoopPhiBackedge(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    loop_idx: usize,
+    w: anytype,
+    indent: []const u8,
+) !void {
+    var hidx = loop_idx;
+    while (hidx > 0) {
+        hidx -= 1;
+        if (m.instructions[hidx].op == .Label) break;
+    }
+    var k = hidx + 1;
+    while (k < loop_idx) : (k += 1) {
+        if (m.instructions[k].op != .Phi) continue;
+        const lp = common.classifyLoopPhi(m.instructions, m.id_defs, k) orelse continue;
+        if (lp.backedge_val == lp.result_id) continue;
+        const nm = names.get(lp.result_id) orelse continue;
+        const bv = names.get(lp.backedge_val) orelse "0";
+        try w.print("{s}{s} = {s};\n", .{ indent, nm, bv });
+    }
+}
+
+/// Emit the loop tail: continue-block computations followed by the header-phi
+/// back-edge updates. Used at the loop end and (braced) before explicit continues.
+fn emitLoopTail(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
+    cont_lbl: u32,
+    loop_idx: usize,
+    label_map: *const std.AutoHashMap(u32, usize),
+    w: anytype,
+    alloc: std.mem.Allocator,
+    is_frag: bool,
+    ovid: ?u32,
+    cbuffers: *const std.ArrayList(CbufferDecl),
+    textures: *const std.ArrayList(TextureDecl),
+    indent: []const u8,
+) !void {
+    const cont_idx = label_map.get(cont_lbl) orelse m.instructions.len;
+    if (cont_idx < m.instructions.len) {
+        var ci2: usize = cont_idx + 1;
+        while (ci2 < m.instructions.len) : (ci2 += 1) {
+            const cinst = m.instructions[ci2];
+            if (cinst.op == .FunctionEnd or cinst.op == .Label or cinst.op == .Branch) break;
+            if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
+            try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures);
+        }
+    }
+    try emitLoopPhiBackedge(m, names, loop_idx, w, indent);
 }
 
 fn emitWhileLoopMSL(
@@ -3161,10 +3262,20 @@ fn emitWhileLoopMSL(
         }
         cond_end = bc_idx;
     } else if (next_inst.op == .BranchConditional and next_inst.words.len >= 4) {
-        // Pattern B
+        // Pattern B. If the header holds loop-counter phis, re-emit its condition
+        // instructions (skipped in the straight-line stream) inside the loop.
         bc_idx = loop_idx + 1;
         cond_start = null;
         cond_end = loop_idx + 1;
+        var hidx = loop_idx;
+        while (hidx > 0) { hidx -= 1; if (m.instructions[hidx].op == .Label) break; }
+        var cs = hidx + 1;
+        var saw_phi = false;
+        while (cs < loop_idx and m.instructions[cs].op == .Phi) : (cs += 1) saw_phi = true;
+        if (saw_phi and cs < loop_idx) {
+            cond_start = cs;
+            cond_end = loop_idx;
+        }
     } else {
         if (label_map.get(merge_lbl)) |mi| return mi;
         return loop_idx + 1;
@@ -3177,6 +3288,7 @@ fn emitWhileLoopMSL(
     }
     const body_lbl = bc.words[2];
 
+    const loop_has_phi = loopHasHeaderPhi(m, loop_idx);
     try w.writeAll("    while (true)\n    {\n");
 
     // Emit condition block instructions (Pattern A)
@@ -3232,12 +3344,27 @@ fn emitWhileLoopMSL(
                 if (nml) |nmv| {
                     const nhe = nfl != null and nfl.? != nmv;
                     if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe)) {
-                        try w.print("        if ({s}) continue;\n", .{ncn});
+                        // if (cond) continue; — advance counters before the back-edge
+                        if (loop_has_phi) {
+                            try w.print("        if ({s}) {{\n", .{ncn});
+                            try emitLoopTail(m, names, decs, cont_lbl, loop_idx, label_map, w, alloc, is_frag, ovid, cbuffers, textures, "            ");
+                            try w.writeAll("            continue;\n        }\n");
+                        } else {
+                            try w.print("        if ({s}) continue;\n", .{ncn});
+                        }
                     } else if (tl_is_trivial_break and fl_is_trivial_continue) {
+                        // trailing continue is the fall-through back-edge; for phi
+                        // loops drop it so control reaches the loop-tail advance.
                         try w.print("        if ({s}) break;\n", .{ncn});
-                        try w.writeAll("        continue;\n");
+                        if (!loop_has_phi) try w.writeAll("        continue;\n");
                     } else if (tl_is_trivial_continue and nhe) {
-                        try w.print("        if ({s}) continue;\n", .{ncn});
+                        if (loop_has_phi) {
+                            try w.print("        if ({s}) {{\n", .{ncn});
+                            try emitLoopTail(m, names, decs, cont_lbl, loop_idx, label_map, w, alloc, is_frag, ovid, cbuffers, textures, "            ");
+                            try w.writeAll("            continue;\n        }\n");
+                        } else {
+                            try w.print("        if ({s}) continue;\n", .{ncn});
+                        }
                         bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures);
                     } else if (tl_is_trivial_break) {
                         try w.print("        if ({s}) break;\n", .{ncn});
@@ -3245,9 +3372,11 @@ fn emitWhileLoopMSL(
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures);
                         }
                     } else if (fl_is_trivial_continue) {
+                        // trailing continue is the fall-through back-edge; for phi
+                        // loops drop it so control reaches the loop-tail advance.
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures);
-                        try w.writeAll("        } continue;\n");
+                        if (loop_has_phi) try w.writeAll("        }\n") else try w.writeAll("        } continue;\n");
                     } else if (fl_is_trivial_break and !nhe) {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures);
@@ -3265,6 +3394,7 @@ fn emitWhileLoopMSL(
                 }
                 continue;
             }
+            if (isLoopHeaderCondSkip(m, bi)) continue; // nested Pattern-B loop condition
             try emitInstruction(m, names, decs, binst, w, alloc, is_frag, ovid, cbuffers, textures);
         }
     }
@@ -3282,6 +3412,8 @@ fn emitWhileLoopMSL(
         }
     }
 
+    // Advance the loop counters on the fall-through back-edge.
+    try emitLoopPhiBackedge(m, names, loop_idx, w, "        ");
     try w.writeAll("    }\n");
     if (label_map.get(merge_lbl)) |mi| return mi;
     return loop_idx + 1;
@@ -3328,6 +3460,7 @@ fn emitBlock(
             }
             continue;
         }
+        if (isLoopHeaderCondSkip(m, i)) continue; // Pattern-B loop condition inside this branch
         try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid, cbuffers, textures);
     }
     return i;
@@ -3495,13 +3628,34 @@ fn emitInstruction(
         },
         .Phi => {
             if (inst.words.len < 4) return;
+            const result_id = inst.words[2];
+            // Loop-header phi (loop counter): render as a mutable local declared
+            // and initialised here at the loop preheader; the back-edge update is
+            // emitted at the loop tail by emitWhileLoopMSL. Without this the phi
+            // was aliased to its constant init value, freezing the counter into
+            // an infinite loop.
+            if (result_id < m.id_defs.len) {
+                if (m.id_defs[result_id]) |pidx| {
+                    if (common.classifyLoopPhi(m.instructions, m.id_defs, pidx)) |lp| {
+                        if (names.get(result_id) == null) {
+                            const a = try std.fmt.allocPrint(alloc, "v{d}", .{result_id});
+                            if (names.fetchPut(result_id, a) catch null) |old| alloc.free(old.value);
+                        }
+                        const tn = mslType(m, inst.words[1], names, alloc) catch "int";
+                        const nm = names.get(result_id) orelse "vphi";
+                        const init_name = names.get(lp.init_val) orelse "0";
+                        try w.print("    {s} {s} = {s};\n", .{ tn, nm, init_name });
+                        return;
+                    }
+                }
+            }
             const fv = inst.words[3];
             if (names.get(fv)) |sn| {
                 const a = try alloc.dupe(u8, sn);
-                if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
+                if (names.fetchPut(result_id, a) catch null) |old| alloc.free(old.value);
             } else {
                 const a = try std.fmt.allocPrint(alloc, "v{d}", .{fv});
-                if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
+                if (names.fetchPut(result_id, a) catch null) |old| alloc.free(old.value);
             }
         },
         .AccessChain => {

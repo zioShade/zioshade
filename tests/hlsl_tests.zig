@@ -14410,3 +14410,17 @@ test "HLSL: module-scope const array indexed at runtime materializes its values"
     try assertNotContains(hlsl, "LUT[");
     try assertNotContains(hlsl, "static float LUT");
 }
+
+// Loop-counter OpPhi lowering (regression) — see glsl_tests.zig for rationale.
+test "loop-phi: for-loop counter advances (not frozen constant)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float x=0.0; for(int i=0;i<20;i++){ x=x+float(i);} o=vec4(x);}
+    ;
+    const hlsl = try compileToHlslStage(source, .fragment);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "while (true)");
+    try assertContains(hlsl, "< 20");
+    try assertNotContains(hlsl, "0 < 20");
+}
