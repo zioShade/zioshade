@@ -3379,3 +3379,28 @@ test "wgsl: mutated in-parameter is copied to a local at entry (increment preser
     try assertContains(wgsl, copy_needle);
     try nagaValidateOrSkip(wgsl, "mutable-in-param");
 }
+
+// The mutated-param promotion must be SCOPE-AWARE: a read-only `in` param that
+// merely shares its name with a mutated inner-block local must NOT be promoted.
+// Falsely promoting it copies the param into a local that DCE then eliminates,
+// leaving a dangling SSA reference to the (now-undefined) parameter value —
+// invalid SPIR-V. Guard: the read-only param compiles to valid SPIR-V.
+test "wgsl: read-only param shadowed by a mutated inner local is not promoted" {
+    const source =
+        \\#version 450
+        \\layout(location=0) in float u;
+        \\layout(location=0) out vec4 o;
+        \\float f(float p) {
+        \\    float r = p;
+        \\    { float p = u; p += 1.0; r += p; }
+        \\    return r + p;
+        \\}
+        \\void main() { o = vec4(f(u)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expect(try glslpp.validateSPIRV(alloc, spirv));
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "shadowed-readonly-param");
+}

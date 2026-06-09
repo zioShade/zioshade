@@ -3320,6 +3320,35 @@ const Analyzer = struct {
         return null;
     }
 
+    /// Whether `decl` declares a local named `name` (a plain `var_decl`, or one of
+    /// the names in a multi-declaration).
+    fn declNodeDeclares(decl: ast.Node, name: []const u8) bool {
+        switch (decl.tag) {
+            .var_decl => return std.mem.eql(u8, decl.data.name, name),
+            .multi_decl, .var_decl_multi => {
+                for (decl.data.children) |c| {
+                    if (c.tag == .var_decl and std.mem.eql(u8, c.data.name, name)) return true;
+                }
+            },
+            else => {},
+        }
+        return false;
+    }
+
+    /// Whether `node` opens a scope that RE-DECLARES `name`, shadowing an outer
+    /// binding of the same name throughout `node`. A `block`'s own declarations
+    /// and a `for`'s init both introduce such shadows. Deeper nested scopes are
+    /// handled by the recursion in `nameMutatedIn`.
+    fn scopeDeclaresName(node: ast.Node, name: []const u8) bool {
+        if (node.tag == .for_stmt) {
+            return node.data.children.len > 0 and declNodeDeclares(node.data.children[0], name);
+        }
+        if (node.tag == .block) {
+            for (node.data.children) |c| if (declNodeDeclares(c, name)) return true;
+        }
+        return false;
+    }
+
     /// Whether `name` is the target of an in-place mutation (assignment, compound
     /// assignment, or ++/--) anywhere in the subtree. Used to decide if an `in`
     /// function parameter must be copied to a local at entry: GLSL passes `in`
@@ -3328,7 +3357,14 @@ const Analyzer = struct {
     /// (e.g. a loop condition `while(lo<=hi)`) read the original value, and the
     /// late local copy is then dead-code-eliminated along with the write (a silent
     /// dropped-update / infinite loop).
+    ///
+    /// Scope-aware: a nested block / `for`-init that re-declares `name` shadows the
+    /// parameter, so mutations inside that scope must NOT count (they target the
+    /// shadow, not the param — counting them would falsely promote a read-only
+    /// parameter and corrupt its by-value SSA reference → invalid SPIR-V).
     fn nameMutatedIn(node: ast.Node, name: []const u8) bool {
+        // A scope re-declaring `name` shadows the parameter throughout — skip it.
+        if (scopeDeclaresName(node, name)) return false;
         switch (node.tag) {
             .assign_op, .compound_assign, .post_increment, .post_decrement, .pre_increment, .pre_decrement => {
                 if (node.data.children.len > 0) {
