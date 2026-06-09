@@ -1108,6 +1108,28 @@ const Analyzer = struct {
         if (self.ac_result_to_base.get(ptr_id)) |base_id| {
             _ = self.load_cache.remove(base_id);
             _ = self.global_load_cache.remove(base_id);
+            self.invalidateAliasingChains(base_id);
+        }
+    }
+
+    /// Invalidate every cached load reached through ANY access chain into `base_id`
+    /// — i.e. a SIBLING access chain (a different SSA id) into the SAME base
+    /// buffer/variable. A store/atomic through one chain (`b.data[i]`) may alias a
+    /// load cached through a different chain (`b.data[j]`) into the same base when
+    /// the indices are dynamically equal, so no such cached load may survive the
+    /// mutation (#235, follow-up to #223). Over-invalidation is always safe: it can
+    /// only force an extra re-load, never reuse a stale value (immutable-uniform
+    /// reloads are re-merged by the optimizer's load CSE). `ac_result_to_base` is
+    /// reset at every basic-block boundary (and per function), so this scans only the
+    /// chains created in the current block — keeping the per-mutation cost bounded.
+    fn invalidateAliasingChains(self: *Analyzer, base_id: u32) void {
+        var it = self.ac_result_to_base.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* == base_id) {
+                const chain_id = entry.key_ptr.*;
+                _ = self.load_cache.remove(chain_id);
+                _ = self.global_load_cache.remove(chain_id);
+            }
         }
     }
 
@@ -1132,6 +1154,10 @@ const Analyzer = struct {
         if (self.ac_result_to_base.get(ptr_id)) |base_id| {
             _ = self.load_cache.remove(base_id);
             _ = self.global_load_cache.remove(base_id);
+            // #235: also invalidate sibling chains into the same base (they may
+            // dynamically alias this chain). Runs BEFORE the forwarding put below,
+            // which re-establishes the exact-chain entry.
+            self.invalidateAliasingChains(base_id);
         }
         // Store-to-load forwarding: within the same basic block, a load of the
         // same pointer after this store can use the stored value directly.
@@ -4357,6 +4383,7 @@ const Analyzer = struct {
                 if (self.ac_result_to_base.get(target.id)) |base_id| {
                     _ = self.load_cache.remove(base_id);
                     _ = self.global_load_cache.remove(base_id);
+                    self.invalidateAliasingChains(base_id); // #235: sibling chains into same base
                 }
                 self.load_cache.put(self.alloc, target.id, value_id) catch {}; // Forward stored value
         try self.instructions.append(self.alloc, .{
@@ -8254,6 +8281,7 @@ const Analyzer = struct {
                 if (self.ac_result_to_base.get(lval.id)) |base_id| {
                     _ = self.load_cache.remove(base_id);
                     _ = self.global_load_cache.remove(base_id);
+                    self.invalidateAliasingChains(base_id); // #235: sibling chains into same base (e.g. b.data[i]++ vs b.data[j])
                 }
                 self.load_cache.put(self.alloc, lval.id, new_val_id) catch {}; // Forward
         try self.instructions.append(self.alloc, .{

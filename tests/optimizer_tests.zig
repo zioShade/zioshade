@@ -359,3 +359,75 @@ test "frontend: shared read after atomicAdd is not hoisted before it (#223, no-o
     defer alloc.free(spirv);
     try assertLoadAfterAtomic(spirv);
 }
+
+// #235: a load through one access chain (`b.data[j]`) must NOT be reused after an
+// atomic mutates a SIBLING access chain (`b.data[i]`) into the SAME base buffer.
+// The two chains have distinct SSA ids, so the pre-#235 invalidation (exact chain
+// id + base only) left the cached `b.data[j]` load alive across the atomic — and
+// `y` reused the stale pre-atomic value when i == j at runtime. After the fix the
+// `result.total = y` store must read a load positioned AFTER the OpAtomicIAdd.
+const ALIAS_CHAIN_SRC =
+    \\#version 310 es
+    \\layout(local_size_x = 32) in;
+    \\layout(std430, binding = 0) buffer B { uint data[]; } b;
+    \\layout(std430, binding = 1) buffer R { uint total; } result;
+    \\void main() {
+    \\    uint j = gl_LocalInvocationID.x;
+    \\    uint i = gl_LocalInvocationID.y; // statically distinct chain; may alias j at runtime
+    \\    uint x = b.data[j];
+    \\    atomicAdd(b.data[i], 1u);
+    \\    uint y = b.data[j];
+    \\    result.total = y;
+    \\}
+;
+
+test "frontend: sibling access-chain load not reused across atomic on same base (#235, opt)" {
+    const spirv = try compileCompute(ALIAS_CHAIN_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterAtomic(spirv);
+}
+
+test "frontend: sibling access-chain load not reused across atomic on same base (#235, no-opt)" {
+    const spirv = try compileComputeNoOpt(ALIAS_CHAIN_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterAtomic(spirv);
+}
+
+// #235 (review finding): the SAME sibling-aliasing bug is reachable through a
+// plain read-modify-write store (`b.data[i]++`), not just an atomic. The `++`
+// store through chain_i must invalidate the cached `b.data[j]` load through the
+// sibling chain_j. After the fix, `result.total = y` must read a load positioned
+// AFTER the increment's OpIAdd (opcode 128), not the stale pre-increment one.
+fn assertLoadAfterIAdd(spirv: []const u32) !void {
+    const iadd_pos = firstOpcodePos(spirv, 128) orelse return error.NoIAdd; // OpIAdd (the b.data[i]++ add)
+    const stored_val = lastStoreLoadedValue(spirv) orelse return error.NoLoadedStore;
+    const load_pos = loadPosForResult(spirv, stored_val) orelse return error.NoLoad;
+    try std.testing.expect(load_pos > iadd_pos);
+}
+
+const ALIAS_INCR_SRC =
+    \\#version 310 es
+    \\layout(local_size_x = 32) in;
+    \\layout(std430, binding = 0) buffer B { uint data[]; } b;
+    \\layout(std430, binding = 1) buffer R { uint total; } result;
+    \\void main() {
+    \\    uint j = gl_LocalInvocationID.x;
+    \\    uint i = gl_LocalInvocationID.y; // statically distinct chain; may alias j at runtime
+    \\    uint x = b.data[j];
+    \\    b.data[i]++;
+    \\    uint y = b.data[j];
+    \\    result.total = y;
+    \\}
+;
+
+test "frontend: sibling access-chain load not reused across ++ store on same base (#235, opt)" {
+    const spirv = try compileCompute(ALIAS_INCR_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterIAdd(spirv);
+}
+
+test "frontend: sibling access-chain load not reused across ++ store on same base (#235, no-opt)" {
+    const spirv = try compileComputeNoOpt(ALIAS_INCR_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterIAdd(spirv);
+}
