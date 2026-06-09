@@ -2871,10 +2871,17 @@ test "T-atomic.1: MSL atomic_compare_exchange reads compare/data from correct op
     const msl = try compileToMslStage(source, .compute);
     defer alloc.free(msl);
     try assertContains(msl, "atomic_compare_exchange_weak_explicit(");
-    // Correct: compare 7 (passed by reference), data 9.
-    try assertContains(msl, "&7u, 9u,");
+    // #263: the comparator must be materialized into an addressable mutable local
+    // (MSL `expected` is an in/out thread pointer) — never &<literal>, which is not
+    // an lvalue and does not compile.
+    try assertContains(msl, "&_cas_expected_");
+    try assertContains(msl, "= 7u;"); // local initialized to the comparator
+    try assertContains(msl, ", 9u,"); // data passed by value (operand order, #260)
+    // The original loaded value is taken from the local, not the bool return.
+    try assertNotContains(msl, "&7u"); // invalid-lvalue bug (#263)
+    try assertNotContains(msl, "&9u"); // operand-swap regression (#260)
     // The Unequal-semantics constant (0x40 == 64) must never appear as an argument.
-    try assertNotContains(msl, "&9u, 64u,");
+    try assertNotContains(msl, "64u,");
 }
 
 // #260: atomicExchange / atomicAdd must remain correct (they read value from words[6]).
@@ -2912,6 +2919,32 @@ test "T-atomic.3: MSL image atomic_compare_exchange reads compare/data from corr
     const msl = try compileToMslStage(source, .compute);
     defer alloc.free(msl);
     try assertContains(msl, "atomic_compare_exchange_weak_explicit(");
-    try assertContains(msl, "&5u, 3u,");
-    try assertNotContains(msl, "&3u, 64u,");
+    // #263: comparator materialized into an addressable local (see T-atomic.1).
+    try assertContains(msl, "&_cas_expected_");
+    try assertContains(msl, "= 5u;"); // local initialized to the comparator
+    try assertContains(msl, ", 3u,"); // data passed by value
+    try assertNotContains(msl, "&5u"); // invalid-lvalue bug (#263)
+    try assertNotContains(msl, "&3u"); // operand-swap regression (#260)
+    try assertNotContains(msl, "64u,");
+}
+
+// #263: the comparator is also routed through the materialized local when it is a
+// runtime VALUE (not a constant). This was the previously-compiling path (`&varname`);
+// guard that it still produces a valid `&_cas_expected_` lvalue and the correct data.
+test "T-atomic.4: MSL atomic_compare_exchange handles a runtime (non-constant) comparator (#263)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { uint lock; uint cmpval; uint out_old; } b;
+        \\void main() {
+        \\    uint c = b.cmpval;                          // runtime value — not constant-foldable
+        \\    b.out_old = atomicCompSwap(b.lock, c, 9u);  // compare = c, data = 9
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "atomic_compare_exchange_weak_explicit(");
+    try assertContains(msl, "&_cas_expected_"); // comparator passed via addressable local
+    try assertContains(msl, ", 9u,"); // data still passed by value
+    try assertNotContains(msl, "&9u"); // data must never be address-of'd
 }
