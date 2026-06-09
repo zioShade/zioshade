@@ -6378,9 +6378,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
             },
             .IsInf => {
-                // WGSL has no isInf builtin and no clean idiom (no infinity literal).
-                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no isInf builtin", .{}) catch null;
-                return error.UnsupportedOp;
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const x = names.get(inst.words[3]) orelse "0";
+                if (std.mem.eql(u8, rt, "bool")) {
+                    // WGSL has no isInf builtin and no infinity literal. The idiom
+                    // `(x != 0.0 && x * 2.0 == x)` is true ONLY for ±inf: 0 is excluded
+                    // by `x != 0.0`; a finite nonzero x has `x*2 != x`; NaN fails the
+                    // `==`; the max finite value overflows under `*2.0` to inf, which
+                    // `!= x`. naga-validated.
+                    try writeInd(w, indent);
+                    try w.print("let {s}: bool = ({s} != 0.0 && {s} * 2.0 == {s});\n", .{ result_name, x, x, x });
+                } else {
+                    // Vector isinf (bvecN) has no clean WGSL form (no componentwise &&
+                    // on bool vectors). Honest-error, parallel to vector isnan above.
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no isInf for vector type '{s}'", .{rt}) catch null;
+                    return error.UnsupportedOp;
+                }
             },
 
             // CompositeInsert

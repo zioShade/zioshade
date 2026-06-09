@@ -342,6 +342,34 @@ test "wgsl unmapped ext-inst errors honestly instead of emitting unknown()" {
     );
 }
 
+// WGSL has no isInf builtin (and no infinity literal). isinf(x) lowers to the
+// literal-free idiom (x != 0.0 && x * 2.0 == x), which is true ONLY for ±inf:
+// 0 is excluded by `x != 0.0`; a finite nonzero x has `x*2 != x`; NaN fails the
+// `==`; the max finite value overflows under `*2.0` to inf, which `!= x`. Must
+// be naga-validated WGSL with no `isInf`/`isinf` identifier leak. (#170)
+test "wgsl scalar isinf lowers to a naga-valid idiom (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in float v;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bool b = isinf(v);
+        \\    fragColor = vec4(b ? 1.0 : 0.0, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The non-existent WGSL builtin must never leak (naga: undefined identifier).
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "isInf") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "isinf") == null);
+    // Positively lock the idiom shape so a future refactor can't swap in a
+    // different (still naga-valid) but incorrect expression.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "* 2.0 ==") != null);
+    try nagaValidateOrSkip(wgsl, "scalar-isinf");
+}
+
 // WGSL has no matrix-inverse builtin. GLSL inverse() (GLSL.std.450 MatrixInverse)
 // must NOT silently emit `matrixInverse(m)` (naga: "no definition in scope").
 // Pass 2 lowers it to an emit-once generated `spvInverseN` helper (cofactor /
@@ -866,10 +894,11 @@ test "wgsl: geometry stage errors honestly (WGSL has no geometry entry point)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "Geometry") != null);
 }
 
-test "wgsl: scalar isnan lowers to (x != x); isinf errors honestly" {
-    // WGSL has no isNan/isInf builtins. Scalar isnan(x) must lower to (x != x);
-    // isinf has no clean WGSL idiom and must fail loud (not emit isinf(x), which
-    // naga rejects as an undefined identifier — silent-wrong).
+test "wgsl: scalar isnan lowers to (x != x); scalar isinf to a naga-valid idiom" {
+    // WGSL has no isNan/isInf builtins. Scalar isnan(x) lowers to (x != x); scalar
+    // isinf(x) lowers to the literal-free idiom (x != 0.0 && x*2.0 == x) (#170).
+    // Neither may emit the non-existent isnan(...)/isinf(...) builtin (naga rejects
+    // those as undefined identifiers — silent-wrong).
     {
         const source =
             \\#version 450
@@ -894,7 +923,11 @@ test "wgsl: scalar isnan lowers to (x != x); isinf errors honestly" {
         ;
         const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
         defer alloc.free(spirv);
-        try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+        const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+        defer alloc.free(wgsl);
+        try std.testing.expect(std.mem.indexOf(u8, wgsl, "isinf(") == null);
+        try std.testing.expect(std.mem.indexOf(u8, wgsl, "isInf") == null);
+        try nagaValidateOrSkip(wgsl, "isinf-scalar");
     }
 }
 
