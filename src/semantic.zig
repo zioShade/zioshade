@@ -513,7 +513,7 @@ const Analyzer = struct {
     const_composite_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty,
     access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty,
     global_access_chain_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty, // key -> ptr_id (persists across blocks, populated from entry block)
-    ac_result_to_base: std.AutoHashMapUnmanaged(u32, u32) = .empty, // AccessChain result_id -> base var_id (for store invalidation)
+    chain_root_base: std.AutoHashMapUnmanaged(u32, u32) = .empty, // #248: AccessChain result_id -> transitive ROOT base var (for store/atomic sibling-aliasing invalidation). Persists for the WHOLE function (reset per-function, NOT per-block) so invalidation reaches loads cached in dominating blocks (global_load_cache, residual A), multi-level nested siblings (b.arr[i].x vs b.arr[j].y, residual B), and mutations through a dominating-block chain (residual C). Supersedes the old per-block immediate-base map.
     load_cache: std.AutoHashMapUnmanaged(u32, u32) = .empty, // ptr_id -> loaded_value_id (cleared at labels)
     global_load_cache: std.AutoHashMapUnmanaged(u32, u32) = .empty, // ptr_id -> loaded_value_id (persists across blocks)
     global_ptr_ids: std.AutoHashMapUnmanaged(u32, void) = .empty, // set of ptr_ids that point into global (Input/Uniform/Output) variables
@@ -605,7 +605,7 @@ const Analyzer = struct {
         self.const_composite_cache.deinit(self.alloc);
         self.access_chain_cache.deinit(self.alloc);
         self.global_access_chain_cache.deinit(self.alloc);
-        self.ac_result_to_base.deinit(self.alloc);
+        self.chain_root_base.deinit(self.alloc);
         self.load_cache.deinit(self.alloc);
         self.global_load_cache.deinit(self.alloc);
         self.global_ptr_ids.deinit(self.alloc);
@@ -1011,8 +1011,15 @@ const Analyzer = struct {
             .ty = result_ty,
         });
         self.access_chain_cache.put(self.alloc, key, ptr_id) catch {};
-        // Track AC result -> base variable for store invalidation
-        self.ac_result_to_base.put(self.alloc, ptr_id, base_id) catch {};
+        // #248: record the transitive ROOT base for store/atomic sibling invalidation.
+        // For a nested lvalue (`b.arr[i].x`) base_id is itself an AccessChain result
+        // already recorded here, so its root is in chain_root_base; otherwise base_id
+        // IS the root variable. Persists
+        // per-function so sibling invalidation reaches dominating-block and nested
+        // chains. A cache hit above returns an earlier ptr_id already recorded this
+        // function (global_access_chain_cache is reset per-function), so no entry is lost.
+        const root_base = self.chain_root_base.get(base_id) orelse base_id;
+        self.chain_root_base.put(self.alloc, ptr_id, root_base) catch {};
         // Populate global cache from dominating blocks (entry + loop headers)
         if (self.cache_globals) {
             self.global_access_chain_cache.put(self.alloc, key, ptr_id) catch {};
@@ -1105,11 +1112,10 @@ const Analyzer = struct {
     fn invalidatePtrLoadCache(self: *Analyzer, ptr_id: u32) void {
         _ = self.load_cache.remove(ptr_id);
         _ = self.global_load_cache.remove(ptr_id);
-        if (self.ac_result_to_base.get(ptr_id)) |base_id| {
-            _ = self.load_cache.remove(base_id);
-            _ = self.global_load_cache.remove(base_id);
-            self.invalidateAliasingChains(base_id);
-        }
+        // #248: resolve ptr_id to its root and drop all sibling chains. Routed through
+        // chain_root_base (per-function), NOT ac_result_to_base (per-block), so this
+        // fires even when ptr_id was built in a dominating block (residual C).
+        self.invalidateAliasingChains(ptr_id);
     }
 
     /// Invalidate every cached load reached through ANY access chain into `base_id`
@@ -1119,13 +1125,36 @@ const Analyzer = struct {
     /// the indices are dynamically equal, so no such cached load may survive the
     /// mutation (#235, follow-up to #223). Over-invalidation is always safe: it can
     /// only force an extra re-load, never reuse a stale value (immutable-uniform
-    /// reloads are re-merged by the optimizer's load CSE). `ac_result_to_base` is
-    /// reset at every basic-block boundary (and per function), so this scans only the
-    /// chains created in the current block — keeping the per-mutation cost bounded.
-    fn invalidateAliasingChains(self: *Analyzer, base_id: u32) void {
-        var it = self.ac_result_to_base.iterator();
+    /// reloads are re-merged by the optimizer's load CSE).
+    ///
+    /// #248: `mutated_id` is the pointer actually being mutated (the store/atomic/`++`
+    /// target). We resolve it to its transitive ROOT variable via `chain_root_base`
+    /// (which persists per-FUNCTION, not per-block), then invalidate every cached load
+    /// through ANY chain into that root, plus the root's own load. Iterating the
+    /// per-function `chain_root_base` — rather than the per-block `ac_result_to_base` —
+    /// closes three residuals of the original #235 (immediate-base, per-block) fix:
+    ///   A. a sibling load cached in a DOMINATING block (entry/loop-header →
+    ///      `global_load_cache`) whose chain id is absent from the current block's
+    ///      `ac_result_to_base`;
+    ///   B. a MULTI-LEVEL nested lvalue (`b.arr[i].x` vs `b.arr[j].y`) whose chains
+    ///      resolve to different INTERMEDIATE bases but the same root;
+    ///   C. the MUTATED chain itself built in a dominating block (reused in a child
+    ///      block via `global_access_chain_cache`), hence absent from the child block's
+    ///      `ac_result_to_base` — pre-#248 callers gated sibling invalidation on that
+    ///      map and so skipped it entirely. Callers now pass the mutated pointer here
+    ///      directly instead of guarding on `ac_result_to_base`.
+    /// If `mutated_id` is not a chain (a plain variable), `root == mutated_id` and only
+    /// chains rooted directly at it (e.g. a whole-array store) are dropped. Over-
+    /// invalidation is always safe. Cost is O(chains-in-function) per mutation; bounded
+    /// for real shaders, and the invalidated set is exactly the loads that may alias.
+    fn invalidateAliasingChains(self: *Analyzer, mutated_id: u32) void {
+        const root = self.chain_root_base.get(mutated_id) orelse mutated_id;
+        // Drop the root variable's own cached whole-object load too.
+        _ = self.load_cache.remove(root);
+        _ = self.global_load_cache.remove(root);
+        var it = self.chain_root_base.iterator();
         while (it.next()) |entry| {
-            if (entry.value_ptr.* == base_id) {
+            if (entry.value_ptr.* == root) {
                 const chain_id = entry.key_ptr.*;
                 _ = self.load_cache.remove(chain_id);
                 _ = self.global_load_cache.remove(chain_id);
@@ -1150,15 +1179,12 @@ const Analyzer = struct {
         // so that subsequent loads of uv don't return a stale cached value.
         _ = self.load_cache.remove(ptr_id);
         _ = self.global_load_cache.remove(ptr_id);
-        // Check if ptr_id is an AccessChain result — if so, invalidate the base variable too
-        if (self.ac_result_to_base.get(ptr_id)) |base_id| {
-            _ = self.load_cache.remove(base_id);
-            _ = self.global_load_cache.remove(base_id);
-            // #235: also invalidate sibling chains into the same base (they may
-            // dynamically alias this chain). Runs BEFORE the forwarding put below,
-            // which re-establishes the exact-chain entry.
-            self.invalidateAliasingChains(base_id);
-        }
+        // #235/#248: invalidate the chain's ROOT variable and every SIBLING chain into
+        // it (they may dynamically alias this chain). Routed through chain_root_base
+        // (per-function) so it also fires for chains built in a dominating block
+        // (residual C). Runs BEFORE the forwarding put below, which re-establishes the
+        // exact-chain entry for this pointer.
+        self.invalidateAliasingChains(ptr_id);
         // Store-to-load forwarding: within the same basic block, a load of the
         // same pointer after this store can use the stored value directly.
         self.load_cache.put(self.alloc, ptr_id, val_id) catch {};
@@ -1278,7 +1304,8 @@ const Analyzer = struct {
         self.in_entry_block = false;
         self.cache_globals = false; // Only re-enable in loop headers
         self.access_chain_cache.clearRetainingCapacity();
-        self.ac_result_to_base.clearRetainingCapacity();
+        // NOTE: chain_root_base is intentionally NOT cleared here — it persists for the
+        // whole function (#248) so sibling invalidation reaches dominating-block chains.
         self.load_cache.clearRetainingCapacity();
         self.pure_op_cache.clearRetainingCapacity();
         try self.instructions.append(self.alloc, .{
@@ -2430,7 +2457,7 @@ const Analyzer = struct {
         self.in_entry_block = true;
         self.cache_globals = true;
         self.access_chain_cache.clearRetainingCapacity();
-        self.ac_result_to_base.clearRetainingCapacity();
+        self.chain_root_base.clearRetainingCapacity(); // #248: persists per-FUNCTION (not per-block) — clear at function entry
         self.load_cache.clearRetainingCapacity();
         self.pure_op_cache.clearRetainingCapacity();
         self.global_load_cache.clearRetainingCapacity();
@@ -4416,13 +4443,12 @@ const Analyzer = struct {
                 store_operands[1] = .{ .id = value_id };
                 _ = self.load_cache.remove(target.id);
                 _ = self.global_load_cache.remove(target.id);
-                // If storing to an AccessChain result (e.g., v.x), also invalidate the base variable (v)
-                // so subsequent loads of v return the updated value, not a stale cached load.
-                if (self.ac_result_to_base.get(target.id)) |base_id| {
-                    _ = self.load_cache.remove(base_id);
-                    _ = self.global_load_cache.remove(base_id);
-                    self.invalidateAliasingChains(base_id); // #235: sibling chains into same base
-                }
+                // #235/#248: invalidate the chain's ROOT variable and every sibling
+                // chain into it (e.g. storing to v.x invalidates v and v.y; a buffer
+                // element store invalidates aliasing element loads). Routed through
+                // chain_root_base (per-function) so it fires for dominating-block
+                // chains too (residual C). Runs before the forwarding put below.
+                self.invalidateAliasingChains(target.id);
                 self.load_cache.put(self.alloc, target.id, value_id) catch {}; // Forward stored value
         try self.instructions.append(self.alloc, .{
                     .tag = .store,
@@ -4573,6 +4599,10 @@ const Analyzer = struct {
                                     store_ops[1] = .{ .id = final_shuffle_id };
                                     _ = self.load_cache.remove(var_ptr_id2);
                                     _ = self.global_load_cache.remove(var_ptr_id2);
+                                    // #248-D: a multi-component swizzle compound-assign (`v.xy *= k`)
+                                    // is a mutation site too — invalidate the chain's root and every
+                                    // sibling chain into it before forwarding the stored value.
+                                    self.invalidateAliasingChains(var_ptr_id2);
                                     self.load_cache.put(self.alloc, var_ptr_id2, final_shuffle_id) catch {}; // Forward
         try self.instructions.append(self.alloc, .{
                                         .tag = .store,
@@ -8326,12 +8356,10 @@ const Analyzer = struct {
                 store_ops[1] = .{ .id = new_val_id };
                 _ = self.load_cache.remove(lval.id);
                 _ = self.global_load_cache.remove(lval.id);
-                // If storing to an AccessChain result (e.g., v.x++), also invalidate the base variable
-                if (self.ac_result_to_base.get(lval.id)) |base_id| {
-                    _ = self.load_cache.remove(base_id);
-                    _ = self.global_load_cache.remove(base_id);
-                    self.invalidateAliasingChains(base_id); // #235: sibling chains into same base (e.g. b.data[i]++ vs b.data[j])
-                }
+                // #235/#248: invalidate the chain's ROOT and every sibling chain into it
+                // (e.g. b.data[i]++ invalidates b.data[j]). Routed through chain_root_base
+                // (per-function) so it fires for dominating-block chains too (residual C).
+                self.invalidateAliasingChains(lval.id);
                 self.load_cache.put(self.alloc, lval.id, new_val_id) catch {}; // Forward
         try self.instructions.append(self.alloc, .{
                     .tag = .store,

@@ -474,3 +474,188 @@ test "frontend: shared read after a helper that does atomic+barrier is re-loaded
     defer alloc.free(spirv);
     try assertLoadAfterAtomic(spirv);
 }
+
+// #248 residual A — a sibling load cached in a DOMINATING block (entry / loop
+// header, where `cache_globals` is true → the load lands in `global_load_cache`)
+// must be invalidated by a sibling mutation in a CHILD block. `invalidateAliasingChains`
+// (pre-#248) iterated `ac_result_to_base`, which is reset at every block boundary,
+// so the dominating-block chain id was absent from the child block's map and the
+// stale `global_load_cache` entry survived the atomic. `data[j]` is loaded in the
+// entry block, then `data[i]` is atomically bumped inside `if (x > 0u)`, then
+// `data[j]` is read again in that child block — the re-read must load AFTER the
+// atomic, not reuse the dominating-block cached value.
+const ALIAS_DOMINATING_SRC =
+    \\#version 310 es
+    \\layout(local_size_x = 32) in;
+    \\layout(std430, binding = 0) buffer B { uint data[]; } buf;
+    \\layout(std430, binding = 1) buffer R { uint total; } result;
+    \\void main() {
+    \\    uint j = gl_LocalInvocationID.x;
+    \\    uint i = gl_LocalInvocationID.y; // statically distinct; may alias j at runtime
+    \\    uint x = buf.data[j];            // ENTRY (dominating) block → global_load_cache
+    \\    if (x > 0u) {
+    \\        atomicAdd(buf.data[i], 1u);  // mutate sibling chain data[i] in CHILD block
+    \\        uint y = buf.data[j];        // re-read: must NOT reuse the dominating-block load
+    \\        result.total = y;
+    \\    }
+    \\}
+;
+
+test "frontend: sibling load cached in dominating block re-loads after atomic in child (#248-A, opt)" {
+    const spirv = try compileCompute(ALIAS_DOMINATING_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterAtomic(spirv);
+}
+
+test "frontend: sibling load cached in dominating block re-loads after atomic in child (#248-A, no-opt)" {
+    const spirv = try compileComputeNoOpt(ALIAS_DOMINATING_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterAtomic(spirv);
+}
+
+// #248 residual B — a MULTI-LEVEL nested lvalue. `buf.arr[i].a` is built as nested
+// single-index access chains (`arr` member → `[i]` → `.a`), so `buf.arr[i].a` and
+// `buf.arr[j].a` resolve to DIFFERENT immediate bases (`arr[i]` vs `arr[j]`). The
+// pre-#248 sibling invalidation keyed on the immediate base only, so a store to
+// `buf.arr[i].a` did not invalidate the cached `buf.arr[j].a` load — they alias
+// exactly when i == j. After the fix the chain root (`buf`) is resolved transitively
+// and all chains into it are invalidated, so the re-read loads AFTER the `x + 1u`
+// OpIAdd that produced the stored value.
+const ALIAS_NESTED_SRC =
+    \\#version 310 es
+    \\layout(local_size_x = 32) in;
+    \\struct Cell { uint a; uint b; };
+    \\layout(std430, binding = 0) buffer B { Cell arr[]; } buf;
+    \\layout(std430, binding = 1) buffer R { uint total; } result;
+    \\void main() {
+    \\    uint j = gl_LocalInvocationID.x;
+    \\    uint i = gl_LocalInvocationID.y; // statically distinct; may alias j at runtime
+    \\    uint x = buf.arr[j].a;            // load nested chain arr[j].a (cached)
+    \\    buf.arr[i].a = x + 1u;            // store nested chain arr[i].a (same component; aliases when i==j)
+    \\    uint y = buf.arr[j].a;            // re-read: must NOT reuse the pre-store load
+    \\    result.total = y;
+    \\}
+;
+
+test "frontend: multi-level nested sibling load re-loads after store on aliasing chain (#248-B, opt)" {
+    const spirv = try compileCompute(ALIAS_NESTED_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterIAdd(spirv);
+}
+
+test "frontend: multi-level nested sibling load re-loads after store on aliasing chain (#248-B, no-opt)" {
+    const spirv = try compileComputeNoOpt(ALIAS_NESTED_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterIAdd(spirv);
+}
+
+// #248 residual C (surfaced by the code review of the A/B fix) — the MUTATED chain
+// itself was built in a DOMINATING block. `buf.data[0]` (literal index) is created
+// while evaluating the entry-block `if` condition, so it lands in
+// `global_access_chain_cache`. The `atomicAdd(buf.data[0], ...)` in the child block
+// re-uses that cached chain id, which is therefore ABSENT from the child block's
+// (per-block) `ac_result_to_base`. The invalidation entry points gate sibling
+// invalidation on `ac_result_to_base.get(ptr_id)`, so the gate missed and the cached
+// sibling `buf.data[j]` load (in `global_load_cache` from the entry block) survived
+// the atomic → stale when j == 0. Fixed by routing the gate through the per-function
+// `chain_root_base` (which DOES contain the dominating-block chain id).
+const ALIAS_DOM_MUT_SRC =
+    \\#version 310 es
+    \\layout(local_size_x = 32) in;
+    \\layout(std430, binding = 0) buffer B { uint data[]; } buf;
+    \\layout(std430, binding = 1) buffer R { uint total; } result;
+    \\void main() {
+    \\    uint j = gl_LocalInvocationID.x;
+    \\    uint y = buf.data[j];            // ENTRY: sibling chain → global_load_cache
+    \\    if (buf.data[0] > 0u) {          // ENTRY: data[0] chain → global_access_chain_cache
+    \\        atomicAdd(buf.data[0], 1u);  // CHILD: data[0] reused from dominating block; ac_result_to_base miss
+    \\        uint z = buf.data[j];        // re-read sibling: must NOT reuse the dominating-block load
+    \\        result.total = z;
+    \\    }
+    \\}
+;
+
+test "frontend: sibling load survives mutation through a dominating-block chain (#248-C, opt)" {
+    const spirv = try compileCompute(ALIAS_DOM_MUT_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterAtomic(spirv);
+}
+
+test "frontend: sibling load survives mutation through a dominating-block chain (#248-C, no-opt)" {
+    const spirv = try compileComputeNoOpt(ALIAS_DOM_MUT_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterAtomic(spirv);
+}
+
+// #248 residual D (surfaced by the review of the C fix) — the MULTI-COMPONENT swizzle
+// compound-assign path (`v.xy *= k`) is a fifth mutation site. It reads the whole
+// vector, recombines via OpVectorShuffle, and stores the result back, but pre-fix it
+// only removed its own chain id from the caches — it did NOT invalidate SIBLING chains
+// into the same root. So a cached `buf.data[j].x` load survived `buf.data[i].xy *= 2.0`
+// and read stale when i == j. Fixed by routing this site through invalidateAliasingChains
+// too. Landmark: the store-back's value is an OpVectorShuffle result (unique to this
+// path); the re-read load feeding result.total must be positioned AFTER that store.
+fn isResultOfOpcode(spirv: []const u32, value_id: u32, opcode: u32) bool {
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        if (wc == 0) break;
+        if ((spirv[i] & 0xFFFF) == opcode and wc >= 3 and spirv[i + 2] == value_id) return true;
+        i += wc;
+    }
+    return false;
+}
+
+// Word index of the first OpStore whose stored value is an OpVectorShuffle (79) result
+// — i.e. the swizzle compound-assign store-back.
+fn swizzleStorePos(spirv: []const u32) ?usize {
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        if (wc == 0) break;
+        if ((spirv[i] & 0xFFFF) == 62 and wc >= 3) { // OpStore
+            const value_id = spirv[i + 2];
+            if (isResultOfOpcode(spirv, value_id, 79)) return i;
+        }
+        i += wc;
+    }
+    return null;
+}
+
+fn assertLoadAfterSwizzleStore(spirv: []const u32) !void {
+    const store_pos = swizzleStorePos(spirv) orelse return error.NoSwizzleStore;
+    const stored_val = lastStoreLoadedValue(spirv) orelse return error.NoLoadedStore;
+    const load_pos = loadPosForResult(spirv, stored_val) orelse return error.NoLoad;
+    try std.testing.expect(load_pos > store_pos);
+}
+
+// Whole-vec sibling reads so the value stored to result.total is a direct OpLoad
+// (a `.x` read would store an OpCompositeExtract, which lastStoreLoadedValue can't
+// track). The first store caches buf.data[j]'s load (it roots in `buf`, NOT `result`,
+// so it survives the result.total store); the swizzle store-back on the sibling
+// data[i] must invalidate it so the second read re-loads.
+const ALIAS_SWIZZLE_SRC =
+    \\#version 310 es
+    \\layout(local_size_x = 32) in;
+    \\layout(std430, binding = 0) buffer B { vec4 data[]; } buf;
+    \\layout(std430, binding = 1) buffer R { vec4 total; } result;
+    \\void main() {
+    \\    uint j = gl_LocalInvocationID.x;
+    \\    uint i = gl_LocalInvocationID.y; // statically distinct; may alias j at runtime
+    \\    result.total = buf.data[j];       // load chain data[j] (cached)
+    \\    buf.data[i].xy *= 2.0;            // swizzle compound-assign store-back on sibling data[i]
+    \\    result.total = buf.data[j];       // re-read: must NOT reuse the pre-store load
+    \\}
+;
+
+test "frontend: sibling load re-loads after swizzle compound-assign store-back (#248-D, opt)" {
+    const spirv = try compileCompute(ALIAS_SWIZZLE_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterSwizzleStore(spirv);
+}
+
+test "frontend: sibling load re-loads after swizzle compound-assign store-back (#248-D, no-opt)" {
+    const spirv = try compileComputeNoOpt(ALIAS_SWIZZLE_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterSwizzleStore(spirv);
+}
