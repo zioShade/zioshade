@@ -1837,7 +1837,7 @@ fn emitBlock(
         // A loop nested in this if/switch branch: handle its header phi / deferred
         // condition exactly as the top-level path does.
         if (isDeferredHdrGLSL(i)) continue;
-        {
+        if (inst.op == .Phi) {
             const phi_indent = std.fmt.allocPrint(alloc, "{s}    ", .{indent}) catch indent;
             defer if (phi_indent.ptr != indent.ptr) alloc.free(phi_indent);
             if (try tryEmitLoopPhiDeclGLSL(m, names, inst, w, alloc, phi_indent)) continue;
