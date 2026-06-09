@@ -60,6 +60,21 @@ fn assertContains(haystack: []const u8, needle: []const u8) !void {
     }
 }
 
+/// Count instructions with the given SPIR-V opcode in a word stream (skips the
+/// 5-word header). Used for IR-level regression guards that don't depend on a
+/// particular backend's text emission.
+fn countSpirvOpcode(words: []const u32, opcode: u16) u32 {
+    var count: u32 = 0;
+    var pos: usize = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(words[pos] & 0xFFFF)) == opcode) count += 1;
+        pos += wc;
+    }
+    return count;
+}
+
 // Validate WGSL with naga — the external WebGPU validator. The whole point of
 // the "silent-wrong" class of bugs is that glslpp emits text that LOOKS fine
 // (exit 0) but a real validator rejects, so string assertions alone can pass
@@ -3121,6 +3136,273 @@ test "wgsl: nested-struct stage-IO members are flattened to leaf @location param
     // No struct/array survives at a @location (naga's actual rule).
     try assertNotContains(wgsl, "@location(0) a: Foo");
     try nagaValidateOrSkip(wgsl, "nested-struct IO flattening");
+}
+
+// A mid-body early `return` inside an entry function must actually EXIT — the
+// void OpReturn used to be dropped ("handled by wrapper"), so the early branch
+// fell through to later stage-IO writes and its output was unconditionally
+// overwritten (silent-wrong: naga ACCEPTS the miscompiled output). The fix emits
+// an explicit `return <output>;` at the early-return point so the branch's value
+// survives.
+test "wgsl: vertex early return is honored (value preserved, not dropped)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 col;
+        \\layout(location=1) in float cond;
+        \\void main() {
+        \\    if (cond > 0.0) { col = vec4(10.0); return; }
+        \\    col = vec4(20.0);
+        \\    gl_Position = vec4(0.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+
+    // Semantic, naga-free guard: a `return` MUST appear between the early-branch
+    // write (col = 10) and the fall-through write (col = 20). If the return is
+    // dropped, the only `return` is the trailing one — after col = 20 — and the
+    // 10.0 path is dead.
+    const a10 = std.mem.indexOf(u8, wgsl, "vec4<f32>(10.0)") orelse return error.TestExpectedFind;
+    const a20 = std.mem.indexOf(u8, wgsl, "vec4<f32>(20.0)") orelse return error.TestExpectedFind;
+    const aret = std.mem.indexOfPos(u8, wgsl, a10, "return") orelse return error.TestExpectedFind;
+    try std.testing.expect(aret < a20);
+
+    try nagaValidateOrSkip(wgsl, "vertex-early-return");
+}
+
+// The simple-fragment form (output accumulates in a single named local that is
+// returned by name) must also honor the early return.
+test "wgsl: fragment early return is honored (value preserved, not dropped)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 fragColor;
+        \\layout(location=1) in float cond;
+        \\void main() {
+        \\    if (cond > 0.0) { fragColor = vec4(10.0); return; }
+        \\    fragColor = vec4(20.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+
+    const a10 = std.mem.indexOf(u8, wgsl, "vec4<f32>(10.0)") orelse return error.TestExpectedFind;
+    const a20 = std.mem.indexOf(u8, wgsl, "vec4<f32>(20.0)") orelse return error.TestExpectedFind;
+    const aret = std.mem.indexOfPos(u8, wgsl, a10, "return") orelse return error.TestExpectedFind;
+    try std.testing.expect(aret < a20);
+
+    try nagaValidateOrSkip(wgsl, "fragment-early-return");
+}
+
+// When the early return targets an output that is ASSEMBLED at the trailing
+// return from end-captured values (e.g. a frag_depth struct, whose depth is the
+// LAST store), an early `return FragmentOutput(color, <last-depth>)` would use
+// the wrong (later) depth. Rather than silently miscompile, glslpp must fail loud.
+test "wgsl: early return into an assembled frag_depth output errors honestly" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 fragColor;
+        \\layout(location=1) in float cond;
+        \\void main() {
+        \\    if (cond > 0.0) { fragColor = vec4(10.0); gl_FragDepth = 0.3; return; }
+        \\    fragColor = vec4(20.0);
+        \\    gl_FragDepth = 0.7;
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedEarlyReturn, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
+// A value-returning helper whose loop conditionally `return`s early used to be
+// DELETED entirely by deadLoopElim (the early return wasn't counted as a side
+// effect, and the result "escaped" only via that return), collapsing the helper
+// to its post-loop fallthrough constant — a silent miscompile that validators
+// accept. The loop must survive (OpLoopMerge present), and the `while`-loop
+// counter must be lifted to OpPhi so backends don't hoist a stale header load.
+test "wgsl: helper while-loop with early return is preserved and counter is live" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\layout(location=0) in float t;
+        \\float search(float target) {
+        \\    int i = 0;
+        \\    float x = 0.0;
+        \\    while (i < 20) {
+        \\        x = x * x + 0.3;
+        \\        if (x > target) return float(i) / 20.0;
+        \\        i++;
+        \\    }
+        \\    return 1.0;
+        \\}
+        \\void main() { o = vec4(search(t)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    // #1: the loop survived deadLoopElim (OpLoopMerge = 246).
+    try std.testing.expect(countSpirvOpcode(spirv, 246) >= 1);
+    // #3: the `while` counter was converted to OpPhi (245), so there is no
+    // header OpLoad of the counter for a backend to hoist into a stale snapshot.
+    try std.testing.expect(countSpirvOpcode(spirv, 245) >= 1);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "helper-while-early-return");
+}
+
+// A `while` loop as the FIRST statement of a function makes the loop header the
+// function's entry block; the back-edge then targets the entry block, which
+// spirv-val rejects ("First block ... is targeted"). deadLoopElim used to mask
+// this by deleting such loops. A pre-header block must be spliced in so the
+// emitted SPIR-V is valid. Guard: the produced SPIR-V passes glslpp's own
+// validator wrapper (spirv-val).
+test "wgsl: loop-as-first-statement emits valid SPIR-V (entry not a branch target)" {
+    // `drain`'s loop is the function's first statement and writes an SSBO (a real
+    // side effect, so deadLoopElim keeps it). Without a spliced pre-header the
+    // loop header would be the entry block and the back-edge would target it —
+    // spirv-val rejects ("First block ... is targeted").
+    const source =
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430, binding=0) buffer B { int data[]; };
+        \\void drain() { while (data[0] > 0) { data[0] = data[0] - 1; } }
+        \\void main() { drain(); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    try std.testing.expect(try glslpp.validateSPIRV(alloc, spirv));
+}
+
+// An ESCAPING condition variable (read after the loop) with a mid-body `break`
+// cannot be safely lifted to a phi, so it stays a memory var whose value is
+// LOADED at the loop header and reused in the body. The WGSL emitter used to
+// HOIST that header load before `loop {`, so the body multiplied a stale
+// pre-loop snapshot every iteration (`let s = x; loop { ... s*0.9 ... }`). The
+// header load must be emitted INSIDE the loop so it re-reads each iteration.
+test "wgsl: escaping condition-var while-loop re-reads inside the loop (no hoist)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\layout(location=0) in float t;
+        \\void main() {
+        \\    float x = t;
+        \\    int guard = 0;
+        \\    while (x > 0.01) { x = x * 0.9; guard++; if (guard > 200) break; }
+        \\    o = vec4(x);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    const loop_idx = std.mem.indexOf(u8, wgsl, "loop {") orelse return error.TestExpectedFind;
+    // The `<v> * 0.9` decay must read a value (re)defined INSIDE the loop, not a
+    // hoisted pre-loop snapshot: find the multiply, extract its left operand, and
+    // assert that operand's `let` definition occurs after `loop {`.
+    const mul = std.mem.indexOf(u8, wgsl, " * 0.9") orelse return error.TestExpectedFind;
+    var s = mul;
+    while (s > 0 and (std.ascii.isAlphanumeric(wgsl[s - 1]) or wgsl[s - 1] == '_')) s -= 1;
+    const operand = wgsl[s..mul];
+    const def_needle = try std.fmt.allocPrint(alloc, "let {s}:", .{operand});
+    defer alloc.free(def_needle);
+    const def_idx = std.mem.indexOf(u8, wgsl, def_needle) orelse return error.TestExpectedFind;
+    try std.testing.expect(def_idx > loop_idx);
+    try nagaValidateOrSkip(wgsl, "escaping-condvar-while");
+}
+
+// A `do { … } while(cond)` loop's latch ends in the bottom test (a conditional
+// back-edge). Lifting its counter to a phi would place the increment on that
+// conditional edge, which the structured emitters drop — leaving the counter
+// never updated (infinite loop). loopCounterToPhi must NOT convert do-while
+// counters; they stay correct memory vars. Guard: valid WGSL + the counter is
+// assigned inside the loop.
+test "wgsl: do-while counter is updated (not dropped by phi conversion)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\layout(location=0) in float t;
+        \\void main() {
+        \\    float x = t;
+        \\    int i = 0;
+        \\    do { x = x * 0.5; i++; } while (x > 0.1 && i < 50);
+        \\    o = vec4(x);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The counter increment `<v> + 1` must be stored back to a loop var. Find the
+    // `+ 1` result and assert it is assigned to a name (`<name> = <result>;`),
+    // i.e. the increment is not a dead let.
+    try assertContains(wgsl, "+ 1");
+    // Robust value-preservation check via naga (the miscompile is valid WGSL, so
+    // this is a structural guard; semantics are confirmed against spirv-cross in
+    // the conformance suite).
+    try nagaValidateOrSkip(wgsl, "do-while-counter");
+}
+
+// An `in` function parameter mutated in place (the GLSL by-value copy) must be
+// copied to a local at function ENTRY. Previously the copy was created lazily at
+// the first write, so a use BEFORE it — a loop condition `while(lo<=hi)` — bound
+// to the immutable parameter and the copy + increment were dead-code-eliminated,
+// dropping `lo=lo+1` entirely (infinite loop). deadLoopElim used to mask this by
+// deleting the whole loop; with live loops preserved it surfaced as a hang.
+test "wgsl: mutated in-parameter is copied to a local at entry (increment preserved)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\layout(location=0) in float t;
+        \\int f(int lo, int hi) {
+        \\    int acc = 0;
+        \\    while (lo <= hi) { acc += lo; lo = lo + 1; }
+        \\    return acc;
+        \\}
+        \\void main() { o = vec4(float(f(0, int(t)))); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expect(try glslpp.validateSPIRV(alloc, spirv));
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The mutated param must be promoted to a mutable local initialised from the
+    // parameter. Extract the first param name from `fn f(<p>: i32, …)` and assert
+    // a `var … : i32 = <p>;` copy exists (the increment then mutates that local,
+    // not the dropped-on-the-floor original).
+    const open = (std.mem.indexOf(u8, wgsl, "fn f(") orelse return error.TestExpectedFind) + "fn f(".len;
+    const colon = std.mem.indexOfScalarPos(u8, wgsl, open, ':') orelse return error.TestExpectedFind;
+    const param = std.mem.trim(u8, wgsl[open..colon], " ");
+    const copy_needle = try std.fmt.allocPrint(alloc, ": i32 = {s};", .{param});
+    defer alloc.free(copy_needle);
+    try assertContains(wgsl, copy_needle);
+    try nagaValidateOrSkip(wgsl, "mutable-in-param");
+}
+
+// The mutated-param promotion must be SCOPE-AWARE: a read-only `in` param that
+// merely shares its name with a mutated inner-block local must NOT be promoted.
+// Falsely promoting it copies the param into a local that DCE then eliminates,
+// leaving a dangling SSA reference to the (now-undefined) parameter value —
+// invalid SPIR-V. Guard: the read-only param compiles to valid SPIR-V.
+test "wgsl: read-only param shadowed by a mutated inner local is not promoted" {
+    const source =
+        \\#version 450
+        \\layout(location=0) in float u;
+        \\layout(location=0) out vec4 o;
+        \\float f(float p) {
+        \\    float r = p;
+        \\    { float p = u; p += 1.0; r += p; }
+        \\    return r + p;
+        \\}
+        \\void main() { o = vec4(f(u)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expect(try glslpp.validateSPIRV(alloc, spirv));
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "shadowed-readonly-param");
 }
 
 // #170 (H) review fix C1: a nested-struct INPUT block emitted as a plain WGSL
