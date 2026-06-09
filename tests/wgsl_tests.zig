@@ -424,6 +424,36 @@ test "wgsl non-finite spec-constant (override) default is an honest error (#252)
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
 
+// #258: the same guard must cover the unsigned-division (OpUDiv) and modulo (`%`)
+// operator paths — `4u / 0u` and `4 % 0` are equally const-rejected by naga.
+test "wgsl constant unsigned division by zero is an honest error (#258)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uint a = 4u / 0u;
+        \\    fragColor = vec4(float(a), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
+test "wgsl constant integer modulo by zero is an honest error (#258)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = 4 % 0;
+        \\    fragColor = vec4(float(a), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
 // #254 (follow-up to #252): the frontend does NOT fold a constant division by zero,
 // so `1.0/0.0` reaches the WGSL backend as an OpFDiv of two constants and was emitted
 // as the literal division `1.0f / 0.0f` — which naga const-evaluates and rejects
@@ -494,6 +524,49 @@ test "wgsl constant mod by zero folds to a NaN bitcast (#254)" {
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "% 0.0f") == null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "nan") == null);
     try nagaValidateOrSkip(wgsl, "const-mod-by-zero");
+}
+
+// #258: a pre-existing emitBinOp band-aid emitted `let v: T = 0.0;` for ANY division
+// whose divisor renders as a literal zero. Integer constants render as bare "0", so an
+// INTEGER division by a literal zero hit it — producing `let v: i32 = 0.0;`, which naga
+// rejects as a type error ("expected i32, got AbstractFloat"). A RUNTIME integer
+// divide-by-zero is well-defined in WGSL (x / 0 == x) and naga accepts the raw `b / 0`,
+// so it must be emitted as a normal division, not the type-wrong `0.0`.
+test "wgsl runtime integer division by zero emits a valid division, not 0.0 (#258)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) flat in int b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = b / 0; // runtime dividend; WGSL defines x/0 == x
+        \\    fragColor = vec4(float(a), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The type-wrong band-aid output must be gone.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, ": i32 = 0.0;") == null);
+    try nagaValidateOrSkip(wgsl, "runtime-int-div-zero");
+}
+
+// #258: an INTEGER CONSTANT divided by a constant zero (`4 / 0`) is genuinely
+// unrepresentable — naga const-evaluates it and rejects ("Division by zero"), and WGSL
+// has no integer inf/nan. (The float analogue is folded to a bitcast by #254; that path
+// runs before this one.) It must fail loud rather than emit the old naga-invalid `0.0`.
+test "wgsl constant integer division by zero is an honest error (#258)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int a = 4 / 0; // const/const integer div-by-zero — unrepresentable in WGSL
+        \\    fragColor = vec4(float(a), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // WGSL has no matrix-inverse builtin. GLSL inverse() (GLSL.std.450 MatrixInverse)
