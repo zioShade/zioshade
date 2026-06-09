@@ -2677,6 +2677,26 @@ const Codegen = struct {
                 // Buffer_reference types also need Block decoration
                 if (td.is_buffer_reference) needs_block = true;
 
+                // In/out interface blocks (declared `in/out Name { ... }`) also need the
+                // `Block` decoration on their struct type — glslang's oracle emits
+                // `OpDecorate %S Block` for them — but, unlike a UBO/SSBO, they carry NO
+                // member Offset/MatrixStride/ArrayStride (glslang emits none). So this is
+                // a Block-ONLY flag, kept separate from needs_block (which additionally
+                // drives emitNestedStructLayout). Resolving it here, before the dedup key,
+                // lets the key fold it in (see below).
+                //
+                // The analyzer sets td.is_io_interface_block ONLY for real in/out blocks —
+                // NOT for a plain `struct` used as an IO variable (`struct S{..}; in S v;`,
+                // which glslang does NOT Block-decorate) and NOT for UBO/SSBO. Using the
+                // flag instead of a storage-class scan over globals is what keeps us from
+                // Block-decorating a struct that is ALSO a UBO/SSBO member: such a struct
+                // is nested inside the UBO's Block, and a Block-inside-a-Block is invalid
+                // SPIR-V. The `!needs_block` guard keeps a would-be-both type on the full
+                // needs_block (Block + Offset) path. (The flag is on the bare struct type,
+                // so per-vertex / instanced `in S {..} s[N]` blocks are covered too:
+                // ensureType recurses through the array to the named base S.)
+                const needs_io_block = !needs_block and td.is_io_interface_block;
+
                 // Make the resolved layout the active array-stride context for the
                 // member loop AND the emitNestedStructLayout call below (the defer
                 // restores it on every exit path, including the dedup cache-hit
@@ -2789,6 +2809,11 @@ const Codegen = struct {
                 // a plain struct. This only ADDS discrimination — truly-identical
                 // types share needs_block so still merge.
                 layout_key = layout_key *% 33 +% @as(u64, @intFromBool(needs_block));
+                // Fold needs_io_block for the same reason needs_block is folded: two
+                // distinctly-named structs with byte-identical member names+types (one
+                // an in/out interface block, one a plain struct) must not merge — only
+                // the interface block carries the Block decoration.
+                layout_key = layout_key *% 33 +% @as(u64, @intFromBool(needs_io_block));
                 if (self.emitted_struct_layouts.get(layout_key)) |cached_id| {
                     // Reuse existing struct type — update name mapping too
                     if (self.in_interface_block) {
@@ -2822,6 +2847,12 @@ const Codegen = struct {
                     self.default_row_major = block_row_major;
                     try self.emitNestedStructLayout(id, td.members, block_layout);
                     self.default_row_major = false;
+                } else if (needs_io_block) {
+                    // In/out interface block: emit `Block` ONLY. glslang emits no member
+                    // Offset/MatrixStride for these, so we must NOT call
+                    // emitNestedStructLayout here (that would introduce a new diff vs the
+                    // oracle and mis-decorate the interface).
+                    try self.emitDecorationSectionDecorateNoExtra(id, @intFromEnum(spirv.Decoration.block));
                 }
                 // If we emitted a forward pointer, now emit the actual pointer definition
                 if (self_ptr_id != 0) {
