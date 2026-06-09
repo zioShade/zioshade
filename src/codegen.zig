@@ -5828,8 +5828,11 @@ const Codegen = struct {
                 try self.emitAtomicOp(resolved, spirv.Op.AtomicFAddEXT);
             },
             .atomic_comp_swap => {
-                // OpAtomicCompareExchange: 9 words
-                // result_type, result, ptr, scope, semantics(unequal), semantics(equal), unequal_value, equal_value
+                // OpAtomicCompareExchange: 9 words. Per the SPIR-V spec the operands
+                // after the pointer are: Scope, Equal-semantics, Unequal-semantics,
+                // Value(new/data), Comparator(compare) — i.e. data at words[7], compare
+                // at words[8]. Both memory-semantics ids are the same constant (64) here,
+                // so the order in which they are emitted below is immaterial.
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const ptr_id = self.operandId(resolved, 0);

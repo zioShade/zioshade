@@ -2851,3 +2851,67 @@ test "T19.10: int sampler array + depth component types (#203)" {
     try assertContains(msl, "depth2d<float>");        // depth always float
     try assertNotContains(msl, "depth2d<int>");
 }
+
+// #260: atomicCompSwap(mem, compare, data) → MSL atomic_compare_exchange_weak_explicit(
+// mem, &compare, data, …). OpAtomicCompareExchange layout is [ptr][scope][eq-sem]
+// [uneq-sem][value(new/data)][comparator(compare)] — data at words[7], compare at
+// words[8]. The backend read compare from words[7] (the data) and data from words[6]
+// (the Unequal-semantics constant), emitting `…(&9u, 64u, …)`: silent-wrong. HLSL was
+// the correct reference. (cross-backend sibling of #170 / #260 GLSL fix.)
+test "T-atomic.1: MSL atomic_compare_exchange reads compare/data from correct operands (#260)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { uint lock; uint out_old; } b;
+        \\void main() {
+        \\    uint old = atomicCompSwap(b.lock, 7u, 9u); // compare 7, set 9
+        \\    b.out_old = old;
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "atomic_compare_exchange_weak_explicit(");
+    // Correct: compare 7 (passed by reference), data 9.
+    try assertContains(msl, "&7u, 9u,");
+    // The Unequal-semantics constant (0x40 == 64) must never appear as an argument.
+    try assertNotContains(msl, "&9u, 64u,");
+}
+
+// #260: atomicExchange / atomicAdd must remain correct (they read value from words[6]).
+test "T-atomic.2: MSL atomic_exchange/atomic_fetch_add stay correct after compswap fix (#260)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { uint slot; uint total; uint out_old; } b;
+        \\void main() {
+        \\    uint old = atomicExchange(b.slot, 42u); // store 42
+        \\    atomicAdd(b.total, 37u);                // add 37
+        \\    b.out_old = old;
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "atomic_exchange_explicit(");
+    try assertContains(msl, ", 42u,");
+    try assertContains(msl, "atomic_fetch_add_explicit(");
+    try assertContains(msl, ", 37u,");
+}
+
+// #260: the IMAGE variant shares the same operand decode as the SSBO path. Guard the
+// text output directly — conformance only validates the produced SPIR-V, not the MSL.
+test "T-atomic.3: MSL image atomic_compare_exchange reads compare/data from correct operands (#260)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(r32ui, binding = 0) uniform uimage2D img;
+        \\layout(std430, binding = 1) buffer B { uint out_old; } b;
+        \\void main() {
+        \\    b.out_old = imageAtomicCompSwap(img, ivec2(0), 5u, 3u); // compare 5, set 3
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "atomic_compare_exchange_weak_explicit(");
+    try assertContains(msl, "&5u, 3u,");
+    try assertNotContains(msl, "&3u, 64u,");
+}
