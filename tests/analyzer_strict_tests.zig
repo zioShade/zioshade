@@ -897,3 +897,153 @@ fn containsOpcode(spirv: []const u32, opcode: u16) bool {
     }
     return false;
 }
+
+// ============================================================
+// Stage/direction validity of interface (in/out) blocks.
+//
+// Oracle ground-truth — `glslangValidator -V --aml --amb`. The illegal combos
+// in core GLSL are exactly these four (an INPUT block is illegal in
+// vertex/compute; an OUTPUT block is illegal in fragment/compute):
+//   vertex   OUT block → ACCEPT
+//   vertex   IN  block → REJECT "'input block' : not supported in this stage: vertex"
+//   fragment IN  block → ACCEPT
+//   fragment OUT block → REJECT "'output block' : not supported in this stage: fragment"
+//   compute  IN  block → REJECT "'input block' : not supported in this stage: compute"
+//   compute  OUT block → REJECT "'output block' : not supported in this stage: compute"
+//   geometry / tess-control / tess-eval / mesh → BOTH directions ACCEPT (not checked).
+//   (compute SSBO/UBO/shared blocks and the brace-less `layout(local_size_x) in;`
+//    are NOT interface blocks here and stay valid.)
+//
+// glslpp previously SILENTLY ACCEPTED the illegal combos and emitted
+// `OpDecorate %Blk Block` for an interface no GLSL compiler would produce
+// (noticed during PR #247). These guard the honest-reject; the reject tests pin
+// lastErrorCtx() == "interface-block-invalid-stage" so they cannot pass for an
+// unrelated reason (false-green) if block parsing later regresses.
+// ============================================================
+
+test "strict: fragment OUTPUT interface block is an honest error (invalid GLSL)" {
+    // Oracle: "'output block' : not supported in this stage: fragment".
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\out Bar { vec2 a; } bar;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(bar.a, 0.0, 1.0); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
+    // The flipped fail-loud plain API must also reject it (not emit silent SPIR-V).
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    // Pin the rejection to THIS check (not an unrelated error) — false-green guard.
+    try std.testing.expectEqualStrings("interface-block-invalid-stage", glslpp.lastErrorCtx() orelse "");
+}
+
+test "strict: vertex INPUT interface block is an honest error (invalid GLSL)" {
+    // Oracle: "'input block' : not supported in this stage: vertex".
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\in Bar { vec2 a; } bar;
+        \\void main(){ gl_Position = vec4(bar.a, 0.0, 1.0); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .vertex }));
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .vertex }));
+    try std.testing.expectEqualStrings("interface-block-invalid-stage", glslpp.lastErrorCtx() orelse "");
+}
+
+test "strict: vertex OUTPUT interface block is accepted (valid GLSL)" {
+    // Oracle ACCEPTs — the last vertex-processing stage may declare output blocks.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\out Bar { vec2 a; } bar;
+        \\void main(){ bar.a = vec2(1.0); gl_Position = vec4(0.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .vertex });
+    _ = spirv;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .vertex });
+    defer alloc.free(spv);
+    try std.testing.expect(spv.len > 5);
+}
+
+test "strict: fragment INPUT interface block is accepted (valid GLSL)" {
+    // Oracle ACCEPTs — a fragment shader may consume input blocks.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\in Bar { vec2 a; } bar;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(bar.a, 0.0, 1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    _ = spirv;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spv.len > 5);
+}
+
+test "strict: compute OUTPUT interface block is an honest error (invalid GLSL)" {
+    // Oracle: "'output block' : not supported in this stage: compute".
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\out Bar { vec2 a; } bar;
+        \\void main(){ bar.a = vec2(1.0); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute }));
+    try std.testing.expectEqualStrings("interface-block-invalid-stage", glslpp.lastErrorCtx() orelse "");
+}
+
+test "strict: compute INPUT interface block is an honest error (invalid GLSL)" {
+    // Oracle: "'input block' : not supported in this stage: compute". The brace-less
+    // `layout(local_size_x=1) in;` on the line above is a layout-only declaration,
+    // NOT an interface block, and must stay valid (only the braced `in Bar {...}` is
+    // rejected).
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\in Bar { vec2 a; } bar;
+        \\layout(std430, binding=0) buffer B { vec2 o; };
+        \\void main(){ o = bar.a; }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute }));
+    try std.testing.expectEqualStrings("interface-block-invalid-stage", glslpp.lastErrorCtx() orelse "");
+}
+
+test "strict: fragment OUTPUT interface block ARRAY instance is an honest error" {
+    // Array-instance blocks (`out Bar {...} bar[3];`) flow through a distinct
+    // is_block_array registration branch; the check sits before it and keys on
+    // storage_class, so it must catch this shape too.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\out Bar { vec2 a; } bar[3];
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(bar[0].a, 0.0, 1.0); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    try std.testing.expectEqualStrings("interface-block-invalid-stage", glslpp.lastErrorCtx() orelse "");
+}
+
+test "strict: compute SSBO + UBO blocks remain accepted (not interface blocks)" {
+    // Guard the scoping: buffer/uniform blocks in compute derive .storage_buffer /
+    // .uniform storage classes (not .input/.output), so the stage check must NOT
+    // fire for them. Oracle ACCEPTs both.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430, binding=0) buffer B { vec4 data[]; };
+        \\layout(binding=1) uniform U { vec4 c; };
+        \\void main(){ data[0] = c; }
+    ;
+    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    _ = spirv;
+    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute });
+    defer alloc.free(spv);
+    try std.testing.expect(spv.len > 5);
+}

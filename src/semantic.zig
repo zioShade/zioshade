@@ -2190,6 +2190,38 @@ const Analyzer = struct {
                 else
                     .uniform;
 
+                // Honest-reject stage/direction-invalid interface blocks. Verified
+                // with `glslangValidator -V --aml --amb`, the illegal (stage,
+                // direction) interface-block combos in core GLSL are exactly:
+                //   - INPUT  block in VERTEX  ("'input block' : not supported in this stage: vertex")
+                //   - OUTPUT block in FRAGMENT ("'output block' : not supported in this stage: fragment")
+                //   - INPUT  block in COMPUTE ("'input block' : not supported in this stage: compute")
+                //   - OUTPUT block in COMPUTE ("'output block' : not supported in this stage: compute")
+                // Equivalently: an INPUT block is illegal in vertex/compute, and an
+                // OUTPUT block is illegal in fragment/compute. Geometry, tessellation
+                // (control/eval) and mesh legitimately carry BOTH directions, so they
+                // are NOT checked. glslpp otherwise silently accepts these illegal
+                // blocks and emits `OpDecorate %Blk Block` for an interface no GLSL
+                // compiler would produce (noticed in PR #247). Only `in`/`out`
+                // qualifiers reach storage_class .input/.output here — push_constant,
+                // SSBO (.storage_buffer), UBO (.uniform) and shared (.workgroup)
+                // blocks, and the brace-less `layout(local_size_x) in;` declaration
+                // (which is NOT a uniform_block node) are never matched. Record the
+                // error so the fail-loud gate rejects it; valid blocks fall through.
+                if (self.stage) |stg| {
+                    const bad_in = storage_class == .input and (stg == .vertex or stg == .compute);
+                    const bad_out = storage_class == .output and (stg == .fragment or stg == .compute);
+                    if (bad_in or bad_out) {
+                        last_error_ctx = "interface-block-invalid-stage";
+                        last_error_inner = if (bad_out)
+                            "output block not supported in this stage"
+                        else
+                            "input block not supported in this stage";
+                        const msg = std.fmt.allocPrint(self.alloc, "{s}: {s} '{s}' (stage: {s})", .{ last_error_ctx, last_error_inner, name, @tagName(stg) }) catch "interface-block-invalid-stage";
+                        self.errors.append(self.alloc, msg) catch {};
+                    }
+                }
+
                 // Register the block as a struct type
                 const members = try self.alloc.dupe(ast.StructMember, node.data.members);
                 const has_buffer_ref = if (node.data.layout) |l| l.buffer_reference else false;
