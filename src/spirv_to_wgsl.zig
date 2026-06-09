@@ -6869,9 +6869,53 @@ fn emitOuterProduct(module: *const ParsedModule, names: *std.AutoHashMap(u32, []
     try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, buf.items });
 }
 
+// #254: if both operands of a float +/-/*/÷/% are 32-bit float constants and the IEEE
+// result is non-finite, return its u32 bit pattern (else null). The frontend does NOT
+// fold a constant division by zero, so `1.0/0.0` reaches here as an OpFDiv of two
+// constants; emitted verbatim it becomes `1.0f / 0.0f`, which naga const-evaluates and
+// rejects ("Float literal is infinite"). Folding it to bitcast<f32>(0x..u) yields a
+// runtime value naga accepts (a follow-up to #252's constant handling).
+fn f32ConstVal(module: *const ParsedModule, id: u32) ?f32 {
+    const ci = common.getDef(module, id) orelse return null;
+    if (ci.op != .Constant or ci.words.len <= 3) return null;
+    const ti = common.getDef(module, ci.words[1]) orelse return null;
+    if (ti.op != .TypeFloat or !(ti.words.len > 2 and ti.words[2] == 32)) return null;
+    return @bitCast(ci.words[3]);
+}
+
+fn constFoldNonFiniteFloat(module: *const ParsedModule, inst: Instruction) ?u32 {
+    if (inst.words.len < 5) return null;
+    const a = f32ConstVal(module, inst.words[3]) orelse return null;
+    const b = f32ConstVal(module, inst.words[4]) orelse return null;
+    const r: f32 = switch (inst.op) {
+        .FAdd => a + b,
+        .FSub => a - b,
+        .FMul => a * b,
+        .FDiv => a / b,
+        // Both FMod and FRem are emitted as WGSL `%` (truncated remainder == Zig
+        // @rem); for the non-finite case we fold (e.g. `mod(1.0, 0.0)` → NaN) the
+        // two agree, and finite results are never folded so the FMod/FRem operator
+        // discrepancy is irrelevant here.
+        .FMod, .FRem => @rem(a, b),
+        else => return null,
+    };
+    if (std.math.isFinite(r)) return null;
+    return @bitCast(r);
+}
+
 fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
     const rt = try wgslType(module, inst.words[1], names, arena);
     const result_name = names.get(inst.words[2]) orelse "v";
+    // #254: const-fold a non-finite scalar-float arithmetic result to a bitcast literal
+    // (runtime context — emitBinOp only emits function-body `let` statements). Runs
+    // before the literal-zero band-aid below so `1.0/0.0` folds to +inf, not 0.0.
+    if (std.mem.eql(u8, rt, "f32")) {
+        if (constFoldNonFiniteFloat(module, inst)) |bits| {
+            try writeIndentStatic(w, indent);
+            try w.print("let {s}: {s} = bitcast<f32>(0x{x:0>8}u);\n", .{ result_name, rt, bits });
+            return;
+        }
+    }
     const lhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, 0);
     const rhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[4], arena, 0);
     // Wrap compound expressions in parens for correct precedence
