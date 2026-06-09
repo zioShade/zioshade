@@ -424,6 +424,78 @@ test "wgsl non-finite spec-constant (override) default is an honest error (#252)
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
 
+// #254 (follow-up to #252): the frontend does NOT fold a constant division by zero,
+// so `1.0/0.0` reaches the WGSL backend as an OpFDiv of two constants and was emitted
+// as the literal division `1.0f / 0.0f` — which naga const-evaluates and rejects
+// ("Float literal is infinite"). The backend must const-fold a non-finite float
+// arithmetic result (here +inf) into `bitcast<f32>(0x..u)` (a runtime value naga
+// accepts), in function-body / runtime context.
+test "wgsl constant division by zero folds to a bitcast, not a literal division (#254)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = 1.0/0.0; // +inf — frontend does not fold this
+        \\    fragColor = vec4(a, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // +inf has bit pattern 0x7f800000.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "bitcast<f32>(0x7f800000") != null);
+    // No naga-rejected literal division-by-zero must survive.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "/ 0.0f") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "inf") == null);
+    try nagaValidateOrSkip(wgsl, "const-div-by-zero");
+}
+
+// 0.0/0.0 is NaN (e.g. 0x7fc00000 on x86-64; the NaN payload is platform-defined, so
+// the test pins only the bitcast prefix). It must also fold to a bitcast rather than a
+// naga-rejected literal.
+test "wgsl constant 0/0 folds to a NaN bitcast (#254)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = 0.0/0.0; // NaN
+        \\    fragColor = vec4(a, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "bitcast<f32>(0x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "/ 0.0f") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "nan") == null);
+    try nagaValidateOrSkip(wgsl, "const-nan-div");
+}
+
+// #254: the same non-finite-constant-arithmetic hazard reaches the `%` operator —
+// `mod(1.0, 0.0)` is an OpFMod of two constants emitted as `1.0f % 0.0f`, which naga
+// const-evaluates to NaN and rejects ("Float literal is NaN"). It must fold to a
+// bitcast too (caught by the review of the division fix).
+test "wgsl constant mod by zero folds to a NaN bitcast (#254)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float a = mod(1.0, 0.0); // NaN
+        \\    fragColor = vec4(a, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "bitcast<f32>(0x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "% 0.0f") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "nan") == null);
+    try nagaValidateOrSkip(wgsl, "const-mod-by-zero");
+}
+
 // WGSL has no matrix-inverse builtin. GLSL inverse() (GLSL.std.450 MatrixInverse)
 // must NOT silently emit `matrixInverse(m)` (naga: "no definition in scope").
 // Pass 2 lowers it to an emit-once generated `spvInverseN` helper (cofactor /
