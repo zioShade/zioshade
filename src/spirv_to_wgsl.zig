@@ -372,6 +372,36 @@ fn typeReachesStruct(module: *const ParsedModule, root_type_id: u32, target: u32
     return false;
 }
 
+/// True if `type_id` is (or transitively contains) an OpTypeArray whose length
+/// operand is a specialization constant (OpSpecConstant / OpSpecConstantOp). WGSL
+/// allows an `override`-sized array ONLY as a `var<workgroup>` type — a spec-
+/// constant-sized function-local, struct-member, or storage array is therefore
+/// unrepresentable. Used to fail loud instead of emitting a runtime `array<T>`
+/// (naga-invalid as a local) or dropping members to an empty struct (#170 I).
+fn typeContainsSpecConstArray(module: *const ParsedModule, type_id: u32, depth: u32) bool {
+    if (depth > 16) return false;
+    const inst = getDef(module, type_id) orelse return false;
+    switch (inst.op) {
+        .TypeArray => {
+            if (inst.words.len > 3) {
+                if (getDef(module, inst.words[3])) |len| {
+                    if (len.op == .SpecConstant or len.op == .SpecConstantOp) return true;
+                }
+            }
+            if (inst.words.len > 2) return typeContainsSpecConstArray(module, inst.words[2], depth + 1);
+        },
+        .TypeRuntimeArray, .TypePointer => {
+            const elem_idx: usize = if (inst.op == .TypePointer) 3 else 2;
+            if (inst.words.len > elem_idx) return typeContainsSpecConstArray(module, inst.words[elem_idx], depth + 1);
+        },
+        .TypeStruct => for (inst.words[2..]) |mt| {
+            if (typeContainsSpecConstArray(module, mt, depth + 1)) return true;
+        },
+        else => {},
+    }
+    return false;
+}
+
 /// GLSL allows scalar overloads of the geometric builtins (`normalize(float)`,
 /// `length(float)`, …) but WGSL defines `normalize`/`length`/`distance`/
 /// `reflect` only on vectors — naga rejects the scalar call ("wrong type passed
@@ -2359,6 +2389,23 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     const is_vertex = module.execution_model == .Vertex;
     const is_compute = module.execution_model == .GLCompute;
     var use_vertex_struct = false;
+
+    // #170 (I): a spec-constant-sized array is unrepresentable in WGSL except as
+    // a `var<workgroup>` type (override array sizing is workgroup-only). Any
+    // OTHER variable — function-local, Private, or a UBO/SSBO whose struct has a
+    // spec-const-sized member — therefore cannot be faithfully lowered: glslpp
+    // would emit a runtime `array<T>` (naga-invalid as a local) or drop the
+    // members to an empty struct. Fail loud instead. (Workgroup vars are skipped,
+    // so a representable override-sized workgroup array is unaffected.)
+    for (module.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc == .Workgroup) continue;
+        if (typeContainsSpecConstArray(&module, inst.words[1], 0)) {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL cannot size a non-workgroup array by a specialization constant (override array sizing is workgroup-only)", .{}) catch null;
+            return error.UnsupportedOp;
+        }
+    }
 
     // Find entry point and function
     var entry_func_idx: ?usize = null;

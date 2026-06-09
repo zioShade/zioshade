@@ -3173,3 +3173,24 @@ test "wgsl: input interface-block matrix member is an honest error" {
     ;
     try std.testing.expectError(error.UnsupportedOp, compileToWgsl(src));
 }
+
+// #170 (I): a spec-constant-sized array is unrepresentable in WGSL except as a
+// workgroup-var type (override array sizing is workgroup-only). A function-local
+// (or struct-member / storage) spec-const-sized array must fail loud rather than
+// emit a runtime `array<T>` (naga-invalid as a local) or drop members to an empty
+// struct.
+test "wgsl: spec-constant-sized function-local array is an honest error" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(constant_id = 0) const int a = 1;
+        \\layout(constant_id = 1) const int b = 2;
+        \\layout(set = 0, binding = 0) buffer B { int data[]; };
+        \\void main() {
+        \\    int local_arr[b];
+        \\    local_arr[a] = a;
+        \\    data[0] = local_arr[1 - a];
+        \\}
+    ;
+    try std.testing.expectError(error.UnsupportedOp, compileCompToWgsl(src));
+}
