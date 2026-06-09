@@ -2577,7 +2577,7 @@ fn emitBody(
                 plist.append(alloc, .{ .result_id = pinst.words[2], .type_id = pinst.words[1], .init_id = init_id, .update_id = update_id }) catch {};
                 phi_hdr.put(pinst.words[2], li) catch {};
             }
-            loop_phis.put(li, plist) catch {};
+            loop_phis.put(li, plist) catch plist.deinit(alloc);
             // Pattern B: BranchConditional directly after LoopMerge -> the condition
             // lives in the header block; defer its non-phi instrs for in-loop replay.
             if (li + 1 < module.instructions.len and module.instructions[li + 1].op == .BranchConditional) {
