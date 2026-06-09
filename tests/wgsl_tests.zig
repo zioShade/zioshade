@@ -3404,3 +3404,75 @@ test "wgsl: read-only param shadowed by a mutated inner local is not promoted" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "shadowed-readonly-param");
 }
+
+// #170 (H) review fix C1: a nested-struct INPUT block emitted as a plain WGSL
+// struct (`struct VertexIn { a: Foo }`) must also DECLARE the inner struct
+// (`Foo`); otherwise naga rejects ("no definition in scope for `Foo`"). The
+// corpus fixture masked this (a sibling plain input forced `Foo` to be emitted
+// as a side effect) — this MINIMAL single-block shader is the real guard.
+test "wgsl: nested-struct input block emits its inner struct decl" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\struct Foo { vec4 a; vec4 b; };
+        \\in VertexIn { Foo a; Foo b; } vin;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vin.a.a + vin.b.b; }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "struct Foo {");
+    try nagaValidateOrSkip(wgsl, "nested-struct input inner decl");
+}
+
+// #170 (H) review fix I2: an INPUT interface block with an ARRAY member
+// (`in Blk { float a[4]; }`) emitted `@location(0) a: array<f32,4>` — naga
+// forbids an array at a @location. Symmetric to the array OUTPUT case: flatten
+// into per-element leaf @location params and reassemble the array in the local.
+test "wgsl: input interface-block array member is flattened to per-element @location" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\in Blk { float a[4]; } b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(b.a[0] + b.a[3]); }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "@location(0) b_a_0: f32");
+    try assertContains(wgsl, "@location(3) b_a_3: f32");
+    try assertNotContains(wgsl, "@location(0) a: array");
+    try nagaValidateOrSkip(wgsl, "input array-member flattening");
+}
+
+// #170 (H) review fix I2: a matrix member in an INPUT block has no per-element
+// @location flattening here (would need column reassembly) — fail loud rather
+// than emit a naga-invalid `@location(0) m: mat4x4f`.
+test "wgsl: input interface-block matrix member is an honest error" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\in Blk { mat4 m; } b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = b.m[0]; }
+    ;
+    try std.testing.expectError(error.UnsupportedOp, compileToWgsl(src));
+}
+
+// #170 (I): a spec-constant-sized array is unrepresentable in WGSL except as a
+// workgroup-var type (override array sizing is workgroup-only). A function-local
+// (or struct-member / storage) spec-const-sized array must fail loud rather than
+// emit a runtime `array<T>` (naga-invalid as a local) or drop members to an empty
+// struct.
+test "wgsl: spec-constant-sized function-local array is an honest error" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(constant_id = 0) const int a = 1;
+        \\layout(constant_id = 1) const int b = 2;
+        \\layout(set = 0, binding = 0) buffer B { int data[]; };
+        \\void main() {
+        \\    int local_arr[b];
+        \\    local_arr[a] = a;
+        \\    data[0] = local_arr[1 - a];
+        \\}
+    ;
+    try std.testing.expectError(error.UnsupportedOp, compileCompToWgsl(src));
+}

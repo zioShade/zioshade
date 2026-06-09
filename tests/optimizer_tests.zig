@@ -88,6 +88,51 @@ test "optimizer: loop with accumulation is preserved" {
     try std.testing.expect(hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.LoopMerge)));
 }
 
+test "optimizer: loop accumulating into a struct member is preserved (#220)" {
+    // Regression: deadLoopElim's Phase 2.5 load-after-merge check matched only a
+    // DIRECT `OpLoad %var`, missing `OpLoad` of an `OpAccessChain` into the var.
+    // A loop accumulating into a struct MEMBER (read back via access chain after
+    // the loop) was therefore wrongly eliminated, folding the member to its
+    // initial value — wrong numeric result on ALL backends. glslang preserves it.
+    const source =
+        \\#version 450
+        \\out vec4 FragColor;
+        \\uniform float u;
+        \\struct A { float s; };
+        \\void main() {
+        \\    A a;
+        \\    a.s = 0.0;
+        \\    for (int i = 0; i < 4; i++) { a.s += u + float(i); }
+        \\    FragColor = vec4(a.s, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    // The loop must survive — a.s accumulates and flows to FragColor.
+    try std.testing.expect(hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.LoopMerge)));
+}
+
+test "optimizer: loop accumulating into an array element is preserved (#220)" {
+    // Same root cause as the struct-member case: the array element's access chain
+    // is hoisted out of the loop, so the in-loop store + post-loop load go through
+    // it. deadLoopElim must recognize the hoisted-AC store/load as touching the
+    // base local, or it wrongly eliminates the loop.
+    const source =
+        \\#version 450
+        \\out vec4 FragColor;
+        \\uniform float u;
+        \\void main() {
+        \\    float arr[4];
+        \\    arr[0] = 0.0;
+        \\    for (int i = 0; i < 4; i++) { arr[0] += u + float(i); }
+        \\    FragColor = vec4(arr[0], 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    try std.testing.expect(hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.LoopMerge)));
+}
+
 test "optimizer: AC+Store to composite variable preserves loads" {
     // Regression test: optimizer was eliminating loads after AC+Store
     const source =
@@ -226,4 +271,91 @@ test "optimizer: inline trivial functions" {
     // The trivial function should be inlined
     // After inlining, the constant should propagate through
     try std.testing.expect(spirv.len > 0);
+}
+
+fn compileCompute(source: [:0]const u8) ![]const u32 {
+    return glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
+}
+
+fn compileComputeNoOpt(source: [:0]const u8) ![]const u32 {
+    return glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
+}
+
+// Returns the word index of the FIRST instruction with `opcode`, or null.
+fn firstOpcodePos(spirv: []const u32, opcode: u32) ?usize {
+    var i: usize = 5; // skip header
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        if (wc == 0) break;
+        if ((spirv[i] & 0xFFFF) == opcode) return i;
+        i += wc;
+    }
+    return null;
+}
+
+// Finds the word index of the OpLoad whose result_id == `value_id`, or null.
+fn loadPosForResult(spirv: []const u32, value_id: u32) ?usize {
+    var i: usize = 5;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        if (wc == 0) break;
+        // OpLoad: [op|wc][result_type][result_id][pointer]...
+        if ((spirv[i] & 0xFFFF) == 61 and wc >= 4 and spirv[i + 2] == value_id) return i;
+        i += wc;
+    }
+    return null;
+}
+
+// Finds the value operand of the LAST OpStore whose value is produced by an OpLoad
+// (i.e. the `result.total = s_counter` store, not the `s_counter = 0u` const store).
+fn lastStoreLoadedValue(spirv: []const u32) ?u32 {
+    var i: usize = 5;
+    var found: ?u32 = null;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        if (wc == 0) break;
+        // OpStore: [op|wc][pointer][value]
+        if ((spirv[i] & 0xFFFF) == 62 and wc >= 3) {
+            const value_id = spirv[i + 2];
+            if (loadPosForResult(spirv, value_id) != null) found = value_id;
+        }
+        i += wc;
+    }
+    return found;
+}
+
+// Asserts the load feeding the SSBO write is ordered AFTER the atomic RMW (#223).
+fn assertLoadAfterAtomic(spirv: []const u32) !void {
+    const atomic_pos = firstOpcodePos(spirv, 234) orelse return error.NoAtomic; // OpAtomicIAdd
+    const stored_val = lastStoreLoadedValue(spirv) orelse return error.NoLoadedStore;
+    const load_pos = loadPosForResult(spirv, stored_val) orelse return error.NoLoad;
+    // The shared read that flows to result.total MUST come after the atomicAdd.
+    try std.testing.expect(load_pos > atomic_pos);
+}
+
+const ATOMIC_SHARED_SRC =
+    \\#version 310 es
+    \\layout(local_size_x = 32) in;
+    \\shared uint s_counter;
+    \\layout(std430, binding = 0) buffer Result { uint total; } result;
+    \\void main() {
+    \\    uint idx = gl_LocalInvocationID.x;
+    \\    if (idx == 0u) s_counter = 0u;
+    \\    barrier();
+    \\    atomicAdd(s_counter, 1u);
+    \\    barrier();
+    \\    if (idx == 0u) result.total = s_counter;
+    \\}
+;
+
+test "frontend: shared read after atomicAdd is not hoisted before it (#223, opt)" {
+    const spirv = try compileCompute(ATOMIC_SHARED_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterAtomic(spirv);
+}
+
+test "frontend: shared read after atomicAdd is not hoisted before it (#223, no-opt)" {
+    const spirv = try compileComputeNoOpt(ATOMIC_SHARED_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterAtomic(spirv);
 }
