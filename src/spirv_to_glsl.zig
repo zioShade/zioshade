@@ -1651,7 +1651,43 @@ fn emitWhileLoop(
         return loop_idx + 1;
     }
     const body_lbl = bc.words[2];
+
+    // #237: run the SSA phi counter update at the TOP of the loop (guarded by a
+    // first-iteration flag) so a `continue` — which skips the bottom-of-loop update
+    // in `while(true)` — still advances the counter, matching a real `for` loop.
+    var fbuf: [40]u8 = undefined;
+    const first_flag = std.fmt.bufPrint(&fbuf, "_loopfirst_{d}", .{loop_idx}) catch "_loopfirst";
+    const has_phis = if (g_loop_phis) |lp| (if (lp.get(loop_idx)) |pl| pl.items.len > 0 else false) else false;
+    if (has_phis) try w.print("    bool {s} = true;\n", .{first_flag});
+
     try w.writeAll("    while (true)\n    {\n");
+
+    if (has_phis) {
+        try w.print("        if (!{s})\n        {{\n", .{first_flag});
+        const cont_idx0 = label_map.get(cont_lbl) orelse m.instructions.len;
+        if (cont_idx0 < m.instructions.len) {
+            var ci0: usize = cont_idx0 + 1;
+            while (ci0 < m.instructions.len) : (ci0 += 1) {
+                const cinst = m.instructions[ci0];
+                if (cinst.op == .FunctionEnd or cinst.op == .Label or cinst.op == .Branch) break;
+                if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
+                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid);
+            }
+        }
+        if (g_loop_phis) |lp| {
+            if (lp.get(loop_idx)) |plist| {
+                for (plist.items) |pi| {
+                    const rname = names.get(pi.result_id) orelse continue;
+                    const vname = names.get(pi.update_id) orelse continue;
+                    if (std.mem.eql(u8, rname, vname)) continue;
+                    try w.print("        {s} = {s};\n", .{ rname, vname });
+                }
+            }
+        }
+        try w.writeAll("        }\n");
+        try w.print("        {s} = false;\n", .{first_flag});
+    }
+
     var cond_name: []const u8 = names.get(bc.words[1]) orelse "true";
     if (cond_start) |cs| {
         if (cs < cond_end) {
@@ -1787,28 +1823,19 @@ fn emitWhileLoop(
             try emitInstruction(m, names, decs, binst, w, alloc, is_frag, ovid);
         }
     }
-    // Emit continue block (e.g., i++ in for-loops)
-    const cont_idx = label_map.get(cont_lbl) orelse m.instructions.len;
-    if (cont_idx < m.instructions.len) {
-        var ci2: usize = cont_idx + 1;
-        while (ci2 < m.instructions.len) : (ci2 += 1) {
-            const cinst = m.instructions[ci2];
-            if (cinst.op == .FunctionEnd) break;
-            if (cinst.op == .Label) break;
-            if (cinst.op == .Branch) break;
-            if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
-            try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid);
-        }
-    }
-    // Write the loop-counter phi(s) back at the back-edge so the next iteration
-    // sees the updated value (`i = i_next;`); without this the counter never advances.
-    if (g_loop_phis) |lp| {
-        if (lp.get(loop_idx)) |plist| {
-            for (plist.items) |pi| {
-                const rname = names.get(pi.result_id) orelse continue;
-                const vname = names.get(pi.update_id) orelse continue;
-                if (std.mem.eql(u8, rname, vname)) continue;
-                try w.print("        {s} = {s};\n", .{ rname, vname });
+    // Emit continue block (e.g., i++ in for-loops). For phi-counter loops the
+    // update + write-back were hoisted to the top (#237), so skip them here.
+    if (!has_phis) {
+        const cont_idx = label_map.get(cont_lbl) orelse m.instructions.len;
+        if (cont_idx < m.instructions.len) {
+            var ci2: usize = cont_idx + 1;
+            while (ci2 < m.instructions.len) : (ci2 += 1) {
+                const cinst = m.instructions[ci2];
+                if (cinst.op == .FunctionEnd) break;
+                if (cinst.op == .Label) break;
+                if (cinst.op == .Branch) break;
+                if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
+                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid);
             }
         }
     }

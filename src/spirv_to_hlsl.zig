@@ -2865,8 +2865,43 @@ fn emitWhileLoopHLSL(
         return loop_idx + 1;
     }
 
+    // #237: For a loop with an SSA phi counter, the back-edge counter update must
+    // run on EVERY iteration including `continue` paths. A C `continue` in a
+    // `while(true)` skips the bottom-of-loop update, so instead we run the update
+    // at the TOP of the loop guarded by a first-iteration flag: a plain `continue`
+    // then re-enters the top and advances the counter (matching a real `for`).
+    var fbuf: [40]u8 = undefined;
+    const first_flag = std.fmt.bufPrint(&fbuf, "_loopfirst_{d}", .{loop_idx}) catch "_loopfirst";
+    const has_phis = if (loop_phis.get(loop_idx)) |pl| pl.items.len > 0 else false;
+    if (has_phis) try w.print("    bool {s} = true;\n", .{first_flag});
+
     // Emit: while (true) {
     try w.writeAll("    while (true)\n    {\n");
+
+    if (has_phis) {
+        // Run the counter update at the top, except on the first iteration.
+        try w.print("        if (!{s})\n        {{\n", .{first_flag});
+        const cont_idx0 = label_map.get(cont_lbl) orelse module.instructions.len;
+        if (cont_idx0 < module.instructions.len) {
+            var ci0: usize = cont_idx0 + 1;
+            while (ci0 < module.instructions.len) : (ci0 += 1) {
+                const cinst = module.instructions[ci0];
+                if (cinst.op == .FunctionEnd or cinst.op == .Label or cinst.op == .Branch) break;
+                if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
+                try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, is_vertex, output_var_id);
+            }
+        }
+        if (loop_phis.get(loop_idx)) |plist| {
+            for (plist.items) |pi| {
+                const rname = names.get(pi.result_id) orelse continue;
+                const vname = names.get(pi.update_id) orelse continue;
+                if (std.mem.eql(u8, rname, vname)) continue;
+                try w.print("        {s} = {s};\n", .{ rname, vname });
+            }
+        }
+        try w.writeAll("        }\n");
+        try w.print("        {s} = false;\n", .{first_flag});
+    }
 
     // Emit condition block instructions (for pattern A)
     if (cond_start) |cs| {
@@ -3002,29 +3037,20 @@ fn emitWhileLoopHLSL(
             try emitInstruction(module, names, decorations, binst, w, alloc, is_fragment, is_vertex, output_var_id);
         }
     }
-    // Emit continue block (e.g., i++ in for-loops)
-    const cont_idx = label_map.get(cont_lbl) orelse module.instructions.len;
-    if (cont_idx < module.instructions.len) {
-        var ci2: usize = cont_idx + 1;
-        while (ci2 < module.instructions.len) : (ci2 += 1) {
-            const cinst = module.instructions[ci2];
-            if (cinst.op == .FunctionEnd) break;
-            if (cinst.op == .Label) break;
-            if (cinst.op == .Branch) break;
-            if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
-            try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, is_vertex, output_var_id);
-        }
-    }
-
-    // Write the loop-counter phi(s) back at the back-edge, so the next iteration
-    // sees the updated value: `i = i_next;`. The update value was emitted above
-    // (in the body or continue block). Without this the counter never advances.
-    if (loop_phis.get(loop_idx)) |plist| {
-        for (plist.items) |pi| {
-            const rname = names.get(pi.result_id) orelse continue;
-            const vname = names.get(pi.update_id) orelse continue;
-            if (std.mem.eql(u8, rname, vname)) continue;
-            try w.print("        {s} = {s};\n", .{ rname, vname });
+    // Emit continue block (e.g., i++ in for-loops). For phi-counter loops the
+    // update was hoisted to the top (#237), so skip it here.
+    if (!has_phis) {
+        const cont_idx = label_map.get(cont_lbl) orelse module.instructions.len;
+        if (cont_idx < module.instructions.len) {
+            var ci2: usize = cont_idx + 1;
+            while (ci2 < module.instructions.len) : (ci2 += 1) {
+                const cinst = module.instructions[ci2];
+                if (cinst.op == .FunctionEnd) break;
+                if (cinst.op == .Label) break;
+                if (cinst.op == .Branch) break;
+                if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
+                try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, is_vertex, output_var_id);
+            }
         }
     }
 
