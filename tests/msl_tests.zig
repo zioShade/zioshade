@@ -2948,3 +2948,68 @@ test "T-atomic.4: MSL atomic_compare_exchange handles a runtime (non-constant) c
     try assertContains(msl, ", 9u,"); // data still passed by value
     try assertNotContains(msl, "&9u"); // data must never be address-of'd
 }
+
+// #265: the atomic result must be a typed DECLARATION (`uint vN = atomic_...`), not a
+// bare assignment to an undeclared SSA temp. Checks the line containing `call` has the
+// type token `ty` before it (a declaration), which the old `vN = atomic_...` lacked.
+fn atomicCallLineHasType(msl: []const u8, call: []const u8, ty: []const u8) bool {
+    const at = std.mem.indexOf(u8, msl, call) orelse return false;
+    var ls = at;
+    while (ls > 0 and msl[ls - 1] != '\n') ls -= 1;
+    return std.mem.indexOf(u8, msl[ls..at], ty) != null;
+}
+
+// #265: every MSL atomic must (A) cast the object to `(device|threadgroup atomic_T*)&…`
+// — bare `b.total` is a plain `uint`, not an atomic pointer, so it does not compile —
+// and (B) declare its SSA result temp with a type.
+test "T-atomic.5: MSL device SSBO atomic casts the object + declares the result (#265)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer B { uint total; } b;
+        \\void main() {
+        \\    uint o = atomicAdd(b.total, 37u);
+        \\    b.total = o;
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    // (A) device address-space + atomic_uint cast on the object.
+    try assertContains(msl, "atomic_fetch_add_explicit((device atomic_uint*)&b.total, 37u,");
+    try assertNotContains(msl, "atomic_fetch_add_explicit(b.total"); // the bare-object bug
+    // (B) the result is a typed declaration, not a bare `vN = …`.
+    try std.testing.expect(atomicCallLineHasType(msl, "atomic_fetch_add_explicit", "uint"));
+}
+
+test "T-atomic.6: MSL threadgroup (shared) atomic uses the threadgroup address space (#265)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\shared uint counter;
+        \\layout(std430, binding = 0) buffer B { uint out0; } b;
+        \\void main() {
+        \\    b.out0 = atomicAdd(counter, 5u);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "atomic_fetch_add_explicit((threadgroup atomic_uint*)&counter, 5u,");
+    try assertNotContains(msl, "atomic_fetch_add_explicit(counter"); // bare-object bug
+    try std.testing.expect(atomicCallLineHasType(msl, "atomic_fetch_add_explicit", "uint")); // Gap B
+}
+
+test "T-atomic.7: MSL signed atomic casts to atomic_int (#265)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer B { int sval; } b;
+        \\void main() {
+        \\    b.sval = atomicMin(b.sval, -5);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "atomic_fetch_min_explicit((device atomic_int*)&b.sval, -5,");
+    try assertNotContains(msl, "atomic_fetch_min_explicit(b.sval"); // bare-object bug
+    try std.testing.expect(atomicCallLineHasType(msl, "atomic_fetch_min_explicit", "int"));
+}
