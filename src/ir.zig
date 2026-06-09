@@ -223,6 +223,16 @@ pub const TypeDef = struct {
     members: []const ast.StructMember,
     size_bytes: u32,
     is_buffer_reference: bool = false,
+    /// True only when this type was declared as an `in`/`out` interface BLOCK
+    /// (`in Name { ... } inst;`), as opposed to a plain `struct` that merely
+    /// happens to be used as an input/output variable (`struct S {..}; in S v;`).
+    /// Real in/out interface blocks require an `OpDecorate <struct> Block`
+    /// decoration (the adjacent stage interface-matches on it); plain struct IO
+    /// variables do NOT (glslang emits no Block for them). UBO/SSBO blocks get
+    /// Block via the storage-class scan in codegen, so this flag is set ONLY for
+    /// the in/out case. The distinction is in the AST (`.uniform_block` node) but
+    /// otherwise lost in the IR, so it is carried here.
+    is_io_interface_block: bool = false,
 };
 
 pub const Instruction = struct {
