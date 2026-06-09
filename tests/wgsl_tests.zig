@@ -370,6 +370,60 @@ test "wgsl scalar isinf lowers to a naga-valid idiom (#170)" {
     try nagaValidateOrSkip(wgsl, "scalar-isinf");
 }
 
+// WGSL has no inf/nan float literal. A non-finite float CONSTANT (e.g. an
+// overflowing `1e40` literal folded to +inf) was previously emitted as the bare
+// `inf`/`nan` identifier (naga: "no definition in scope for identifier: `inf`").
+// It must instead be emitted as `bitcast<f32>(0x..u)` from the exact bit pattern. (#252)
+test "wgsl non-finite float constant emits bitcast, not bare inf/nan (#252)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float big = 1e40; // overflows f32 -> +inf constant
+        \\    fragColor = vec4(big, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "bitcast<f32>(0x") != null);
+    // The bare non-finite identifiers must never leak.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "inf") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "nan") == null);
+    try nagaValidateOrSkip(wgsl, "nonfinite-const");
+}
+
+// #252: a non-finite float has NO valid WGSL const-expression form — `bitcast`
+// (used for runtime contexts) is itself rejected by naga inside a const/override
+// initializer ("Not implemented as constant expression: bitcast"). So a non-finite
+// float in a module-scope `const` initializer, or as a spec-constant (`override`)
+// default, is unrepresentable and must fail loud rather than emit naga-invalid output.
+test "wgsl non-finite float in a const-global initializer is an honest error (#252)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) flat in int idx;
+        \\layout(location = 0) out vec4 fragColor;
+        \\const vec4 LUT[2] = vec4[2](vec4(1e40, 0.0, 0.0, 1.0), vec4(1.0));
+        \\void main() { fragColor = LUT[idx]; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
+test "wgsl non-finite spec-constant (override) default is an honest error (#252)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(constant_id = 0) const float K = 1e40;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = vec4(K, 0.0, 0.0, 1.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
 // WGSL has no matrix-inverse builtin. GLSL inverse() (GLSL.std.450 MatrixInverse)
 // must NOT silently emit `matrixInverse(m)` (naga: "no definition in scope").
 // Pass 2 lowers it to an emit-once generated `spvInverseN` helper (cofactor /

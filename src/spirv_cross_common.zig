@@ -408,7 +408,9 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
                     buf.writer(alloc).print("vec{d}<{s}>(", .{count, wgsl_scalar}) catch continue;
                     for (inst.words[3..], 0..) |comp_id, i| {
                         if (i > 0) buf.writer(alloc).writeAll(", ") catch continue;
-                        const comp_name = names.get(comp_id) orelse "0.0";
+                        const bc = wgslNonFiniteBitcast(alloc, module, comp_id);
+                        defer if (bc) |s| alloc.free(s);
+                        const comp_name = bc orelse (names.get(comp_id) orelse "0.0");
                         buf.writer(alloc).writeAll(comp_name) catch continue;
                     }
                     buf.writer(alloc).writeAll(")") catch continue;
@@ -423,7 +425,9 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
                     buf.writer(alloc).print("{s}(", .{struct_name}) catch continue;
                     for (inst.words[3..], 0..) |comp_id, i| {
                         if (i > 0) buf.writer(alloc).writeAll(", ") catch continue;
-                        const comp_name = names.get(comp_id) orelse "0.0";
+                        const bc = wgslNonFiniteBitcast(alloc, module, comp_id);
+                        defer if (bc) |s| alloc.free(s);
+                        const comp_name = bc orelse (names.get(comp_id) orelse "0.0");
                         buf.writer(alloc).writeAll(comp_name) catch continue;
                     }
                     buf.writer(alloc).writeAll(")") catch continue;
@@ -454,7 +458,9 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
                     buf2.writer(alloc).print("array<{s}, {d}>(", .{elem_name, count_val}) catch continue;
                     for (inst.words[3..], 0..) |comp_id, i| {
                         if (i > 0) buf2.writer(alloc).writeAll(", ") catch continue;
-                        const comp_name2 = names.get(comp_id) orelse "0.0";
+                        const bc2 = wgslNonFiniteBitcast(alloc, module, comp_id);
+                        defer if (bc2) |s| alloc.free(s);
+                        const comp_name2 = bc2 orelse (names.get(comp_id) orelse "0.0");
                         buf2.writer(alloc).writeAll(comp_name2) catch continue;
                     }
                     buf2.writer(alloc).writeAll(")") catch continue;
@@ -550,6 +556,21 @@ pub fn wgslTypeName(alloc: std.mem.Allocator, module: *const ParsedModule, names
         .TypeStruct => return alloc.dupe(u8, names.get(type_id) orelse "Struct"),
         else => return alloc.dupe(u8, "f32"),
     }
+}
+
+/// WGSL has no inf/nan float literal. If `id` is a non-finite 32-bit float
+/// OpConstant, return its exact bit pattern as `bitcast<f32>(0x..u)` (caller
+/// frees); otherwise null (caller uses the normal constant name). Used by the
+/// WGSL-only ConstantComposite namer so a non-finite component does not leak the
+/// bare `inf`/`nan` identifier naga rejects (#252).
+fn wgslNonFiniteBitcast(alloc: std.mem.Allocator, module: *const ParsedModule, id: u32) ?[]const u8 {
+    const ci = getDef(module, id) orelse return null;
+    if (ci.op != .Constant or ci.words.len <= 3) return null;
+    const ti = getDef(module, ci.words[1]) orelse return null;
+    if (ti.op != .TypeFloat or !(ti.words.len > 2 and ti.words[2] == 32)) return null;
+    const f: f32 = @bitCast(ci.words[3]);
+    if (std.math.isFinite(f)) return null;
+    return std.fmt.allocPrint(alloc, "bitcast<f32>(0x{x:0>8}u)", .{ci.words[3]}) catch null;
 }
 
 pub fn constantLiteral(alloc: std.mem.Allocator, type_inst: Instruction, literal_words: []const u32) ![]const u8 {

@@ -1551,6 +1551,19 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
             const rid = inst.words[2];
             const ti = getDef(module, inst.words[1]) orelse continue;
             if (ti.op != .TypeFloat) continue; // scalar float only
+            // #252: WGSL has no inf/nan literal. A non-finite 32-bit float constant
+            // (e.g. an overflowing `1e40` → +inf, or a folded `0.0/0.0` → NaN) is
+            // named by the shared formatter as the bare `inf`/`-inf`/`nan` identifier,
+            // which naga rejects ("no definition in scope"). Emit the exact bit
+            // pattern via `bitcast<f32>(0x..u)` instead.
+            if (ti.words.len > 2 and ti.words[2] == 32) {
+                const f: f32 = @bitCast(inst.words[3]);
+                if (!std.math.isFinite(f)) {
+                    const bc = std.fmt.allocPrint(alloc, "bitcast<f32>(0x{x:0>8}u)", .{inst.words[3]}) catch continue;
+                    lit_reps.append(alloc, .{ .key = rid, .val = bc }) catch alloc.free(bc);
+                    continue;
+                }
+            }
             const cur = names.get(rid) orelse continue;
             if (!isPlainNumericLiteral(cur)) continue; // OpName alias / already typed
             const typed = std.fmt.allocPrint(alloc, "{s}f", .{cur}) catch continue;
@@ -1873,7 +1886,10 @@ fn resolveConstantExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32,
                 if (bits == 32) {
                     const f: f32 = @bitCast(val);
                     var buf = std.ArrayList(u8).initCapacity(arena, 32) catch return null;
-                    if (f == @floor(f) and @abs(f) < 1e6) {
+                    if (!std.math.isFinite(f)) {
+                        // #252: WGSL has no inf/nan literal — emit the exact bits.
+                        buf.print(arena, "bitcast<f32>(0x{x:0>8}u)", .{val}) catch return null;
+                    } else if (f == @floor(f) and @abs(f) < 1e6) {
                         buf.print(arena, "{d}.0", .{f}) catch return null;
                     } else {
                         buf.print(arena, "{d}", .{f}) catch return null;
@@ -2754,6 +2770,15 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             // (naga: undefined identifier) instead of silently reading zeros.
             const init_id = inst.words[4];
             if (resolveConstantExpr(&module, &names, init_id, arena)) |val| {
+                // #252: a non-finite float is spelled `bitcast<f32>(0x..u)` (valid in
+                // runtime expressions) but naga REJECTS `bitcast` in a const-expression
+                // ("Not implemented as constant expression"). WGSL has no const-expr
+                // form for inf/nan, so a module-scope `const` with a non-finite
+                // component is unrepresentable — fail loud, don't emit a non-parsing const.
+                if (std.mem.indexOf(u8, val, "bitcast<f32>(0x") != null) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL cannot represent a non-finite float constant in a module-scope const initializer", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
                 try w.print("const {s}: {s} = {s};\n", .{ name, rt, val });
             }
             continue;
@@ -3180,6 +3205,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             // Format default per type: f32 needs decimal, i32/u32 don't.
             if (std.mem.eql(u8, type_str, "f32")) {
                 const fv: f32 = @bitCast(default_val);
+                // #252: a WGSL `override` default is a const-expression; a non-finite
+                // float has no const-expr form (`bitcast` is rejected there too), so
+                // fail loud rather than emit `= inf` (naga: undefined identifier).
+                if (!std.math.isFinite(fv)) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL cannot represent a non-finite float spec-constant (override) default", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
                 try w.print("@id({d}) override {s}: {s} = {d};\n", .{ sid, name, type_str, fv });
             } else if (std.mem.eql(u8, type_str, "i32")) {
                 const iv: i32 = @bitCast(default_val);
