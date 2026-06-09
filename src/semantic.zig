@@ -1096,6 +1096,32 @@ const Analyzer = struct {
         return result_id;
     }
 
+    /// Invalidate cached loads of `ptr_id` and its base variable after a memory
+    /// mutation that is NOT a plain store (e.g. an atomic RMW). Unlike emitStore,
+    /// this performs NO store-to-load forwarding: the new memory value is not a
+    /// known SSA id (an atomic's result is the OLD value), so any subsequent read
+    /// must re-load. Root-cause fix for #223 — a `shared`/SSBO load must never be
+    /// reused across an atomic RMW on the same variable.
+    fn invalidatePtrLoadCache(self: *Analyzer, ptr_id: u32) void {
+        _ = self.load_cache.remove(ptr_id);
+        _ = self.global_load_cache.remove(ptr_id);
+        if (self.ac_result_to_base.get(ptr_id)) |base_id| {
+            _ = self.load_cache.remove(base_id);
+            _ = self.global_load_cache.remove(base_id);
+        }
+    }
+
+    /// Invalidate ALL cached loads at a memory-ordering barrier (`barrier()` and the
+    /// memoryBarrier* family). After such a barrier the values of cross-invocation
+    /// memory (shared/SSBO) may have changed in OTHER invocations, so no cached load
+    /// may survive the barrier. Immutable loads (uniforms/inputs) are merely re-loaded
+    /// and re-merged by the optimizer's load CSE, so clearing wholesale is correct and
+    /// conservative. Root-cause fix for #223 — a load must not be hoisted across a barrier.
+    fn invalidateLoadCachesAtBarrier(self: *Analyzer) void {
+        self.load_cache.clearRetainingCapacity();
+        self.global_load_cache.clearRetainingCapacity();
+    }
+
     fn emitStore(self: *Analyzer, ptr_id: u32, val_id: u32) !void {
         // Invalidate load cache for this pointer AND any base variable it might be derived from.
         // When storing to a component (e.g., uv.x), we must also invalidate the whole variable (uv)
@@ -4772,6 +4798,9 @@ const Analyzer = struct {
                             .operands = barrier_ops,
                             .ty = .void,
                         });
+                        // #223: a barrier synchronizes cross-invocation memory — no load
+                        // cached before it may be reused after it.
+                        self.invalidateLoadCachesAtBarrier();
                         return .{ .ty = .void, .id = result_id };
                     }
                     if (std.mem.eql(u8, node.data.name, "memoryBarrier")) {
@@ -4788,6 +4817,9 @@ const Analyzer = struct {
                             .operands = mb_ops,
                             .ty = .void,
                         });
+                        // #223: a memory barrier orders shared/buffer memory — invalidate
+                        // cached loads so post-barrier reads observe other invocations' writes.
+                        self.invalidateLoadCachesAtBarrier();
                         return .{ .ty = .void, .id = result_id };
                     }
                     if (std.mem.eql(u8, node.data.name, "memoryBarrierShared")) {
@@ -4804,6 +4836,9 @@ const Analyzer = struct {
                             .operands = mb_ops,
                             .ty = .void,
                         });
+                        // #223: a memory barrier orders shared/buffer memory — invalidate
+                        // cached loads so post-barrier reads observe other invocations' writes.
+                        self.invalidateLoadCachesAtBarrier();
                         return .{ .ty = .void, .id = result_id };
                     }
                     if (std.mem.eql(u8, node.data.name, "memoryBarrierImage") or std.mem.eql(u8, node.data.name, "memoryBarrierBuffer")) {
@@ -4820,6 +4855,9 @@ const Analyzer = struct {
                             .operands = mb_ops,
                             .ty = .void,
                         });
+                        // #223: a memory barrier orders shared/buffer memory — invalidate
+                        // cached loads so post-barrier reads observe other invocations' writes.
+                        self.invalidateLoadCachesAtBarrier();
                         return .{ .ty = .void, .id = result_id };
                     }
                     if (std.mem.eql(u8, node.data.name, "groupMemoryBarrier")) {
@@ -4836,6 +4874,9 @@ const Analyzer = struct {
                             .operands = mb_ops,
                             .ty = .void,
                         });
+                        // #223: a memory barrier orders shared/buffer memory — invalidate
+                        // cached loads so post-barrier reads observe other invocations' writes.
+                        self.invalidateLoadCachesAtBarrier();
                         return .{ .ty = .void, .id = result_id };
                     }
                     if (self.isBarrierBuiltin(node.data.name)) {
@@ -4848,6 +4889,9 @@ const Analyzer = struct {
                                 .operands = &.{},
                                 .ty = .void,
                             });
+                            // #223: the interlock brackets a critical section over coherent
+                            // image/SSBO memory — a load cached before it must not survive it.
+                            self.invalidateLoadCachesAtBarrier();
                             return .{ .ty = .void, .id = result_id };
                         }
                         if (std.mem.eql(u8, node.data.name, "endInvocationInterlockARB")) {
@@ -4858,6 +4902,9 @@ const Analyzer = struct {
                                 .operands = &.{},
                                 .ty = .void,
                             });
+                            // #223: end of the interlocked critical section — invalidate
+                            // cached loads so later reads observe the section's writes.
+                            self.invalidateLoadCachesAtBarrier();
                             return .{ .ty = .void, .id = result_id };
                         }
                         // Remaining barrier builtins (demote)
@@ -5258,6 +5305,10 @@ const Analyzer = struct {
                             .operands = operands,
                             .ty = ret_ty,
                         });
+                        // #223: the atomic mutates memory — invalidate any cached load of
+                        // the target so a later read of the same variable re-loads the
+                        // post-atomic value instead of a stale pre-atomic one.
+                        self.invalidatePtrLoadCache(ptr_tid.id);
                         return .{ .ty = ret_ty, .id = result_id };
                     }
                     if (std.mem.eql(u8, node.data.name, "atomicCompSwap")) {
@@ -5279,6 +5330,8 @@ const Analyzer = struct {
                             .operands = operands,
                             .ty = ret_ty,
                         });
+                        // #223: atomic mutation — invalidate cached loads of the target.
+                        self.invalidatePtrLoadCache(ptr_tid.id);
                         return .{ .ty = ret_ty, .id = result_id };
                     }
                     // === Image atomics (imageAtomicAdd/Or/Xor/And/Min/Max/Exchange/CompSwap) ===
