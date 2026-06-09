@@ -1590,6 +1590,35 @@ fn emitBody(
     }
 }
 
+/// A do-while (bottom-test) loop's CONTINUE block ends in a back-edge
+/// `OpBranchConditional` whose two targets are exactly {header, merge}. A normal
+/// top-test loop's continue block ends in an unconditional `OpBranch header`.
+/// Returns the instruction index of that back-edge BranchConditional, else null.
+/// This must be consulted BEFORE scanning the body for a condition (issue #244):
+/// otherwise a body-local `if` is mis-detected as the loop condition.
+fn detectDoWhileBackEdge(
+    m: *const ParsedModule,
+    cont_lbl: u32,
+    header_lbl: u32,
+    merge_lbl: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+) ?usize {
+    const ci = label_map.get(cont_lbl) orelse return null;
+    var s = ci + 1;
+    while (s < m.instructions.len) : (s += 1) {
+        const t = m.instructions[s];
+        if (t.op == .Label or t.op == .FunctionEnd) return null;
+        if (t.op == .Branch) return null; // unconditional back-edge = top-test loop
+        if (t.op == .BranchConditional and t.words.len >= 4) {
+            const a = t.words[2];
+            const b = t.words[3];
+            if ((a == header_lbl and b == merge_lbl) or (a == merge_lbl and b == header_lbl)) return s;
+            return null;
+        }
+    }
+    return null;
+}
+
 fn emitWhileLoop(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -1617,43 +1646,44 @@ fn emitWhileLoop(
         return loop_idx + 1;
     }
 
+    // Header label = nearest Label before the LoopMerge (needed for do-while
+    // back-edge detection).
+    var hlbl_idx: usize = loop_idx;
+    while (hlbl_idx > 0) : (hlbl_idx -= 1) {
+        if (m.instructions[hlbl_idx].op == .Label) break;
+    }
+    const header_lbl: u32 = if (m.instructions[hlbl_idx].words.len > 1) m.instructions[hlbl_idx].words[1] else 0;
+
     const next_inst = m.instructions[loop_idx + 1];
     if (next_inst.op == .Branch and next_inst.words.len >= 2) {
-        // Pattern A: separate condition block
-        const cond_lbl = next_inst.words[1];
-        const cond_idx = label_map.get(cond_lbl) orelse {
-            if (label_map.get(merge_lbl)) |mi| return mi;
-            return loop_idx + 1;
-        };
-        cond_start = cond_idx + 1;
-        bc_idx = cond_idx + 1;
-        while (bc_idx < m.instructions.len) : (bc_idx += 1) {
-            const scan = m.instructions[bc_idx];
-            if (scan.op == .BranchConditional) break;
-            if (scan.op == .Branch or scan.op == .FunctionEnd or scan.op == .Label) { bc_idx = m.instructions.len; break; }
-        }
-        if (bc_idx >= m.instructions.len) {
-            // do-while (pattern C): the branch target is the BODY; the condition is at
-            // the back-edge (the continue block ends in a BranchConditional).
-            if (label_map.get(cont_lbl)) |ci| {
-                var s = ci + 1;
-                while (s < m.instructions.len) : (s += 1) {
-                    const t = m.instructions[s];
-                    if (t.op == .Label or t.op == .FunctionEnd or t.op == .Branch) break;
-                    if (t.op == .BranchConditional and t.words.len >= 4) {
-                        is_do_while = true;
-                        bc_idx = s;
-                        cond_start = null;
-                        break;
-                    }
-                }
+        // FIRST: is this a do-while (bottom-test) loop? Inspect the CONTINUE block's
+        // terminator BEFORE scanning the body. Otherwise the body's own `if`
+        // BranchConditional (`if(x) continue;`) is mis-grabbed as the loop condition,
+        // which crashes (GLSL stack-overflow) / silently miscompiles (HLSL/MSL) — #244.
+        if (detectDoWhileBackEdge(m, cont_lbl, header_lbl, merge_lbl, label_map)) |dw_bc| {
+            is_do_while = true;
+            bc_idx = dw_bc;
+            cond_start = null;
+        } else {
+            // Pattern A: separate top-test condition block.
+            const cond_lbl = next_inst.words[1];
+            const cond_idx = label_map.get(cond_lbl) orelse {
+                if (label_map.get(merge_lbl)) |mi| return mi;
+                return loop_idx + 1;
+            };
+            cond_start = cond_idx + 1;
+            bc_idx = cond_idx + 1;
+            while (bc_idx < m.instructions.len) : (bc_idx += 1) {
+                const scan = m.instructions[bc_idx];
+                if (scan.op == .BranchConditional) break;
+                if (scan.op == .Branch or scan.op == .FunctionEnd or scan.op == .Label) { bc_idx = m.instructions.len; break; }
             }
-            if (!is_do_while) {
+            if (bc_idx >= m.instructions.len) {
                 if (label_map.get(merge_lbl)) |mi| return mi;
                 return loop_idx + 1;
             }
+            cond_end = bc_idx;
         }
-        if (!is_do_while) cond_end = bc_idx;
     } else if (next_inst.op == .BranchConditional and next_inst.words.len >= 4) {
         // Pattern B: BranchConditional directly after LoopMerge
         bc_idx = loop_idx + 1;
@@ -1673,11 +1703,6 @@ fn emitWhileLoop(
 
     if (is_do_while) {
         body_lbl = next_inst.words[1]; // OpBranch target = body
-        var hl: usize = loop_idx;
-        while (hl > 0) : (hl -= 1) {
-            if (m.instructions[hl].op == .Label) break;
-        }
-        const header_lbl: u32 = if (m.instructions[hl].words.len > 1) m.instructions[hl].words[1] else 0;
         dw_loop_when_true = (bc.words[2] == header_lbl);
 
         // Only STRAIGHT-LINE do-while bodies are supported (the body-emission machinery
