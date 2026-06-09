@@ -129,6 +129,58 @@ fn loopCounterAdvances(src: []const u8) !bool {
     return false;
 }
 
+/// True if the loop's counter advances on the `continue` path (#237): a variable
+/// feeding the break condition is re-assigned BEFORE the first `continue` in the
+/// loop body. Returns true vacuously when the loop has no `continue`. In the
+/// broken output the only counter write-back is at the BOTTOM (after the
+/// `continue`), so a `continue` skips it → infinite loop.
+fn continueAdvancesCounter(src: []const u8) !bool {
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const body = loopBody(src) orelse return false;
+    const cont_pos = std.mem.indexOf(u8, body, "continue") orelse return true; // no continue
+    const before = body[0..cont_pos];
+
+    // break-condition seed identifiers
+    const guard = "if (!(";
+    const gi = std.mem.indexOf(u8, src, guard) orelse return false;
+    const after = src[gi + guard.len ..];
+    const brk = std.mem.indexOf(u8, after, "break") orelse return false;
+    var cond_end = brk;
+    while (cond_end > 0 and (after[cond_end - 1] == ' ' or after[cond_end - 1] == ')')) cond_end -= 1;
+    var seeds = std.StringHashMap(void).init(a);
+    try collectIdents(after[0..cond_end], &seeds);
+
+    var decl_deps = std.StringHashMap(std.StringHashMap(void)).init(a);
+    try scanDecls(a, src, &decl_deps);
+    var reassigned = std.StringHashMap(void).init(a);
+    try scanBareAssigns(before, &reassigned); // ONLY before the first continue
+
+    var frontier = std.StringHashMap(void).init(a);
+    var iter0 = seeds.iterator();
+    while (iter0.next()) |e| try frontier.put(e.key_ptr.*, {});
+    var seen = std.StringHashMap(void).init(a);
+    var depth: usize = 0;
+    while (depth < 6 and frontier.count() > 0) : (depth += 1) {
+        var next = std.StringHashMap(void).init(a);
+        var it = frontier.iterator();
+        while (it.next()) |e| {
+            const name = e.key_ptr.*;
+            if (seen.contains(name)) continue;
+            try seen.put(name, {});
+            if (reassigned.contains(name)) return true;
+            if (decl_deps.get(name)) |deps| {
+                var di = deps.iterator();
+                while (di.next()) |d| try next.put(d.key_ptr.*, {});
+            }
+        }
+        frontier = next;
+    }
+    return false;
+}
+
 /// Returns {lhs_name, has_type_prefix, rhs_end} for a plain `=` at `src[i]`, or
 /// null if it is not a plain assignment LHS.
 const AssignLHS = struct { name: []const u8, has_type_prefix: bool };
@@ -203,6 +255,26 @@ const NESTED_LOOP_SRC =
     \\}
 ;
 
+const CONTINUE_LOOP_SRC =
+    \\#version 450
+    \\out vec4 FragColor;
+    \\uniform int n;
+    \\void main() {
+    \\    float s = 0.0;
+    \\    for (int i = 0; i < n; i++) { if (i == 3) continue; if (i > 10) break; s += float(i); }
+    \\    FragColor = vec4(s, 0.0, 0.0, 1.0);
+    \\}
+;
+
+test "continue advances the counter in HLSL (#237)" {
+    const hlsl = try compileToHlsl(CONTINUE_LOOP_SRC);
+    defer alloc.free(hlsl);
+    if (!try continueAdvancesCounter(hlsl)) {
+        std.debug.print("HLSL continue skips the counter update (infinite loop):\n{s}\n", .{hlsl});
+        return error.ContinueSkipsUpdate;
+    }
+}
+
 test "loop counter advances in HLSL (phi not frozen)" {
     const hlsl = try compileToHlsl(COUNTER_LOOP_SRC);
     defer alloc.free(hlsl);
@@ -246,6 +318,24 @@ test "nested loop counters both advance in HLSL (#phi-loop)" {
     if (!try loopCounterAdvances(hlsl)) {
         std.debug.print("HLSL nested loop counter is frozen:\n{s}\n", .{hlsl});
         return error.LoopCounterFrozen;
+    }
+}
+
+test "continue advances the counter in GLSL (#237)" {
+    const glsl = try compileToGlsl(CONTINUE_LOOP_SRC);
+    defer alloc.free(glsl);
+    if (!try continueAdvancesCounter(glsl)) {
+        std.debug.print("GLSL continue skips the counter update (infinite loop):\n{s}\n", .{glsl});
+        return error.ContinueSkipsUpdate;
+    }
+}
+
+test "continue advances the counter in MSL (#237)" {
+    const msl = try compileToMsl(CONTINUE_LOOP_SRC);
+    defer alloc.free(msl);
+    if (!try continueAdvancesCounter(msl)) {
+        std.debug.print("MSL continue skips the counter update (infinite loop):\n{s}\n", .{msl});
+        return error.ContinueSkipsUpdate;
     }
 }
 
