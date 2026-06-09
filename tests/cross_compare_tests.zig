@@ -853,3 +853,59 @@ test "#173 item1: matrix-element const-array global cross-compiles to glslang-va
     defer alloc.free(g);
     try assertGlslangAccepts(alloc, "matrix-const-array", g, .fragment);
 }
+
+// ---------------------------------------------------------------------------
+// Loop-header OpPhi lowering: compile via glslpp's OWN pipeline (so the
+// loopCounterToPhi pass produces the loop-counter OpPhi), cross-compile to
+// GLSL, then assert glslangValidator accepts the result. This validates the
+// EMITTED output compiles (catches counter-freeze, stale conditions, and
+// duplicate continue-block declarations that SPIR-V-only validation misses).
+// ---------------------------------------------------------------------------
+
+fn glslppLoopAccepts(name: []const u8, source: [:0]const u8) !void {
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 450 });
+    defer alloc.free(glsl);
+    try assertGlslangAccepts(alloc, name, glsl, .fragment);
+}
+
+test "loop-phi emitted GLSL compiles: simple for" {
+    try glslppLoopAccepts("phi-simple",
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float x=0.0; for(int i=0;i<20;i++){ x=x+float(i);} o=vec4(x);}
+    );
+}
+
+test "loop-phi emitted GLSL compiles: nested" {
+    try glslppLoopAccepts("phi-nested",
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float s=0.0; for(int i=0;i<4;i++){ for(int j=0;j<3;j++){ s+=float(i*j);}} o=vec4(s);}
+    );
+}
+
+test "loop-phi emitted GLSL compiles: early break" {
+    try glslppLoopAccepts("phi-break",
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float s=0.0; for(int i=0;i<100;i++){ s+=float(i); if(s>10.0) break;} o=vec4(s);}
+    );
+}
+
+test "loop-phi emitted GLSL compiles: continue" {
+    try glslppLoopAccepts("phi-continue",
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float s=0.0; for(int i=0;i<10;i++){ if(i==5) continue; s+=float(i);} o=vec4(s);}
+    );
+}
+
+test "loop-phi emitted GLSL compiles: empty body (body == continue block)" {
+    try glslppLoopAccepts("phi-empty-body",
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ int i; for(i=0;i<10;i++){} o=vec4(float(i));}
+    );
+}

@@ -2977,9 +2977,11 @@ fn emitWhileLoopHLSL(
             try emitInstruction(module, names, decorations, binst, w, alloc, is_fragment, is_vertex, output_var_id);
         }
     }
-    // Emit continue block (e.g., i++ in for-loops)
+    // Emit continue block (e.g., i++ in for-loops). When the body block IS the
+    // continue block (body_lbl == cont_lbl) the body loop already emitted it —
+    // re-emitting would re-declare its locals in the same scope (invalid HLSL).
     const cont_idx = label_map.get(cont_lbl) orelse module.instructions.len;
-    if (cont_idx < module.instructions.len) {
+    if (cont_idx < module.instructions.len and cont_lbl != body_lbl) {
         var ci2: usize = cont_idx + 1;
         while (ci2 < module.instructions.len) : (ci2 += 1) {
             const cinst = module.instructions[ci2];

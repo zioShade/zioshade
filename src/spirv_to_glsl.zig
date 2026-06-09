@@ -1801,9 +1801,12 @@ fn emitWhileLoop(
             try emitInstruction(m, names, decs, binst, w, alloc, is_frag, ovid);
         }
     }
-    // Emit continue block (e.g., i++ in for-loops)
+    // Emit continue block (e.g., i++ in for-loops). When the body block IS the
+    // continue block (body_lbl == cont_lbl, e.g. an empty-body for-loop) the body
+    // loop above already emitted it — emitting it again here would re-declare its
+    // locals in the same scope (invalid GLSL).
     const cont_idx = label_map.get(cont_lbl) orelse m.instructions.len;
-    if (cont_idx < m.instructions.len) {
+    if (cont_idx < m.instructions.len and cont_lbl != body_lbl) {
         var ci2: usize = cont_idx + 1;
         while (ci2 < m.instructions.len) : (ci2 += 1) {
             const cinst = m.instructions[ci2];

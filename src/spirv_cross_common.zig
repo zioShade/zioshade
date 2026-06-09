@@ -765,8 +765,6 @@ pub const LoopHeaderPhi = struct {
     type_id: u32,
     init_val: u32, // incoming value from the loop preheader
     backedge_val: u32, // incoming value from the continue block (loop tail)
-    header_label: u32,
-    continue_label: u32,
 };
 
 /// If the OpPhi at `phi_idx` is a *loop-header* phi — i.e. an OpLoopMerge
@@ -809,19 +807,6 @@ pub fn classifyLoopPhi(instructions: anytype, id_defs: anytype, phi_idx: usize) 
     }
     if (!found) return null;
 
-    // Header label: the OpLabel preceding this phi's block.
-    var header_label: u32 = 0;
-    {
-        var b = phi_idx;
-        while (b > 0) {
-            b -= 1;
-            if (instructions[b].op == .Label and instructions[b].words.len > 1) {
-                header_label = instructions[b].words[1];
-                break;
-            }
-        }
-    }
-
     var init_val: ?u32 = null;
     var be_val: ?u32 = null;
     var p: usize = 3;
@@ -844,8 +829,6 @@ pub fn classifyLoopPhi(instructions: anytype, id_defs: anytype, phi_idx: usize) 
         .type_id = phi.words[1],
         .init_val = init_val orelse phi.words[3],
         .backedge_val = be_val orelse phi.words[5],
-        .header_label = header_label,
-        .continue_label = cont_label,
     };
 }
 
