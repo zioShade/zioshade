@@ -1105,6 +1105,207 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
     return result.toOwnedSlice(alloc);
 }
 
+/// Ensure no function's ENTRY block is a branch target. A loop whose header is
+/// the very first statement of a function (no local-var inits / preamble before
+/// it — e.g. `int f(int lo,int hi){ while(lo<=hi){...} }`) makes the loop header
+/// the function's entry block, and the loop back-edge then branches to it.
+/// SPIR-V forbids the entry block of a function from being the target of any
+/// branch (spirv-val: "First block '%N' of function is targeted by block '%M'").
+/// glslpp's `deadLoopElim` used to mask this by deleting such loops; now that
+/// live early-return loops survive, this surfaces as invalid SPIR-V.
+///
+/// Fix: for each function whose entry block is a branch target, splice in a new
+/// empty pre-header block as the new entry that unconditionally branches to the
+/// old entry. Any OpVariable in the old entry is relocated into the pre-header so
+/// it stays in the function's first block (a SPIR-V structural requirement).
+/// Conservatively skipped if the entry block contains an OpPhi (a phi predecessor
+/// rewrite would be required, which this simple splice does not perform — such a
+/// shape does not arise for the var-based loop-as-entry case this targets).
+pub fn ensureLoopPreheader(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
+    if (words.len < 5) return words;
+    var bound = words[3];
+
+    // Pass 1: locate each function's entry label and the span of its entry block,
+    // and decide whether a pre-header is needed.
+    const Edit = struct {
+        entry_label: u32,
+        new_label: u32,
+        // word range [body_start, body_end) of the entry block's NON-variable
+        // instructions that follow the entry OpLabel (terminator inclusive).
+        var_words: []const u32, // OpVariable instructions to relocate (may be empty)
+    };
+    var edits = std.ArrayListUnmanaged(Edit).empty;
+    defer edits.deinit(alloc);
+
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const op: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
+        if (op != 54) { // not OpFunction
+            pos = ie;
+            continue;
+        }
+        // Skip OpFunction + OpFunctionParameter(s) to the entry OpLabel.
+        var fp = ie;
+        while (fp < words.len) {
+            const pwc: u32 = words[fp] >> 16;
+            const pop: u16 = @truncate(words[fp] & 0xFFFF);
+            if (pwc == 0) break;
+            if (pop == 55) { fp += pwc; continue; } // OpFunctionParameter
+            break;
+        }
+        if (fp >= words.len) break;
+        const lwc: u32 = words[fp] >> 16;
+        const lop: u16 = @truncate(words[fp] & 0xFFFF);
+        if (lop != 248 or lwc < 2) { pos = ie; continue; } // expected entry OpLabel
+        const entry_label = words[fp + 1];
+
+        // Find the end of the function (OpFunctionEnd) and whether the entry label
+        // is a branch target anywhere in the function. Also detect an OpPhi in the
+        // entry block (conservative skip).
+        var func_end = fp;
+        var is_target = false;
+        var entry_has_phi = false;
+        {
+            // Walk the entry block first to spot an OpPhi.
+            var bp = fp + lwc;
+            while (bp < words.len) {
+                const bwc: u32 = words[bp] >> 16;
+                const bop: u16 = @truncate(words[bp] & 0xFFFF);
+                if (bwc == 0) break;
+                if (bop == 245) entry_has_phi = true; // OpPhi
+                // Block terminators end the entry block.
+                if (bop == 249 or bop == 250 or bop == 251 or bop == 253 or
+                    bop == 254 or bop == 252 or bop == 255 or bop == 248)
+                {
+                    break;
+                }
+                bp += bwc;
+            }
+            // Walk to OpFunctionEnd scanning branch targets.
+            var sp = fp;
+            while (sp < words.len) {
+                const swc: u32 = words[sp] >> 16;
+                const sop: u16 = @truncate(words[sp] & 0xFFFF);
+                if (swc == 0) break;
+                if (sop == 56) { func_end = sp; break; } // OpFunctionEnd
+                switch (sop) {
+                    249 => if (swc >= 2 and words[sp + 1] == entry_label) { is_target = true; }, // OpBranch
+                    250 => { // OpBranchConditional
+                        if (swc >= 4 and (words[sp + 2] == entry_label or words[sp + 3] == entry_label)) is_target = true;
+                    },
+                    251 => { // OpSwitch: selector default [literal target]...
+                        if (swc >= 3 and words[sp + 2] == entry_label) is_target = true;
+                        var k: u32 = sp + 4;
+                        while (k < sp + swc) : (k += 2) {
+                            if (words[k] == entry_label) is_target = true;
+                        }
+                    },
+                    else => {},
+                }
+                sp += swc;
+            }
+        }
+
+        if (is_target and !entry_has_phi) {
+            // Collect OpVariable instructions in the entry block (to relocate).
+            var var_list = std.ArrayListUnmanaged(u32).empty;
+            var bp = fp + lwc;
+            while (bp < words.len) {
+                const bwc: u32 = words[bp] >> 16;
+                const bop: u16 = @truncate(words[bp] & 0xFFFF);
+                if (bwc == 0) break;
+                if (bop == 248) break; // next block
+                if (bop == 59) { // OpVariable
+                    var_list.appendSlice(alloc, words[bp .. bp + bwc]) catch {};
+                }
+                // Stop at the block terminator.
+                if (bop == 249 or bop == 250 or bop == 251 or bop == 253 or
+                    bop == 254 or bop == 252 or bop == 255)
+                {
+                    break;
+                }
+                bp += bwc;
+            }
+            const var_words = var_list.toOwnedSlice(alloc) catch &.{};
+            edits.append(alloc, .{ .entry_label = entry_label, .new_label = bound, .var_words = var_words }) catch {};
+            bound += 1;
+        }
+        pos = ie;
+    }
+
+    if (edits.items.len == 0) return words;
+
+    // Pass 2: rebuild. For each entry OpLabel that needs a pre-header, emit the new
+    // pre-header (OpLabel + relocated OpVariables + OpBranch to old entry) BEFORE it,
+    // and drop the relocated OpVariables from the old entry block.
+    var result = std.ArrayList(u32).initCapacity(alloc, words.len + edits.items.len * 6) catch {
+        for (edits.items) |e| if (e.var_words.len > 0) alloc.free(@constCast(e.var_words));
+        return words;
+    };
+    result.appendSliceAssumeCapacity(words[0..5]);
+    result.items[3] = bound;
+
+    // Helper: find an edit for a given entry label.
+    pos = 5;
+    var active_drop: ?usize = null; // index into edits whose entry block we're in (dropping its vars)
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const op: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) {
+            result.appendSlice(alloc, words[pos..]) catch {};
+            break;
+        }
+        const ie = pos + wc;
+        if (ie > words.len) { result.appendSlice(alloc, words[pos..]) catch {}; break; }
+
+        if (op == 248 and wc >= 2) { // OpLabel
+            const lbl = words[pos + 1];
+            active_drop = null;
+            var matched: ?usize = null;
+            for (edits.items, 0..) |e, idx| {
+                if (e.entry_label == lbl) { matched = idx; break; }
+            }
+            if (matched) |idx| {
+                const e = edits.items[idx];
+                // Emit pre-header block.
+                result.appendSlice(alloc, &.{ (2 << 16) | 248, e.new_label }) catch {}; // OpLabel new
+                if (e.var_words.len > 0) result.appendSlice(alloc, e.var_words) catch {};
+                result.appendSlice(alloc, &.{ (2 << 16) | 249, e.entry_label }) catch {}; // OpBranch entry
+                // Emit the original entry OpLabel; mark that we must drop its vars.
+                result.appendSlice(alloc, words[pos..ie]) catch {};
+                active_drop = idx;
+                pos = ie;
+                continue;
+            }
+            result.appendSlice(alloc, words[pos..ie]) catch {};
+            pos = ie;
+            continue;
+        }
+
+        // Inside an entry block that gained a pre-header: drop relocated OpVariables.
+        if (active_drop != null and op == 59) { // OpVariable
+            pos = ie;
+            continue;
+        }
+        // Any terminator/next-label clears the drop state (handled by the OpLabel case).
+        if (active_drop != null and (op == 249 or op == 250 or op == 251 or
+            op == 253 or op == 254 or op == 252 or op == 255))
+        {
+            active_drop = null;
+        }
+
+        result.appendSlice(alloc, words[pos..ie]) catch {};
+        pos = ie;
+    }
+
+    for (edits.items) |e| if (e.var_words.len > 0) alloc.free(@constCast(e.var_words));
+    return result.toOwnedSlice(alloc) catch words;
+}
+
 /// Dead loop elimination: remove loops whose bodies have no observable side effects
 /// and whose computed values are never used after the loop.
 pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
@@ -1196,6 +1397,17 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             if (in_loop and !has_side_effects) {
                 if (opcode == 62 and wc >= 3) { // OpStore
                     if (!safe_ptrs.isSet(words[pos + 1])) has_side_effects = true;
+                } else if (opcode == 252 or opcode == 253 or opcode == 254 or
+                           opcode == 4416 or opcode == 5380) {
+                    // Early function exit / fragment discard inside the loop is a
+                    // CONTROL-FLOW side effect: OpKill (252), OpReturn (253),
+                    // OpReturnValue (254), OpTerminateInvocation (4416),
+                    // OpDemoteToHelperInvocation (5380). The loop conditionally
+                    // returns (or discards) before its merge, so its iterations
+                    // ARE observable — deleting it is silent-wrong (e.g. a search
+                    // loop whose hit returns early would collapse to its post-loop
+                    // fallthrough value). Keep the loop.
+                    has_side_effects = true;
                 } else if (opcode == 63 or opcode == 234 or opcode == 235 or
                            (opcode >= 57 and opcode <= 60) or
                            (opcode >= 68 and opcode <= 76) or opcode == 99 or

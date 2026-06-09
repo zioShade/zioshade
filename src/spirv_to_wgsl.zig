@@ -178,6 +178,36 @@ fn recordUnsupportedExtInst(op: u32) error{UnsupportedExtInst} {
     return error.UnsupportedExtInst;
 }
 
+/// How a mid-body (early) `OpReturn` in the ENTRY function is lowered. WGSL's
+/// entry point returns the output struct/value, so a void SPIR-V return cannot
+/// simply become `return;` — it must reassemble the current outputs.
+///   * `.none`    — non-entry (helper) function; legacy behaviour (a void return
+///                  with no inout result is dropped; see the `.Return` arm).
+///   * `.stmt`    — the outputs accumulate in a single named local that the
+///                  trailing return references verbatim (`vertex_out`, a color
+///                  `var`, or a void entry's `return;`); emit this statement at
+///                  the early-return point.
+///   * `.honest_error` — the trailing return is ASSEMBLED from end-captured
+///                  values (frag_depth/MRT struct, or the single-store direct
+///                  return), which an early return cannot reproduce at the right
+///                  program point; fail loud rather than silently miscompile.
+const EarlyReturnMode = union(enum) {
+    none,
+    stmt: []const u8,
+    honest_error,
+};
+
+/// Record the detail for a mid-body early return that cannot be cleanly
+/// structurized into WGSL, then return the honest error.
+fn recordUnsupportedEarlyReturn() error{UnsupportedEarlyReturn} {
+    last_error_detail = std.fmt.bufPrint(
+        &last_error_detail_buf,
+        "mid-body early 'return' targets an assembled entry output (frag_depth/MRT/direct-return) that WGSL structurization cannot express",
+        .{},
+    ) catch null;
+    return error.UnsupportedEarlyReturn;
+}
+
 /// Single source of truth: glslpp's internal GLSL.std.450 opcode number → WGSL
 /// builtin name. Used by BOTH the main emit path and the loop-replay path so the
 /// two cannot drift (they previously had divergent inline switches — the replay
@@ -3412,7 +3442,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
 
         const inout_ret_name: ?[]const u8 = if (has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, .none);
 
         try w.writeAll("}\n\n");
     }
@@ -4031,8 +4061,38 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
+    // Determine how a mid-body EARLY return assembles the entry output. The
+    // trailing return (emitted after emitBody, below) collapses all paths into a
+    // single exit; an early return must reproduce that exit at its own point.
+    // Only the cases whose trailing return is a single named local (returned
+    // verbatim) can be reproduced cleanly — the rest are assembled from
+    // end-captured values and must fail loud (see EarlyReturnMode).
+    const early_return_mode: EarlyReturnMode = blk: {
+        if (use_frag_depth_struct or use_frag_mrt_struct) break :blk .honest_error;
+        if (use_vertex_struct) {
+            // Deep-flattened outputs are copied into vertex_out only at the
+            // trailing return (output_copyouts); an early `return vertex_out;`
+            // would miss those, so honest-error. The common case (no recons)
+            // writes every output — including matrix-output columns
+            // (`vertex_out.{base}_{c}`) — directly into vertex_out members, so an
+            // early return captures exactly what was written so far. Return as-is.
+            break :blk if (output_recons.count() == 0) .{ .stmt = "return vertex_out;" } else .honest_error;
+        }
+        // Single-store direct return: the output is never declared as a `var`;
+        // the value is captured and returned at the end. An early return has no
+        // local to assemble from.
+        if (direct_return_id != null) break :blk .honest_error;
+        if ((is_fragment or is_vertex) and output_var_id != null) {
+            const nm = names.get(output_var_id.?) orelse break :blk .honest_error;
+            break :blk .{ .stmt = try std.fmt.allocPrint(arena, "return {s};", .{nm}) };
+        }
+        // No returned value (compute, or an output-less stage): a plain `return;`
+        // is valid WGSL.
+        break :blk .{ .stmt = "return;" };
+    };
+
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, early_return_mode);
 
     // Re-resolve the direct-return value AFTER emitBody: a passthrough store
     // (`o = x`, or `o = -(-x)` after double-negate folding) feeds an OpLoad
@@ -4201,7 +4261,7 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void)) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), early_return: EarlyReturnMode) !void {
     _ = decorations;
     _ = wrapped_uniform_arrays;
     var indent: u32 = 1; // base function body indentation (4 spaces)
@@ -4221,6 +4281,20 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         if (inst.op == .Label) { i += 1; break; }
         if (inst.op == .FunctionParameter) continue;
         break;
+    }
+
+    // Index of the function's LAST OpReturn — the terminator of the final block,
+    // which the wrapper turns into the trailing output-struct return. Any earlier
+    // OpReturn (or one nested in a selection/loop) is an EARLY return that must
+    // actually exit; see the `.Return` arm.
+    var last_return_idx: usize = 0;
+    {
+        var ri: usize = func_idx + 1;
+        while (ri < module.instructions.len) : (ri += 1) {
+            const rinst = module.instructions[ri];
+            if (rinst.op == .FunctionEnd) break;
+            if (rinst.op == .Return or rinst.op == .ReturnValue) last_return_idx = ri;
+        }
     }
 
     // Control flow state tracking
@@ -5376,6 +5450,33 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             if_depth -= 1;
                         }
                     }
+
+                    // Non-phi loop header: this block declares an OpLoopMerge but
+                    // carries no header Phi (a `while`/`do` loop whose loop-carried
+                    // values stayed memory vars). Its computations (e.g. the
+                    // OpLoad of a condition variable, reused in the body) must be
+                    // emitted INSIDE the loop so they re-evaluate each iteration —
+                    // otherwise they are hoisted before `loop {` and the body reads
+                    // a stale pre-loop snapshot. Defer them via the same machinery
+                    // the Phi path uses; the LoopMerge arm replays them in-body.
+                    // (Phi loops are already deferred by the Phi handler.)
+                    if (!defer_active) {
+                        var k: usize = i + 1;
+                        var has_phi = false;
+                        var is_loop_header = false;
+                        while (k < module.instructions.len) : (k += 1) {
+                            switch (module.instructions[k].op) {
+                                .Phi => has_phi = true,
+                                .LoopMerge => { is_loop_header = true; break; },
+                                .Label, .Branch, .BranchConditional, .Switch, .SelectionMerge, .Return, .ReturnValue, .Kill, .Unreachable, .FunctionEnd => break,
+                                else => {},
+                            }
+                        }
+                        if (is_loop_header and !has_phi) {
+                            defer_active = true;
+                            defer_start = i + 1;
+                        }
+                    }
                 }
             },
 
@@ -5995,8 +6096,24 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .Return => {
                 if (inout_return) |ret_name| {
                     try writeInd(w, indent); try w.print("return {s};\n", .{ret_name});
+                } else {
+                    // Entry function. The FINAL return (terminator of the last
+                    // block, at top level) is collapsed into the wrapper's trailing
+                    // output-struct return, so it is dropped here. A mid-body EARLY
+                    // return — nested in a selection/loop, or textually before the
+                    // final return — must actually exit, or later stage-IO writes
+                    // overwrite the branch's output (silent-wrong).
+                    const is_early = i != last_return_idx or if_depth > 0 or in_loop;
+                    if (is_early) {
+                        switch (early_return) {
+                            .none => {},
+                            .stmt => |s| {
+                                try writeInd(w, indent); try w.print("{s}\n", .{s});
+                            },
+                            .honest_error => return recordUnsupportedEarlyReturn(),
+                        }
+                    }
                 }
-                // Otherwise: void return in entry function — handled by wrapper
             },
 
             // ExtInst (GLSL.std.450)
