@@ -1679,6 +1679,19 @@ fn emitWhileLoop(
         }
         const header_lbl: u32 = if (m.instructions[hl].words.len > 1) m.instructions[hl].words[1] else 0;
         dw_loop_when_true = (bc.words[2] == header_lbl);
+
+        // Only STRAIGHT-LINE do-while bodies are supported (the body-emission machinery
+        // treats a branch to cont_lbl as `continue`, but cont_lbl is the condition block
+        // here). Conditional control flow in the body would be miscompiled — fail loud.
+        const bidx = label_map.get(body_lbl) orelse m.instructions.len;
+        var sidx = bidx + 1;
+        while (sidx < m.instructions.len) : (sidx += 1) {
+            const t = m.instructions[sidx];
+            if (t.op == .Label and t.words.len > 1 and t.words[1] == cont_lbl) break;
+            if (t.op == .FunctionEnd) break;
+            if (t.op == .SelectionMerge or t.op == .LoopMerge or t.op == .BranchConditional or t.op == .Switch) return error.UnstructuredControlFlow;
+            if (t.op == .Branch and t.words.len > 1 and t.words[1] != cont_lbl) return error.UnstructuredControlFlow;
+        }
     }
 
     // #237: run the SSA phi counter update at the TOP of the loop (guarded by a

@@ -2819,6 +2819,20 @@ fn emitWhileLoopHLSL(
         }
         const header_lbl: u32 = if (module.instructions[hl].words.len > 1) module.instructions[hl].words[1] else 0;
         dw_loop_when_true = (bc.words[2] == header_lbl);
+
+        // Only STRAIGHT-LINE do-while bodies are supported. The body is emitted with
+        // the top-test machinery, which treats a branch to cont_lbl as a `continue`;
+        // in a do-while cont_lbl is the CONDITION block, so conditional control flow
+        // in the body (break/continue/nested loop) would be miscompiled. Fail loud.
+        const bidx = label_map.get(body_lbl) orelse module.instructions.len;
+        var sidx = bidx + 1;
+        while (sidx < module.instructions.len) : (sidx += 1) {
+            const t = module.instructions[sidx];
+            if (t.op == .Label and t.words.len > 1 and t.words[1] == cont_lbl) break;
+            if (t.op == .FunctionEnd) break;
+            if (t.op == .SelectionMerge or t.op == .LoopMerge or t.op == .BranchConditional or t.op == .Switch) return error.UnstructuredControlFlow;
+            if (t.op == .Branch and t.words.len > 1 and t.words[1] != cont_lbl) return error.UnstructuredControlFlow;
+        }
     }
 
     // Check if this is a do-once loop: both branches of BranchConditional go to merge
