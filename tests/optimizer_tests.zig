@@ -431,3 +431,46 @@ test "frontend: sibling access-chain load not reused across ++ store on same bas
     defer alloc.free(spirv);
     try assertLoadAfterIAdd(spirv);
 }
+
+// #234: a barrier()/atomic hidden inside a CALLED helper must invalidate the
+// caller's load cache. glslpp emits a real OpFunctionCall (no frontend inlining);
+// the call site did not invalidate load_cache/global_load_cache, so a read of a
+// shared/SSBO variable AFTER the call reused the pre-call cached load — the #223
+// memory-ordering violation, one call-frame deep.
+// Asserts the value stored to result.total is loaded AFTER the OpFunctionCall
+// (no-opt: bump() is a real call, not yet inlined). In the buggy output the read
+// reused the pre-call cached load, positioned BEFORE the call.
+fn assertLoadAfterCall(spirv: []const u32) !void {
+    const call_pos = firstOpcodePos(spirv, 57) orelse return error.NoCall; // OpFunctionCall
+    const stored_val = lastStoreLoadedValue(spirv) orelse return error.NoLoadedStore;
+    const load_pos = loadPosForResult(spirv, stored_val) orelse return error.NoLoad;
+    try std.testing.expect(load_pos > call_pos);
+}
+
+const HELPER_ATOMIC_SRC =
+    \\#version 310 es
+    \\layout(local_size_x = 32) in;
+    \\shared uint s_counter;
+    \\layout(std430, binding = 0) buffer R { uint total; } result;
+    \\void bump() { atomicAdd(s_counter, 1u); barrier(); }
+    \\void main() {
+    \\    uint a = s_counter;
+    \\    bump();
+    \\    uint b = s_counter;
+    \\    if (gl_LocalInvocationID.x == 0u) result.total = b;
+    \\}
+;
+
+test "frontend: shared read after a helper that does atomic+barrier is re-loaded (#234, no-opt)" {
+    const spirv = try compileComputeNoOpt(HELPER_ATOMIC_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterCall(spirv);
+}
+
+test "frontend: shared read after a helper that does atomic+barrier is re-loaded (#234, opt)" {
+    // After inlining bump() into main, the OpAtomicIAdd sits in main; the read
+    // feeding result.total must be loaded AFTER it (not the stale pre-call load).
+    const spirv = try compileCompute(HELPER_ATOMIC_SRC);
+    defer alloc.free(spirv);
+    try assertLoadAfterAtomic(spirv);
+}

@@ -6909,6 +6909,17 @@ const Analyzer = struct {
                         .operands = operands,
                         .ty = result_ty,
                     });
+                    // #234: glslpp emits a real OpFunctionCall (no inlining at semantic
+                    // time) and has no cross-function memory-effect summary, so a callee
+                    // that runs a barrier/atomic/store — or mutates an out/inout pointer
+                    // arg — is invisible to the caller's per-call-frame load cache. A
+                    // shared/SSBO read AFTER the call would otherwise reuse the stale
+                    // pre-call cached value (the #223 violation, one frame deep).
+                    // Conservatively clear both load caches at the call site: over-
+                    // invalidation only ever forces an extra re-load (never a stale
+                    // value), and immutable-uniform reloads are re-merged by the
+                    // optimizer's load CSE.
+                    self.invalidateLoadCachesAtBarrier();
                 }
                 return .{ .ty = result_ty, .id = result_id };
             },
