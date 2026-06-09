@@ -2728,15 +2728,19 @@ fn emitWhileLoopHLSL(
     is_vertex: bool,
     output_var_id: ?u32,
 ) !usize {
-    // Two patterns after LoopMerge:
+    // Three patterns after LoopMerge:
     // Pattern A: LoopMerge; Branch cond_label; ...; BranchConditional cond, body, merge
     // Pattern B: LoopMerge; BranchConditional cond, body, merge (merged condition)
+    // Pattern C (do-while / bottom-test): LoopMerge; Branch body; ...; the continue
+    //   block ends in BranchConditional cond, header, merge (condition at back-edge).
 
     var cond_name: []const u8 = "true";
     var body_lbl: u32 = 0;
     var bc_idx: usize = loop_idx + 1;
     var cond_start: ?usize = null; // start of condition instructions (for pattern A)
     var cond_end: usize = loop_idx + 1; // end of condition instructions
+    var is_do_while = false; // pattern C: condition tested at the back-edge
+    var dw_loop_when_true = true; // back-edge BranchConditional loops when cond is true
 
     if (loop_idx + 1 >= module.instructions.len) {
         if (label_map.get(merge_lbl)) |mi| return mi;
@@ -2763,10 +2767,28 @@ fn emitWhileLoopHLSL(
             }
         }
         if (bc_idx >= module.instructions.len) {
-            if (label_map.get(merge_lbl)) |mi| return mi;
-            return loop_idx + 1;
+            // No BranchConditional in the branch target's block → do-while (pattern C):
+            // the OpBranch target is the BODY; the loop condition is at the back-edge
+            // (the continue block ends in a BranchConditional → header/merge).
+            if (label_map.get(cont_lbl)) |ci| {
+                var s = ci + 1;
+                while (s < module.instructions.len) : (s += 1) {
+                    const t = module.instructions[s];
+                    if (t.op == .Label or t.op == .FunctionEnd or t.op == .Branch) break;
+                    if (t.op == .BranchConditional and t.words.len >= 4) {
+                        is_do_while = true;
+                        bc_idx = s;
+                        cond_start = null; // the branch target is the body, not a condition block
+                        break;
+                    }
+                }
+            }
+            if (!is_do_while) {
+                if (label_map.get(merge_lbl)) |mi| return mi;
+                return loop_idx + 1;
+            }
         }
-        cond_end = bc_idx;
+        if (!is_do_while) cond_end = bc_idx;
     } else if (next_inst.op == .BranchConditional and next_inst.words.len >= 4) {
         // Pattern B: BranchConditional directly after LoopMerge
         bc_idx = loop_idx + 1;
@@ -2785,6 +2807,19 @@ fn emitWhileLoopHLSL(
     cond_name = names.get(bc.words[1]) orelse "true";
     body_lbl = bc.words[2];
     const false_lbl: ?u32 = if (bc.words.len > 3) bc.words[3] else null;
+
+    if (is_do_while) {
+        // The body is the LoopMerge's OpBranch target, NOT the back-edge BranchCond
+        // target (which is the header). Determine whether the back-edge loops on
+        // true (→ `if (!cond) break;`) or on false (→ `if (cond) break;`).
+        body_lbl = next_inst.words[1];
+        var hl: usize = loop_idx;
+        while (hl > 0) : (hl -= 1) {
+            if (module.instructions[hl].op == .Label) break;
+        }
+        const header_lbl: u32 = if (module.instructions[hl].words.len > 1) module.instructions[hl].words[1] else 0;
+        dw_loop_when_true = (bc.words[2] == header_lbl);
+    }
 
     // Check if this is a do-once loop: both branches of BranchConditional go to merge
     // (no actual looping, just a selection inside a loop wrapper)
@@ -2872,7 +2907,9 @@ fn emitWhileLoopHLSL(
     // then re-enters the top and advances the counter (matching a real `for`).
     var fbuf: [40]u8 = undefined;
     const first_flag = std.fmt.bufPrint(&fbuf, "_loopfirst_{d}", .{loop_idx}) catch "_loopfirst";
-    const has_phis = if (loop_phis.get(loop_idx)) |pl| pl.items.len > 0 else false;
+    // do-while loops test the condition at the bottom and carry their update in the
+    // body, so the #237 top-of-loop first-flag transform does not apply.
+    const has_phis = !is_do_while and (if (loop_phis.get(loop_idx)) |pl| pl.items.len > 0 else false);
     if (has_phis) try w.print("    bool {s} = true;\n", .{first_flag});
 
     // Emit: while (true) {
@@ -2932,8 +2969,8 @@ fn emitWhileLoopHLSL(
         cond_name = names.get(bc.words[1]) orelse cond_name;
     }
 
-    // Emit: if (!(condition)) break;
-    try w.print("        if (!({s})) break;\n", .{cond_name});
+    // Emit: if (!(condition)) break;  — top-test only. A do-while tests at the bottom.
+    if (!is_do_while) try w.print("        if (!({s})) break;\n", .{cond_name});
 
     // Emit body block
     const body_idx = label_map.get(body_lbl) orelse module.instructions.len;
@@ -3037,8 +3074,9 @@ fn emitWhileLoopHLSL(
             try emitInstruction(module, names, decorations, binst, w, alloc, is_fragment, is_vertex, output_var_id);
         }
     }
-    // Emit continue block (e.g., i++ in for-loops). For phi-counter loops the
-    // update was hoisted to the top (#237), so skip it here.
+    // Emit continue block (e.g., i++ in for-loops, or the do-while back-edge
+    // condition). For phi-counter loops the update was hoisted to the top (#237),
+    // so skip it here.
     if (!has_phis) {
         const cont_idx = label_map.get(cont_lbl) orelse module.instructions.len;
         if (cont_idx < module.instructions.len) {
@@ -3048,9 +3086,21 @@ fn emitWhileLoopHLSL(
                 if (cinst.op == .FunctionEnd) break;
                 if (cinst.op == .Label) break;
                 if (cinst.op == .Branch) break;
+                if (cinst.op == .BranchConditional) break; // do-while back-edge — handled below
                 if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
                 try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, is_vertex, output_var_id);
             }
+        }
+    }
+
+    // do-while (pattern C): the condition was just emitted (continue block); test it
+    // at the BOTTOM. Loop-on-true → `if (!cond) break;`, loop-on-false → `if (cond) break;`.
+    if (is_do_while) {
+        const dwc = names.get(bc.words[1]) orelse "true";
+        if (dw_loop_when_true) {
+            try w.print("        if (!({s})) break;\n", .{dwc});
+        } else {
+            try w.print("        if ({s}) break;\n", .{dwc});
         }
     }
 
