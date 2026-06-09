@@ -6883,6 +6883,28 @@ fn f32ConstVal(module: *const ParsedModule, id: u32) ?f32 {
     return @bitCast(ci.words[3]);
 }
 
+// #258: helpers for the integer constant-division-by-zero honest-error guard.
+fn isConstant(module: *const ParsedModule, id: u32) bool {
+    const ci = common.getDef(module, id) orelse return false;
+    return ci.op == .Constant;
+}
+
+fn isConstantZero(module: *const ParsedModule, id: u32) bool {
+    const ci = common.getDef(module, id) orelse return false;
+    // The literal word for a scalar int 0 / float +0.0 is the all-zero bit pattern.
+    // Limitation: a 64-bit integer constant `0x1_00000000` also has words[3]==0; this
+    // would false-positive, but glslpp honest-errors 64-bit integer types in the
+    // frontend (semantic.zig) before they reach the WGSL backend, so it is unreachable
+    // for glslpp's own output (and a false honest-error is preferable to silent-wrong
+    // for hand-fed external SPIR-V).
+    return ci.op == .Constant and ci.words.len > 3 and ci.words[3] == 0;
+}
+
+fn isIntegerType(module: *const ParsedModule, type_id: u32) bool {
+    const ti = common.getDef(module, type_id) orelse return false;
+    return ti.op == .TypeInt;
+}
+
 fn constFoldNonFiniteFloat(module: *const ParsedModule, inst: Instruction) ?u32 {
     if (inst.words.len < 5) return null;
     const a = f32ConstVal(module, inst.words[3]) orelse return null;
@@ -6916,22 +6938,34 @@ fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
             return;
         }
     }
+    // #258: a division/remainder whose DIVISOR is a constant zero. (The float
+    // const/const case was folded to a bitcast above, #254.) What remains:
+    //   - runtime dividend / const-zero → a valid RUNTIME division naga accepts
+    //     (WGSL defines integer `x / 0 == x`; float `x / 0.0` is a runtime inf) →
+    //     emit normally;
+    //   - INTEGER const dividend / const-zero → naga const-evaluates and rejects
+    //     ("Division by zero"), and WGSL has no integer inf/nan, so it is
+    //     unrepresentable → honest-error. (The old band-aid emitted `0.0` here,
+    //     which is itself naga-invalid for an integer result.)
+    if (inst.words.len >= 5 and
+        (std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "%")) and
+        isConstantZero(module, inst.words[4]) and
+        isConstant(module, inst.words[3]) and
+        isIntegerType(module, inst.words[1]))
+    {
+        last_error_detail = std.fmt.bufPrint(
+            &last_error_detail_buf,
+            "integer constant division by zero has no WGSL representation",
+            .{},
+        ) catch null;
+        return error.UnsupportedOp;
+    }
     const lhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, 0);
     const rhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[4], arena, 0);
     // Wrap compound expressions in parens for correct precedence
     const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
     const rhs = if (isCompoundExpr(rhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{rhs_raw}) else rhs_raw;
-    // Avoid division by literal zero (naga evaluates compile-time)
-    if (std.mem.eql(u8, op, "/") and isLiteralZero(rhs)) {
-        try writeIndentStatic(w, indent); try w.print("let {s}: {s} = 0.0;\n", .{ result_name, rt });
-        return;
-    }
     try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
-}
-
-// Check if a string is a compound expression (contains operators at depth 0)
-fn isLiteralZero(s: []const u8) bool {
-    return std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "0.0") or std.mem.eql(u8, s, "0.0.0");
 }
 
 fn isCompoundExpr(s: []const u8) bool {
