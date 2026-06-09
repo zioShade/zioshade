@@ -5360,6 +5360,33 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             if_depth -= 1;
                         }
                     }
+
+                    // Non-phi loop header: this block declares an OpLoopMerge but
+                    // carries no header Phi (a `while`/`do` loop whose loop-carried
+                    // values stayed memory vars). Its computations (e.g. the
+                    // OpLoad of a condition variable, reused in the body) must be
+                    // emitted INSIDE the loop so they re-evaluate each iteration —
+                    // otherwise they are hoisted before `loop {` and the body reads
+                    // a stale pre-loop snapshot. Defer them via the same machinery
+                    // the Phi path uses; the LoopMerge arm replays them in-body.
+                    // (Phi loops are already deferred by the Phi handler.)
+                    if (!defer_active) {
+                        var k: usize = i + 1;
+                        var has_phi = false;
+                        var is_loop_header = false;
+                        while (k < module.instructions.len) : (k += 1) {
+                            switch (module.instructions[k].op) {
+                                .Phi => has_phi = true,
+                                .LoopMerge => { is_loop_header = true; break; },
+                                .Label, .Branch, .BranchConditional, .Switch, .SelectionMerge, .Return, .ReturnValue, .Kill, .Unreachable, .FunctionEnd => break,
+                                else => {},
+                            }
+                        }
+                        if (is_loop_header and !has_phi) {
+                            defer_active = true;
+                            defer_start = i + 1;
+                        }
+                    }
                 }
             },
 

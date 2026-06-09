@@ -270,6 +270,17 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
             // the phi names a non-predecessor block (spirv-val rejects).
             if (!isDirectPredecessor(words, pre_store.?.block, hdr_label)) continue;
 
+            // For the `while`-extension (update store NOT in the latch), require
+            // the latch to be a simple unconditional back-edge to the header. A
+            // `do { … } while(cond)` loop's latch ends in a CONDITIONAL branch
+            // (the bottom test); converting its counter yields a phi whose update
+            // lives on that conditional back-edge — which the structured emitters
+            // (WGSL/GLSL/MSL/HLSL) do not render, dropping the increment. Keep
+            // such loops as memory vars. The classic `for`/`while` latch is an
+            // unconditional OpBranch to the header and is unaffected.
+            if (cont_store.?.block != cont_label and
+                unconditionalBranchTarget(words, cont_label) != hdr_label) continue;
+
             // Check: all loads are in loop-dominated blocks (not pre-header store block or merge)
             // For structured SPIR-V, any block that is NOT the pre-header or merge is dominated by the header
             const pre_block = pre_store.?.block;
