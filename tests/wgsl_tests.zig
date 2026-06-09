@@ -3343,3 +3343,39 @@ test "wgsl: do-while counter is updated (not dropped by phi conversion)" {
     // the conformance suite).
     try nagaValidateOrSkip(wgsl, "do-while-counter");
 }
+
+// An `in` function parameter mutated in place (the GLSL by-value copy) must be
+// copied to a local at function ENTRY. Previously the copy was created lazily at
+// the first write, so a use BEFORE it — a loop condition `while(lo<=hi)` — bound
+// to the immutable parameter and the copy + increment were dead-code-eliminated,
+// dropping `lo=lo+1` entirely (infinite loop). deadLoopElim used to mask this by
+// deleting the whole loop; with live loops preserved it surfaced as a hang.
+test "wgsl: mutated in-parameter is copied to a local at entry (increment preserved)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\layout(location=0) in float t;
+        \\int f(int lo, int hi) {
+        \\    int acc = 0;
+        \\    while (lo <= hi) { acc += lo; lo = lo + 1; }
+        \\    return acc;
+        \\}
+        \\void main() { o = vec4(float(f(0, int(t)))); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expect(try glslpp.validateSPIRV(alloc, spirv));
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The mutated param must be promoted to a mutable local initialised from the
+    // parameter. Extract the first param name from `fn f(<p>: i32, …)` and assert
+    // a `var … : i32 = <p>;` copy exists (the increment then mutates that local,
+    // not the dropped-on-the-floor original).
+    const open = (std.mem.indexOf(u8, wgsl, "fn f(") orelse return error.TestExpectedFind) + "fn f(".len;
+    const colon = std.mem.indexOfScalarPos(u8, wgsl, open, ':') orelse return error.TestExpectedFind;
+    const param = std.mem.trim(u8, wgsl[open..colon], " ");
+    const copy_needle = try std.fmt.allocPrint(alloc, ": i32 = {s};", .{param});
+    defer alloc.free(copy_needle);
+    try assertContains(wgsl, copy_needle);
+    try nagaValidateOrSkip(wgsl, "mutable-in-param");
+}

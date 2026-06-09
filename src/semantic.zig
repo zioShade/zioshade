@@ -2408,11 +2408,52 @@ const Analyzer = struct {
                     .ir_id = pid,
                 });
             } else {
-                try self.declare(param.name, .{
-                    .kind = .param,
-                    .ty = param.ty,
-                    .ir_id = pid,
-                });
+                // An `in` parameter mutated in-place must be copied to a local at
+                // ENTRY so every use — including one before the first write, e.g. a
+                // loop condition — references the mutable copy. Promoting lazily at
+                // the first write (see analyzeLValue's `.param` branch) is too late:
+                // earlier uses bind to the immutable parameter and the copy + write
+                // are later DCE'd (dropped increment → infinite loop).
+                var mutated = false;
+                for (node.data.children) |stmt| {
+                    if (nameMutatedIn(stmt, param.name)) {
+                        mutated = true;
+                        break;
+                    }
+                }
+                if (mutated) {
+                    const var_id = self.allocId();
+                    const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    sc_operands[0] = .{ .literal_int = 7 }; // Function storage class
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .local_variable,
+                        .result_type = null,
+                        .result_id = var_id,
+                        .operands = sc_operands,
+                        .ty = param.ty,
+                    });
+                    const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                    store_ops[0] = .{ .id = var_id };
+                    store_ops[1] = .{ .id = pid };
+                    try self.instructions.append(self.alloc, .{
+                        .tag = .store,
+                        .result_type = null,
+                        .result_id = null,
+                        .operands = store_ops,
+                        .ty = param.ty,
+                    });
+                    try self.declare(param.name, .{
+                        .kind = .var_sym,
+                        .ty = param.ty,
+                        .ir_id = var_id,
+                    });
+                } else {
+                    try self.declare(param.name, .{
+                        .kind = .param,
+                        .ty = param.ty,
+                        .ir_id = pid,
+                    });
+                }
             }
         }
 
@@ -3264,6 +3305,44 @@ const Analyzer = struct {
             }
         }
         return null;
+    }
+
+    /// Unwrap an lvalue expression (member/index/swizzle/group chains) to its
+    /// root identifier name, or null if it is not rooted in a plain identifier.
+    fn lvalueBaseName(node: ast.Node) ?[]const u8 {
+        var n = node;
+        var guard: u32 = 0;
+        while (guard < 64) : (guard += 1) {
+            if (n.tag == .identifier) return if (n.data.name.len > 0) n.data.name else null;
+            if (n.data.children.len == 0) return null;
+            n = n.data.children[0];
+        }
+        return null;
+    }
+
+    /// Whether `name` is the target of an in-place mutation (assignment, compound
+    /// assignment, or ++/--) anywhere in the subtree. Used to decide if an `in`
+    /// function parameter must be copied to a local at entry: GLSL passes `in`
+    /// params by value, so mutating one modifies a local copy — but binding the
+    /// name to the immutable parameter id makes any use BEFORE the first write
+    /// (e.g. a loop condition `while(lo<=hi)`) read the original value, and the
+    /// late local copy is then dead-code-eliminated along with the write (a silent
+    /// dropped-update / infinite loop).
+    fn nameMutatedIn(node: ast.Node, name: []const u8) bool {
+        switch (node.tag) {
+            .assign_op, .compound_assign, .post_increment, .post_decrement, .pre_increment, .pre_decrement => {
+                if (node.data.children.len > 0) {
+                    if (lvalueBaseName(node.data.children[0])) |base| {
+                        if (std.mem.eql(u8, base, name)) return true;
+                    }
+                }
+            },
+            else => {},
+        }
+        for (node.data.children) |child| {
+            if (nameMutatedIn(child, name)) return true;
+        }
+        return false;
     }
 
     fn analyzeLValue(self: *Analyzer, node: ast.Node) Error!TypedId {
