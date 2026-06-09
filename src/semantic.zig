@@ -2198,6 +2198,12 @@ const Analyzer = struct {
                     .members = members,
                     .size_bytes = 0,
                     .is_buffer_reference = has_buffer_ref,
+                    // Mark in/out interface blocks so codegen emits the required
+                    // `OpDecorate <struct> Block`. Only the in/out case is flagged —
+                    // UBO/SSBO get Block via codegen's uniform/buffer storage scan,
+                    // and a plain `struct` used as an IO variable never reaches this
+                    // `.uniform_block` handler, so it is correctly left unflagged.
+                    .is_io_interface_block = storage_class == .input or storage_class == .output,
                 };
                 const owned_name = try self.alloc.dupe(u8, name);
                 try self.types.put(self.alloc, owned_name, td);

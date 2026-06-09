@@ -749,11 +749,76 @@ test "strict: barycentric per-vertex interface block array (pervertexEXT in Foo 
     // count >= 2 proves the block instance (not just the plain array) is
     // decorated, i.e. the qualifier survives the interface-block path.
     try std.testing.expectEqual(@as(usize, 2), countPlainDecoration(spirv, DECO_PER_VERTEX_KHR));
-    // NOTE: the `OpDecorate %Foo Block` decoration the oracle emits is a
-    // SEPARATE, pre-existing gap that affects ALL fragment input/output
-    // interface blocks (verified: a non-barycentric `in Foo {...} foo;` also
-    // lacks it) — it is out of scope for this barycentric fix (the task scopes
-    // the interface-block-array handling as already-separate). Tracked apart.
+    // The interface-block struct Foo must also carry `OpDecorate %Foo Block`
+    // (decoration value 2), exactly as the glslang oracle emits — this is what
+    // makes it a proper interface block that can interface-match the adjacent
+    // stage. (Block 2 is only ever valid on an OpTypeStruct, and this shader has
+    // no UBO/SSBO, so the only Block must be on the per-vertex in-block Foo.)
+    try std.testing.expect(hasPlainDecoration(spirv, 2));
+}
+
+test "strict: plain fragment input interface block gets OpDecorate Block (not barycentric-specific)" {
+    // The missing `OpDecorate %S Block` is a GENERAL gap for ALL fragment in/out
+    // interface blocks, not just the barycentric per-vertex case. A minimal,
+    // non-barycentric `in Foo {...} foo;` must get the Block decoration its struct
+    // type requires (glslang's oracle emits it). Without it the struct is not a
+    // proper interface block and won't interface-match the adjacent stage
+    // (silent-wrong / false-green: spirv-val tolerates the missing decoration).
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(location=0) out vec2 value;
+        \\layout(location=2) in Foo { vec2 a; vec2 b; } foo;
+        \\void main(){ value = foo.a + foo.b; }
+    ;
+    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    // Block = decoration value 2 (only ever valid on an OpTypeStruct). The shader
+    // has no UBO/SSBO, so the only Block must be on the in-block struct Foo.
+    try std.testing.expect(hasPlainDecoration(spirv, 2));
+}
+
+test "strict: a plain struct used as an IO variable is NOT Block-decorated (faithful to oracle)" {
+    // `struct Sub {..}; in Sub iblk;` is NOT an interface block — glslang emits NO
+    // `OpDecorate %Sub Block` for it (it is a plain struct-typed input variable).
+    // Only a real `in/out Name { ... }` block gets Block. Asserting ZERO Block
+    // decorations guards against the io-block detection over-firing on plain
+    // struct IO variables.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\struct Sub { vec4 a; vec2 b; };
+        \\layout(location=0) in Sub iblk;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = iblk.a + vec4(iblk.b, 0.0, 0.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectEqual(@as(usize, 0), countPlainDecoration(spirv, 2));
+}
+
+test "strict: struct shared by a UBO member and a plain IO var is not double-Block-decorated (no invalid Block-in-Block)" {
+    // When a struct name is used BOTH as a UBO member (so it is nested inside the
+    // UBO's Block and gets Offset member decorations) AND as a struct-typed input
+    // variable, the io-block path must NOT also stamp `Block` on it: a Block nested
+    // within another Block is invalid SPIR-V ("A Block ... cannot be nested within
+    // another Block"). The ONLY Block decoration here must be the UBO's — exactly
+    // one. (RED before the fix narrowed io-block detection to real interface blocks:
+    // the shared struct got Block + Offset and spirv-val rejected the module.)
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\struct Sub { vec4 a; vec2 b; };
+        \\layout(set=0, binding=0) uniform UBO { Sub s; vec4 tail; } ubo;
+        \\layout(location=0) in Sub iblk;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = ubo.s.a + ubo.tail + iblk.a + vec4(iblk.b, 0.0, 0.0); }
+    ;
+    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    // Exactly one Block — the UBO. If the shared struct Sub were also Block-decorated
+    // this would be 2 (and the module would be invalid SPIR-V).
+    try std.testing.expectEqual(@as(usize, 1), countPlainDecoration(spirv, 2));
 }
 
 /// Scan for `OpCapability <cap>` (Op 17, word_count 2).
