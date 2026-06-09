@@ -249,9 +249,46 @@ test "nested loop counters both advance in HLSL (#phi-loop)" {
     }
 }
 
-// GLSL and MSL backends share the same root cause; their fixes (and tests) land
-// in follow-up changes. The compile helpers below are kept for those.
-comptime {
-    _ = &compileToGlsl;
-    _ = &compileToMsl;
+test "loop counter advances in GLSL (phi not frozen)" {
+    const glsl = try compileToGlsl(COUNTER_LOOP_SRC);
+    defer alloc.free(glsl);
+    if (!try loopCounterAdvances(glsl)) {
+        std.debug.print("GLSL loop counter is frozen:\n{s}\n", .{glsl});
+        return error.LoopCounterFrozen;
+    }
+}
+
+test "nested loop counters both advance in GLSL (#phi-loop)" {
+    const glsl = try compileToGlsl(NESTED_LOOP_SRC);
+    defer alloc.free(glsl);
+    if (assignsToLiteralLHS(glsl)) {
+        std.debug.print("GLSL assigns to a literal LHS (frozen nested phi):\n{s}\n", .{glsl});
+        return error.AssignToLiteral;
+    }
+    if (!try loopCounterAdvances(glsl)) {
+        std.debug.print("GLSL nested loop counter is frozen:\n{s}\n", .{glsl});
+        return error.LoopCounterFrozen;
+    }
+}
+
+test "loop counter advances in MSL (phi not frozen)" {
+    const msl = try compileToMsl(COUNTER_LOOP_SRC);
+    defer alloc.free(msl);
+    if (!try loopCounterAdvances(msl)) {
+        std.debug.print("MSL loop counter is frozen:\n{s}\n", .{msl});
+        return error.LoopCounterFrozen;
+    }
+}
+
+test "nested loop counters both advance in MSL (#phi-loop)" {
+    const msl = try compileToMsl(NESTED_LOOP_SRC);
+    defer alloc.free(msl);
+    if (assignsToLiteralLHS(msl)) {
+        std.debug.print("MSL assigns to a literal LHS (frozen nested phi):\n{s}\n", .{msl});
+        return error.AssignToLiteral;
+    }
+    if (!try loopCounterAdvances(msl)) {
+        std.debug.print("MSL nested loop counter is frozen:\n{s}\n", .{msl});
+        return error.LoopCounterFrozen;
+    }
 }
