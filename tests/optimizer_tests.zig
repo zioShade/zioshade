@@ -88,6 +88,51 @@ test "optimizer: loop with accumulation is preserved" {
     try std.testing.expect(hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.LoopMerge)));
 }
 
+test "optimizer: loop accumulating into a struct member is preserved (#220)" {
+    // Regression: deadLoopElim's Phase 2.5 load-after-merge check matched only a
+    // DIRECT `OpLoad %var`, missing `OpLoad` of an `OpAccessChain` into the var.
+    // A loop accumulating into a struct MEMBER (read back via access chain after
+    // the loop) was therefore wrongly eliminated, folding the member to its
+    // initial value — wrong numeric result on ALL backends. glslang preserves it.
+    const source =
+        \\#version 450
+        \\out vec4 FragColor;
+        \\uniform float u;
+        \\struct A { float s; };
+        \\void main() {
+        \\    A a;
+        \\    a.s = 0.0;
+        \\    for (int i = 0; i < 4; i++) { a.s += u + float(i); }
+        \\    FragColor = vec4(a.s, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    // The loop must survive — a.s accumulates and flows to FragColor.
+    try std.testing.expect(hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.LoopMerge)));
+}
+
+test "optimizer: loop accumulating into an array element is preserved (#220)" {
+    // Same root cause as the struct-member case: the array element's access chain
+    // is hoisted out of the loop, so the in-loop store + post-loop load go through
+    // it. deadLoopElim must recognize the hoisted-AC store/load as touching the
+    // base local, or it wrongly eliminates the loop.
+    const source =
+        \\#version 450
+        \\out vec4 FragColor;
+        \\uniform float u;
+        \\void main() {
+        \\    float arr[4];
+        \\    arr[0] = 0.0;
+        \\    for (int i = 0; i < 4; i++) { arr[0] += u + float(i); }
+        \\    FragColor = vec4(arr[0], 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    try std.testing.expect(hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.LoopMerge)));
+}
+
 test "optimizer: AC+Store to composite variable preserves loads" {
     // Regression test: optimizer was eliminating loads after AC+Store
     const source =

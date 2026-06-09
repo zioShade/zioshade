@@ -1348,7 +1348,15 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                         if (lbl == header_label_id) in_loop2 = true;
                         if (lbl == loop_info.merge_id) in_loop2 = false;
                     }
-                    if (in_loop2 and op3 == 65 and wc3 >= 4) { // OpAccessChain
+                    // Capture AccessChain→base mappings GLOBALLY, not just in-loop:
+                    // mergeAccessChains often HOISTS a struct/array member's access
+                    // chain (`%ac = OpAccessChain %a %0`) to BEFORE the loop, while
+                    // the in-loop store writes through that same hoisted `%ac`.
+                    // Gating capture on `in_loop2` missed the hoisted chain, so the
+                    // store below didn't resolve to base `%a` and the accumulator
+                    // var was never recorded — the loop was then wrongly eliminated
+                    // (#220). The store check stays in-loop; only capture is global.
+                    if (op3 == 65 and wc3 >= 4) { // OpAccessChain
                         const ac_result = words[pos + 2];
                         const ac_base = words[pos + 3];
                         if (ac_base > 0 and ac_base < bound and func_vars.contains(ac_base) and ac_result > 0 and ac_result < bound) {
@@ -1367,6 +1375,32 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
 
             if (loop_stored_locals.count() == 0) continue;
 
+            // Map AccessChain result -> base func-local var, so a post-loop read
+            // of a STRUCT/ARRAY MEMBER of a loop-stored local (`a.s`, encoded as
+            // `OpAccessChain %a … ; OpLoad %ac`) is recognized as a load of that
+            // local. Without this, the load check below only matched a DIRECT
+            // `OpLoad %a` and wrongly eliminated a loop that accumulates into a
+            // struct member (the member folded to its initial value — #220).
+            // Symmetric to the store-side AC tracking (ac_to_base_dl) above.
+            var ac_to_base_load = std.AutoHashMapUnmanaged(u32, u32).empty;
+            defer ac_to_base_load.deinit(alloc);
+            pos = 5;
+            while (pos < words.len) {
+                const hdr3 = words[pos]; const wc3: u32 = hdr3 >> 16; const op3: u16 = @truncate(hdr3 & 0xFFFF);
+                if (wc3 == 0) break;
+                if (op3 == 65 and wc3 >= 4) { // OpAccessChain: result, type, base, ...
+                    const ac_result = words[pos + 2];
+                    const ac_base = words[pos + 3];
+                    if (ac_result > 0 and ac_result < bound and ac_base < bound) {
+                        // Resolve a base that is itself an AccessChain (nested
+                        // member, e.g. `a.b.c`) to the underlying func-local.
+                        const root = ac_to_base_load.get(ac_base) orelse ac_base;
+                        if (loop_stored_locals.isSet(root)) ac_to_base_load.put(alloc, ac_result, root) catch {};
+                    }
+                }
+                pos += wc3;
+            }
+
             // Check if any of these vars are loaded after the merge label
             var local_value_escapes = false;
             var past_merge2 = false;
@@ -1378,10 +1412,13 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                     if (words[pos + 1] == loop_info.merge_id) past_merge2 = true;
                 }
                 if (past_merge2 and !local_value_escapes) {
-                    // Check OpLoad from a loop-stored-local
+                    // Check OpLoad from a loop-stored-local — either directly, or
+                    // via an AccessChain into one (a struct/array member read).
                     if (op2 == 61 and wc2 >= 4) { // OpLoad
                         const load_ptr = words[pos + 3];
-                        if (load_ptr < bound and loop_stored_locals.isSet(load_ptr)) {
+                        if (load_ptr < bound and
+                            (loop_stored_locals.isSet(load_ptr) or ac_to_base_load.contains(load_ptr)))
+                        {
                             local_value_escapes = true;
                         }
                     }

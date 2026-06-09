@@ -452,6 +452,8 @@ pub fn build(b: *std.Build) void {
         .root_module = opt_test_mod,
     }));
     test_step.dependOn(&run_opt_tests.step);
+    const opt_test_step = b.step("test-opt", "Run optimizer regression tests");
+    opt_test_step.dependOn(&run_opt_tests.step);
 
     // Mesh/Task shader tests
     const mesh_task_test_step = b.step("test-mesh-task", "Run mesh/task shader compilation tests");
