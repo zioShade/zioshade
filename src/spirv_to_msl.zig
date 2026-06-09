@@ -4306,9 +4306,11 @@ fn emitInstruction(
             }
         },
         .AtomicCompareExchange => {
+            // OpAtomicCompareExchange: result_type, result, pointer, scope, eq-sem,
+            // uneq-sem, value(new/data), comparator(compare) — data=words[7], compare=words[8].
             const rn = names.get(inst.words[2]) orelse "v";
-            const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            const cmp = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
+            const val = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
+            const cmp = if (inst.words.len > 8) names.get(inst.words[8]) orelse "0" else "0";
             switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
                 .ssbo => |ptr| try w.print("    {s} = atomic_compare_exchange_weak_explicit({s}, &{s}, {s}, memory_order_relaxed, memory_order_relaxed);\n", .{rn, ptr, cmp, val}),
                 .image => |p| try w.print("    {s} = atomic_compare_exchange_weak_explicit(&{s}[{s}], &{s}, {s}, memory_order_relaxed, memory_order_relaxed);\n", .{rn, p.img, p.coord, cmp, val}),
