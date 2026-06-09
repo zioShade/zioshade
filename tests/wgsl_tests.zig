@@ -424,6 +424,76 @@ test "wgsl non-finite spec-constant (override) default is an honest error (#252)
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
 
+// #170: atomicCompSwap(mem, compare, data) → WGSL atomicCompareExchangeWeak(ptr,
+// compare, new). OpAtomicCompareExchange has TWO memory-semantics operands
+// (Equal + Unequal), so its layout is [ptr][scope][eq-sem][uneq-sem][value(new)]
+// [comparator(compare)]. The backend read the COMPARE arg from the unequal-semantics
+// word instead of the comparator word — emitting the memory-semantics constant (64)
+// as the compare value: silent-wrong (naga accepts it, the value is just wrong).
+test "wgsl atomicCompSwap uses the comparator, not a memory-semantics operand (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { uint lock; uint out_old; } b;
+        \\void main() {
+        \\    uint old = atomicCompSwap(b.lock, 7u, 9u); // compare 7, set 9
+        \\    b.out_old = old;
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // Must compare against 7 and store 9 — `atomicCompareExchangeWeak(&ptr, 7u, 9u)`.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "atomicCompareExchangeWeak(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "7u, 9u).old_value") != null);
+    try nagaValidateOrSkip(wgsl, "atomic-compswap");
+}
+
+// #170: atomicExchange(mem, data) → WGSL atomicExchange(ptr, data). OpAtomicExchange's
+// operand layout is [ptr][scope][semantics][value], so the new value is words[6]. The
+// inline emitter read words[4] (the SCOPE) as the value — emitting the scope constant
+// instead of the data: silent-wrong (naga accepts it, the stored value is wrong).
+test "wgsl atomicExchange stores the value operand, not the scope (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { uint slot; uint out_old; } b;
+        \\void main() {
+        \\    uint old = atomicExchange(b.slot, 42u); // store 42
+        \\    b.out_old = old;
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "atomicExchange(&b.slot, 42u)") != null);
+    try nagaValidateOrSkip(wgsl, "atomic-exchange");
+}
+
+// #170: the atomic binary ops (atomicAdd/Sub/And/Or/Xor/Min/Max) read their value
+// operand from words[6] — words[4] is the memory SCOPE and words[5] the semantics.
+// The emitter read words[4], so every atomic op emitted the scope constant (Device == 1)
+// as its value: `atomicAdd(b.total, 37u)` became `atomicAdd(&b.total, 1u)`. Masked
+// because atomic counters often add 1u (== the scope), and naga accepts either.
+test "wgsl atomic binary op uses the value operand, not the scope (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { uint total; } b;
+        \\void main() {
+        \\    atomicAdd(b.total, 37u); // add 37, NOT the scope constant 1
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "atomicAdd(&b.total, 37u)") != null);
+    try nagaValidateOrSkip(wgsl, "atomic-add-value");
+}
+
 // #258: the same guard must cover the unsigned-division (OpUDiv) and modulo (`%`)
 // operator paths — `4u / 0u` and `4 % 0` are equally const-rejected by naga.
 test "wgsl constant unsigned division by zero is an honest error (#258)" {
