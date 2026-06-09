@@ -289,6 +289,36 @@ const CONTINUE_LOOP_SRC =
     \\}
 ;
 
+// #244: a do-while whose body contains its OWN conditional control flow
+// (`if(i==3) continue;`). Faithful emission needs an inline-expression loop
+// condition (so a body `continue` re-evaluates it fresh) which glslpp's flat-SSA
+// model does not yet have. Until then the backends MUST fail loud (honest-error)
+// rather than crash (GLSL stack-overflow) or silently miscompile (HLSL/MSL emit
+// inverted-polarity break + duplicated/undeclared temps + infinite loop).
+const DOWHILE_CF_SRC =
+    \\#version 450
+    \\out vec4 FragColor;
+    \\uniform int n;
+    \\void main() {
+    \\    float s = 0.0;
+    \\    int i = 0;
+    \\    do { i++; if (i == 3) continue; s += float(i); } while (i < n);
+    \\    FragColor = vec4(s, 0.0, 0.0, 1.0);
+    \\}
+;
+
+test "do-while with body control flow honest-errors (not crash/miscompile) in GLSL (#244)" {
+    try std.testing.expectError(error.UnstructuredControlFlow, compileToGlsl(DOWHILE_CF_SRC));
+}
+
+test "do-while with body control flow honest-errors (not crash/miscompile) in HLSL (#244)" {
+    try std.testing.expectError(error.UnstructuredControlFlow, compileToHlsl(DOWHILE_CF_SRC));
+}
+
+test "do-while with body control flow honest-errors (not crash/miscompile) in MSL (#244)" {
+    try std.testing.expectError(error.UnstructuredControlFlow, compileToMsl(DOWHILE_CF_SRC));
+}
+
 test "do-while loop body is emitted in HLSL (#238)" {
     const hlsl = try compileToHlsl(DOWHILE_SRC);
     defer alloc.free(hlsl);
