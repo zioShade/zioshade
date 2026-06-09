@@ -4237,73 +4237,66 @@ fn emitInstruction(
         .EmitVertex => try w.writeAll("    // EmitVertex (geometry shader)\n"),
         .EndPrimitive => try w.writeAll("    // EndPrimitive (geometry shader)\n"),
         .ImageTexelPointer => {
-            // No code emission needed — result used by atomic ops which resolve via classifyMslAtomicPtr
+            // No code emission needed — the result id is resolved at each atomic call site
+            // by mslAtomicObject, which detects the ImageTexelPointer op directly.
         },
 
         // Atomic operations → MSL atomic_fetch_*_explicit
         .AtomicIAdd => {
+            const scalar = try mslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_add_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = atomic_fetch_add_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
-            }
+            const obj = try mslAtomicObject(m, names, inst.words[3], scalar, alloc);
+            try w.print("    {s} {s} = atomic_fetch_add_explicit({s}, {s}, memory_order_relaxed);\n", .{scalar, rn, obj, val});
         },
         .AtomicISub => {
+            const scalar = try mslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_sub_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = atomic_fetch_sub_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
-            }
+            const obj = try mslAtomicObject(m, names, inst.words[3], scalar, alloc);
+            try w.print("    {s} {s} = atomic_fetch_sub_explicit({s}, {s}, memory_order_relaxed);\n", .{scalar, rn, obj, val});
         },
         .AtomicOr => {
+            const scalar = try mslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_or_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = atomic_fetch_or_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
-            }
+            const obj = try mslAtomicObject(m, names, inst.words[3], scalar, alloc);
+            try w.print("    {s} {s} = atomic_fetch_or_explicit({s}, {s}, memory_order_relaxed);\n", .{scalar, rn, obj, val});
         },
         .AtomicXor => {
+            const scalar = try mslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_xor_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = atomic_fetch_xor_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
-            }
+            const obj = try mslAtomicObject(m, names, inst.words[3], scalar, alloc);
+            try w.print("    {s} {s} = atomic_fetch_xor_explicit({s}, {s}, memory_order_relaxed);\n", .{scalar, rn, obj, val});
         },
         .AtomicAnd => {
+            const scalar = try mslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
-            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_and_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = atomic_fetch_and_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
-            }
+            const obj = try mslAtomicObject(m, names, inst.words[3], scalar, alloc);
+            try w.print("    {s} {s} = atomic_fetch_and_explicit({s}, {s}, memory_order_relaxed);\n", .{scalar, rn, obj, val});
         },
         .AtomicSMin, .AtomicUMin => {
+            const scalar = try mslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_min_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = atomic_fetch_min_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
-            }
+            const obj = try mslAtomicObject(m, names, inst.words[3], scalar, alloc);
+            try w.print("    {s} {s} = atomic_fetch_min_explicit({s}, {s}, memory_order_relaxed);\n", .{scalar, rn, obj, val});
         },
         .AtomicSMax, .AtomicUMax => {
+            const scalar = try mslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_max_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = atomic_fetch_max_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
-            }
+            const obj = try mslAtomicObject(m, names, inst.words[3], scalar, alloc);
+            try w.print("    {s} {s} = atomic_fetch_max_explicit({s}, {s}, memory_order_relaxed);\n", .{scalar, rn, obj, val});
         },
         .AtomicExchange => {
+            const scalar = try mslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomic_exchange_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = atomic_exchange_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
-            }
+            const obj = try mslAtomicObject(m, names, inst.words[3], scalar, alloc);
+            try w.print("    {s} {s} = atomic_exchange_explicit({s}, {s}, memory_order_relaxed);\n", .{scalar, rn, obj, val});
         },
         .AtomicCompareExchange => {
             // OpAtomicCompareExchange: result_type, result, pointer, scope, eq-sem,
@@ -4322,26 +4315,17 @@ fn emitInstruction(
             const cmp = if (inst.words.len > 8) names.get(inst.words[8]) orelse "0" else "0";
             const sty = try mslType(m, inst.words[1], names, alloc);
             const id = inst.words[2];
-            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| {
-                    try w.print("    {s} _cas_expected_{d};\n", .{sty, id});
-                    try w.print("    do {{ _cas_expected_{d} = {s}; }} while (!atomic_compare_exchange_weak_explicit({s}, &_cas_expected_{d}, {s}, memory_order_relaxed, memory_order_relaxed) && _cas_expected_{d} == {s});\n", .{id, cmp, ptr, id, val, id, cmp});
-                    try w.print("    {s} = _cas_expected_{d};\n", .{rn, id});
-                },
-                .image => |p| {
-                    try w.print("    {s} _cas_expected_{d};\n", .{sty, id});
-                    try w.print("    do {{ _cas_expected_{d} = {s}; }} while (!atomic_compare_exchange_weak_explicit(&{s}[{s}], &_cas_expected_{d}, {s}, memory_order_relaxed, memory_order_relaxed) && _cas_expected_{d} == {s});\n", .{id, cmp, p.img, p.coord, id, val, id, cmp});
-                    try w.print("    {s} = _cas_expected_{d};\n", .{rn, id});
-                },
-            }
+            const obj = try mslAtomicObject(m, names, inst.words[3], sty, alloc);
+            try w.print("    {s} _cas_expected_{d};\n", .{sty, id});
+            try w.print("    do {{ _cas_expected_{d} = {s}; }} while (!atomic_compare_exchange_weak_explicit({s}, &_cas_expected_{d}, {s}, memory_order_relaxed, memory_order_relaxed) && _cas_expected_{d} == {s});\n", .{id, cmp, obj, id, val, id, cmp});
+            try w.print("    {s} {s} = _cas_expected_{d};\n", .{sty, rn, id});
         },
         .AtomicFAddEXT => {
+            const scalar = try mslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0.0" else "0.0";
-            switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomic_fetch_add_explicit({s}, {s}, memory_order_relaxed);\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = atomic_fetch_add_explicit(&{s}[{s}], {s}, memory_order_relaxed);\n", .{rn, p.img, p.coord, val}),
-            }
+            const obj = try mslAtomicObject(m, names, inst.words[3], scalar, alloc);
+            try w.print("    {s} {s} = atomic_fetch_add_explicit({s}, {s}, memory_order_relaxed);\n", .{scalar, rn, obj, val});
         },
 
         // Subgroup operations → MSL simd_* functions
@@ -4573,22 +4557,52 @@ fn emitCall(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), in
 
 
 /// Classify an atomic pointer: SSBO variable or ImageTexelPointer (image atomic)
-const MslAtomicPtr = union(enum) {
-    ssbo: []const u8,
-    image: struct { img: []const u8, coord: []const u8 },
-};
+// The MSL address space an atomic pointer lives in, derived from the SPIR-V storage
+// class of the pointer's type. `shared` (Workgroup) → threadgroup; SSBO (StorageBuffer /
+// Uniform) → device. Metal's atomic_*_explicit builtins require an address-space-qualified
+// `atomic_T*`, so this qualifier is mandatory at the call site.
+fn mslAtomicAddrSpace(m: *const ParsedModule, ptr_id: u32) []const u8 {
+    const pd = getDef(m, ptr_id) orelse return "device";
+    if (pd.words.len < 2) return "device";
+    const tptr = getDef(m, pd.words[1]) orelse return "device";
+    // OpTypePointer: [1]=result id, [2]=storage class, [3]=pointee type.
+    if (tptr.op == .TypePointer and tptr.words.len > 2) {
+        const sc: spirv.StorageClass = @enumFromInt(tptr.words[2]);
+        // Only Workgroup (`shared`) and StorageBuffer/Uniform (SSBO) can be atomic
+        // targets; the former maps to threadgroup, everything else to device.
+        return if (sc == .Workgroup) "threadgroup" else "device";
+    }
+    return "device";
+}
 
-fn classifyMslAtomicPtr(m: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), ptr_id: u32) MslAtomicPtr {
-    const pd = getDef(m, ptr_id);
-    if (pd) |d| {
+// MSL atomic type name for a scalar MSL type. Note: `atomic_float` requires Metal 3.0
+// (only reachable via the GL_EXT_shader_atomic_float `AtomicFAddEXT` path); `half`/f16
+// atomics do not exist in the GLSL frontend, so the catch-all `atomic_uint` is never
+// actually hit for a half scalar.
+fn mslAtomicTypeName(scalar: []const u8) []const u8 {
+    if (std.mem.eql(u8, scalar, "int")) return "atomic_int";
+    if (std.mem.eql(u8, scalar, "float")) return "atomic_float"; // Metal 3.0+
+    return "atomic_uint";
+}
+
+// The object expression for an MSL atomic_*_explicit call. For an image atomic
+// (OpImageTexelPointer) this is `&img[coord]`; for an SSBO/shared scalar it is the
+// spirv-cross-faithful `(device|threadgroup atomic_T*)&<member>` — a plain scalar
+// member is NOT an atomic pointer, so the cast is required to compile.
+fn mslAtomicObject(m: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), ptr_id: u32, scalar: []const u8, alloc: std.mem.Allocator) ![]const u8 {
+    if (getDef(m, ptr_id)) |d| {
         if (d.op == .ImageTexelPointer) {
-            return .{ .image = .{
-                .img = names.get(d.words[3]) orelse "img",
-                .coord = names.get(d.words[4]) orelse "0",
-            } };
+            // KNOWN-INCOMPLETE: Metal image atomics use method syntax
+            // (`img.atomic_fetch_add(coord, …)`), not a pointer cast. This `&img[coord]`
+            // form is a separate, larger texture-atomic representation problem — the
+            // device/threadgroup cast below applies only to the SSBO/shared scalar path.
+            const img = names.get(d.words[3]) orelse "img";
+            const coord = names.get(d.words[4]) orelse "0";
+            return std.fmt.allocPrint(alloc, "&{s}[{s}]", .{ img, coord });
         }
     }
-    return .{ .ssbo = names.get(ptr_id) orelse "mem" };
+    const ptr = names.get(ptr_id) orelse "mem";
+    return std.fmt.allocPrint(alloc, "({s} {s}*)&{s}", .{ mslAtomicAddrSpace(m, ptr_id), mslAtomicTypeName(scalar), ptr });
 }
 
 fn emitStd450(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, instruction: u32, w: anytype, alloc: std.mem.Allocator) !void {
