@@ -60,6 +60,21 @@ fn assertContains(haystack: []const u8, needle: []const u8) !void {
     }
 }
 
+/// Count instructions with the given SPIR-V opcode in a word stream (skips the
+/// 5-word header). Used for IR-level regression guards that don't depend on a
+/// particular backend's text emission.
+fn countSpirvOpcode(words: []const u32, opcode: u16) u32 {
+    var count: u32 = 0;
+    var pos: usize = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(words[pos] & 0xFFFF)) == opcode) count += 1;
+        pos += wc;
+    }
+    return count;
+}
+
 // Validate WGSL with naga — the external WebGPU validator. The whole point of
 // the "silent-wrong" class of bugs is that glslpp emits text that LOOKS fine
 // (exit 0) but a real validator rejects, so string assertions alone can pass
@@ -3200,4 +3215,62 @@ test "wgsl: early return into an assembled frag_depth output errors honestly" {
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedEarlyReturn, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
+// A value-returning helper whose loop conditionally `return`s early used to be
+// DELETED entirely by deadLoopElim (the early return wasn't counted as a side
+// effect, and the result "escaped" only via that return), collapsing the helper
+// to its post-loop fallthrough constant — a silent miscompile that validators
+// accept. The loop must survive (OpLoopMerge present), and the `while`-loop
+// counter must be lifted to OpPhi so backends don't hoist a stale header load.
+test "wgsl: helper while-loop with early return is preserved and counter is live" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\layout(location=0) in float t;
+        \\float search(float target) {
+        \\    int i = 0;
+        \\    float x = 0.0;
+        \\    while (i < 20) {
+        \\        x = x * x + 0.3;
+        \\        if (x > target) return float(i) / 20.0;
+        \\        i++;
+        \\    }
+        \\    return 1.0;
+        \\}
+        \\void main() { o = vec4(search(t)); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    // #1: the loop survived deadLoopElim (OpLoopMerge = 246).
+    try std.testing.expect(countSpirvOpcode(spirv, 246) >= 1);
+    // #3: the `while` counter was converted to OpPhi (245), so there is no
+    // header OpLoad of the counter for a backend to hoist into a stale snapshot.
+    try std.testing.expect(countSpirvOpcode(spirv, 245) >= 1);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "helper-while-early-return");
+}
+
+// A `while` loop as the FIRST statement of a function makes the loop header the
+// function's entry block; the back-edge then targets the entry block, which
+// spirv-val rejects ("First block ... is targeted"). deadLoopElim used to mask
+// this by deleting such loops. A pre-header block must be spliced in so the
+// emitted SPIR-V is valid. Guard: the produced SPIR-V passes glslpp's own
+// validator wrapper (spirv-val).
+test "wgsl: loop-as-first-statement emits valid SPIR-V (entry not a branch target)" {
+    // `drain`'s loop is the function's first statement and writes an SSBO (a real
+    // side effect, so deadLoopElim keeps it). Without a spliced pre-header the
+    // loop header would be the entry block and the back-edge would target it —
+    // spirv-val rejects ("First block ... is targeted").
+    const source =
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430, binding=0) buffer B { int data[]; };
+        \\void drain() { while (data[0] > 0) { data[0] = data[0] - 1; } }
+        \\void main() { drain(); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    try std.testing.expect(try glslpp.validateSPIRV(alloc, spirv));
 }

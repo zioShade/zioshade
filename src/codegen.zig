@@ -344,8 +344,13 @@ fn generateInternal(
     if (deduped_func.ptr != deduped_ptr.ptr) alloc.free(deduped_ptr);
     const tail_dce = opt.deadCodeElim(alloc, deduped_func) catch return deduped_func;
     if (tail_dce.ptr != deduped_func.ptr) alloc.free(deduped_func);
-    const result = compact_ids.compactIds(alloc, tail_dce) catch return tail_dce;
-    if (result.ptr != tail_dce.ptr) alloc.free(tail_dce);
+    // Splice a pre-header before any function whose entry block is a loop header
+    // (a loop as the function's first statement) so the entry block is never a
+    // branch target — otherwise spirv-val rejects ("First block ... is targeted").
+    const preheadered = opt.ensureLoopPreheader(alloc, tail_dce) catch return tail_dce;
+    if (preheadered.ptr != tail_dce.ptr) alloc.free(tail_dce);
+    const result = compact_ids.compactIds(alloc, preheadered) catch return preheadered;
+    if (result.ptr != preheadered.ptr) alloc.free(preheadered);
     return result;
 
 }

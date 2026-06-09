@@ -7,6 +7,113 @@ const std = @import("std");
 const compact_ids = @import("compact_ids.zig");
 const opt = @import("compact_ids_passes.zig");
 
+/// The single unconditional-branch target of `block_label`'s block, or null if
+/// its terminator is not a plain OpBranch (conditional/return/etc.) or the block
+/// is not found.
+fn unconditionalBranchTarget(words: []const u32, block_label: u32) ?u32 {
+    var pos: u32 = 5;
+    var in_block = false;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const op: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        if (op == 248 and wc >= 2) {
+            if (in_block) return null; // next block without a terminator
+            in_block = (words[pos + 1] == block_label);
+        } else if (in_block) {
+            // Terminators: OpBranch(249), OpBranchConditional(250), OpSwitch(251),
+            // OpReturn(253), OpReturnValue(254), OpKill(252), OpUnreachable(255).
+            if (op == 249 and wc >= 2) return words[pos + 1];
+            if (op == 250 or op == 251 or op == 253 or op == 254 or op == 252 or op == 255) return null;
+        }
+        pos += wc;
+    }
+    return null;
+}
+
+/// Count the blocks whose terminator branches to `target` (CFG predecessors),
+/// recording the last such predecessor's label in `last_pred`.
+fn predecessorCount(words: []const u32, target: u32, last_pred: *u32) u32 {
+    var count: u32 = 0;
+    var cur_label: u32 = 0;
+    var pos: u32 = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const op: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        if (op == 248 and wc >= 2) cur_label = words[pos + 1]; // OpLabel
+        var hit = false;
+        switch (op) {
+            249 => if (wc >= 2 and words[pos + 1] == target) { hit = true; }, // OpBranch
+            250 => if (wc >= 4 and (words[pos + 2] == target or words[pos + 3] == target)) { hit = true; }, // OpBranchConditional
+            251 => { // OpSwitch: selector default [literal target]...
+                if (wc >= 3 and words[pos + 2] == target) hit = true;
+                var k: u32 = pos + 4;
+                while (k < pos + wc) : (k += 2) if (words[k] == target) { hit = true; };
+            },
+            else => {},
+        }
+        if (hit) {
+            count += 1;
+            last_pred.* = cur_label;
+        }
+        pos += wc;
+    }
+    return count;
+}
+
+/// Whether `block` is a valid "loop update" predecessor of the latch `cont_label`
+/// for phi construction: either the store sits directly in the latch (the classic
+/// `for`-loop shape), or it sits in a body block that UNCONDITIONALLY branches to
+/// the latch where the latch has exactly that ONE predecessor (the classic
+/// `while`-loop shape, `… ; i++; }`). The single-predecessor + unconditional-branch
+/// requirement guarantees (a) the stored value dominates the latch, so the phi
+/// operand `[stored_val, cont_label]` is well-formed, and (b) there is no `break`
+/// between the store and the latch, so no loop exit observes a value inconsistent
+/// with the phi. Conditional/multi-predecessor updates (e.g. a nested loop's
+/// counter against an outer latch, or `if(c) lo=…; else hi=…;`) are conservatively
+/// rejected — they fail the unconditional-branch or single-predecessor test.
+fn isLoopUpdateBlock(words: []const u32, block: u32, cont_label: u32) bool {
+    if (block == cont_label) return true;
+    if (unconditionalBranchTarget(words, block) != cont_label) return false;
+    var last_pred: u32 = 0;
+    return predecessorCount(words, cont_label, &last_pred) == 1 and last_pred == block;
+}
+
+/// Whether `pred`'s terminator branches to `target` (i.e. `pred` is a direct CFG
+/// predecessor of `target`). Used to confirm the init store's block is a real
+/// predecessor of the loop header before using it as the `[init, pred]` phi
+/// operand — a cross-loop accumulator (e.g. `sum` initialised outside a nested
+/// loop) has its init store far from the inner header and must NOT be converted.
+fn isDirectPredecessor(words: []const u32, pred: u32, target: u32) bool {
+    var pos: u32 = 5;
+    var in_block = false;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        const op: u16 = @truncate(words[pos] & 0xFFFF);
+        if (wc == 0) break;
+        if (op == 248 and wc >= 2) {
+            if (in_block) return false; // left pred's block without finding a match
+            in_block = (words[pos + 1] == pred);
+        } else if (in_block) {
+            switch (op) {
+                249 => if (wc >= 2) return words[pos + 1] == target, // OpBranch
+                250 => return wc >= 4 and (words[pos + 2] == target or words[pos + 3] == target), // OpBranchConditional
+                251 => { // OpSwitch
+                    if (wc >= 3 and words[pos + 2] == target) return true;
+                    var k: u32 = pos + 4;
+                    while (k < pos + wc) : (k += 2) if (words[k] == target) return true;
+                    return false;
+                },
+                252, 253, 254, 255 => return false, // non-branch terminator
+                else => {},
+            }
+        }
+        pos += wc;
+    }
+    return false;
+}
+
 pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
     const bound = words[3];
     if (bound <= 1) return words;
@@ -144,12 +251,24 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
             const hdr_label = entry.key_ptr.*;
             const cont_label = entry.value_ptr.*;
 
+            // Classify the two stores: the "cont_store" is the loop-update store
+            // (in the latch, or in a body block that dominates the latch — see
+            // isLoopUpdateBlock, which also handles `while`-loops whose increment
+            // lives in the body rather than the continue block); the other is the
+            // pre-header init store.
             var pre_store: ?StoreInfo = null;
             var cont_store: ?StoreInfo = null;
             for (v.stores.items) |s| {
-                if (s.block == cont_label) cont_store = s else pre_store = s;
+                if (isLoopUpdateBlock(words, s.block, cont_label)) cont_store = s else pre_store = s;
             }
             if (pre_store == null or cont_store == null) continue;
+
+            // The init store's block must be a direct predecessor of the header so
+            // the phi operand `[init, pre_block]` is well-formed. A cross-loop
+            // accumulator (`sum` initialised before an OUTER loop, updated in an
+            // INNER loop) has its init far from the inner header — reject it, or
+            // the phi names a non-predecessor block (spirv-val rejects).
+            if (!isDirectPredecessor(words, pre_store.?.block, hdr_label)) continue;
 
             // Check: all loads are in loop-dominated blocks (not pre-header store block or merge)
             // For structured SPIR-V, any block that is NOT the pre-header or merge is dominated by the header
@@ -239,7 +358,11 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
                 if (ie2 > words.len) break;
                 if (op2 == 248 and wc2 >= 2) cur_label = words[pos + 1];
                 if (op2 == 62 and wc2 >= 3 and words[pos + 1] == v.var_id) {
-                    if (cur_label == cont_label or cur_label == pre_store.?.block) {
+                    // Remove BOTH the init store (pre-header) and the loop-update
+                    // store. The latter may live in the latch (`for`) or in a body
+                    // block that dominates the latch (`while`); key off the store's
+                    // actual block, not cont_label.
+                    if (cur_label == cont_store.?.block or cur_label == pre_store.?.block) {
                         try remove_store_positions.put(alloc, pos, {});
                     }
                 }
