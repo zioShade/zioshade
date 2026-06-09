@@ -336,6 +336,70 @@ fn glslType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, [
     };
 }
 
+/// Loop-header OpPhi (the loop counter): materialized as a mutable variable so
+/// the counter is not frozen at its constant init value (#phi-loop). Mirrors the
+/// HLSL backend's fix (src/spirv_to_hlsl.zig).
+const PhiInfo = struct { result_id: u32, type_id: u32, init_id: u32, update_id: u32 };
+
+// Per-emitBody loop-phi state. Set at the start of emitBody and read by
+// emitWhileLoop and emitBlock — avoids threading three maps through emitBlock's
+// 19 call sites. Safe: read only within the synchronous extent of one emitBody
+// (threadlocal guards against any parallel backend invocation).
+threadlocal var g_loop_phis: ?*const std.AutoHashMap(usize, std.ArrayList(PhiInfo)) = null;
+threadlocal var g_phi_hdr: ?*const std.AutoHashMap(u32, usize) = null;
+threadlocal var g_deferred_hdr: ?*const std.AutoHashMap(usize, void) = null;
+
+/// GLSL type name for a loop-phi variable declaration — STATIC strings only (no
+/// allocation), for the scalar/vector types loop phis realistically carry.
+fn phiTypeNameGLSL(m: *const ParsedModule, type_id: u32) []const u8 {
+    const tinst = getDef(m, type_id) orelse return "int";
+    switch (tinst.op) {
+        .TypeBool => return "bool",
+        .TypeInt => return if (tinst.words.len > 3 and tinst.words[3] != 0) "int" else "uint",
+        .TypeFloat => return if (tinst.words.len > 2 and tinst.words[2] == 16) "float16_t" else "float",
+        .TypeVector => {
+            const s = phiTypeNameGLSL(m, tinst.words[2]);
+            const c = tinst.words[3];
+            if (c < 1 or c > 4) return "int";
+            const i: usize = c;
+            if (std.mem.eql(u8, s, "float")) return ([_][]const u8{ "", "float", "vec2", "vec3", "vec4" })[i];
+            if (std.mem.eql(u8, s, "float16_t")) return ([_][]const u8{ "", "float16_t", "f16vec2", "f16vec3", "f16vec4" })[i];
+            if (std.mem.eql(u8, s, "int")) return ([_][]const u8{ "", "int", "ivec2", "ivec3", "ivec4" })[i];
+            if (std.mem.eql(u8, s, "uint")) return ([_][]const u8{ "", "uint", "uvec2", "uvec3", "uvec4" })[i];
+            if (std.mem.eql(u8, s, "bool")) return ([_][]const u8{ "", "bool", "bvec2", "bvec3", "bvec4" })[i];
+            return "int";
+        },
+        else => return "int",
+    }
+}
+
+/// If `inst` is a loop-header phi, emit its mutable-variable declaration
+/// (`TYPE name = <init>;`) at `indent` and return true (caller should `continue`).
+fn tryEmitLoopPhiDeclGLSL(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, indent: []const u8) !bool {
+    if (inst.op != .Phi) return false;
+    const ph = g_phi_hdr orelse return false;
+    const lmi = ph.get(inst.words[2]) orelse return false;
+    const lp = g_loop_phis orelse return false;
+    const plist = lp.get(lmi) orelse return false;
+    for (plist.items) |pi| {
+        if (pi.result_id != inst.words[2]) continue;
+        const tyname = phiTypeNameGLSL(m, pi.type_id);
+        if (names.get(pi.result_id) == null) {
+            const nm = std.fmt.allocPrint(alloc, "v{d}", .{pi.result_id}) catch "vphi";
+            if (names.fetchPut(pi.result_id, nm) catch null) |old| alloc.free(old.value);
+        }
+        const vname = names.get(pi.result_id) orelse "vphi";
+        const init_name = names.get(pi.init_id) orelse "0";
+        try w.print("{s}{s} {s} = {s};\n", .{ indent, tyname, vname, init_name });
+    }
+    return true;
+}
+
+fn isDeferredHdrGLSL(idx: usize) bool {
+    const dh = g_deferred_hdr orelse return false;
+    return dh.contains(idx);
+}
+
 fn tryResolveTypeName(m: *const ParsedModule, type_id: u32) []const u8 {
     const inst = getDef(m, type_id) orelse return "float";
     return switch(inst.op){ .TypeFloat=>"float", .TypeInt=>if(inst.words.len>3 and inst.words[3]!=0)"int" else "uint", .TypeBool=>"bool", else=>"float" };
@@ -1349,10 +1413,67 @@ fn emitBody(
         }
     }
 
+    // Pre-pass: identify loop-header OpPhi (loop counters) — see spirv_to_hlsl.zig.
+    // The maps are exposed via file-scope state (g_*) so emitWhileLoop and emitBlock
+    // can read them without threading params through emitBlock's many call sites.
+    var loop_phis = std.AutoHashMap(usize, std.ArrayList(PhiInfo)).init(alloc);
+    var phi_hdr = std.AutoHashMap(u32, usize).init(alloc);
+    var deferred_hdr = std.AutoHashMap(usize, void).init(alloc);
+    defer {
+        var lpit = loop_phis.valueIterator();
+        while (lpit.next()) |list| list.deinit(alloc);
+        loop_phis.deinit();
+        phi_hdr.deinit();
+        deferred_hdr.deinit();
+        g_loop_phis = null;
+        g_phi_hdr = null;
+        g_deferred_hdr = null;
+    }
+    {
+        var li = func_idx + 1;
+        while (li < m.instructions.len) : (li += 1) {
+            const minst = m.instructions[li];
+            if (minst.op == .FunctionEnd) break;
+            if (minst.op != .LoopMerge or minst.words.len < 3) continue;
+            var hlabel_idx: usize = li;
+            while (hlabel_idx > func_idx) : (hlabel_idx -= 1) {
+                if (m.instructions[hlabel_idx].op == .Label) break;
+            }
+            var plist = std.ArrayList(PhiInfo).initCapacity(alloc, 2) catch continue;
+            var p = hlabel_idx + 1;
+            while (p < li) : (p += 1) {
+                const pinst = m.instructions[p];
+                if (pinst.op != .Phi or pinst.words.len < 5) continue;
+                var init_id: u32 = pinst.words[3];
+                var update_id: u32 = if (pinst.words.len >= 6) pinst.words[5] else pinst.words[3];
+                var pp: usize = 3;
+                while (pp + 1 < pinst.words.len) : (pp += 2) {
+                    if (label_map.get(pinst.words[pp + 1])) |lx| {
+                        if (lx < hlabel_idx) init_id = pinst.words[pp] else update_id = pinst.words[pp];
+                    }
+                }
+                plist.append(alloc, .{ .result_id = pinst.words[2], .type_id = pinst.words[1], .init_id = init_id, .update_id = update_id }) catch {};
+                phi_hdr.put(pinst.words[2], li) catch {};
+            }
+            loop_phis.put(li, plist) catch plist.deinit(alloc);
+            if (li + 1 < m.instructions.len and m.instructions[li + 1].op == .BranchConditional) {
+                var d = hlabel_idx + 1;
+                while (d < li) : (d += 1) {
+                    if (m.instructions[d].op != .Phi) deferred_hdr.put(d, {}) catch {};
+                }
+            }
+        }
+    }
+    g_loop_phis = &loop_phis;
+    g_phi_hdr = &phi_hdr;
+    g_deferred_hdr = &deferred_hdr;
+
     var idx = func_idx + 1;
     while (idx < m.instructions.len) : (idx += 1) {
         const inst = m.instructions[idx];
         if (inst.op == .FunctionEnd) break;
+        if (isDeferredHdrGLSL(idx)) continue;
+        if (try tryEmitLoopPhiDeclGLSL(m, names, inst, w, alloc, "    ")) continue;
         if (inst.op == .FunctionParameter or inst.op == .Label or inst.op == .SelectionMerge or inst.op == .Branch) continue;
 
         // Handle LoopMerge: emit while(true) { condition; if (!cond) break; body; }
@@ -1531,6 +1652,7 @@ fn emitWhileLoop(
     }
     const body_lbl = bc.words[2];
     try w.writeAll("    while (true)\n    {\n");
+    var cond_name: []const u8 = names.get(bc.words[1]) orelse "true";
     if (cond_start) |cs| {
         if (cs < cond_end) {
             var ci: usize = cs;
@@ -1540,8 +1662,22 @@ fn emitWhileLoop(
                 try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid);
             }
         }
+    } else {
+        // Pattern B: the condition is computed in the HEADER block (deferred by the
+        // caller). Replay the header's non-phi instructions HERE so the comparison
+        // re-evaluates against the live loop counter each iteration.
+        var hlabel: usize = loop_idx;
+        while (hlabel > 0) : (hlabel -= 1) {
+            if (m.instructions[hlabel].op == .Label) break;
+        }
+        var hp = hlabel + 1;
+        while (hp < loop_idx) : (hp += 1) {
+            const hinst = m.instructions[hp];
+            if (hinst.op == .Phi or hinst.op == .Label or hinst.op == .SelectionMerge or hinst.op == .LoopMerge or hinst.op == .Branch or hinst.op == .BranchConditional) continue;
+            try emitInstruction(m, names, decs, hinst, w, alloc, is_frag, ovid);
+        }
+        cond_name = names.get(bc.words[1]) orelse cond_name;
     }
-    const cond_name = names.get(bc.words[1]) orelse "true";
     try w.print("        if (!({s})) break;\n", .{cond_name});
     const body_idx = label_map.get(body_lbl) orelse m.instructions.len;
     if (body_idx < m.instructions.len) {
@@ -1549,6 +1685,8 @@ fn emitWhileLoop(
         while (bi < m.instructions.len) : (bi += 1) {
             const binst = m.instructions[bi];
             if (binst.op == .FunctionEnd) break;
+            if (isDeferredHdrGLSL(bi)) continue;
+            if (try tryEmitLoopPhiDeclGLSL(m, names, binst, w, alloc, "        ")) continue;
             if (binst.op == .Label and binst.words.len > 1) {
                 const lbl = binst.words[1];
                 if (lbl == cont_lbl or lbl == merge_lbl) break;
@@ -1662,6 +1800,18 @@ fn emitWhileLoop(
             try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid);
         }
     }
+    // Write the loop-counter phi(s) back at the back-edge so the next iteration
+    // sees the updated value (`i = i_next;`); without this the counter never advances.
+    if (g_loop_phis) |lp| {
+        if (lp.get(loop_idx)) |plist| {
+            for (plist.items) |pi| {
+                const rname = names.get(pi.result_id) orelse continue;
+                const vname = names.get(pi.update_id) orelse continue;
+                if (std.mem.eql(u8, rname, vname)) continue;
+                try w.print("        {s} = {s};\n", .{ rname, vname });
+            }
+        }
+    }
     try w.writeAll("    }\n");
     if (label_map.get(merge_lbl)) |mi| return mi;
     return loop_idx + 1;
@@ -1684,6 +1834,14 @@ fn emitBlock(
     while (i < m.instructions.len) : (i += 1) {
         const inst = m.instructions[i];
         if (inst.op == .FunctionEnd) break;
+        // A loop nested in this if/switch branch: handle its header phi / deferred
+        // condition exactly as the top-level path does.
+        if (isDeferredHdrGLSL(i)) continue;
+        {
+            const phi_indent = std.fmt.allocPrint(alloc, "{s}    ", .{indent}) catch indent;
+            defer if (phi_indent.ptr != indent.ptr) alloc.free(phi_indent);
+            if (try tryEmitLoopPhiDeclGLSL(m, names, inst, w, alloc, phi_indent)) continue;
+        }
         if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) {
             if (is_switch) try w.print("{s}    break;\n", .{indent});
             break;
