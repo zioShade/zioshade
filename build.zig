@@ -455,6 +455,21 @@ pub fn build(b: *std.Build) void {
     const opt_test_step = b.step("test-opt", "Run optimizer regression tests");
     opt_test_step.dependOn(&run_opt_tests.step);
 
+    // Loop-counter (OpPhi) cross-backend correctness tests
+    const loopphi_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/loop_phi_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    loopphi_test_mod.addImport("glslpp", glslpp_mod);
+    const run_loopphi_tests = b.addRunArtifact(b.addTest(.{
+        .name = "loop-phi-tests",
+        .root_module = loopphi_test_mod,
+    }));
+    test_step.dependOn(&run_loopphi_tests.step);
+    const loopphi_test_step = b.step("test-loop-phi", "Run loop-counter phi correctness tests");
+    loopphi_test_step.dependOn(&run_loopphi_tests.step);
+
     // Mesh/Task shader tests
     const mesh_task_test_step = b.step("test-mesh-task", "Run mesh/task shader compilation tests");
     const mesh_task_test_mod = b.createModule(.{
