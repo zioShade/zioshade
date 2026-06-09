@@ -6784,7 +6784,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const ptr = names.get(inst.words[3]) orelse "ptr";
-                const val = names.get(inst.words[4]) orelse "0";
+                // OpAtomicExchange layout: [3]=pointer [4]=scope [5]=semantics [6]=value.
+                // The value is words[6], NOT words[4] (which is the scope — emitting it
+                // stored the scope constant instead of the data: silent-wrong).
+                const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
                 try writeInd(w, indent); try w.print("let {s}: {s} = atomicExchange(&{s}, {s});\n", .{ rn, rt, ptr, val });
             },
             .AtomicCompareExchange => {
@@ -6795,9 +6798,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const rn = names.get(inst.words[2]) orelse "v";
                 const ptr = names.get(inst.words[3]) orelse "ptr";
-                // words[4] = scope, words[5] = memory semantics
-                const cmp = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+                // OpAtomicCompareExchange operand layout (after result-type + result-id):
+                //   [3]=pointer [4]=scope [5]=Equal-semantics [6]=Unequal-semantics
+                //   [7]=Value (the NEW value) [8]=Comparator (the COMPARE value).
+                // WGSL is atomicCompareExchangeWeak(ptr, compare, new), so compare comes
+                // from words[8] (the comparator) and new from words[7] (the value). The
+                // previous code read the compare arg from words[6], the Unequal-semantics
+                // operand — emitting a memory-semantics constant as the compare value
+                // (silent-wrong: naga accepts it but the comparison is against the wrong value).
                 const val = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
+                const cmp = if (inst.words.len > 8) names.get(inst.words[8]) orelse "0" else "0";
                 try writeInd(w, indent); try w.print("let {s}: {s} = atomicCompareExchangeWeak(&{s}, {s}, {s}).old_value;\n", .{ rn, rt, ptr, cmp, val });
             },
 
@@ -7427,8 +7437,14 @@ fn emitAtomicBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     const rt = try wgslType(module, inst.words[1], names, arena);
     const result_name = names.get(inst.words[2]) orelse "v";
     const ptr = names.get(inst.words[3]) orelse "ptr";
-    const val = if (inst.words.len > 4) names.get(inst.words[4]) orelse "0" else "0";
-    try writeIndentStatic(w, indent); try w.print("var {s}: {s} = atomic{s}(&{s}, {s});\n", .{ result_name, rt, op, ptr, val });
+    // OpAtomic{IAdd,ISub,And,Or,Xor,SMin,UMin,SMax,UMax,FAddEXT} layout:
+    //   [3]=pointer [4]=scope [5]=semantics [6]=value. The value is words[6], NOT
+    //   words[4] (the scope). Reading words[4] emitted the scope constant (Device == 1)
+    //   as the operand — silent-wrong for every value != the scope.
+    const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+    // The atomic RMW result is an immutable SSA value — bind with `let`, matching the
+    // AtomicExchange / AtomicCompareExchange emitters (was `var`, an inconsistency).
+    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = atomic{s}(&{s}, {s});\n", .{ result_name, rt, op, ptr, val });
 }
 
 // Get the WGSL function name for a GLSL.std.450 instruction opcode, for the
