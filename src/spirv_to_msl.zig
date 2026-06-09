@@ -49,6 +49,36 @@ const StageOutputDecl = struct { var_id: u32, name: []const u8, type_id: u32, lo
 
 // ---- Helpers ----
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction { if (id >= m.id_defs.len) return null; const i = m.id_defs[id] orelse return null; if (i >= m.instructions.len) return null; return m.instructions[i]; }
+
+/// A loop-header OpPhi (the loop counter): must be materialized as a mutable
+/// variable `TYPE name = <init>;` before the loop and updated `name = <update>;`
+/// at the back-edge, else the counter freezes at its init value (#gaps: phi-loop).
+const PhiInfo = struct { result_id: u32, type_id: u32, init_id: u32, update_id: u32 };
+
+/// MSL type name for a loop-phi variable declaration. Returns STATIC strings only
+/// (no allocation, so no free management) for the scalar/vector types loop phis
+/// realistically carry. Falls back to "int" for exotic (matrix/struct) phis.
+fn phiTypeNameMSL(m: *const ParsedModule, type_id: u32) []const u8 {
+    const tinst = getDef(m, type_id) orelse return "int";
+    switch (tinst.op) {
+        .TypeBool => return "bool",
+        .TypeInt => return if (tinst.words.len > 3 and tinst.words[3] != 0) "int" else "uint",
+        .TypeFloat => return if (tinst.words.len > 2 and tinst.words[2] == 16) "half" else "float",
+        .TypeVector => {
+            const scalar = phiTypeNameMSL(m, tinst.words[2]);
+            const cols = tinst.words[3];
+            if (cols < 1 or cols > 4) return "int";
+            const idx: usize = cols;
+            if (std.mem.eql(u8, scalar, "float")) return ([_][]const u8{ "", "float", "float2", "float3", "float4" })[idx];
+            if (std.mem.eql(u8, scalar, "half")) return ([_][]const u8{ "", "half", "half2", "half3", "half4" })[idx];
+            if (std.mem.eql(u8, scalar, "int")) return ([_][]const u8{ "", "int", "int2", "int3", "int4" })[idx];
+            if (std.mem.eql(u8, scalar, "uint")) return ([_][]const u8{ "", "uint", "uint2", "uint3", "uint4" })[idx];
+            if (std.mem.eql(u8, scalar, "bool")) return ([_][]const u8{ "", "bool", "bool2", "bool3", "bool4" })[idx];
+            return "int";
+        },
+        else => return "int",
+    }
+}
 fn getMemberName(m: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
     return common.commonGetMemberName(m.instructions, struct_id, member_idx, buf, "_m");
 }
@@ -3037,17 +3067,101 @@ fn emitBody(
         }
     }
 
+    // Pre-pass: identify loop-header OpPhi (loop counters). A loop-header phi must
+    // be materialized as a MUTABLE variable initialized to its preheader operand and
+    // updated at the loop back-edge — otherwise the counter freezes at its init value
+    // (silent-wrong infinite loop). For "pattern B" loops (condition computed in the
+    // header block), the condition instructions are deferred and replayed inside the
+    // loop so the comparison re-evaluates against the live counter each iteration.
+    var loop_phis = std.AutoHashMap(usize, std.ArrayList(PhiInfo)).init(alloc);
+    defer {
+        var lpit = loop_phis.valueIterator();
+        while (lpit.next()) |list| list.deinit(alloc);
+        loop_phis.deinit();
+    }
+    var phi_hdr = std.AutoHashMap(u32, usize).init(alloc); // phi result_id -> LoopMerge idx
+    defer phi_hdr.deinit();
+    var deferred_hdr = std.AutoHashMap(usize, void).init(alloc); // header cond instr idx -> skip & replay
+    defer deferred_hdr.deinit();
+    {
+        var li = func_idx + 1;
+        while (li < m.instructions.len) : (li += 1) {
+            const minst = m.instructions[li];
+            if (minst.op == .FunctionEnd) break;
+            if (minst.op != .LoopMerge or minst.words.len < 3) continue;
+            // Header label = nearest preceding Label.
+            var hlabel_idx: usize = li;
+            while (hlabel_idx > func_idx) : (hlabel_idx -= 1) {
+                if (m.instructions[hlabel_idx].op == .Label) break;
+            }
+            var plist = std.ArrayList(PhiInfo).initCapacity(alloc, 2) catch continue;
+            var p = hlabel_idx + 1;
+            while (p < li) : (p += 1) {
+                const pinst = m.instructions[p];
+                if (pinst.op != .Phi or pinst.words.len < 5) continue;
+                // Classify (value,label) pairs: label defined BEFORE the header is the
+                // preheader (init); a label defined AFTER is the back-edge (update).
+                var init_id: u32 = pinst.words[3];
+                var update_id: u32 = if (pinst.words.len >= 6) pinst.words[5] else pinst.words[3];
+                var pp: usize = 3;
+                while (pp + 1 < pinst.words.len) : (pp += 2) {
+                    const val_id = pinst.words[pp];
+                    const lbl_id = pinst.words[pp + 1];
+                    if (label_map.get(lbl_id)) |lx| {
+                        if (lx < hlabel_idx) init_id = val_id else update_id = val_id;
+                    }
+                }
+                plist.append(alloc, .{ .result_id = pinst.words[2], .type_id = pinst.words[1], .init_id = init_id, .update_id = update_id }) catch {};
+                phi_hdr.put(pinst.words[2], li) catch {};
+            }
+            loop_phis.put(li, plist) catch plist.deinit(alloc);
+            // Pattern B: BranchConditional directly after LoopMerge -> the condition
+            // lives in the header block; defer its non-phi instrs for in-loop replay.
+            if (li + 1 < m.instructions.len and m.instructions[li + 1].op == .BranchConditional) {
+                var d = hlabel_idx + 1;
+                while (d < li) : (d += 1) {
+                    if (m.instructions[d].op != .Phi) deferred_hdr.put(d, {}) catch {};
+                }
+            }
+        }
+    }
+
     var idx = func_idx + 1;
     while (idx < m.instructions.len) : (idx += 1) {
         const inst = m.instructions[idx];
         if (inst.op == .FunctionEnd) break;
+        // Header condition instrs (pattern B) are replayed inside the loop, not here.
+        if (deferred_hdr.contains(idx)) continue;
         if (inst.op == .FunctionParameter or inst.op == .Label or inst.op == .SelectionMerge or inst.op == .Branch) continue;
+
+        // Loop-header OpPhi: materialize the loop counter as a mutable variable.
+        if (inst.op == .Phi) {
+            if (phi_hdr.get(inst.words[2])) |lmi| {
+                if (loop_phis.get(lmi)) |plist| {
+                    for (plist.items) |pi| {
+                        if (pi.result_id != inst.words[2]) continue;
+                        const tyname = phiTypeNameMSL(m, pi.type_id);
+                        if (names.get(pi.result_id) == null) {
+                            const nm = std.fmt.allocPrint(alloc, "v{d}", .{pi.result_id}) catch "vphi";
+                            if (names.fetchPut(pi.result_id, nm) catch null) |old| alloc.free(old.value);
+                        }
+                        const vname = names.get(pi.result_id) orelse "vphi";
+                        const init_name = names.get(pi.init_id) orelse "0";
+                        try w.print("    {s} {s} = {s};\n", .{ tyname, vname, init_name });
+                    }
+                }
+                continue;
+            }
+            // Non-loop phi: existing alias-the-first-operand behavior.
+            try emitInstruction(m, names, decs, inst, w, alloc, is_frag, output_var_id, cbuffers, textures);
+            continue;
+        }
 
         // Handle LoopMerge: emit while(true) { condition; if(!cond) break; body; }
         if (inst.op == .LoopMerge and inst.words.len >= 3) {
             const merge_lbl = inst.words[1];
             const cont_lbl = inst.words[2];
-            idx = try emitWhileLoopMSL(m, names, decs, idx, merge_lbl, cont_lbl, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, cbuffers, textures);
+            idx = try emitWhileLoopMSL(m, names, decs, idx, merge_lbl, cont_lbl, &label_map, &bc_merge, &loop_phis, &phi_hdr, &deferred_hdr, w, alloc, is_frag, output_var_id, cbuffers, textures);
             continue;
         }
 
@@ -3122,6 +3236,9 @@ fn emitWhileLoopMSL(
     cont_lbl: u32,
     label_map: *const std.AutoHashMap(u32, usize),
     bc_merge: *const std.AutoHashMap(usize, u32),
+    loop_phis: *const std.AutoHashMap(usize, std.ArrayList(PhiInfo)),
+    phi_hdr: *const std.AutoHashMap(u32, usize),
+    deferred_hdr: *const std.AutoHashMap(usize, void),
     w: anytype, alloc: std.mem.Allocator,
     is_frag: bool, ovid: ?u32,
     cbuffers: *const std.ArrayList(CbufferDecl),
@@ -3189,6 +3306,21 @@ fn emitWhileLoopMSL(
                 try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures);
             }
         }
+    } else {
+        // Pattern B: the condition is computed in the HEADER block (deferred by the
+        // caller). Replay the header's non-phi instructions HERE so the comparison
+        // re-evaluates against the live loop counter each iteration; otherwise it is
+        // a loop-invariant test of the counter's init value (frozen → infinite loop).
+        var hlabel: usize = loop_idx;
+        while (hlabel > 0) : (hlabel -= 1) {
+            if (m.instructions[hlabel].op == .Label) break;
+        }
+        var hp = hlabel + 1;
+        while (hp < loop_idx) : (hp += 1) {
+            const hinst = m.instructions[hp];
+            if (hinst.op == .Phi or hinst.op == .Label or hinst.op == .SelectionMerge or hinst.op == .LoopMerge or hinst.op == .Branch or hinst.op == .BranchConditional) continue;
+            try emitInstruction(m, names, decs, hinst, w, alloc, is_frag, ovid, cbuffers, textures);
+        }
     }
 
     const cond_name = names.get(bc.words[1]) orelse "true";
@@ -3201,6 +3333,30 @@ fn emitWhileLoopMSL(
         while (bi < m.instructions.len) : (bi += 1) {
             const binst = m.instructions[bi];
             if (binst.op == .FunctionEnd) break;
+            // A NESTED loop's header condition (pattern B) is deferred and replayed
+            // inside that nested loop — skip it here so it isn't emitted prematurely
+            // against the frozen counter.
+            if (deferred_hdr.contains(bi)) continue;
+            // A NESTED loop-header phi: emit it as a mutable variable BEFORE the
+            // nested `while`, exactly as the top-level path does.
+            if (binst.op == .Phi) {
+                if (phi_hdr.get(binst.words[2])) |lmi| {
+                    if (loop_phis.get(lmi)) |plist| {
+                        for (plist.items) |pi| {
+                            if (pi.result_id != binst.words[2]) continue;
+                            const tyname = phiTypeNameMSL(m, pi.type_id);
+                            if (names.get(pi.result_id) == null) {
+                                const nm = std.fmt.allocPrint(alloc, "v{d}", .{pi.result_id}) catch "vphi";
+                                if (names.fetchPut(pi.result_id, nm) catch null) |old| alloc.free(old.value);
+                            }
+                            const vname = names.get(pi.result_id) orelse "vphi";
+                            const init_name = names.get(pi.init_id) orelse "0";
+                            try w.print("        {s} {s} = {s};\n", .{ tyname, vname, init_name });
+                        }
+                    }
+                    continue;
+                }
+            }
             if (binst.op == .Label and binst.words.len > 1) {
                 const lbl = binst.words[1];
                 if (lbl == cont_lbl or lbl == merge_lbl) break;
@@ -3210,7 +3366,7 @@ fn emitWhileLoopMSL(
                 if (binst.words.len >= 3) {
                     const nmerge = binst.words[1];
                     const ncont = binst.words[2];
-                    bi = try emitWhileLoopMSL(m, names, decs, bi, nmerge, ncont, label_map, bc_merge, w, alloc, is_frag, ovid, cbuffers, textures);
+                    bi = try emitWhileLoopMSL(m, names, decs, bi, nmerge, ncont, label_map, bc_merge, loop_phis, phi_hdr, deferred_hdr, w, alloc, is_frag, ovid, cbuffers, textures);
                     bi -= 1;
                 }
                 continue;
@@ -3279,6 +3435,18 @@ fn emitWhileLoopMSL(
             if (cinst.op == .Branch) break;
             if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
             try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures);
+        }
+    }
+
+    // Write the loop-counter phi(s) back at the back-edge, so the next iteration
+    // sees the updated value: `i = i_next;`. The update value was emitted above
+    // (in the body or continue block). Without this the counter never advances.
+    if (loop_phis.get(loop_idx)) |plist| {
+        for (plist.items) |pi| {
+            const rname = names.get(pi.result_id) orelse continue;
+            const vname = names.get(pi.update_id) orelse continue;
+            if (std.mem.eql(u8, rname, vname)) continue;
+            try w.print("        {s} = {s};\n", .{ rname, vname });
         }
     }
 
