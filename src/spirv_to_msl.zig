@@ -4308,12 +4308,31 @@ fn emitInstruction(
         .AtomicCompareExchange => {
             // OpAtomicCompareExchange: result_type, result, pointer, scope, eq-sem,
             // uneq-sem, value(new/data), comparator(compare) — data=words[7], compare=words[8].
+            //
+            // MSL's atomic_compare_exchange_weak_explicit does NOT match GLSL atomicCompSwap:
+            //  - `expected` is an in/out `thread T*` — it needs an addressable mutable
+            //    lvalue, so passing `&<constant>` (e.g. `&7u`) does not compile (#263); and
+            //  - it returns a bool (success), NOT the original value, whereas the SPIR-V op's
+            //    result is the original loaded value.
+            // Emit the spirv-cross idiom: materialize a mutable local seeded with the
+            // comparator, retry on spurious _weak failure (the only CAS form MSL offers),
+            // then take the original value from the local.
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
             const cmp = if (inst.words.len > 8) names.get(inst.words[8]) orelse "0" else "0";
+            const sty = try mslType(m, inst.words[1], names, alloc);
+            const id = inst.words[2];
             switch (classifyMslAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomic_compare_exchange_weak_explicit({s}, &{s}, {s}, memory_order_relaxed, memory_order_relaxed);\n", .{rn, ptr, cmp, val}),
-                .image => |p| try w.print("    {s} = atomic_compare_exchange_weak_explicit(&{s}[{s}], &{s}, {s}, memory_order_relaxed, memory_order_relaxed);\n", .{rn, p.img, p.coord, cmp, val}),
+                .ssbo => |ptr| {
+                    try w.print("    {s} _cas_expected_{d};\n", .{sty, id});
+                    try w.print("    do {{ _cas_expected_{d} = {s}; }} while (!atomic_compare_exchange_weak_explicit({s}, &_cas_expected_{d}, {s}, memory_order_relaxed, memory_order_relaxed) && _cas_expected_{d} == {s});\n", .{id, cmp, ptr, id, val, id, cmp});
+                    try w.print("    {s} = _cas_expected_{d};\n", .{rn, id});
+                },
+                .image => |p| {
+                    try w.print("    {s} _cas_expected_{d};\n", .{sty, id});
+                    try w.print("    do {{ _cas_expected_{d} = {s}; }} while (!atomic_compare_exchange_weak_explicit(&{s}[{s}], &_cas_expected_{d}, {s}, memory_order_relaxed, memory_order_relaxed) && _cas_expected_{d} == {s});\n", .{id, cmp, p.img, p.coord, id, val, id, cmp});
+                    try w.print("    {s} = _cas_expected_{d};\n", .{rn, id});
+                },
             }
         },
         .AtomicFAddEXT => {
