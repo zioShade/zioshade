@@ -255,6 +255,29 @@ const NESTED_LOOP_SRC =
     \\}
 ;
 
+const DOWHILE_SRC =
+    \\#version 450
+    \\out vec4 FragColor;
+    \\uniform int n;
+    \\void main() {
+    \\    float s = 0.0;
+    \\    int i = 0;
+    \\    do { s += float(i); i++; } while (i < n);
+    \\    FragColor = vec4(s, 0.0, 0.0, 1.0);
+    \\}
+;
+
+/// True if a do-while loop was emitted (body not dropped): there is a `while`
+/// loop whose body contains a bare assignment (the accumulator/counter update).
+/// In the broken output the whole loop + body vanished, so there is no loop.
+fn doWhileEmitted(src: []const u8) bool {
+    const body = loopBody(src) orelse return false;
+    var reassigned = std.StringHashMap(void).init(alloc);
+    defer reassigned.deinit();
+    scanBareAssigns(body, &reassigned) catch return false;
+    return reassigned.count() > 0;
+}
+
 const CONTINUE_LOOP_SRC =
     \\#version 450
     \\out vec4 FragColor;
@@ -265,6 +288,15 @@ const CONTINUE_LOOP_SRC =
     \\    FragColor = vec4(s, 0.0, 0.0, 1.0);
     \\}
 ;
+
+test "do-while loop body is emitted in HLSL (#238)" {
+    const hlsl = try compileToHlsl(DOWHILE_SRC);
+    defer alloc.free(hlsl);
+    if (!doWhileEmitted(hlsl)) {
+        std.debug.print("HLSL dropped the do-while loop body:\n{s}\n", .{hlsl});
+        return error.DoWhileBodyDropped;
+    }
+}
 
 test "continue advances the counter in HLSL (#237)" {
     const hlsl = try compileToHlsl(CONTINUE_LOOP_SRC);
@@ -318,6 +350,24 @@ test "nested loop counters both advance in HLSL (#phi-loop)" {
     if (!try loopCounterAdvances(hlsl)) {
         std.debug.print("HLSL nested loop counter is frozen:\n{s}\n", .{hlsl});
         return error.LoopCounterFrozen;
+    }
+}
+
+test "do-while loop body is emitted in GLSL (#238)" {
+    const glsl = try compileToGlsl(DOWHILE_SRC);
+    defer alloc.free(glsl);
+    if (!doWhileEmitted(glsl)) {
+        std.debug.print("GLSL dropped the do-while loop body:\n{s}\n", .{glsl});
+        return error.DoWhileBodyDropped;
+    }
+}
+
+test "do-while loop body is emitted in MSL (#238)" {
+    const msl = try compileToMsl(DOWHILE_SRC);
+    defer alloc.free(msl);
+    if (!doWhileEmitted(msl)) {
+        std.debug.print("MSL dropped the do-while loop body:\n{s}\n", .{msl});
+        return error.DoWhileBodyDropped;
     }
 }
 

@@ -1609,6 +1609,8 @@ fn emitWhileLoop(
     var bc_idx: usize = loop_idx + 1;
     var cond_start: ?usize = null; // start of condition instructions (Pattern A only)
     var cond_end: usize = loop_idx + 1;
+    var is_do_while = false; // pattern C: condition tested at the back-edge (do-while)
+    var dw_loop_when_true = true;
 
     if (loop_idx + 1 >= m.instructions.len) {
         if (label_map.get(merge_lbl)) |mi| return mi;
@@ -1631,10 +1633,27 @@ fn emitWhileLoop(
             if (scan.op == .Branch or scan.op == .FunctionEnd or scan.op == .Label) { bc_idx = m.instructions.len; break; }
         }
         if (bc_idx >= m.instructions.len) {
-            if (label_map.get(merge_lbl)) |mi| return mi;
-            return loop_idx + 1;
+            // do-while (pattern C): the branch target is the BODY; the condition is at
+            // the back-edge (the continue block ends in a BranchConditional).
+            if (label_map.get(cont_lbl)) |ci| {
+                var s = ci + 1;
+                while (s < m.instructions.len) : (s += 1) {
+                    const t = m.instructions[s];
+                    if (t.op == .Label or t.op == .FunctionEnd or t.op == .Branch) break;
+                    if (t.op == .BranchConditional and t.words.len >= 4) {
+                        is_do_while = true;
+                        bc_idx = s;
+                        cond_start = null;
+                        break;
+                    }
+                }
+            }
+            if (!is_do_while) {
+                if (label_map.get(merge_lbl)) |mi| return mi;
+                return loop_idx + 1;
+            }
         }
-        cond_end = bc_idx;
+        if (!is_do_while) cond_end = bc_idx;
     } else if (next_inst.op == .BranchConditional and next_inst.words.len >= 4) {
         // Pattern B: BranchConditional directly after LoopMerge
         bc_idx = loop_idx + 1;
@@ -1650,14 +1669,39 @@ fn emitWhileLoop(
         if (label_map.get(merge_lbl)) |mi| return mi;
         return loop_idx + 1;
     }
-    const body_lbl = bc.words[2];
+    var body_lbl = bc.words[2];
+
+    if (is_do_while) {
+        body_lbl = next_inst.words[1]; // OpBranch target = body
+        var hl: usize = loop_idx;
+        while (hl > 0) : (hl -= 1) {
+            if (m.instructions[hl].op == .Label) break;
+        }
+        const header_lbl: u32 = if (m.instructions[hl].words.len > 1) m.instructions[hl].words[1] else 0;
+        dw_loop_when_true = (bc.words[2] == header_lbl);
+
+        // Only STRAIGHT-LINE do-while bodies are supported (the body-emission machinery
+        // treats a branch to cont_lbl as `continue`, but cont_lbl is the condition block
+        // here). Conditional control flow in the body would be miscompiled — fail loud.
+        const bidx = label_map.get(body_lbl) orelse m.instructions.len;
+        var sidx = bidx + 1;
+        while (sidx < m.instructions.len) : (sidx += 1) {
+            const t = m.instructions[sidx];
+            if (t.op == .Label and t.words.len > 1 and t.words[1] == cont_lbl) break;
+            if (t.op == .FunctionEnd) break;
+            if (t.op == .SelectionMerge or t.op == .LoopMerge or t.op == .BranchConditional or t.op == .Switch) return error.UnstructuredControlFlow;
+            if (t.op == .Branch and t.words.len > 1 and t.words[1] != cont_lbl) return error.UnstructuredControlFlow;
+        }
+    }
 
     // #237: run the SSA phi counter update at the TOP of the loop (guarded by a
     // first-iteration flag) so a `continue` — which skips the bottom-of-loop update
     // in `while(true)` — still advances the counter, matching a real `for` loop.
     var fbuf: [40]u8 = undefined;
     const first_flag = std.fmt.bufPrint(&fbuf, "_loopfirst_{d}", .{loop_idx}) catch "_loopfirst";
-    const has_phis = if (g_loop_phis) |lp| (if (lp.get(loop_idx)) |pl| pl.items.len > 0 else false) else false;
+    // do-while loops carry their update in the body and test at the bottom; the
+    // #237 top-of-loop transform does not apply.
+    const has_phis = !is_do_while and (if (g_loop_phis) |lp| (if (lp.get(loop_idx)) |pl| pl.items.len > 0 else false) else false);
     if (has_phis) try w.print("    bool {s} = true;\n", .{first_flag});
 
     try w.writeAll("    while (true)\n    {\n");
@@ -1714,7 +1758,7 @@ fn emitWhileLoop(
         }
         cond_name = names.get(bc.words[1]) orelse cond_name;
     }
-    try w.print("        if (!({s})) break;\n", .{cond_name});
+    if (!is_do_while) try w.print("        if (!({s})) break;\n", .{cond_name}); // top-test only
     const body_idx = label_map.get(body_lbl) orelse m.instructions.len;
     if (body_idx < m.instructions.len) {
         var bi: usize = body_idx + 1;
@@ -1834,9 +1878,19 @@ fn emitWhileLoop(
                 if (cinst.op == .FunctionEnd) break;
                 if (cinst.op == .Label) break;
                 if (cinst.op == .Branch) break;
+                if (cinst.op == .BranchConditional) break; // do-while back-edge — handled below
                 if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
                 try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid);
             }
+        }
+    }
+    // do-while (pattern C): test the back-edge condition at the BOTTOM.
+    if (is_do_while) {
+        const dwc = names.get(bc.words[1]) orelse "true";
+        if (dw_loop_when_true) {
+            try w.print("        if (!({s})) break;\n", .{dwc});
+        } else {
+            try w.print("        if ({s}) break;\n", .{dwc});
         }
     }
     try w.writeAll("    }\n");
