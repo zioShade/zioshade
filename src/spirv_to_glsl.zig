@@ -1530,6 +1530,16 @@ fn loopHasHeaderPhi(m: *const ParsedModule, loop_idx: usize) bool {
 
 /// Emit the back-edge updates for a loop's header phis (loop counters lifted to
 /// mutable locals): `<counter> = <back-edge value>;` for each, at `indent`.
+///
+/// Limitation: the back-edge value is resolved by name. For glslpp-generated
+/// SPIR-V the only loop-header phi is the simple loop counter (see
+/// loop_counter_phi.zig), whose back-edge is a plain OpIAdd — always correct.
+/// Externally optimized SPIR-V (e.g. `spirv-opt --ssa-rewrite`) can produce a
+/// loop carrying a value updated under an inner branch, whose back-edge is a
+/// *selection-merge* OpPhi in the loop body. Those body selection-phis are not
+/// yet materialised by the loop emitters, so such a value can read stale (the
+/// update lands in a now-dead OpVariable). Tracked as a follow-up; not reachable
+/// through glslpp's own GLSL/HLSL/MSL front end.
 fn emitLoopPhiBackedge(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),

@@ -822,8 +822,8 @@ pub fn classifyLoopPhi(instructions: anytype, id_defs: anytype, phi_idx: usize) 
         if (is_be) be_val = val else init_val = val;
     }
 
-    // Positional fallback if classification was ambiguous (single edge, or
-    // labels not found): SPIR-V's first pair is the most common preheader edge.
+    // Positional fallback if classification was ambiguous (labels not found):
+    // SPIR-V's first pair is the most common preheader edge.
     return .{
         .result_id = phi.words[2],
         .type_id = phi.words[1],

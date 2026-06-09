@@ -2645,6 +2645,8 @@ fn loopHasHeaderPhi(m: *const ParsedModule, loop_idx: usize) bool {
 }
 
 /// Emit `<counter> = <back-edge value>;` for each loop-header phi, at `indent`.
+/// See spirv_to_glsl.zig:emitLoopPhiBackedge for the external-SPIR-V
+/// loop-carried selection-phi limitation.
 fn emitLoopPhiBackedge(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -2663,9 +2665,21 @@ fn emitLoopPhiBackedge(
         const lp = common.classifyLoopPhi(m.instructions, m.id_defs, k) orelse continue;
         if (lp.backedge_val == lp.result_id) continue;
         const nm = names.get(lp.result_id) orelse continue;
-        const bv = names.get(lp.backedge_val) orelse "0";
+        const bv = phiValName(m, names, lp.backedge_val);
         try w.print("{s}{s} = {s};\n", .{ indent, nm, bv });
     }
+}
+
+/// Resolve a phi operand's value name. Named results/constants resolve directly;
+/// bool constants without an entry fall back to their literal (matches GLSL's
+/// exprName). Used for loop-header phi init / back-edge values.
+fn phiValName(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32) []const u8 {
+    if (names.get(id)) |n| return n;
+    if (getDef(m, id)) |d| {
+        if (d.op == .ConstantTrue) return "true";
+        if (d.op == .ConstantFalse) return "false";
+    }
+    return "0";
 }
 
 /// Emit the loop tail: continue-block computations followed by the header-phi
@@ -3282,7 +3296,7 @@ fn emitInstruction(
                         }
                         const tn = hlslType(module, inst.words[1], names, alloc) catch "int";
                         const nm = names.get(result_id) orelse "vphi";
-                        const init_name = names.get(lp.init_val) orelse "0";
+                        const init_name = phiValName(module, names, lp.init_val);
                         try w.print("    {s} {s} = {s};\n", .{ tn, nm, init_name });
                         return;
                     }
