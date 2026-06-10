@@ -3830,3 +3830,27 @@ test "wgsl: fine-quality derivatives map to dpdxFine/dpdyFine/fwidthFine" {
     try assertContains(wgsl, "dpdyFine(");
     try assertContains(wgsl, "fwidthFine(");
 }
+
+// #294: a runtime-sized SSBO array `.length()` (`buffer B { float d[]; }; … d.length()`)
+// must lower to OpArrayLength → WGSL `arrayLength(&buf.member)` (returning u32), NOT be
+// constant-folded to 0 (the prior frontend silent-wrong). Oracle: naga validates the
+// emitted `arrayLength(&B_data.d)`. OpArrayLength (opcode 68) is modeled in
+// compact_ids.zig (`68 => rt(2, "il")`) so the optimizer's id-compaction preserves the
+// struct-ptr id and passes the member-index literal through unmodified.
+test "wgsl: runtime SSBO array .length() -> arrayLength(&buf.member)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { float d[]; };
+        \\layout(std430, binding = 1) buffer Out { uint n; };
+        \\void main() { n = uint(d.length()); }
+    ;
+    const wgsl = try compileCompToWgsl(src);
+    defer alloc.free(wgsl);
+    // Assert the resolved buffer name + member (not the "buf"/"arr" fallbacks).
+    try assertContains(wgsl, "arrayLength(&B");
+    try assertContains(wgsl, ".d)");
+    try assertNotContains(wgsl, "unhandled");
+    try assertNotContains(wgsl, ".arr)");
+    try nagaValidateOrSkip(wgsl, "ssbo_array_length");
+}

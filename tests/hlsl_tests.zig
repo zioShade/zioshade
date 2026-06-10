@@ -14516,3 +14516,13 @@ test "T-qlod.1: HLSL textureQueryLod uses CalculateLevelOfDetail (#gaps querylod
     try assertContains(hlsl, ").xx"); // scalar LOD splatted to the float2 result
     try assertNotContains(hlsl, "// unhandled");
 }
+
+// #294: runtime-sized SSBO array `.length()` lowers to OpArrayLength. HLSL would express
+// this via a StructuredBuffer/ByteAddressBuffer `.GetDimensions(...)` — not yet wired — so
+// it HONEST-ERRORS (error.UnsupportedOp) rather than the silent-wrong `// unhandled op 68`.
+test "T-arrlen.1: runtime SSBO array .length() honest-errors in HLSL (#294)" {
+    const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(std430,binding=1) buffer Out { uint n; };\nvoid main(){ n = uint(d.length()); }";
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
+}

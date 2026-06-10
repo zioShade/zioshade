@@ -3675,3 +3675,13 @@ test "T-interp.4: the MSL 2.3 interpolation guard does not trip a plain-input sh
     try assertNotContains(msl, "interpolant<");
     try assertNotContains(msl, "// unhandled");
 }
+
+// #294: runtime-sized SSBO array `.length()` lowers to OpArrayLength. MSL would express
+// this via a passed buffer-length constant — not yet wired — so it HONEST-ERRORS
+// (error.UnsupportedOp) rather than the silent-wrong `// unhandled op 68`.
+test "T-arrlen.1: runtime SSBO array .length() honest-errors in MSL (#294)" {
+    const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(std430,binding=1) buffer Out { uint n; };\nvoid main(){ n = uint(d.length()); }";
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToMSL(alloc, spirv, .{}));
+}

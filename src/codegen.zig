@@ -5008,6 +5008,27 @@ const Codegen = struct {
                 try self.emitWord(composite_id);
                 try self.emitWord(index);
             },
+            .array_length => {
+                // OpArrayLength %uint %result %structurePtr <arrayMemberLiteral>.
+                // The structure pointer is the SSBO block variable (operand 0); the
+                // literal is the index of the runtime-array member (operand 1). The
+                // result type was resolved to uint above (SPIR-V mandates uint here).
+                const result_id = resolved.result_id orelse return;
+                const struct_ptr = self.operandId(resolved, 0);
+                const member_idx: u32 = switch (resolved.operands[1]) {
+                    .literal_int => |v| v,
+                    else => 0,
+                };
+                // Result type resolves to uint (the IR op is typed .uint, and SPIR-V
+                // mandates uint here). The optimizer's getOpInfo models opcode 68
+                // (compact_ids.zig: `68 => rt(2, "il")`) so DCE keeps the uint type
+                // and id-compaction preserves the member-index LITERAL.
+                try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ArrayLength)));
+                try self.emitWord(resolved.result_type.?);
+                try self.emitWord(result_id);
+                try self.emitWord(struct_ptr);
+                try self.emitWord(member_idx);
+            },
             .access_chain => {
                 // OpAccessChain returns a pointer, so we must use ensurePointerType, not the
                 // default value-type resolution from inst.ty.
