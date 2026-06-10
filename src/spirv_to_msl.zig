@@ -3625,6 +3625,48 @@ fn emitBody(
     }
 }
 
+/// Resolve a do-while back-edge condition OPERAND to an MSL expression over PERSISTENT
+/// variables (#246). The MSL do-while controlling expression lives OUTSIDE the body block
+/// scope, so it must read the loop's persistent (function-scope) variables directly: an
+/// `OpLoad ptr` resolves to the loaded variable's name (a fresh read), a constant to its
+/// literal. Returns null for anything else (a body-local temp out of scope) so the caller
+/// honest-errors.
+fn inlineDoWhileOperand(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32) ?[]const u8 {
+    const def = getDef(m, id) orelse return null;
+    switch (def.op) {
+        .Load => return if (def.words.len > 3) names.get(def.words[3]) else null,
+        .Constant => return if (def.words.len > 3) names.get(def.words[2]) else null,
+        .ConstantTrue => return "true",
+        .ConstantFalse => return "false",
+        else => return null,
+    }
+}
+
+/// Rebuild a do-while back-edge condition as an inline MSL expression over persistent
+/// variables (#246): a single comparison `a OP b` whose operands are loads-of-vars or
+/// constants. Returns null for compound (`&&`/`||`) or non-trivial conditions so the
+/// caller falls back to the honest-error path.
+fn tryInlineDoWhileCond(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), cond_id: u32, alloc: std.mem.Allocator) ?[]const u8 {
+    const def = getDef(m, cond_id) orelse return null;
+    const op_str: ?[]const u8 = switch (def.op) {
+        .SLessThan, .ULessThan, .FOrdLessThan => "<",
+        .SGreaterThan, .UGreaterThan, .FOrdGreaterThan => ">",
+        .SLessThanEqual, .ULessThanEqual, .FOrdLessThanEqual => "<=",
+        .SGreaterThanEqual, .UGreaterThanEqual, .FOrdGreaterThanEqual => ">=",
+        .IEqual, .FOrdEqual => "==",
+        .INotEqual, .FOrdNotEqual => "!=",
+        else => null,
+    };
+    if (op_str) |ops| {
+        if (def.words.len < 5) return null;
+        const lhs = inlineDoWhileOperand(m, names, def.words[3]) orelse return null;
+        const rhs = inlineDoWhileOperand(m, names, def.words[4]) orelse return null;
+        return std.fmt.allocPrint(alloc, "{s} {s} {s}", .{ lhs, ops, rhs }) catch null;
+    }
+    if (def.op == .Load and def.words.len > 3) return names.get(def.words[3]);
+    return null;
+}
+
 /// A do-while (bottom-test) loop's CONTINUE block ends in a back-edge
 /// `OpBranchConditional` whose two targets are exactly {header, merge}. A normal
 /// top-test loop's continue block ends in an unconditional `OpBranch header`.
@@ -3738,23 +3780,36 @@ fn emitWhileLoopMSL(
     }
     var body_lbl = bc.words[2];
 
+    // #246: do-while emission. STRAIGHT-LINE body → keep `while(true){ body; if(!cond)break; }`.
+    // Body WITH control flow → native `do { body } while(<inlined cond>);` when the back-edge
+    // condition can be rebuilt over persistent vars (so a body `continue` re-evaluates it at
+    // the bottom test, outside the body block scope). Else honest-error.
+    var body_has_cf = false;
+    var dw_inlined: ?[]const u8 = null;
     if (is_do_while) {
         body_lbl = next_inst.words[1]; // OpBranch target = body
         dw_loop_when_true = (bc.words[2] == header_lbl);
 
-        // Only STRAIGHT-LINE do-while bodies are supported (the body-emission machinery
-        // treats a branch to cont_lbl as `continue`, but cont_lbl is the condition block
-        // here). Conditional control flow in the body would be miscompiled — fail loud.
         const bidx = label_map.get(body_lbl) orelse m.instructions.len;
         var sidx = bidx + 1;
         while (sidx < m.instructions.len) : (sidx += 1) {
             const t = m.instructions[sidx];
             if (t.op == .Label and t.words.len > 1 and t.words[1] == cont_lbl) break;
             if (t.op == .FunctionEnd) break;
-            if (t.op == .SelectionMerge or t.op == .LoopMerge or t.op == .BranchConditional or t.op == .Switch) return error.UnstructuredControlFlow;
-            if (t.op == .Branch and t.words.len > 1 and t.words[1] != cont_lbl) return error.UnstructuredControlFlow;
+            // Nested loop or switch sharing the do-while condition is not yet supported.
+            if (t.op == .LoopMerge or t.op == .Switch) return error.UnstructuredControlFlow;
+            // if/continue/break in the body — supported via the native do-while path.
+            if (t.op == .SelectionMerge or t.op == .BranchConditional) body_has_cf = true;
+            // A branch to anything other than the continue (back-edge) or merge (`break`)
+            // is unstructured for this flat scan — fail loud (conservative; only trivial
+            // if(c)continue;/break; bodies are accepted in this increment).
+            if (t.op == .Branch and t.words.len > 1 and t.words[1] != cont_lbl and t.words[1] != merge_lbl) return error.UnstructuredControlFlow;
+        }
+        if (body_has_cf) {
+            dw_inlined = tryInlineDoWhileCond(m, names, bc.words[1], alloc) orelse return error.UnstructuredControlFlow;
         }
     }
+    const dw_native = dw_inlined != null;
 
     // #237: run the SSA phi counter update at the TOP of the loop (first-iteration
     // flag) so a `continue` still advances the counter (matching a real `for`).
@@ -3764,7 +3819,11 @@ fn emitWhileLoopMSL(
     const has_phis = !is_do_while and (if (g_loop_phis) |lp| (if (lp.get(loop_idx)) |pl| pl.items.len > 0 else false) else false);
     if (has_phis) try w.print("    bool {s} = true;\n", .{first_flag});
 
-    try w.writeAll("    while (true)\n    {\n");
+    if (dw_native) {
+        try w.writeAll("    do\n    {\n");
+    } else {
+        try w.writeAll("    while (true)\n    {\n");
+    }
 
     if (has_phis) {
         try w.print("        if (!{s})\n        {{\n", .{first_flag});
@@ -3899,8 +3958,10 @@ fn emitWhileLoopMSL(
         }
     }
     // Emit continue block (e.g., i++ in for-loops). For phi-counter loops the
-    // update + write-back were hoisted to the top (#237), so skip them here.
-    if (!has_phis) {
+    // update + write-back were hoisted to the top (#237), so skip them here. For the
+    // native do-while (#246) the latch block IS the condition (rebuilt inline below) —
+    // do not emit it as body statements.
+    if (!has_phis and !dw_native) {
         const cont_idx = label_map.get(cont_lbl) orelse m.instructions.len;
         if (cont_idx < m.instructions.len) {
             var ci2: usize = cont_idx + 1;
@@ -3915,17 +3976,28 @@ fn emitWhileLoopMSL(
             }
         }
     }
-    // do-while (pattern C): test the back-edge condition at the BOTTOM.
-    if (is_do_while) {
-        const dwc = names.get(bc.words[1]) orelse "true";
+    if (dw_native) {
+        // Native do-while (#246): close with the inlined back-edge condition over the
+        // persistent loop vars. A body `continue` lands here and re-evaluates correctly.
+        const cond = dw_inlined.?;
         if (dw_loop_when_true) {
-            try w.print("        if (!({s})) break;\n", .{dwc});
+            try w.print("    }} while ({s});\n", .{cond});
         } else {
-            try w.print("        if ({s}) break;\n", .{dwc});
+            try w.print("    }} while (!({s}));\n", .{cond});
         }
+    } else {
+        // do-while (pattern C, straight-line body): test the back-edge condition at the
+        // BOTTOM of the while(true) loop.
+        if (is_do_while) {
+            const dwc = names.get(bc.words[1]) orelse "true";
+            if (dw_loop_when_true) {
+                try w.print("        if (!({s})) break;\n", .{dwc});
+            } else {
+                try w.print("        if ({s}) break;\n", .{dwc});
+            }
+        }
+        try w.writeAll("    }\n");
     }
-
-    try w.writeAll("    }\n");
     if (label_map.get(merge_lbl)) |mi| return mi;
     return loop_idx + 1;
 }
