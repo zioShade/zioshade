@@ -2133,3 +2133,45 @@ test "T-bf.1: GLSL bitfieldExtract/bitfieldInsert lower to native builtins (#gap
     try assertContains(glsl, "bitfieldInsert(");
     try assertNotContains(glsl, "// unhandled");
 }
+
+// #286: a plain non-opaque global uniform (`uniform int n;` — a default-uniform-block
+// member, which glslpp supports as a desktop-GLSL extension) was emitted as an empty
+// `uniform n {} n_1;` block with the scalar dropped, while the body referenced `n` (the
+// block name) → non-compiling GLSL. It must emit a plain `uniform int n;` declaration
+// instead (matching the WGSL backend's `var<uniform> n: i32;`). glslang(desktop)-valid.
+test "T-uni.1: plain global uniform scalar emits 'uniform int n;', not an empty block (#286)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\uniform int n;
+        \\void main() { o = vec4(float(n)); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "uniform int n;");
+    // The broken empty-block form must be gone.
+    try assertNotContains(glsl, "uniform n\n{\n}");
+    try assertNotContains(glsl, "n_1;");
+}
+
+test "T-uni.2: plain global uniform vector + the do-while motivating case (#286)" {
+    // A bare vec uniform emits `uniform vec3 c;`, and the do-while back-edge condition
+    // (the #286-motivating shader) references the bare scalar uniform `n` directly.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\uniform vec3 c;
+        \\uniform int n;
+        \\void main() {
+        \\    int i = 0;
+        \\    do { i++; } while (i < n);
+        \\    o = vec4(c, float(i));
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "uniform vec3 c;");
+    try assertContains(glsl, "uniform int n;");
+    try assertNotContains(glsl, "n_1;");
+    try assertNotContains(glsl, "c_1;");
+}
