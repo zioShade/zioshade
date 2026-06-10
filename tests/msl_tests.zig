@@ -736,21 +736,26 @@ test "T11.1: MSL loop reconstruction produces while loop" {
     try assertContains(msl, "discard_fragment");
 }
 
-test "T11.2: findLSB/findMSB in MSL" {
+test "T-bits.0: findLSB/findMSB in MSL lower to the guarded index idiom, not bare ctz/clz" {
     const source =
         \\#version 450
         \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform U { int seed; } u;
         \\void main() {
-        \\    int a = findLSB(7);
-        \\    int b = findMSB(7);
+        \\    int a = findLSB(u.seed);
+        \\    int b = findMSB(u.seed);
         \\    fragColor = vec4(float(a), float(b), 0.0, 1.0);
         \\}
     ;
     const msl = try compileToMsl(source);
     defer alloc.free(msl);
-    // findLSB/findMSB should emit ctz/clz in MSL, not "unhandled"
-    try assertContains(msl, "ctz");
-    try assertContains(msl, "clz");
+    // findLSB → select(ctz(x), -1, x==0); findMSB(signed) → flip + select(clz-index).
+    // NOT the old bare ctz/clz (which returned the wrong count / missed the zero edge).
+    try assertContains(msl, "select(ctz(");
+    try assertContains(msl, "select(clz(");
+    try assertContains(msl, "_fmsb_"); // signed findMSB negative-flip temp
+    try assertNotContains(msl, " = ctz(");
+    try assertNotContains(msl, " = clz(");
 }
 
 test "T12.1: MSL CompositeInsert (partial vector write)" {
@@ -3012,4 +3017,82 @@ test "T-atomic.7: MSL signed atomic casts to atomic_int (#265)" {
     try assertContains(msl, "atomic_fetch_min_explicit((device atomic_int*)&b.sval, -5,");
     try assertNotContains(msl, "atomic_fetch_min_explicit(b.sval"); // bare-object bug
     try std.testing.expect(atomicCallLineHasType(msl, "atomic_fetch_min_explicit", "int"));
+}
+
+// findMSB/findLSB are GLSL.std.450 FindSMsb/FindUMsb/FindILsb — NOT raw clz/ctz.
+// glslpp's MSL backend mapped findLSB→ctz and findMSB→clz, which is silent-wrong:
+// findMSB(1u) is 0 (the MSB *index*), but clz(1u) is 31; findLSB(0) must be -1, but
+// ctz(0) is 32. The fix emits the spirv-cross helper math inline (clz(T(0)) is the bit
+// width, so clz(T(0)) - (clz(x) + 1) == 31 - clz(x) for 32-bit, with the x==0 → -1 guard
+// via select). Result type == arg type T (downstream bitcast handles int/uint).
+test "T-bits.1: MSL findLSB lowers to select(ctz(...), -1, x==0), not bare ctz (#gaps findmsb)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { uint ui; int si; } u;
+        \\void main() {
+        \\    int a = findLSB(u.ui);
+        \\    int b = findLSB(u.si);
+        \\    o = vec4(float(a + b), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    try assertContains(msl, "select(ctz("); // -1-on-zero guard around ctz
+    try assertNotContains(msl, " = ctz("); // the old bare-ctz silent-wrong form
+}
+
+test "T-bits.2: MSL findMSB(uint) lowers to the clz(T(0)) - (clz(x)+1) index, not bare clz (#gaps findmsb)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { uint ui; } u;
+        \\void main() {
+        \\    uint a = findMSB(u.ui);
+        \\    o = vec4(float(a), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    try assertContains(msl, "select(clz("); // index = clz(T(0)) - (clz(x)+1), guarded by x==0
+    try assertContains(msl, "- (clz(");
+    try assertNotContains(msl, " = clz("); // the old bare-clz silent-wrong form
+}
+
+test "T-bits.3: MSL findMSB(int) flips negatives then takes the MSB index (#gaps findmsb)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { int si; } u;
+        \\void main() {
+        \\    int a = findMSB(u.si);
+        \\    o = vec4(float(a), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    // Signed findMSB flips negatives (v = x<0 ? ~x : x via -1 - x) before the clz index.
+    try assertContains(msl, "_fmsb_");
+    try assertContains(msl, "select(clz(");
+    try assertNotContains(msl, " = clz("); // the old bare-clz silent-wrong form
+}
+
+test "T-bits.4: MSL findLSB/findMSB are componentwise for vectors (typed splats) (#gaps findmsb)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { uvec2 uv; ivec2 sv; } u;
+        \\void main() {
+        \\    ivec2 a = findLSB(u.uv);
+        \\    ivec2 b = findMSB(u.sv);
+        \\    o = vec4(float(a.x + b.y), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    // Math computed in the (vector) arg type with typed splats, cast to the result type.
+    try assertContains(msl, "uint2(-1)"); // findLSB(uvec2): -1 splat in the arg type
+    try assertContains(msl, "uint2(0)"); // zero-guard splat in the arg type
+    try assertContains(msl, "int2(select("); // result cast to ivec2
+    try assertContains(msl, "int2(-1) - "); // signed-vector negative flip (findMSB(ivec2))
 }

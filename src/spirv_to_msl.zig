@@ -2443,9 +2443,10 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         53 => "ldexp",
         66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
         70 => "faceforward", 71 => "reflect", 72 => "refract",
-        73 => "ctz",       // findLSB → ctz (count trailing zeros)
-        74 => "clz",       // findMSB(signed) → simplified; may need adjustment
-        75 => "clz",       // findMSB(unsigned) → simplified; may need adjustment
+        // 73/74/75 (FindILsb/FindSMsb/FindUMsb) are handled inline in the .ExtInst arm
+        // (findMSB/findLSB are NOT raw ctz/clz). Intentionally NOT mapped here so a
+        // regression that bypassed the inline path would honest-error, not silently
+        // emit the wrong count.
         79 => "min", 80 => "max", 81 => "clamp",
         35 => "modf", 36 => "modf", 51 => "frexp",
         54 => "pack_float_to_snorm4x8", 55 => "pack_float_to_unorm4x8",
@@ -3981,6 +3982,31 @@ fn emitInstruction(
                 }
                 try w.print("    {s} {s};\n", .{ second_type, second_name });
                 try w.print("    {s} {s} = {s}({s}, {s});\n", .{ fract_type, fract_name, func_name, input_name, second_name });
+            } else if (instruction == 73 or instruction == 74 or instruction == 75) {
+                if (inst.words.len < 6) return; // these ExtInsts have exactly one operand
+                // findLSB / findMSB(signed) / findMSB(unsigned) — GLSL.std.450
+                // FindILsb(73) / FindSMsb(74) / FindUMsb(75). These are NOT raw ctz/clz:
+                // findMSB returns the MSB *index* (31 - clz for 32-bit), findLSB returns
+                // -1 when the input is 0, and signed findMSB flips negatives first. Emit
+                // the spirv-cross helper math inline, computed in the ARG type `at` (so
+                // there is no mixed int/uint arithmetic — glslang gives FindUMsb/FindILsb
+                // a signed result over an unsigned operand) and cast to the result type
+                // `rt`, mirroring spirv-cross's `int(spvFindUMSB(x))`. `clz(at(0))` is the
+                // bit width, so `clz(at(0)) - (clz(x) + at(1))` is the MSB index for any
+                // width, and `select(…, at(-1), x == at(0))` supplies the -1-on-zero edge.
+                const rt = try mslType(m, inst.words[1], names, alloc);
+                const at = if (getDef(m, inst.words[5])) |ad| (if (ad.words.len > 1) try mslType(m, ad.words[1], names, alloc) else rt) else rt;
+                const rn = names.get(inst.words[2]) orelse "v";
+                const x = names.get(inst.words[5]) orelse "x";
+                if (instruction == 73) {
+                    try w.print("    {s} {s} = {s}(select(ctz({s}), {s}(-1), {s} == {s}(0)));\n", .{ rt, rn, rt, x, at, x, at });
+                } else if (instruction == 75) {
+                    try w.print("    {s} {s} = {s}(select(clz({s}(0)) - (clz({s}) + {s}(1)), {s}(-1), {s} == {s}(0)));\n", .{ rt, rn, rt, at, x, at, at, x, at });
+                } else { // 74 — signed findMSB: flip negatives (v = x<0 ? ~x : x) first
+                    const id = inst.words[2];
+                    try w.print("    {s} _fmsb_{d} = select({s}, {s}(-1) - {s}, {s} < {s}(0));\n", .{ at, id, x, at, x, x, at });
+                    try w.print("    {s} {s} = {s}(select(clz({s}(0)) - (clz(_fmsb_{d}) + {s}(1)), {s}(-1), _fmsb_{d} == {s}(0)));\n", .{ rt, rn, rt, at, id, at, at, id, at });
+                }
             } else {
                 try emitStd450(m, names, inst, instruction, w, alloc);
             }
