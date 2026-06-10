@@ -565,6 +565,23 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
 
     for (cbuffers.items) |cb| {
+        // A plain non-opaque global uniform (`uniform int n;` — a default-uniform-block
+        // member glslpp supports as a desktop-GLSL extension) is a BARE scalar/vector/
+        // matrix Uniform var, not a Block-decorated struct. Emit it as a plain
+        // `uniform TYPE name;` (#286) — the body references the var name directly — rather
+        // than an empty `uniform name {} name_1;` block that drops the value.
+        // Bare ARRAY uniforms (`uniform float w[8];`) are excluded: they would need both
+        // the `[N]` declaration suffix AND an access-chain fix (the body emits `w_1.w_m2`
+        // struct-member form, not `w[2]`) — tracked as a follow-up. They keep the existing
+        // (broken-but-unchanged) block path here, so this fix introduces no regression.
+        const cbt = getDef(&module, cb.type_id);
+        const is_struct = cbt != null and cbt.?.op == .TypeStruct;
+        const is_array = cbt != null and (cbt.?.op == .TypeArray or cbt.?.op == .TypeRuntimeArray);
+        if (!is_struct and !is_array) {
+            const tn = glslType(&module, cb.type_id, &names, aa) catch return error.OutOfMemory;
+            try w.print("uniform {s} {s};\n\n", .{ tn, cb.name });
+            continue;
+        }
         const shifted = common.applyBindingShift(cb.binding, options.binding_shift);
         try w.print("layout(binding = {d}, std140) uniform {s}\n{{\n", .{shifted, cb.name});
         try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa);
