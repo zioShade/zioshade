@@ -5386,8 +5386,8 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
         .Determinant => "determinant",
         .MatrixInverse => "inverse",
         else => blk: {
-            // Fallback for instruction IDs that don't match our enum values.
-            // Some codegen paths hardcode correct GLSLstd450 values while our enum has different values.
+            // Fallback for GLSL.std.450 opcodes not matched in the named-switch arm above
+            // (the integer min/max/clamp variants, and the lower-numbered builtins).
             const val = @intFromEnum(func);
             break :blk switch (val) {
                 // Correct GLSLstd450 instruction IDs (per SPIR-V spec)
@@ -5428,14 +5428,14 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 35 => "modf",      // Modf (scalar return, pointer out-param)
                 36 => "modf",       // ModfStruct (struct return)
                 37 => "min",       // FMin
-                38 => "max",       // FMax
+                38 => "min",       // UMin
                 39 => "min",       // SMin
-                40 => "max",       // SMax
-                41 => "min",       // UMin
-                42 => "max",       // UMax
+                40 => "max",       // FMax
+                41 => "max",       // UMax
+                42 => "max",       // SMax
                 43 => "clamp",     // FClamp
-                44 => "clamp",     // SClamp
-                45 => "clamp",     // UClamp
+                44 => "clamp",     // UClamp
+                45 => "clamp",     // SClamp
                 46 => "lerp",      // FMix / mix
                 48 => "step",
                 49 => "smoothstep",

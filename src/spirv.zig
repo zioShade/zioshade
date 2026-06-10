@@ -531,15 +531,19 @@ pub const GLSLstd450 = enum(u32) {
     MatrixInverse = 34,
     Modf = 35,
     ModfStruct = 36,
+    // Per the official GLSL.std.450 grammar the min/max/clamp triples are ordered
+    // {F,U,S}Min, {F,U,S}Max, {F,U,S}Clamp — NOT grouped by type. (Previously these were
+    // mis-numbered as FMin/FMax/SMin/SMax/UMin/UMax/FClamp/SClamp/UClamp, swapping the
+    // unsigned/signed ops; #272.)
     FMin = 37,
-    FMax = 38,
+    UMin = 38,
     SMin = 39,
-    SMax = 40,
-    UMin = 41,
-    UMax = 42,
+    FMax = 40,
+    UMax = 41,
+    SMax = 42,
     FClamp = 43,
-    SClamp = 44,
-    UClamp = 45,
+    UClamp = 44,
+    SClamp = 45,
     FMix = 46,
     IMix = 47,
     Step = 48,
