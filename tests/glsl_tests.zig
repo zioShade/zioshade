@@ -2175,3 +2175,43 @@ test "T-uni.2: plain global uniform vector + the do-while motivating case (#286)
     try assertNotContains(glsl, "n_1;");
     try assertNotContains(glsl, "c_1;");
 }
+
+// #289: a bare global uniform ARRAY (`uniform float w[4];` — a default-uniform-block
+// member that is an OpTypeArray, not a Block struct) was mis-emitted on two fronts:
+// (1) the declaration dropped the dimension (`uniform float w;` — wrong type), and
+// (2) the access `w[2]` lowered to the struct-member form `w_1.w_m2` referencing a
+// nonexistent block instance → non-compiling GLSL. It must emit `uniform float w[4];`
+// + index as `w[2]` (the value is a bare array, indexed directly). glslang(desktop)-valid.
+test "T-uni.3: bare global uniform array emits 'uniform float w[4];' + 'w[2]' access (#289)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\uniform float w[4];
+        \\void main() { o = vec4(w[2]); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "uniform float w[4];");
+    try assertContains(glsl, "w[2]");
+    // The broken struct-member / block-instance forms must be gone.
+    try assertNotContains(glsl, "w_1");
+    try assertNotContains(glsl, "w_m");
+}
+
+// #289 (review follow-up): a MULTI-dimensional bare uniform array must keep ALL
+// dimensions in the declaration (`uniform float w[2][3];`) so the declaration matches
+// the multi-index use (`w[1][2]`). glslType strips inner dims, so the bare-array branch
+// walks the nested TypeArray to emit every dimension. glslang(desktop)-valid.
+test "T-uni.4: multi-dim bare uniform array keeps all dimensions (#289)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\uniform float w[2][3];
+        \\void main() { o = vec4(w[1][2]); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "uniform float w[2][3];");
+    try assertContains(glsl, "w[1][2]");
+    try assertNotContains(glsl, "w_1");
+}
