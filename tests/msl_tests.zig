@@ -3120,6 +3120,107 @@ test "T-imgatomic.5: MSL image atomics in a FRAGMENT shader honest-error (#267)"
     try std.testing.expectError(error.UnsupportedOp, compileToMslStage(source, .fragment));
 }
 
+// ---------------------------------------------------------------------------
+// #284: compute kernels never bound storage/sampled images as parameters — the
+// kernel signature omitted them entirely, so a body `img.read()/.write()`
+// referenced an undeclared identifier (silent-wrong, non-compiling). Storage
+// images also need the right `access::` qualifier (read+write → read_write,
+// writeonly → write, readonly/atomic-only → none) for `.write()` to compile.
+// Oracle: spirv-cross --msl.
+test "T-imgrw.1: MSL compute binds a read+write image2D as access::read_write (#284)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(r32f, binding = 0) uniform image2D img;
+        \\void main() {
+        \\    vec4 c = imageLoad(img, ivec2(0));
+        \\    imageStore(img, ivec2(1), c * 2.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "texture2d<float, access::read_write> img [[texture(0)]]");
+    try assertContains(msl, "img.read(");
+    try assertContains(msl, "img.write(");
+}
+
+test "T-imgrw.2: MSL compute binds a writeonly image2D as access::write (#284)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(r32f, binding = 0) writeonly uniform image2D img;
+        \\void main() { imageStore(img, ivec2(0), vec4(1.0)); }
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "texture2d<float, access::write> img [[texture(0)]]");
+    try assertContains(msl, "img.write(");
+}
+
+test "T-imgrw.3: MSL compute binds a readonly image2D with default (sample) access (#284)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(r32f, binding = 0) readonly uniform image2D img;
+        \\layout(std430, binding = 1) buffer B { vec4 o; } b;
+        \\void main() { b.o = imageLoad(img, ivec2(0)); }
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "texture2d<float> img [[texture(0)]]"); // no access:: for read-only
+    try assertContains(msl, "img.read(");
+}
+
+test "T-imgrw.4: MSL atomic-only image keeps default access, no read_write (#284 vs #267)" {
+    // An atomic-only image must NOT gain access::read_write (its read/write goes through
+    // the backing buffer, not the texture) — the #267 texture binding stays unqualified.
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(r32ui, binding = 0) uniform uimage2D img;
+        \\void main() { imageAtomicAdd(img, ivec2(0), 1u); }
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "texture2d<uint> img [[texture(0)]]");
+    try assertNotContains(msl, "access::read_write");
+}
+
+test "T-imgrw.5: MSL compute binds a sampled texture + sampler (#284)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(binding = 0) uniform sampler2D samp;
+        \\layout(std430, binding = 1) buffer B { vec4 o; } b;
+        \\void main() { b.o = texture(samp, vec2(0.5)); }
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "texture2d<float> samp [[texture(0)]]");
+    try assertContains(msl, "sampler sampSmplr [[sampler(0)]]");
+    try assertContains(msl, "samp.sample(");
+}
+
+test "T-imgrw.6: MSL image used for BOTH atomic and imageStore keeps default texture access (#284/#267)" {
+    // The image is in atomic_images, so the #267 path binds it. A co-occurring imageStore
+    // must NOT push the texture to access::write (which would forbid the .get_width() the
+    // spvImage2DAtomicCoord macro needs) — the texture stays unqualified.
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(r32ui, binding = 0) uniform uimage2D img;
+        \\void main() {
+        \\    imageAtomicAdd(img, ivec2(0), 1u);
+        \\    imageStore(img, ivec2(1), uvec4(5u));
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "texture2d<uint> img [[texture(0)]]"); // no access::write
+    try assertNotContains(msl, "access::write");
+    try assertContains(msl, "spvImage2DAtomicCoord("); // the atomic path still works
+}
+
 // findMSB/findLSB are GLSL.std.450 FindSMsb/FindUMsb/FindILsb — NOT raw clz/ctz.
 // glslpp's MSL backend mapped findLSB→ctz and findMSB→clz, which is silent-wrong:
 // findMSB(1u) is 0 (the MSB *index*), but clz(1u) is 31; findLSB(0) must be -1, but
