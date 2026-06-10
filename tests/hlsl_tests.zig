@@ -14491,3 +14491,25 @@ test "T-bf.2: HLSL omits spvBitfield helpers when unused (#275)" {
     defer alloc.free(hlsl);
     try assertNotContains(hlsl, "spvBitfield");
 }
+
+// textureQueryLod (OpImageQueryLod=105) was unhandled → `// unhandled op 105`,
+// non-compiling. HLSL has Texture.CalculateLevelOfDetail(sampler, coord) returning the
+// clamped LOD (scalar); spirv-cross splats it to the vec2 result (.xx).
+test "T-qlod.1: HLSL textureQueryLod uses CalculateLevelOfDetail (#gaps querylod)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(binding = 1) uniform U { vec2 v; } u;
+        \\void main() {
+        \\    vec2 lod = textureQueryLod(s, u.v);
+        \\    o = vec4(lod.x, lod.y, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .fragment);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "float2 "); // result type is float2
+    try assertContains(hlsl, ".CalculateLevelOfDetail(");
+    try assertContains(hlsl, ").xx"); // scalar LOD splatted to the float2 result
+    try assertNotContains(hlsl, "// unhandled");
+}
