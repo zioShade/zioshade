@@ -14442,3 +14442,52 @@ test "T-umm.1: HLSL unsigned+signed min/max are not swapped (#272)" {
     try assertContains(x, "max(");
     try assertNotContains(x, "min(");
 }
+
+// HLSL has no native bitfieldExtract/bitfieldInsert; the SPIR-V OpBitField* ops were
+// unhandled → `// unhandled op N`, non-compiling. Now lowered to generated spvBitfield*
+// helpers (verbatim spirv-cross), dxc-verified. Insert is uint-based (signed result cast
+// back); SExtract sign-extends; UExtract zero-extends.
+test "T-bf.1: HLSL bitfieldExtract/bitfieldInsert use spvBitfield helpers (#275)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { int si; uint ui; ivec2 sv; } u;
+        \\void main() {
+        \\    int a = bitfieldExtract(u.si, 3, 8);   // OpBitFieldSExtract
+        \\    uint b = bitfieldExtract(u.ui, 2, 5);  // OpBitFieldUExtract
+        \\    ivec2 c = bitfieldExtract(u.sv, 1, 4); // SExtract, vector overload
+        \\    int e = bitfieldInsert(u.si, 5, 2, 6); // OpBitFieldInsert (signed → cast back)
+        \\    uint f = bitfieldInsert(u.ui, 3u, 1, 2); // OpBitFieldInsert (unsigned → no cast)
+        \\    o = vec4(float(a + e + c.x) + float(b + f), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlslStage(source, .fragment);
+    defer alloc.free(hlsl);
+    // Helper definitions emitted once in the preamble, with the vector overloads…
+    try assertContains(hlsl, "int spvBitfieldSExtract(int Base");
+    try assertContains(hlsl, "int2 spvBitfieldSExtract(int2 Base"); // vector overload present
+    try assertContains(hlsl, "uint spvBitfieldUExtract(uint Base");
+    try assertContains(hlsl, "uint spvBitfieldInsert(uint Base");
+    // …and called at the use sites.
+    try assertContains(hlsl, "= spvBitfieldSExtract(");
+    try assertContains(hlsl, "= spvBitfieldUExtract(");
+    try assertContains(hlsl, "int(spvBitfieldInsert("); // signed insert cast back from uint
+    try assertContains(hlsl, "= spvBitfieldInsert("); // unsigned insert: bare call, no cast
+    try assertNotContains(hlsl, "uint(spvBitfieldInsert("); // an unsigned result is never cast-wrapped
+    try assertNotContains(hlsl, "// unhandled");
+    // Emit-once: exactly one scalar SExtract definition despite two SExtract call sites.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, hlsl, "int spvBitfieldSExtract(int Base"));
+}
+
+// A shader using NO bitfield ops must not drag in any spvBitfield* helper (gated emission).
+test "T-bf.2: HLSL omits spvBitfield helpers when unused (#275)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { uint ui; } u;
+        \\void main() { o = vec4(float(u.ui), 0.0, 0.0, 1.0); }
+    ;
+    const hlsl = try compileToHlslStage(source, .fragment);
+    defer alloc.free(hlsl);
+    try assertNotContains(hlsl, "spvBitfield");
+}
