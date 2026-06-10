@@ -22,6 +22,21 @@ fn parseLitStr(alloc: std.mem.Allocator, words: []const u32) ![]const u8 { var b
 fn sanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 { var buf = try std.ArrayList(u8).initCapacity(alloc, name.len); for(name)|c|{switch(c){'a'...'z','A'...'Z','0'...'9','_'=>buf.appendAssumeCapacity(c),else=>buf.appendAssumeCapacity('_'),}} return buf.toOwnedSlice(alloc); }
 fn isUniformVar(m: *const ParsedModule, id: u32) bool { const inst = getDef(m, id) orelse return false; if (inst.op == .Variable and inst.words.len >= 4) { const sc: spirv.StorageClass = @enumFromInt(inst.words[3]); return sc == .Uniform; } return false; }
 
+/// A Uniform var whose pointee is a Block-decorated struct (`layout(std140) uniform Foo
+/// { ... } foo_1;`). Access lowers to the `{name}_m{idx}` member form. A bare-array
+/// Uniform var (`uniform float w[8];`, pointee = TypeArray) is NOT a block — it indexes
+/// directly as `w[idx]` and keeps its declaration name in the expression (#289).
+/// NOTE: an ARRAYED block (`uniform Foo { ... } foo[N];`, pointee = TypeArray-of-struct)
+/// returns false here too — it is left on the direct-index path. That arrays-of-blocks
+/// case is KNOWN_UNSUPPORTED (e.g. spv.AofA.frag) and out of scope for #289; this only
+/// makes its (already-broken) output differently-shaped, never regresses a passing test.
+fn isUniformBlockVar(m: *const ParsedModule, id: u32) bool {
+    if (!isUniformVar(m, id)) return false;
+    const pt = resolvePointee(m, id) orelse return false;
+    const ti = getDef(m, pt) orelse return false;
+    return ti.op == .TypeStruct;
+}
+
 fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(m, id) orelse return null;
     switch(inst.op) {
@@ -121,7 +136,9 @@ fn builtinBlockMemberName(bi: spirv.BuiltIn) ?[]const u8 {
 fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) return try alloc.dupe(u8, base_name);
-    const base_is_cb = isUniformVar(m, base_id);
+    // A bare-array Uniform var is NOT a block: keep its name in the expression and
+    // index directly (`w[2]`), not the `{name}_m{idx}` block-member form (#289).
+    const base_is_cb = isUniformBlockVar(m, base_id);
     const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
     // A gl_PerVertex-style built-in block: emit no base instance — its members
     // lower to bare gl_* names (handled per-index below), matching spirv-cross.
@@ -239,7 +256,8 @@ fn writeResolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []co
 fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
     const base_name = names.get(base_id) orelse "base";
     if (indices.len == 0) { try w.writeAll(base_name); return; }
-    const base_is_cb = isUniformVar(m, base_id);
+    // Bare-array Uniform vars are not blocks — index directly (`w[2]`), #289.
+    const base_is_cb = isUniformBlockVar(m, base_id);
     const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
     const base_is_builtin_block = isBuiltinBlockVar(m, base_id);
     if (!base_is_cb and !base_is_builtin_block) try w.writeAll(base_name);
@@ -570,16 +588,40 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         // matrix Uniform var, not a Block-decorated struct. Emit it as a plain
         // `uniform TYPE name;` (#286) — the body references the var name directly — rather
         // than an empty `uniform name {} name_1;` block that drops the value.
-        // Bare ARRAY uniforms (`uniform float w[8];`) are excluded: they would need both
-        // the `[N]` declaration suffix AND an access-chain fix (the body emits `w_1.w_m2`
-        // struct-member form, not `w[2]`) — tracked as a follow-up. They keep the existing
-        // (broken-but-unchanged) block path here, so this fix introduces no regression.
+        // Bare ARRAY uniforms (`uniform float w[8];` — an OpTypeArray pointee, not a
+        // Block struct) emit `uniform {elem} {name}[{N}];` with the dimension preserved
+        // (glslType drops it); the body indexes them directly as `w[2]` (handled in the
+        // access path by the `base_is_cb` + pointee-is-struct guard, since these are NOT
+        // block members) — #289.
         const cbt = getDef(&module, cb.type_id);
         const is_struct = cbt != null and cbt.?.op == .TypeStruct;
         const is_array = cbt != null and (cbt.?.op == .TypeArray or cbt.?.op == .TypeRuntimeArray);
-        if (!is_struct and !is_array) {
-            const tn = glslType(&module, cb.type_id, &names, aa) catch return error.OutOfMemory;
-            try w.print("uniform {s} {s};\n\n", .{ tn, cb.name });
+        if (!is_struct) {
+            if (is_array) {
+                // Walk nested TypeArray layers to emit EVERY dimension — glslType
+                // strips them (`float w[2][3]` would degrade to `uniform float w[2];`
+                // and mismatch the `w[1][2]` use). RuntimeArray (no length) emits `[]`.
+                var dims = std.ArrayList([]const u8).initCapacity(aa, 2) catch return error.OutOfMemory;
+                var elem_id: u32 = cb.type_id;
+                while (getDef(&module, elem_id)) |inn| {
+                    if (inn.op == .TypeArray and inn.words.len > 3) {
+                        const len_def = getDef(&module, inn.words[3]);
+                        const len_val: u32 = if (len_def) |ld| (if (ld.words.len > 3) ld.words[3] else 1) else 1;
+                        dims.append(aa, std.fmt.allocPrint(aa, "[{d}]", .{len_val}) catch "[1]") catch {};
+                        elem_id = inn.words[2];
+                    } else if (inn.op == .TypeRuntimeArray and inn.words.len > 2) {
+                        dims.append(aa, "[]") catch {};
+                        elem_id = inn.words[2];
+                    } else break;
+                }
+                const elem_tn = glslType(&module, elem_id, &names, aa) catch return error.OutOfMemory;
+                try w.print("uniform {s} {s}", .{ elem_tn, cb.name });
+                for (dims.items) |d| try w.writeAll(d);
+                try w.writeAll(";\n\n");
+            } else {
+                const tn = glslType(&module, cb.type_id, &names, aa) catch return error.OutOfMemory;
+                try w.print("uniform {s} {s};\n\n", .{ tn, cb.name });
+            }
             continue;
         }
         const shifted = common.applyBindingShift(cb.binding, options.binding_shift);
