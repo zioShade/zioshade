@@ -2110,3 +2110,26 @@ test "T-umm.1: GLSL unsigned+signed min/max are not swapped (#272)" {
     try assertContains(x, "max(");
     try assertNotContains(x, "min(");
 }
+
+// bitfieldExtract / bitfieldInsert (SPIR-V OpBitField{SExtract,UExtract,Insert} = 202/203/
+// 201) were unhandled → `// unhandled op N` (undeclared result, non-compiling). GLSL has
+// native builtins; bitfieldExtract is overloaded so signed+unsigned share one name.
+test "T-bf.1: GLSL bitfieldExtract/bitfieldInsert lower to native builtins (#gaps bitfield)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { int si; uint ui; } u;
+        \\void main() {
+        \\    int a = bitfieldExtract(u.si, 3, 8);   // OpBitFieldSExtract
+        \\    uint b = bitfieldExtract(u.ui, 2, 5);  // OpBitFieldUExtract
+        \\    int c = bitfieldInsert(u.si, 5, 2, 6); // OpBitFieldInsert
+        \\    ivec2 d = bitfieldExtract(ivec2(u.si), 1, 4); // vector overload path
+        \\    o = vec4(float(a + c + d.x) + float(b), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlslStage(source, .fragment);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "bitfieldExtract(");
+    try assertContains(glsl, "bitfieldInsert(");
+    try assertNotContains(glsl, "// unhandled");
+}
