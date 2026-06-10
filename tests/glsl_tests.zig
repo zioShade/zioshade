@@ -2084,3 +2084,29 @@ test "T-atomic.3: GLSL imageAtomicCompSwap reads compare/data from correct opera
     try assertContains(glsl, ", 5u, 3u)");
     try assertNotContains(glsl, ", 3u, 64u)");
 }
+
+// GLSL.std.450 UMin(38)/UMax(41): unsigned min/max must lower to min()/max(), not the
+// reverse. The backend's wrong F/S/U-grouping numbering swapped them (#272).
+test "T-umm.1: GLSL unsigned+signed min/max are not swapped (#272)" {
+    const min_src =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { uint ui; int si; } u;
+        \\void main() { uint a = min(u.ui, 7u); int e = min(u.si, 3); o = vec4(float(a) + float(e), 0.0, 0.0, 1.0); }
+    ;
+    const m = try compileToGlslStage(min_src, .fragment);
+    defer alloc.free(m);
+    try assertContains(m, "min(");
+    try assertNotContains(m, "max(");
+
+    const max_src =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { uint ui; int si; } u;
+        \\void main() { uint b = max(u.ui, 9u); int f = max(u.si, 5); o = vec4(float(b) + float(f), 0.0, 0.0, 1.0); }
+    ;
+    const x = try compileToGlslStage(max_src, .fragment);
+    defer alloc.free(x);
+    try assertContains(x, "max(");
+    try assertNotContains(x, "min(");
+}

@@ -2565,8 +2565,9 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         // the generated spvInverseNxN helper. Intentionally NOT mapped here: if a bypass
         // ever reached emitStd450 it would emit a visible `// unhandled std450 #34` stub
         // (non-compiling), not a plausible-looking but non-existent `inverse()` call.
-        37 => "min", 38 => "max", 39 => "min",
-        40 => "max", 41 => "min", 42 => "max", 43 => "clamp", 44 => "clamp",
+        // GLSL.std.450 spec order: FMin(37) UMin(38) SMin(39) FMax(40) UMax(41) SMax(42).
+        37 => "min", 38 => "min", 39 => "min",
+        40 => "max", 41 => "max", 42 => "max", 43 => "clamp", 44 => "clamp",
         // 45 = SClamp (signed-integer clamp): plain `clamp`. NOT `fast::clamp` —
         // metal::fast::clamp is float-only fast-math; on ints it round-trips through
         // float (precision loss past 2^24) or won't compile. (FClamp(43) keeps `clamp`,

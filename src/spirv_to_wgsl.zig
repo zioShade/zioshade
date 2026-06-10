@@ -255,8 +255,8 @@ fn glslStd450WgslName(instruction: u32) error{UnsupportedExtInst}![]const u8 {
         35 => "modf", // ModfStruct
         36 => "modf",
         37 => "min", // FMin
-        38 => "min", // SMin
-        39 => "min", // UMin
+        38 => "min", // UMin
+        39 => "min", // SMin
         40 => "max", // FMax
         41 => "max", // UMax
         42 => "max", // SMax
