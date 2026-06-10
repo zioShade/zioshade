@@ -1587,6 +1587,16 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // idiom). Emit the template once, gated on actual need. Read-only const
     // arrays that are only INDEXED keep the simpler valid `constant T[N]` path
     // (intentional divergence from spirv-cross — see the module-array block).
+    // textureQueryLod (OpImageQueryLod) lowers to calculate_clamped_lod /
+    // calculate_unclamped_lod, which exist only on MSL 2.2+. Below that, honest-error
+    // rather than emit non-compiling MSL — matching spirv-cross, which refuses
+    // ImageQueryLod when metal_version < 22.
+    if (options.metal_version < 22) {
+        for (module.instructions) |inst| {
+            if (inst.op == .ImageQueryLod) return error.UnsupportedOp;
+        }
+    }
+
     const need_unsafe_array = moduleNeedsUnsafeArray(&module);
     if (need_unsafe_array) try w.writeAll(spv_unsafe_array_template);
 
@@ -4226,6 +4236,18 @@ fn emitInstruction(
             } else {
                 try w.print("    {s} {s} = {s}.sample({s}Smplr, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord});
             }
+        },
+        // OpImageQueryLod (textureQueryLod): SampledImage, Coordinate → result vec2.
+        // MSL calculate_clamped_lod (.x) + calculate_unclamped_lod (.y) — both MSL 2.2+
+        // (guarded by the metal_version check in spirvToMSL, so this is only reached at 2.2+).
+        // Arrayed textures need no layer split here — the LOD query is layer-agnostic
+        // (unlike .sample, which passes the array layer as a separate argument).
+        .ImageQueryLod => {
+            if (inst.words.len < 5) return;
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            try w.print("    {s} {s} = {s}({s}.calculate_clamped_lod({s}Smplr, {s}), {s}.calculate_unclamped_lod({s}Smplr, {s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", rtt, si, si, coord, si, si, coord });
         },
         .ImageSampleDrefImplicitLod => {
             // Shadow texture: MSL uses .sample_compare(compare_sampler, coord, dref).

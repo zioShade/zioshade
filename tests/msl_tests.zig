@@ -21,6 +21,12 @@ fn compileToMslStage(source: [:0]const u8, stage: glslpp.Stage) ![]const u8 {
     return try glslpp.spirvToMSL(alloc, spirv, .{});
 }
 
+fn compileToMslStageVer(source: [:0]const u8, stage: glslpp.Stage, metal_version: u32) ![]const u8 {
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = stage });
+    defer alloc.free(spirv);
+    return try glslpp.spirvToMSL(alloc, spirv, .{ .metal_version = metal_version });
+}
+
 fn assertContains(haystack: []const u8, needle: []const u8) !void {
     if (std.mem.indexOf(u8, haystack, needle)) |_| return;
     std.debug.print("Expected to find \"{s}\" in output:\n{s}\n", .{ needle, haystack });
@@ -3274,5 +3280,49 @@ test "T-bf.1: MSL bitfieldExtract/bitfieldInsert lower to extract_bits/insert_bi
     try assertContains(msl, "extract_bits(");
     try assertContains(msl, "insert_bits(");
     try assertContains(msl, ", uint(3), uint(8))"); // offset/width cast to uint (signed extract)
+    try assertNotContains(msl, "// unhandled");
+}
+
+// textureQueryLod (OpImageQueryLod=105) was unhandled → `// unhandled op 105`,
+// non-compiling. MSL calculate_clamped_lod/calculate_unclamped_lod require MSL 2.2+.
+const querylod_src =
+    \\#version 450
+    \\layout(location = 0) out vec4 o;
+    \\layout(binding = 0) uniform sampler2D s;
+    \\layout(binding = 1) uniform U { vec2 v; } u;
+    \\void main() {
+    \\    vec2 lod = textureQueryLod(s, u.v);
+    \\    o = vec4(lod.x, lod.y, 0.0, 1.0);
+    \\}
+;
+
+test "T-qlod.1: MSL textureQueryLod emits calculate_clamped/unclamped_lod on MSL 2.2+ (#278)" {
+    const msl = try compileToMslStageVer(querylod_src, .fragment, 22);
+    defer alloc.free(msl);
+    try assertContains(msl, ".calculate_clamped_lod("); // .x = clamped LOD
+    try assertContains(msl, ".calculate_unclamped_lod("); // .y = unclamped LOD
+    try assertNotContains(msl, "// unhandled");
+}
+
+test "T-qlod.2: MSL textureQueryLod honest-errors below MSL 2.2 (#278)" {
+    // calculate_*_lod don't exist before MSL 2.2, so glslpp must fail loud (matching
+    // spirv-cross, which refuses ImageQueryLod when metal_version < 22) rather than emit
+    // non-compiling MSL.
+    try std.testing.expectError(error.UnsupportedOp, compileToMslStageVer(querylod_src, .fragment, 21));
+}
+
+test "T-qlod.3: the MSL 2.2 query guard does not trip a plain-sampling shader (#278)" {
+    // A shader WITHOUT textureQueryLod must still compile at metal_version 21 — the guard
+    // is scoped to OpImageQueryLod only.
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(binding = 1) uniform U { vec2 v; } u;
+        \\void main() { o = texture(s, u.v); }
+    ;
+    const msl = try compileToMslStageVer(source, .fragment, 21);
+    defer alloc.free(msl);
+    try assertContains(msl, ".sample(");
     try assertNotContains(msl, "// unhandled");
 }
