@@ -49,6 +49,7 @@ pub const Op = enum(u16) {
     CopyObject = 83,
     CopyLogical = 400,
     AccessChain = 65,
+    ArrayLength = 68,
     Decorate = 71,
     MemberDecorate = 72,
     VectorShuffle = 79,

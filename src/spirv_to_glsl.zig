@@ -3085,6 +3085,14 @@ fn emitInstruction(
             }
             try w.writeAll(");\n");
         },
+        .ArrayLength => {
+            // Runtime SSBO array `.length()` (OpArrayLength). GLSL has `.length()`
+            // natively, but the GLSL backend's SSBO member naming (`{block}_m{idx}` vs
+            // the original member name) and result-id registration aren't yet wired for
+            // it — emitting it now would desync the declaration from the access. Honest-
+            // error rather than the silent-wrong `// unhandled op 68` (#294; GLSL follow-up).
+            return error.UnsupportedOp;
+        },
         else => {
             try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});
         },

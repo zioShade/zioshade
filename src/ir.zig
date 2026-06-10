@@ -299,6 +299,7 @@ pub const Instruction = struct {
         composite_construct,
         composite_extract,
         access_chain,
+        array_length, // OpArrayLength — runtime SSBO array .length()
         vector_extract_dynamic,
         member_access_op,
         image_sample,

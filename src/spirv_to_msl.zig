@@ -5137,6 +5137,12 @@ fn emitInstruction(
                 try w.print("    dispatch_mesh_threadgroups(mesh_grid, {s}, {s}, {s});\n", .{x, y, z});
             }
         },
+        // Runtime SSBO array `.length()` (OpArrayLength). MSL expresses this via a
+        // passed buffer-length constant — not yet wired here. Honest-error rather than
+        // the silent-wrong `// unhandled op 68` the default arm would emit (#294; MSL
+        // follow-up).
+        .ArrayLength => return error.UnsupportedOp,
+
         else => {
             try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});
         },

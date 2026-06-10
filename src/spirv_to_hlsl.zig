@@ -4672,6 +4672,12 @@ fn emitInstruction(
             }
         },
 
+        // Runtime SSBO array `.length()` (OpArrayLength). HLSL would express this via a
+        // StructuredBuffer/ByteAddressBuffer `.GetDimensions(...)` against the specific
+        // buffer model — not yet wired here. Honest-error rather than the silent-wrong
+        // `// unhandled op 68` the default arm would emit (#294; HLSL follow-up).
+        .ArrayLength => return error.UnsupportedOp,
+
         else => {
             // Mesh/task shader ops
             if (inst.op == .SetMeshOutputsEXT) {

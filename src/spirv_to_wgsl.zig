@@ -6776,6 +6776,31 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
             },
 
+            // ArrayLength — runtime SSBO array `.length()`. WGSL: arrayLength(&buf.member),
+            // returning u32 (matching the uint result type). words[3]=struct (block-var)
+            // pointer, words[4]=runtime-array member index. (#294)
+            .ArrayLength => {
+                if (inst.words.len < 5) return error.UnsupportedOp;
+                const rt = try wgslType(module, inst.words[1], names, arena); // u32
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const buf_name = names.get(inst.words[3]) orelse "buf";
+                const member_idx = inst.words[4];
+                var struct_id: u32 = 0;
+                if (getTypeOf(module, inst.words[3])) |ptr_ty| {
+                    if (getDef(module, ptr_ty)) |ptr| {
+                        if (ptr.op == .TypePointer and ptr.words.len > 3) struct_id = ptr.words[3];
+                    }
+                }
+                // Can't resolve the struct member name (malformed/external SPIR-V) →
+                // honest-error rather than emit `arrayLength(&buf.arr)` against a
+                // nonexistent member (naga would reject it).
+                if (struct_id == 0) return error.UnsupportedOp;
+                var mbuf: [32]u8 = undefined;
+                const member_name = getMemberName(module, struct_id, member_idx, &mbuf);
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = arrayLength(&{s}.{s});\n", .{ result_name, rt, buf_name, member_name });
+            },
+
             // ControlBarrier / MemoryBarrier
             .ControlBarrier => {
                 try writeInd(w, indent); try w.writeAll("workgroupBarrier();\n");

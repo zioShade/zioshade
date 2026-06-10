@@ -81,6 +81,7 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         61 => rt(2, "iL"),          // OpLoad: ptr, optional-mem-access-literals
         62 => rt(0, "iiL"),         // OpStore: ptr, obj, optional-mem-access
         65 => rt(2, "iI"),         // OpAccessChain: base, indexes...
+        68 => rt(2, "il"),         // OpArrayLength: structure-ptr(id), array-member(literal)
         // --- Decoration ---
         71 => rt(0, "ilL"),        // OpDecorate: target-id, decoration, extra-literals
         72 => rt(0, "illL"),       // OpMemberDecorate: type-id, member, decoration, extra-literals

@@ -4737,9 +4737,39 @@ const Analyzer = struct {
                 if (std.mem.eql(u8, node.data.name, "length") and node.data.children.len == 1) {
                     var arr_size: ?u32 = null;
                     const first_child = node.data.children[0];
-                    // Try identifier lookup first (avoids emitting unnecessary IR)
+                    // Try identifier lookup first (avoids emitting unnecessary IR).
+                    // NOTE: this handles only the ANONYMOUS-block form
+                    // (`buffer B { float d[]; }; → d.length()`). A named-instance block
+                    // (`buffer B { float d[]; } b; → b.d.length()`) parses with
+                    // first_child.tag == .member_access, falls through to the fold path
+                    // below, and remains the pre-existing fold-0 limitation (#294 follow-up).
                     if (first_child.tag == .identifier) {
                         if (self.lookup(first_child.data.name)) |sym| {
+                            // RUNTIME-sized SSBO array (`buffer B { float d[]; }; … d.length()`):
+                            // size == 0 with NO size_name marks a genuinely unsized array. It has
+                            // NO compile-time length — it must emit OpArrayLength(block_ptr,
+                            // member_index) at runtime, not fold to the sentinel 0 (the silent-
+                            // wrong this replaces, #294). A spec-const-sized member (`float d[N]`)
+                            // also has size == 0 but a non-null size_name — that is a sized
+                            // OpTypeArray, NOT an OpTypeRuntimeArray, so OpArrayLength is invalid
+                            // for it; it must be EXCLUDED here (falls through to the fold path).
+                            // The result is u32 (SPIR-V requires OpArrayLength's result to be uint).
+                            if (sym.kind == .block_member and sym.ty == .array and
+                                sym.ty.array.size == 0 and sym.ty.array.size_name == null)
+                            {
+                                const id = self.allocId();
+                                const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                operands[0] = .{ .id = sym.ir_id }; // block variable (struct) pointer
+                                operands[1] = .{ .literal_int = sym.member_index }; // runtime-array member index
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .array_length,
+                                    .result_type = null,
+                                    .result_id = id,
+                                    .operands = operands,
+                                    .ty = .uint,
+                                });
+                                return .{ .ty = .uint, .id = id };
+                            }
                             if (sym.ty == .array) arr_size = sym.ty.array.size;
                         }
                     }
