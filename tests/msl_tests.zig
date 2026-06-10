@@ -3223,3 +3223,33 @@ test "T-clamp.1: MSL integer clamp uses clamp(), not fast::clamp() (#gaps sclamp
     // evidence the integer (S/UClamp) paths use plain clamp.
     try assertNotContains(msl, "fast::clamp"); // never the float-only fast-math op on ints
 }
+
+// GLSL.std.450 UMin(38)/UMax(41) — UNSIGNED min/max — must lower to min()/max(), not the
+// reverse. The MSL/HLSL/GLSL backends used a wrong F/S/U-grouping numbering (38→max,
+// 41→min), so min(uint) emitted max() and max(uint) emitted min() — a silent-wrong
+// miscompile on every unsigned min/max. (Signed/float were correct; WGSL was correct.)
+test "T-umm.1: MSL unsigned+signed min/max are not swapped (#272)" {
+    // Both unsigned AND signed min in one shader: every op must be `min`, never `max`
+    // (guards both the unsigned swap and an over-correction of the signed path).
+    const min_src =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { uint ui; int si; } u;
+        \\void main() { uint a = min(u.ui, 7u); int e = min(u.si, 3); o = vec4(float(a) + float(e), 0.0, 0.0, 1.0); }
+    ;
+    const m = try compileToMslStage(min_src, .fragment);
+    defer alloc.free(m);
+    try assertContains(m, "min(");
+    try assertNotContains(m, "max(");
+
+    const max_src =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { uint ui; int si; } u;
+        \\void main() { uint b = max(u.ui, 9u); int f = max(u.si, 5); o = vec4(float(b) + float(f), 0.0, 0.0, 1.0); }
+    ;
+    const x = try compileToMslStage(max_src, .fragment);
+    defer alloc.free(x);
+    try assertContains(x, "max(");
+    try assertNotContains(x, "min(");
+}
