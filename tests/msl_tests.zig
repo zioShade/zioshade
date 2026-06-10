@@ -3253,3 +3253,26 @@ test "T-umm.1: MSL unsigned+signed min/max are not swapped (#272)" {
     try assertContains(x, "max(");
     try assertNotContains(x, "min(");
 }
+
+// bitfieldExtract / bitfieldInsert (SPIR-V OpBitField{SExtract,UExtract,Insert} = 202/203/
+// 201) were unhandled → `// unhandled op N` (undeclared result, non-compiling). MSL has
+// extract_bits/insert_bits (overloaded by signedness); offset/width are uint, so cast.
+test "T-bf.1: MSL bitfieldExtract/bitfieldInsert lower to extract_bits/insert_bits (#gaps bitfield)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { int si; uint ui; } u;
+        \\void main() {
+        \\    int a = bitfieldExtract(u.si, 3, 8);   // OpBitFieldSExtract
+        \\    uint b = bitfieldExtract(u.ui, 2, 5);  // OpBitFieldUExtract
+        \\    int c = bitfieldInsert(u.si, 5, 2, 6); // OpBitFieldInsert
+        \\    o = vec4(float(a + c) + float(b), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    try assertContains(msl, "extract_bits(");
+    try assertContains(msl, "insert_bits(");
+    try assertContains(msl, ", uint(3), uint(8))"); // offset/width cast to uint (signed extract)
+    try assertNotContains(msl, "// unhandled");
+}
