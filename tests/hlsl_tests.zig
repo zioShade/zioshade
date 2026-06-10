@@ -9426,15 +9426,12 @@ test "T397.1: while loop with break" {
     try assertContains(hlsl, "float4");
 }
 
-test "T398.1: do-while with continue -> honest-error (#244)" {
-    // A do-while whose BODY has its own control flow (`if(i==3) continue;`) cannot
-    // yet be faithfully cross-compiled (the bottom condition would need to be an
-    // inline expression so a body `continue` re-evaluates it fresh; glslpp's flat-SSA
-    // model has no such inliner). Earlier this input SILENTLY MISCOMPILED — inverted
-    // `break` polarity, duplicated/undeclared temps, infinite loop — and this very
-    // test rubber-stamped that wrong output by only asserting it contained "float4".
-    // Per glslpp's "fail loud, never lossy" discipline the backend now honest-errors;
-    // assert that contract (see also tests/loop_phi_tests.zig #244).
+test "T398.1: do-while with continue -> native do/while (#246, was #244 honest-error)" {
+    // A do-while whose BODY has its own control flow (`if(i==3) continue;`) is now
+    // emitted faithfully as a native `do { … } while (<inlined cond>);` (#246): the
+    // bottom condition is rebuilt over the persistent loop var so a body `continue`
+    // re-evaluates it fresh. Previously this honest-errored (#244, after an even
+    // earlier silent-miscompile). dxc-validated; semantically n=5 ⇒ correct.
     const source =
         \\#version 450
         \\layout(location = 0) in float x;
@@ -9450,7 +9447,13 @@ test "T398.1: do-while with continue -> honest-error (#244)" {
         \\    fragColor = vec4(sum);
         \\}
     ;
-    try std.testing.expectError(error.UnstructuredControlFlow, compileToHlsl(source));
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "do\n");
+    try assertContains(hlsl, "} while (");
+    try assertNotContains(hlsl, "while (true)");
+    try assertContains(hlsl, "continue;");
+    try assertNotContains(hlsl, "break;");
 }
 
 test "T399.1: matrix scalar operations" {
