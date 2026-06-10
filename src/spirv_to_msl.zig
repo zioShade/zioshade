@@ -1873,8 +1873,13 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
                 if (tex.descriptor_set != set_idx) continue;
                 try w.print("    {s} {s} [[id({d})]];\n", .{ tex.msl_type, tex.name, id_slot });
                 id_slot += 1;
-                try w.print("    sampler {s}Smplr [[id({d})]];\n", .{ tex.name, id_slot });
-                id_slot += 1;
+                // Storage images (#284 follow-up) take no sampler — consuming a
+                // single [[id]] slot, matching spirv-cross. Sampled images take a
+                // second slot for their `sampler`.
+                if (!tex.is_storage) {
+                    try w.print("    sampler {s}Smplr [[id({d})]];\n", .{ tex.name, id_slot });
+                    id_slot += 1;
+                }
             }
             for (storage_buffers.items) |sb| {
                 if (sb.descriptor_set != set_idx) continue;
@@ -3003,11 +3008,11 @@ fn emitFunction(
             first_param = false;
         }
 
-        // Add texture + sampler params
+        // Add texture + sampler params (storage images take no sampler, #284 follow-up)
         for (textures.items) |tex| {
             if (!first_param) try w.writeAll(", ");
             try w.print("{s} {s}", .{ tex.msl_type, tex.name });
-            try w.print(", sampler {s}Smplr", .{tex.name});
+            if (!tex.is_storage) try w.print(", sampler {s}Smplr", .{tex.name});
             first_param = false;
         }
 
@@ -3070,7 +3075,7 @@ fn emitFunction(
                 if (!first_param) try w.writeAll(", ");
                 const tex_b = resolveMslSlot(resource_bindings, binding_shift, tex.descriptor_set, tex.binding);
                 try w.print("{s} {s} [[texture({d})]]", .{ tex.msl_type, tex.name, tex_b});
-                try w.print(", sampler {s}Smplr [[sampler({d})]]", .{tex.name, tex_b});
+                if (!tex.is_storage) try w.print(", sampler {s}Smplr [[sampler({d})]]", .{tex.name, tex_b});
                 first_param = false;
             }
         }
@@ -3090,14 +3095,16 @@ fn emitFunction(
                 try w.print(", set{d}.{s}", .{ cb.descriptor_set, cb.name });
             }
             for (textures.items) |tex| {
-                try w.print(", set{d}.{s}, set{d}.{s}Smplr", .{ tex.descriptor_set, tex.name, tex.descriptor_set, tex.name });
+                try w.print(", set{d}.{s}", .{ tex.descriptor_set, tex.name });
+                if (!tex.is_storage) try w.print(", set{d}.{s}Smplr", .{ tex.descriptor_set, tex.name });
             }
         } else {
             for (cbuffers.items) |cb| {
                 try w.print(", {s}_1", .{cb.name});
             }
             for (textures.items) |tex| {
-                try w.print(", {s}, {s}Smplr", .{tex.name, tex.name});
+                try w.print(", {s}", .{tex.name});
+                if (!tex.is_storage) try w.print(", {s}Smplr", .{tex.name});
             }
         }
         // Pass the stage-in struct last, matching the `_impl` signature order.
@@ -3240,7 +3247,7 @@ fn emitFunction(
             }
             for (textures.items) |tex| {
                 try w.print("    {s} {s} = set{d}.{s};\n", .{ tex.msl_type, tex.name, tex.descriptor_set, tex.name });
-                try w.print("    sampler {s}Smplr = set{d}.{s}Smplr;\n", .{ tex.name, tex.descriptor_set, tex.name });
+                if (!tex.is_storage) try w.print("    sampler {s}Smplr = set{d}.{s}Smplr;\n", .{ tex.name, tex.descriptor_set, tex.name });
             }
             // SSBO: the body emitter accesses members via `Name.member` (dot),
             // so bind `Name` as a reference. The argument-buffer set field is a
@@ -3325,10 +3332,11 @@ fn emitFunction(
             try w.print("constant {s}& {s}_1", .{ cb.name, cb.name });
             first_param = false;
         }
-        // Textures + samplers (stage-agnostic).
+        // Textures + samplers (stage-agnostic; storage images take no sampler, #284 follow-up).
         for (textures.items) |tex| {
             if (!first_param) try w.writeAll(", ");
-            try w.print("{s} {s}, sampler {s}Smplr", .{ tex.msl_type, tex.name, tex.name });
+            try w.print("{s} {s}", .{ tex.msl_type, tex.name });
+            if (!tex.is_storage) try w.print(", sampler {s}Smplr", .{tex.name});
             first_param = false;
         }
         // Input built-ins by value (impl_ty matches the SPIR-V variable type).
@@ -3360,7 +3368,8 @@ fn emitFunction(
         for (textures.items) |tex| {
             if (!first_param) try w.writeAll(", ");
             const tex_b = resolveMslSlot(resource_bindings, binding_shift, tex.descriptor_set, tex.binding);
-            try w.print("{s} {s} [[texture({d})]], sampler {s}Smplr [[sampler({d})]]", .{ tex.msl_type, tex.name, tex_b, tex.name, tex_b });
+            try w.print("{s} {s} [[texture({d})]]", .{ tex.msl_type, tex.name, tex_b });
+            if (!tex.is_storage) try w.print(", sampler {s}Smplr [[sampler({d})]]", .{ tex.name, tex_b });
             first_param = false;
         }
         // Input built-ins as MSL entry-point attributes (uint vertex_id/instance_id).
@@ -3388,7 +3397,8 @@ fn emitFunction(
         }
         for (textures.items) |tex| {
             if (!first_arg) try w.writeAll(", ");
-            try w.print("{s}, {s}Smplr", .{ tex.name, tex.name });
+            try w.print("{s}", .{tex.name});
+            if (!tex.is_storage) try w.print(", {s}Smplr", .{tex.name});
             first_arg = false;
         }
         // Forward each input built-in to the helper, casting uint→int where the
@@ -3449,11 +3459,12 @@ fn emitFunction(
         try w.print("constant {s}& {s}_1", .{cb.name, cb.name});
     }
     // Add texture + sampler params to non-entry functions
+    // (storage images take no sampler, #284 follow-up).
     for (textures.items) |tex| {
         if (!first_param) try w.writeAll(", ");
         first_param = false;
         try w.print("{s} {s}", .{ tex.msl_type, tex.name });
-        try w.print(", sampler {s}Smplr", .{tex.name});
+        if (!tex.is_storage) try w.print(", sampler {s}Smplr", .{tex.name});
     }
 
     try w.writeAll(")\n{\n");
@@ -5034,7 +5045,8 @@ fn emitInstruction(
             for (textures.items) |tex| {
                 if (!first_arg) try w.writeAll(", ");
                 first_arg = false;
-                try w.print("{s}, {s}Smplr", .{tex.name, tex.name});
+                try w.print("{s}", .{tex.name});
+                if (!tex.is_storage) try w.print(", {s}Smplr", .{tex.name});
             }
             try w.writeAll(");\n");
         },

@@ -3221,6 +3221,86 @@ test "T-imgrw.6: MSL image used for BOTH atomic and imageStore keeps default tex
     try assertContains(msl, "spvImage2DAtomicCoord("); // the atomic path still works
 }
 
+// #284 follow-up: the fragment, vertex, non-entry, and argument-buffer
+// texture-emission paths unconditionally emitted `sampler {name}Smplr` for
+// EVERY texture, including STORAGE images (image2D/uimage2D). Storage images
+// don't support `.sample()`, so the sampler is dead — it compiles (unused
+// param) but diverges from spirv-cross, which emits NO sampler for a storage
+// image. The compute path was guarded in #284 (`if (tex.is_storage)`); these
+// tests pin the remaining sites to the same `!tex.is_storage` behaviour.
+// Oracle: spirv-cross --msl.
+test "T-imgrw.7: MSL fragment storage image emits NO sampler (#284 follow-up)" {
+    const source =
+        \\#version 450
+        \\layout(r32f, binding = 0) uniform image2D img;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    imageStore(img, ivec2(0), vec4(1.0));
+        \\    o = imageLoad(img, ivec2(0));
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    try assertContains(msl, "img [[texture(0)]]"); // texture still bound
+    try assertNotContains(msl, "imgSmplr");         // but NO dead sampler anywhere
+}
+
+test "T-imgrw.8: MSL vertex storage image emits NO sampler (#284 follow-up)" {
+    const source =
+        \\#version 450
+        \\layout(r32f, binding = 0) uniform image2D img;
+        \\void main() {
+        \\    gl_Position = imageLoad(img, ivec2(0));
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .vertex);
+    defer alloc.free(msl);
+    try assertContains(msl, "img [[texture(0)]]");
+    try assertNotContains(msl, "imgSmplr");
+}
+
+test "T-imgrw.9: MSL non-entry helper with storage image emits NO sampler (#284 follow-up)" {
+    // Every non-entry function gets ALL textures appended to its signature, so a
+    // helper that touches the storage image exercises the function-signature and
+    // call-forwarding sites.
+    const source =
+        \\#version 450
+        \\layout(r32f, binding = 0) uniform image2D img;
+        \\layout(location = 0) out vec4 o;
+        \\vec4 helper() { return imageLoad(img, ivec2(0)); }
+        \\void main() { o = helper(); }
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    try assertContains(msl, "img [[texture(0)]]");
+    try assertNotContains(msl, "imgSmplr");
+}
+
+test "T-imgrw.10: MSL argbuf storage image takes ONE [[id]] slot, no sampler (#284 follow-up)" {
+    // In an argument buffer a storage image consumes a single [[id]] descriptor
+    // slot (no sampler), so a following combined image-sampler shifts down: its
+    // texture lands at id(1) and its sampler at id(2), not id(2)/id(3).
+    const source =
+        \\#version 450
+        \\layout(set=0, r32f, binding=0) uniform image2D img;
+        \\layout(set=0, binding=1) uniform sampler2D tex;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main() {
+        \\    imageStore(img, ivec2(0), vec4(1.0));
+        \\    o = imageLoad(img, ivec2(0)) + texture(tex, uv);
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const msl = try glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
+    defer alloc.free(msl);
+    try assertNotContains(msl, "imgSmplr");                // storage image: no sampler
+    try assertContains(msl, "img [[id(0)]]");              // texture at slot 0
+    try assertContains(msl, "tex [[id(1)]]");              // sampled texture shifted to slot 1
+    try assertContains(msl, "sampler texSmplr [[id(2)]]"); // its sampler at slot 2
+}
+
 // findMSB/findLSB are GLSL.std.450 FindSMsb/FindUMsb/FindILsb — NOT raw clz/ctz.
 // glslpp's MSL backend mapped findLSB→ctz and findMSB→clz, which is silent-wrong:
 // findMSB(1u) is 0 (the MSB *index*), but clz(1u) is 31; findLSB(0) must be -1, but
