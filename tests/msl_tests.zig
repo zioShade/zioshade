@@ -2937,6 +2937,10 @@ test "T-atomic.3: MSL image atomic_compare_exchange reads compare/data from corr
     try assertNotContains(msl, "&5u"); // invalid-lvalue bug (#263)
     try assertNotContains(msl, "&3u"); // operand-swap regression (#260)
     try assertNotContains(msl, "64u,");
+    // #267: the image-atomic object now targets the backing buffer, not the broken
+    // non-addressable `&img[coord]` form.
+    try assertContains(msl, "img_atomic[spvImage2DAtomicCoord(");
+    try assertNotContains(msl, "&img[int2(");
 }
 
 // #263: the comparator is also routed through the materialized local when it is a
@@ -3023,6 +3027,97 @@ test "T-atomic.7: MSL signed atomic casts to atomic_int (#265)" {
     try assertContains(msl, "atomic_fetch_min_explicit((device atomic_int*)&b.sval, -5,");
     try assertNotContains(msl, "atomic_fetch_min_explicit(b.sval"); // bare-object bug
     try std.testing.expect(atomicCallLineHasType(msl, "atomic_fetch_min_explicit", "int"));
+}
+
+// ---------------------------------------------------------------------------
+// #267: MSL storage-image atomics. Metal has no native read-write atomic on a
+// texture2d; spirv-cross emulates with a buffer-backed linear texture. The
+// queried image is bound as a texture AND a separate `device atomic_T*` backing
+// buffer; the atomic targets `(device atomic_T*)&img_atomic[spvImage2DAtomicCoord(coord, img)]`.
+// Previously glslpp emitted `&img[coord]` (not addressable in Metal) — silent-wrong.
+// Oracle: spirv-cross --msl.
+test "T-imgatomic.1: MSL uimage2D atomic uses spvImage2DAtomicCoord backing buffer (#267)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(r32ui, binding = 0) uniform uimage2D img;
+        \\void main() {
+        \\    uint a = imageAtomicAdd(img, ivec2(0), 7u);
+        \\    uint b = imageAtomicExchange(img, ivec2(1), 3u);
+        \\    imageAtomicMax(img, ivec2(2), a + b);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    // The image is bound as a texture parameter (was entirely missing before).
+    try assertContains(msl, "texture2d<uint> img [[texture(0)]]");
+    // A separate atomic backing buffer is added.
+    try assertContains(msl, "device atomic_uint* img_atomic [[buffer(");
+    // The coord-linearization macro + alignment function-constant are emitted once.
+    try assertContains(msl, "#define spvImage2DAtomicCoord(");
+    try assertContains(msl, "spvLinearTextureAlignment");
+    // The atomic targets the backing buffer at the linearized coord.
+    try assertContains(msl, "atomic_fetch_add_explicit((device atomic_uint*)&img_atomic[spvImage2DAtomicCoord(int2(0), img)], 7u,");
+    try assertContains(msl, "atomic_exchange_explicit((device atomic_uint*)&img_atomic[spvImage2DAtomicCoord(int2(1), img)], 3u,");
+    try assertContains(msl, "atomic_fetch_max_explicit((device atomic_uint*)&img_atomic[spvImage2DAtomicCoord(int2(2), img)],");
+    // The broken non-addressable form is gone.
+    try assertNotContains(msl, "&img[int2(");
+}
+
+test "T-imgatomic.2: MSL iimage2D atomic uses atomic_int backing buffer (#267)" {
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(r32i, binding = 0) uniform iimage2D img;
+        \\void main() { imageAtomicAdd(img, ivec2(0), 5); }
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "texture2d<int> img [[texture(0)]]");
+    try assertContains(msl, "device atomic_int* img_atomic [[buffer(");
+    try assertContains(msl, "atomic_fetch_add_explicit((device atomic_int*)&img_atomic[spvImage2DAtomicCoord(int2(0), img)], 5,");
+}
+
+test "T-imgatomic.3: MSL image-atomic backing buffer is appended AFTER existing buffers (#267)" {
+    // An SSBO at binding 1 occupies a [[buffer]] slot; the atomic backing buffer must
+    // be appended at a non-colliding higher slot, never overwriting the SSBO's.
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(r32ui, binding = 0) uniform uimage2D img;
+        \\layout(std430, binding = 1) buffer B { uint out0; } b;
+        \\void main() { b.out0 = imageAtomicAdd(img, ivec2(0), 7u); }
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "b [[buffer(1)]]"); // the SSBO keeps its slot
+    try assertContains(msl, "device atomic_uint* img_atomic [[buffer(2)]]"); // appended above it
+}
+
+test "T-imgatomic.4: MSL image atomics honest-error under argument buffers (#267)" {
+    // Argument-buffer layout for the atomic backing buffer is out of scope; fail loud.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(r32ui, binding = 0) uniform uimage2D img;
+        \\void main() { imageAtomicAdd(img, ivec2(0), 7u); }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true }));
+}
+
+test "T-imgatomic.5: MSL image atomics in a FRAGMENT shader honest-error (#267)" {
+    // The buffer-backed scheme is implemented for the compute path only; a fragment
+    // image atomic would need impl-helper backing-buffer threading. Fail loud rather
+    // than emit the old non-compiling &img[coord].
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(r32ui, binding = 0) uniform uimage2D img;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(float(imageAtomicAdd(img, ivec2(0), 7u))); }
+    ;
+    try std.testing.expectError(error.UnsupportedOp, compileToMslStage(source, .fragment));
 }
 
 // findMSB/findLSB are GLSL.std.450 FindSMsb/FindUMsb/FindILsb — NOT raw clz/ctz.
