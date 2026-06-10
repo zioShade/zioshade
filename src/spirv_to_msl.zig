@@ -26,7 +26,7 @@ const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32, descr
 // `buildMslTextureType` and read at the emit sites. It is intentionally NOT
 // defaulted: a construction site that forgets it should be a compile error, not
 // a silent `texture2d<float>` for an int/cube/array sampler (#203).
-const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0, is_depth: bool = false, dim: u32 = 1, arrayed: bool = false, msl_type: []const u8 };
+const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0, is_depth: bool = false, dim: u32 = 1, arrayed: bool = false, msl_type: []const u8, var_id: u32 = 0 };
 const MemberKey = struct { struct_id: u32, member_index: u32 };
 /// A stage input that becomes a `main0_in` field and is referenced in the body
 /// as `in.<name>`. For fragment the field is `T name [[user(locnN)]]`; for
@@ -232,6 +232,27 @@ fn mslSampledComponent(m: *const ParsedModule, img: Instruction) []const u8 {
         .TypeInt => if (st.words.len > 3 and st.words[3] == 0) "uint" else "int",
         else => "float",
     };
+}
+
+/// For an image VARIABLE id that is the target of an image atomic, return the MSL
+/// atomic scalar ("uint"/"int") iff it is a 2D, non-arrayed, INTEGER storage image —
+/// the only shape this backend emulates via the spvImage2DAtomicCoord buffer-backed
+/// scheme. Returns null for anything else (1D/3D/cube, arrayed, float component) so
+/// the caller can honest-error instead of mis-emitting. OpTypeImage operand layout:
+/// [op, result, sampled_type(2), Dim(3), Depth(4), Arrayed(5), MS(6), Sampled(7), Format(8)].
+fn mslAtomicImageScalar(m: *const ParsedModule, image_var_id: u32) ?[]const u8 {
+    const v = getDef(m, image_var_id) orelse return null;
+    if (v.op != .Variable or v.words.len < 2) return null;
+    const ptr = getDef(m, v.words[1]) orelse return null;
+    if (ptr.op != .TypePointer or ptr.words.len < 4) return null;
+    const img = getDef(m, ptr.words[3]) orelse return null;
+    if (img.op != .TypeImage or img.words.len < 6) return null;
+    if (img.words[3] != 1) return null; // Dim: 1 == 2D
+    if (img.words[5] != 0) return null; // Arrayed: must be 0
+    const comp = mslSampledComponent(m, img);
+    if (std.mem.eql(u8, comp, "uint")) return "uint";
+    if (std.mem.eql(u8, comp, "int")) return "int";
+    return null; // float → atomic_float is Metal 3.0+; out of scope
 }
 
 fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
@@ -1203,6 +1224,51 @@ fn collectPullModelInputs(m: *const ParsedModule, alloc: std.mem.Allocator) !std
     return set;
 }
 
+/// Collect the storage-IMAGE variable ids that back an image atomic. Metal has no
+/// native read-write atomic on a `texture2d`, so spirv-cross emulates them with a
+/// buffer-backed linear texture: each such image needs a SEPARATE `device atomic_T*`
+/// backing buffer and the `spvImage2DAtomicCoord` linearization macro. SPIR-V routes
+/// image atomics through `OpImageTexelPointer` (whose Image operand, words[3], is the
+/// image variable), so collecting every ImageTexelPointer's image var-id yields exactly
+/// the atomic-accessed images (ImageTexelPointer exists only to feed OpAtomic*).
+fn collectAtomicImages(m: *const ParsedModule, alloc: std.mem.Allocator) !std.AutoHashMap(u32, void) {
+    var set = std.AutoHashMap(u32, void).init(alloc);
+    for (m.instructions) |inst| {
+        if (inst.op == .ImageTexelPointer and inst.words.len >= 4) try set.put(inst.words[3], {});
+    }
+    return set;
+}
+
+/// True if any OpImageTexelPointer (image atomic) lives in a NON-entry function. The
+/// emulation binds the `device atomic_T*` backing buffer only in the entry-point
+/// signature, so a non-entry helper performing an image atomic would reference an
+/// undeclared `<img>_atomic` (silent-wrong). glslpp's own frontend inlines all user
+/// functions into the entry, so this only arises for externally-supplied, non-inlined
+/// SPIR-V — honest-error it. (Image atomics whose operand is a function PARAMETER are
+/// already rejected by mslAtomicImageScalar's `op != .Variable` check.)
+fn imageAtomicInNonEntryFn(m: *const ParsedModule, entry_id: u32) bool {
+    var current_func: u32 = 0;
+    for (m.instructions) |inst| {
+        if (inst.op == .Function and inst.words.len > 2) {
+            current_func = inst.words[2];
+        } else if (inst.op == .ImageTexelPointer and current_func != entry_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The buffer-backed linear-texture atomic emulation preamble (alignment
+/// function-constant + the 2D coord-linearization macro), reproduced from
+/// `spirv-cross --msl`. Emitted once when the module contains image atomics.
+const spv_image2d_atomic_template =
+    \\constant uint spvLinearTextureAlignmentOverride [[function_constant(65535)]];
+    \\constant uint spvLinearTextureAlignment = is_function_constant_defined(spvLinearTextureAlignmentOverride) ? spvLinearTextureAlignmentOverride : 4;
+    \\#define spvImage2DAtomicCoord(tc, tex) (((((tex).get_width() + spvLinearTextureAlignment / 4 - 1) & ~(spvLinearTextureAlignment / 4 - 1)) * (tc).y) + (tc).x)
+    \\
+    \\
+;
+
 /// The exact `spvUnsafeArray<T, Num>` template emitted by `spirv-cross --msl`
 /// (reproduced verbatim so glslpp output is structurally equivalent).
 const spv_unsafe_array_template =
@@ -1590,6 +1656,11 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     var pull_model = try collectPullModelInputs(&module, aa);
     defer pull_model.deinit();
 
+    // Storage-image atomics: the image var-ids that need a buffer-backed atomic
+    // emulation (`device atomic_T*` backing buffer + spvImage2DAtomicCoord macro).
+    var atomic_images = try collectAtomicImages(&module, aa);
+    defer atomic_images.deinit();
+
     // Vertex stage outputs (layout(location) out ... + gl_Position). Collected
     // with ORIGINAL names so `main0_out` fields use the source name while body
     // stores are rewritten to `out.<name>` (incl. `out.gl_Position`) later.
@@ -1634,6 +1705,23 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // MSL 2.3+ feature. Below 2.3, honest-error rather than emit non-compiling MSL —
     // matching spirv-cross, which throws "Pull-model interpolation requires MSL 2.3."
     if (options.metal_version < 23 and pull_model.count() > 0) return error.UnsupportedOp;
+
+    // Storage-image atomics → buffer-backed linear-texture emulation (spirv-cross's
+    // spvImage2DAtomicCoord scheme). Implemented for the COMPUTE path only. Honest-error
+    // the cases this slice does not cover, rather than emit the old non-compiling
+    // `&img[coord]`:
+    //   - argument-buffer layout for the backing buffer (out of scope);
+    //   - fragment/vertex image atomics (would need impl-helper backing-buffer threading);
+    //   - non-2D / arrayed / float-component images (need 2D-array/3D macros or atomic_float).
+    if (atomic_images.count() > 0) {
+        if (options.argument_buffers or module.execution_model != .GLCompute) return error.UnsupportedOp;
+        if (imageAtomicInNonEntryFn(&module, entry_id)) return error.UnsupportedOp;
+        var ai = atomic_images.keyIterator();
+        while (ai.next()) |vid| {
+            if (mslAtomicImageScalar(&module, vid.*) == null) return error.UnsupportedOp;
+        }
+        try w.writeAll(spv_image2d_atomic_template);
+    }
 
     const need_unsafe_array = moduleNeedsUnsafeArray(&module);
     if (need_unsafe_array) try w.writeAll(spv_unsafe_array_template);
@@ -1981,9 +2069,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     }
 
     // Emit non-entry functions first
-    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings, &pull_model); }
+    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings, &pull_model, &atomic_images); }
     // Emit entry function last
-    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings, &pull_model);
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings, &pull_model, &atomic_images);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -2145,7 +2233,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pt = pi.words[3];
         switch (sc) {
             .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding, .descriptor_set=set}) catch {}; },
-            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; const name = names.get(rid) orelse "tex"; const is_depth = imageTypeIsDepth(m, pei); var img = pei; if (img.op == .TypeSampledImage and img.words.len > 2) { img = getDef(m, img.words[2]) orelse img; } const dim: u32 = if (img.op == .TypeImage and img.words.len > 3) img.words[3] else 1; const arrayed: bool = img.op == .TypeImage and img.words.len > 5 and img.words[5] == 1; const comp = mslSampledComponent(m, img); const msl_type = buildMslTextureType(alloc, is_depth, dim, arrayed, comp); switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth,.dim=dim,.arrayed=arrayed,.msl_type=msl_type}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth,.dim=dim,.arrayed=arrayed,.msl_type=msl_type}) catch {};}, else=>{}} },
+            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; const name = names.get(rid) orelse "tex"; const is_depth = imageTypeIsDepth(m, pei); var img = pei; if (img.op == .TypeSampledImage and img.words.len > 2) { img = getDef(m, img.words[2]) orelse img; } const dim: u32 = if (img.op == .TypeImage and img.words.len > 3) img.words[3] else 1; const arrayed: bool = img.op == .TypeImage and img.words.len > 5 and img.words[5] == 1; const comp = mslSampledComponent(m, img); const msl_type = buildMslTextureType(alloc, is_depth, dim, arrayed, comp); switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth,.dim=dim,.arrayed=arrayed,.msl_type=msl_type,.var_id=rid}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth,.dim=dim,.arrayed=arrayed,.msl_type=msl_type,.var_id=rid}) catch {};}, else=>{}} },
             else => {},
         }
     }
@@ -2676,6 +2764,7 @@ fn emitFunction(
     argument_buffers: bool,
     resource_bindings: []const MslResourceBinding,
     pull_model: *const std.AutoHashMap(u32, void),
+    atomic_images: *const std.AutoHashMap(u32, void),
 ) !void {
     const fi = getDef(m, func_id) orelse return;
     if (fi.op != .Function or fi.words.len < 5) return;
@@ -3015,6 +3104,36 @@ fn emitFunction(
                 const cb_b = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
                 try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb_b});
                 first_param = false;
+            }
+        }
+
+        // Storage-image atomics (#267): bind each atomic-accessed image as a texture AND
+        // a separate `device atomic_T*` backing buffer (the spvImage2DAtomicCoord scheme).
+        // The texture itself was previously never bound in compute kernels; the backing
+        // buffer is appended at the next free [[buffer]] slot ABOVE all existing buffers so
+        // no existing binding shifts. (Argbuf / non-compute / non-2D were honest-errored.)
+        if (atomic_images.count() > 0) {
+            // Next free [[buffer]] slot = 1 + max slot used by SSBOs/UBOs (0 if none).
+            var max_buf_slot: u32 = 0;
+            var have_buf = false;
+            for (storage_buffers.items) |sb| {
+                const s = resolveMslSlot(resource_bindings, binding_shift, sb.descriptor_set, sb.binding);
+                if (!have_buf or s > max_buf_slot) { max_buf_slot = s; have_buf = true; }
+            }
+            for (cbuffers.items) |cb| {
+                const s = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
+                if (!have_buf or s > max_buf_slot) { max_buf_slot = s; have_buf = true; }
+            }
+            var next_atomic_buf: u32 = if (have_buf) max_buf_slot + 1 else 0;
+            for (textures.items) |tex| {
+                if (!atomic_images.contains(tex.var_id)) continue;
+                const scalar = mslAtomicImageScalar(m, tex.var_id) orelse "uint";
+                const tex_b = resolveMslSlot(resource_bindings, binding_shift, tex.descriptor_set, tex.binding);
+                if (!first_param) try w.writeAll(", ");
+                try w.print("{s} {s} [[texture({d})]]", .{ tex.msl_type, tex.name, tex_b });
+                try w.print(", device {s}* {s}_atomic [[buffer({d})]]", .{ mslAtomicTypeName(scalar), tex.name, next_atomic_buf });
+                first_param = false;
+                next_atomic_buf += 1;
             }
         }
 
@@ -4910,19 +5029,22 @@ fn mslAtomicTypeName(scalar: []const u8) []const u8 {
 }
 
 // The object expression for an MSL atomic_*_explicit call. For an image atomic
-// (OpImageTexelPointer) this is `&img[coord]`; for an SSBO/shared scalar it is the
-// spirv-cross-faithful `(device|threadgroup atomic_T*)&<member>` — a plain scalar
+// (OpImageTexelPointer) this is the buffer-backed linearized form
+// `(device atomic_T*)&<img>_atomic[spvImage2DAtomicCoord(coord, <img>)]` (#267); for an
+// SSBO/shared scalar it is the spirv-cross-faithful `(device|threadgroup atomic_T*)&<member>` — a plain scalar
 // member is NOT an atomic pointer, so the cast is required to compile.
 fn mslAtomicObject(m: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), ptr_id: u32, scalar: []const u8, alloc: std.mem.Allocator) ![]const u8 {
     if (getDef(m, ptr_id)) |d| {
         if (d.op == .ImageTexelPointer) {
-            // KNOWN-INCOMPLETE: Metal image atomics use method syntax
-            // (`img.atomic_fetch_add(coord, …)`), not a pointer cast. This `&img[coord]`
-            // form is a separate, larger texture-atomic representation problem — the
-            // device/threadgroup cast below applies only to the SSBO/shared scalar path.
+            // Storage-image atomic (#267): Metal has no read-write atomic on a texture2d,
+            // so target a buffer-backed linear texture — a separate `device atomic_T*
+            // <img>_atomic` buffer indexed by the linearized coordinate. Matches
+            // spirv-cross: `(device atomic_uint*)&img_atomic[spvImage2DAtomicCoord(coord, img)]`.
+            // (Non-2D/arrayed/float images and the fragment/vertex/argbuf paths were
+            // honest-errored in spirvToMSL, so this is only reached for the supported case.)
             const img = names.get(d.words[3]) orelse "img";
             const coord = names.get(d.words[4]) orelse "0";
-            return std.fmt.allocPrint(alloc, "&{s}[{s}]", .{ img, coord });
+            return std.fmt.allocPrint(alloc, "(device {s}*)&{s}_atomic[spvImage2DAtomicCoord({s}, {s})]", .{ mslAtomicTypeName(scalar), img, coord, img });
         }
     }
     const ptr = names.get(ptr_id) orelse "mem";
