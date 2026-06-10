@@ -289,12 +289,11 @@ const CONTINUE_LOOP_SRC =
     \\}
 ;
 
-// #244: a do-while whose body contains its OWN conditional control flow
-// (`if(i==3) continue;`). Faithful emission needs an inline-expression loop
-// condition (so a body `continue` re-evaluates it fresh) which glslpp's flat-SSA
-// model does not yet have. Until then the backends MUST fail loud (honest-error)
-// rather than crash (GLSL stack-overflow) or silently miscompile (HLSL/MSL emit
-// inverted-polarity break + duplicated/undeclared temps + infinite loop).
+// A do-while whose body contains its OWN conditional control flow (`if(i==3) continue;`).
+// #244 made all backends honest-error this (it previously crashed GLSL / silently
+// miscompiled HLSL/MSL). #246 now emits it faithfully as a native `do { … } while
+// (<inlined cond>);` in all three backends — the bottom condition is rebuilt over the
+// persistent loop vars so a body `continue` re-evaluates it. See the positive tests below.
 const DOWHILE_CF_SRC =
     \\#version 450
     \\out vec4 FragColor;
@@ -326,12 +325,29 @@ test "do-while with body control flow emits native do/while in GLSL (#246)" {
     try std.testing.expect(std.mem.indexOf(u8, glsl, "break;") == null);
 }
 
-test "do-while with body control flow honest-errors (not crash/miscompile) in HLSL (#244)" {
-    try std.testing.expectError(error.UnstructuredControlFlow, compileToHlsl(DOWHILE_CF_SRC));
+// #246: HLSL emits do-while-with-body-control-flow as a native `do { … } while (<inlined>);`
+// (see the GLSL test above for the rationale). dxc-validated; n=5 ⇒ s=12.
+test "do-while with body control flow emits native do/while in HLSL (#246)" {
+    const hlsl = try compileToHlsl(DOWHILE_CF_SRC);
+    defer alloc.free(hlsl);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "do\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "} while (") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "while (true)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "continue;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "break;") == null);
 }
 
-test "do-while with body control flow honest-errors (not crash/miscompile) in MSL (#244)" {
-    try std.testing.expectError(error.UnstructuredControlFlow, compileToMsl(DOWHILE_CF_SRC));
+// #246: MSL emits do-while-with-body-control-flow as a native `do { … } while (<inlined>);`
+// (see the GLSL test above for the rationale). C-like do-while syntax matches the
+// dxc/glslang-validated GLSL & HLSL increments.
+test "do-while with body control flow emits native do/while in MSL (#246)" {
+    const msl = try compileToMsl(DOWHILE_CF_SRC);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "do\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "} while (") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "while (true)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "continue;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "break;") == null);
 }
 
 test "do-while loop body is emitted in HLSL (#238)" {
