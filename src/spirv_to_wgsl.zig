@@ -6327,13 +6327,21 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try w.print("let {s}: {s} = extractBits({s}, u32({s}), u32({s}));\n", .{ rn, rt, base, offset, count });
             },
 
-            // Derivatives
+            // Derivatives. Ordered to match the SPIR-V spec numbering:
+            // plain (207-209), Fine (210-212), Coarse (213-215). WGSL has a
+            // direct builtin for every one of the nine variants.
             .DPdx => try emitCall(module, names, inst, "dpdx", w, arena, indent),
             .DPdy => try emitCall(module, names, inst, "dpdy", w, arena, indent),
+            .Fwidth => try emitCall(module, names, inst, "fwidth", w, arena, indent),
+            // Fine-quality variants (OpDPdxFine 210 / OpDPdyFine 211 /
+            // OpFwidthFine 212). Previously these fell through to the honest-
+            // error else branch even though WGSL can represent them directly.
+            .DPdxFine => try emitCall(module, names, inst, "dpdxFine", w, arena, indent),
+            .DPdyFine => try emitCall(module, names, inst, "dpdyFine", w, arena, indent),
+            .FwidthFine => try emitCall(module, names, inst, "fwidthFine", w, arena, indent),
             .DPdxCoarse => try emitCall(module, names, inst, "dpdxCoarse", w, arena, indent),
             .DPdyCoarse => try emitCall(module, names, inst, "dpdyCoarse", w, arena, indent),
             .FwidthCoarse => try emitCall(module, names, inst, "fwidthCoarse", w, arena, indent),
-            .Fwidth => try emitCall(module, names, inst, "fwidth", w, arena, indent),
 
             // Subgroup operations (AUDIT FIX, #170 G5 Pass 2). These previously
             // emitted WGSL subgroup builtins (subgroupElect/Ballot/Broadcast/
