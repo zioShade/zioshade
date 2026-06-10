@@ -3144,3 +3144,58 @@ test "T-pack.2: MSL unorm/snorm pack/unpack keep their real MSL builtins (#gaps 
     try assertNotContains(msl, "pack_float_to_half2x16");
     try assertNotContains(msl, "unpack_half2x16_to_float");
 }
+
+// GLSL inverse(matN) has NO MSL builtin — Metal has no matrix `inverse()`. glslpp emitted
+// a bare `inverse(m)` → non-compiling MSL. Fix mirrors the WGSL backend + spirv-cross: emit
+// an emit-once spvInverseNxN cofactor/adjugate helper and call it.
+test "T-inv.1: MSL inverse(matN) calls an emit-once spvInverse helper, not a phantom builtin (#gaps inverse)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { mat2 m2; mat3 m3; mat4 m4; } u;
+        \\void main() {
+        \\    mat2 a = inverse(u.m2);
+        \\    mat3 b = inverse(u.m3);
+        \\    mat4 c = inverse(u.m4);
+        \\    o = vec4(a[0].x + b[1].y + c[2].z, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    // Helper definitions emitted once in the preamble…
+    try assertContains(msl, "float2x2 spvInverse2x2(float2x2 m)");
+    try assertContains(msl, "float3x3 spvInverse3x3(float3x3 m)");
+    try assertContains(msl, "float4x4 spvInverse4x4(float4x4 m)");
+    // …and called at the use site, never the non-existent MSL `inverse()`.
+    try assertContains(msl, "= spvInverse2x2(");
+    try assertContains(msl, "= spvInverse3x3(");
+    try assertContains(msl, "= spvInverse4x4(");
+    try assertNotContains(msl, "= inverse("); // the phantom MSL builtin call
+    // glslpp emits no forward declarations, so the helper DEFINITION must precede its
+    // call site or the MSL won't compile (Metal = C++ definition-before-use).
+    const def3 = std.mem.indexOf(u8, msl, "float3x3 spvInverse3x3(float3x3 m)").?;
+    const call3 = std.mem.indexOf(u8, msl, "= spvInverse3x3(").?;
+    try std.testing.expect(def3 < call3);
+}
+
+// Emit-once: a helper is only emitted for the dims actually used, and only once.
+test "T-inv.2: MSL spvInverse helper is emitted once and only for used dims (#gaps inverse)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { mat3 m3; } u;
+        \\void main() {
+        \\    mat3 a = inverse(u.m3);
+        \\    mat3 b = inverse(a);
+        \\    o = vec4(a[0].x + b[1].y, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    try assertContains(msl, "float3x3 spvInverse3x3(float3x3 m)");
+    // Only the mat3 helper — not mat2/mat4.
+    try assertNotContains(msl, "spvInverse2x2(float2x2");
+    try assertNotContains(msl, "spvInverse4x4(float4x4");
+    // Defined exactly once despite two call sites.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, msl, "float3x3 spvInverse3x3(float3x3 m)"));
+}

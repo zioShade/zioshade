@@ -1056,6 +1056,126 @@ fn moduleNeedsUnsafeArray(m: *const ParsedModule) bool {
     return false;
 }
 
+/// Metal has no matrix `inverse()` builtin, so GLSL inverse(matN) (GLSL.std.450
+/// MatrixInverse=34) is lowered to a generated closed-form cofactor/adjugate helper —
+/// the same math the WGSL backend emits (`spvInverse2/3/4`) and spirv-cross's
+/// `spvInverseNxN`. The helper is emitted into the preamble at most once per dimension,
+/// gated by a module scan (`moduleInverseDims`). Column-major throughout, matching MSL's
+/// `floatNxN(col0…)` constructor order.
+const spv_inverse2_template =
+    \\float2x2 spvInverse2x2(float2x2 m)
+    \\{
+    \\    float det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+    \\    return float2x2(m[1][1], -m[0][1], -m[1][0], m[0][0]) * (1.0 / det);
+    \\}
+    \\
+    \\
+;
+const spv_inverse3_template =
+    \\float3x3 spvInverse3x3(float3x3 m)
+    \\{
+    \\    float a = m[0][0]; float b = m[1][0]; float c = m[2][0];
+    \\    float d = m[0][1]; float e = m[1][1]; float f = m[2][1];
+    \\    float g = m[0][2]; float h = m[1][2]; float i = m[2][2];
+    \\    float A = (e * i - f * h);
+    \\    float B = (f * g - d * i);
+    \\    float C = (d * h - e * g);
+    \\    float det = a * A + b * B + c * C;
+    \\    float inv_det = 1.0 / det;
+    \\    return float3x3(
+    \\        A * inv_det,
+    \\        B * inv_det,
+    \\        C * inv_det,
+    \\        (c * h - b * i) * inv_det,
+    \\        (a * i - c * g) * inv_det,
+    \\        (b * g - a * h) * inv_det,
+    \\        (b * f - c * e) * inv_det,
+    \\        (c * d - a * f) * inv_det,
+    \\        (a * e - b * d) * inv_det);
+    \\}
+    \\
+    \\
+;
+const spv_inverse4_template =
+    \\float4x4 spvInverse4x4(float4x4 m)
+    \\{
+    \\    float a00 = m[0][0]; float a01 = m[0][1]; float a02 = m[0][2]; float a03 = m[0][3];
+    \\    float a10 = m[1][0]; float a11 = m[1][1]; float a12 = m[1][2]; float a13 = m[1][3];
+    \\    float a20 = m[2][0]; float a21 = m[2][1]; float a22 = m[2][2]; float a23 = m[2][3];
+    \\    float a30 = m[3][0]; float a31 = m[3][1]; float a32 = m[3][2]; float a33 = m[3][3];
+    \\    float b00 = a00 * a11 - a01 * a10;
+    \\    float b01 = a00 * a12 - a02 * a10;
+    \\    float b02 = a00 * a13 - a03 * a10;
+    \\    float b03 = a01 * a12 - a02 * a11;
+    \\    float b04 = a01 * a13 - a03 * a11;
+    \\    float b05 = a02 * a13 - a03 * a12;
+    \\    float b06 = a20 * a31 - a21 * a30;
+    \\    float b07 = a20 * a32 - a22 * a30;
+    \\    float b08 = a20 * a33 - a23 * a30;
+    \\    float b09 = a21 * a32 - a22 * a31;
+    \\    float b10 = a21 * a33 - a23 * a31;
+    \\    float b11 = a22 * a33 - a23 * a32;
+    \\    float det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+    \\    float inv_det = 1.0 / det;
+    \\    return float4x4(
+    \\        ( a11 * b11 - a12 * b10 + a13 * b09) * inv_det,
+    \\        (-a01 * b11 + a02 * b10 - a03 * b09) * inv_det,
+    \\        ( a31 * b05 - a32 * b04 + a33 * b03) * inv_det,
+    \\        (-a21 * b05 + a22 * b04 - a23 * b03) * inv_det,
+    \\        (-a10 * b11 + a12 * b08 - a13 * b07) * inv_det,
+    \\        ( a00 * b11 - a02 * b08 + a03 * b07) * inv_det,
+    \\        (-a30 * b05 + a32 * b02 - a33 * b01) * inv_det,
+    \\        ( a20 * b05 - a22 * b02 + a23 * b01) * inv_det,
+    \\        ( a10 * b10 - a11 * b08 + a13 * b06) * inv_det,
+    \\        (-a00 * b10 + a01 * b08 - a03 * b06) * inv_det,
+    \\        ( a30 * b04 - a31 * b02 + a33 * b00) * inv_det,
+    \\        (-a20 * b04 + a21 * b02 - a23 * b00) * inv_det,
+    \\        (-a10 * b09 + a11 * b07 - a12 * b06) * inv_det,
+    \\        ( a00 * b09 - a01 * b07 + a02 * b06) * inv_det,
+    \\        (-a30 * b03 + a31 * b01 - a32 * b00) * inv_det,
+    \\        ( a20 * b03 - a21 * b01 + a22 * b00) * inv_det);
+    \\}
+    \\
+    \\
+;
+
+/// Square dimension (2/3/4) of a MatrixInverse result matrix type, or null if not a
+/// supported square float matrix.
+fn matrixInverseDim(m: *const ParsedModule, result_type_id: u32) ?u8 {
+    const ti = getDef(m, result_type_id) orelse return null;
+    if (ti.op != .TypeMatrix or ti.words.len < 4) return null;
+    const cols = ti.words[3];
+    const col_inst = getDef(m, ti.words[2]) orelse return null;
+    if (col_inst.op != .TypeVector or col_inst.words.len < 4) return null;
+    const rows = col_inst.words[3];
+    if (cols != rows) return null;
+    return switch (cols) {
+        2, 3, 4 => @intCast(cols),
+        else => null,
+    };
+}
+
+const InverseDims = struct { n2: bool = false, n3: bool = false, n4: bool = false };
+
+/// Scan the module for GLSL.std.450 MatrixInverse(34) ExtInsts and record which
+/// helper dimensions are needed, so each is emitted at most once. Assumes the module's
+/// only ExtInstImport is GLSL.std.450 (always true for glslpp-produced SPIR-V) — the
+/// set id (words[3]) is not re-checked, matching the rest of the .ExtInst handling.
+fn moduleInverseDims(m: *const ParsedModule) InverseDims {
+    var r = InverseDims{};
+    for (m.instructions) |inst| {
+        if (inst.op == .ExtInst and inst.words.len >= 6 and inst.words[4] == 34) {
+            if (matrixInverseDim(m, inst.words[1])) |d| switch (d) {
+                2 => r.n2 = true,
+                3 => r.n3 = true,
+                4 => r.n4 = true,
+                else => {},
+            };
+        }
+    }
+    return r;
+}
+
 /// The exact `spvUnsafeArray<T, Num>` template emitted by `spirv-cross --msl`
 /// (reproduced verbatim so glslpp output is structurally equivalent).
 const spv_unsafe_array_template =
@@ -1469,6 +1589,13 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // (intentional divergence from spirv-cross — see the module-array block).
     const need_unsafe_array = moduleNeedsUnsafeArray(&module);
     if (need_unsafe_array) try w.writeAll(spv_unsafe_array_template);
+
+    // Metal has no matrix inverse() builtin — emit the closed-form helper(s) once for
+    // each dimension actually used (gated by a module scan), then call them at use sites.
+    const inv_dims = moduleInverseDims(&module);
+    if (inv_dims.n2) try w.writeAll(spv_inverse2_template);
+    if (inv_dims.n3) try w.writeAll(spv_inverse3_template);
+    if (inv_dims.n4) try w.writeAll(spv_inverse4_template);
 
     // Emit struct forward declarations for types used in uniform/storage blocks
     // These must come before the block declarations
@@ -2434,7 +2561,10 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         22 => "asinh", 23 => "acosh", 24 => "atanh",
         26 => "powr", 27 => "exp", 28 => "log", 29 => "exp2", 30 => "log2",
         31 => "sqrt", 32 => "rsqrt", 33 => "determinant",
-        34 => "inverse",
+        // 34 (MatrixInverse) has no MSL builtin — handled inline in the .ExtInst arm via
+        // the generated spvInverseNxN helper. Intentionally NOT mapped here: if a bypass
+        // ever reached emitStd450 it would emit a visible `// unhandled std450 #34` stub
+        // (non-compiling), not a plausible-looking but non-existent `inverse()` call.
         37 => "min", 38 => "max", 39 => "min",
         40 => "max", 41 => "min", 42 => "max", 43 => "clamp", 44 => "clamp",
         45 => "fast::clamp", 46 => "mix", 48 => "step", 49 => "smoothstep",
@@ -2444,16 +2574,17 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         66 => "length", 67 => "distance", 68 => "cross", 69 => "normalize",
         70 => "faceforward", 71 => "reflect", 72 => "refract",
         // 73/74/75 (FindILsb/FindSMsb/FindUMsb) are handled inline in the .ExtInst arm
-        // (findMSB/findLSB are NOT raw ctz/clz). Intentionally NOT mapped here so a
-        // regression that bypassed the inline path would honest-error, not silently
-        // emit the wrong count.
+        // (findMSB/findLSB are NOT raw ctz/clz). Intentionally NOT mapped here so a bypass
+        // would emit a visible `// unhandled` stub (non-compiling) rather than silently
+        // emitting the wrong count.
         79 => "min", 80 => "max", 81 => "clamp",
         35 => "modf", 36 => "modf", 51 => "frexp",
         54 => "pack_float_to_snorm4x8", 55 => "pack_float_to_unorm4x8",
         56 => "pack_float_to_snorm2x16", 57 => "pack_float_to_unorm2x16",
         // 58 (PackHalf2x16) / 62 (UnpackHalf2x16) have no MSL builtin — handled inline in
-        // the .ExtInst arm via half+as_type. Intentionally NOT mapped here (a bypass would
-        // honest-error rather than emit the non-existent pack_float_to_half2x16).
+        // the .ExtInst arm via half+as_type. Intentionally NOT mapped here: a bypass would
+        // emit a visible `// unhandled` stub (non-compiling) rather than the non-existent
+        // pack_float_to_half2x16.
         60 => "unpack_snorm2x16_to_float", 61 => "unpack_unorm2x16_to_float",
         63 => "unpack_snorm4x8_to_float", 64 => "unpack_unorm4x8_to_float",
         76 => "interpolate_at_centroid", 77 => "interpolate_at_sample", 78 => "interpolate_at_offset",
@@ -3983,6 +4114,19 @@ fn emitInstruction(
                 }
                 try w.print("    {s} {s};\n", .{ second_type, second_name });
                 try w.print("    {s} {s} = {s}({s}, {s});\n", .{ fract_type, fract_name, func_name, input_name, second_name });
+            } else if (instruction == 34) {
+                if (inst.words.len < 6) return; // one operand
+                // GLSL inverse(matN) — Metal has no matrix inverse() builtin, so call the
+                // generated spvInverseNxN helper (emitted once in the preamble).
+                const rt = try mslType(m, inst.words[1], names, alloc);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const x = names.get(inst.words[5]) orelse "x";
+                if (matrixInverseDim(m, inst.words[1])) |d| {
+                    try w.print("    {s} {s} = spvInverse{d}x{d}({s});\n", .{ rt, rn, d, d, x });
+                } else {
+                    // Non-square / unsupported — should be unreachable for valid inverse().
+                    try w.print("    {s} {s} = {s}; // inverse: unsupported matrix dimension\n", .{ rt, rn, x });
+                }
             } else if (instruction == 58 or instruction == 62) {
                 if (inst.words.len < 6) return; // one operand
                 // packHalf2x16(58) / unpackHalf2x16(62) have NO MSL builtin — Metal's
