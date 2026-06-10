@@ -2215,3 +2215,14 @@ test "T-uni.4: multi-dim bare uniform array keeps all dimensions (#289)" {
     try assertContains(glsl, "w[1][2]");
     try assertNotContains(glsl, "w_1");
 }
+
+// #294: runtime-sized SSBO array `.length()` now lowers to OpArrayLength (not the prior
+// fold-to-0 silent-wrong). The GLSL backend's SSBO member naming + result-id registration
+// aren't yet wired for it, so it HONEST-ERRORS (error.UnsupportedOp) rather than emit the
+// silent-wrong `// unhandled op 68`. (GLSL native `.length()` support is a follow-up.)
+test "T-arrlen.1: runtime SSBO array .length() honest-errors in GLSL (#294)" {
+    const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(std430,binding=1) buffer Out { uint n; };\nvoid main(){ n = uint(d.length()); }";
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToGLSL(alloc, spirv, .{}));
+}
