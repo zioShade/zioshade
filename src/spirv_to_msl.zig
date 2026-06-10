@@ -2567,7 +2567,11 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         // (non-compiling), not a plausible-looking but non-existent `inverse()` call.
         37 => "min", 38 => "max", 39 => "min",
         40 => "max", 41 => "min", 42 => "max", 43 => "clamp", 44 => "clamp",
-        45 => "fast::clamp", 46 => "mix", 48 => "step", 49 => "smoothstep",
+        // 45 = SClamp (signed-integer clamp): plain `clamp`. NOT `fast::clamp` —
+        // metal::fast::clamp is float-only fast-math; on ints it round-trips through
+        // float (precision loss past 2^24) or won't compile. (FClamp(43) keeps `clamp`,
+        // which is correct and NaN-safe; spirv-cross uses fast::clamp there for speed.)
+        45 => "clamp", 46 => "mix", 48 => "step", 49 => "smoothstep",
         50 => "fma",
         52 => "frexp",
         53 => "ldexp",
@@ -3715,7 +3719,9 @@ fn emitBlock(
 // - Types: float4/float3/float2 instead of vec4/vec3/vec2
 // - Texture: tex.sample(samp, uv) instead of texture(tex, uv)
 // - Uniforms: Globals_1._m0 instead of Globals_m0
-// - powr instead of pow, fast::clamp instead of clamp
+// - powr instead of pow (GLSL pow is undefined for x<0, matching powr's domain).
+//   clamp (all of F/S/UClamp) lowers to plain `clamp` — never `fast::clamp`, which is
+//   float-only fast-math and would be wrong/lossy for the integer forms.
 
 fn emitInstruction(
     m: *const ParsedModule,
