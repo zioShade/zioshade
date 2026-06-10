@@ -2639,7 +2639,7 @@ fn emitInstruction(
             try w.print("    {s} {s} = textureSize({s}, 0);\n", .{rtt, rn, img});
         },
         .ImageQueryLod => {
-            // OpImageQueryQueryLod: result_type, result, image, coord
+            // OpImageQueryLod: result_type, result, SampledImage, coord
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const img = names.get(inst.words[3]) orelse "tex";
