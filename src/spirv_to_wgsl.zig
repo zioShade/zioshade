@@ -3140,9 +3140,9 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         // are emitted as texture_depth_2d_array / texture_depth_cube_array (see
         // wgslType) and the compare-sample handlers pass the array layer as a
         // separate WGSL array_index argument (see depthCompareShape). The gather
-        // form (textureGatherCompare) is not yet wired for the array_index arg,
-        // so it stays an honest error in its own handler rather than emitting
-        // wrong-arity WGSL.
+        // form (textureGatherCompare) is wired the same way — see the
+        // ImageDrefGather arm, which splits the packed layer into its own
+        // i32(round(...)) array_index argument.
         // Storage textures route through wgslStorageTextureType so the access
         // mode reflects the GLSL readonly/writeonly qualifier (resolved into
         // tex.access from the variable's decorations); the plain wgslType path
@@ -6639,11 +6639,6 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // ImageDrefGather — depth comparison gather
             .ImageDrefGather => {
-                // textureGatherCompare on an ARRAYED depth texture needs a
-                // separate array_index argument the gather path does not yet
-                // build; fail loudly rather than emit wrong-arity WGSL. (The
-                // compare-SAMPLE path DOES support arrays — see emitDepthCompare.)
-                if (depthCompareShape(module, inst.words[3]).arrayed) return error.UnsupportedDepthArrayTexture;
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const si_inst = getDef(module, inst.words[3]);
@@ -6657,7 +6652,21 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
+                // On an ARRAYED depth texture WGSL takes the layer as a SEPARATE
+                // rounded i32 array_index argument between the coordinate and the
+                // depth-ref: textureGatherCompare(t, s, coord.<spatial>,
+                // i32(round(coord.<layer>)), dref). glslang packs the layer into the
+                // coordinate (uv,layer for 2d_array; xyz,layer for cube_array), so it
+                // must be sliced out — matching the compare-SAMPLE path in
+                // emitDepthCompare. (Was previously an honest error, #170.)
+                const shape = depthCompareShape(module, inst.words[3]);
+                if (shape.arrayed) {
+                    const cs = arrayedCoordSwizzle(shape.comps);
+                    const ls = arrayedLayerSwizzle(shape.comps);
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, tex_name, tex_name, coord, cs, coord, ls, dref });
+                } else {
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
+                }
             },
 
             // Projective texture sampling (GLSL textureProj*). WGSL has no

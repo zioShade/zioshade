@@ -899,26 +899,52 @@ test "wgsl: textureLod(sampler2DArrayShadow) emits textureSampleCompareLevel + a
     });
 }
 
-// textureGatherCompare on an ARRAYED shadow sampler also needs a separate
-// array_index argument, which the gather path does not yet build. Until it does,
-// it must stay an honest error rather than emit wrong-arity textureGatherCompare
-// (the same silent-wrong class). The sample path above IS supported; only the
-// gather-array path remains gated.
-test "wgsl: textureGather(sampler2DArrayShadow) is an honest error, not wrong-arity" {
-    const source: [:0]const u8 =
+// textureGatherCompare on an ARRAYED shadow sampler needs a separate array_index
+// argument, just like the compare-SAMPLE path: WGSL's
+// textureGatherCompare(t: texture_depth_2d_array, s, coords: vec2, array_index, depth_ref).
+// glslang packs the layer into the coordinate (vec3: uv, layer) with the compare
+// ref as a separate GLSL arg; the layer (.z) must be sliced out, rounded, and
+// passed as its own i32 argument. Previously honest-errored (#170); now wired
+// (#170, naga-gated) so the GLSL gather faithfully lowers instead of being rejected.
+test "wgsl: textureGather(sampler2DArrayShadow) emits textureGatherCompare + array_index" {
+    try runShadowValidTest(.{
+        .name = "shadow_gather_2d_array",
+        .source =
         \\#version 450
         \\layout(binding=0) uniform sampler2DArrayShadow shadowArr;
         \\layout(location=0) in vec3 vC;
         \\layout(location=1) in float vRef;
         \\layout(location=0) out vec4 fragColor;
         \\void main(){ fragColor = textureGather(shadowArr, vC, vRef); }
-    ;
-    const spirv = try compileToSpirv("shadow_gather_array", source);
-    defer alloc.free(spirv);
-    try std.testing.expectError(
-        error.UnsupportedDepthArrayTexture,
-        glslpp.spirvToWGSL(alloc, spirv, .{}),
-    );
+        ,
+        .tex_decl = "var shadowArr: texture_depth_2d_array;",
+        .builtin = "textureGatherCompare",
+        // 2D spatial coordinate is .xy; the layer (.z) becomes a separate arg.
+        .coord_swizzle = ".xy",
+        .array_index = ".z))",
+    });
+}
+
+// samplerCubeArrayShadow gather → texture_depth_cube_array: the vec4 coordinate
+// (dir.xyz + layer.w) is sliced to the vec3 direction and the layer (.w) becomes
+// a separate rounded i32 array_index argument. Compare ref is a separate GLSL arg.
+test "wgsl: textureGather(samplerCubeArrayShadow) emits textureGatherCompare + array_index" {
+    try runShadowValidTest(.{
+        .name = "shadow_gather_cube_array",
+        .source =
+        \\#version 450
+        \\layout(binding=0) uniform samplerCubeArrayShadow shadowCubeArr;
+        \\layout(location=0) in vec4 vC;
+        \\layout(location=1) in float vRef;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = textureGather(shadowCubeArr, vC, vRef); }
+        ,
+        .tex_decl = "var shadowCubeArr: texture_depth_cube_array;",
+        .builtin = "textureGatherCompare",
+        // Cube spatial coordinate is .xyz; the layer (.w) becomes a separate arg.
+        .coord_swizzle = ".xyz",
+        .array_index = ".w))",
+    });
 }
 
 const ShadowCase = struct {
