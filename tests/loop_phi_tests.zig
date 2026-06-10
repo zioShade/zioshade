@@ -307,8 +307,23 @@ const DOWHILE_CF_SRC =
     \\}
 ;
 
-test "do-while with body control flow honest-errors (not crash/miscompile) in GLSL (#244)" {
-    try std.testing.expectError(error.UnstructuredControlFlow, compileToGlsl(DOWHILE_CF_SRC));
+// #246: do-while WITH body control flow is now emitted faithfully in GLSL as a native
+// `do { … } while (<inlined cond>);` — the condition is rebuilt over the persistent loop
+// vars (so a body `continue` re-evaluates it at the bottom test) rather than a flat-SSA
+// temp (which would be out of scope in the C/GLSL do-while controlling expression).
+// glslang-validated; semantically n=5 ⇒ s=12 (the i==3 iteration is skipped).
+test "do-while with body control flow emits native do/while in GLSL (#246)" {
+    const glsl = try compileToGlsl(DOWHILE_CF_SRC);
+    defer alloc.free(glsl);
+    // Native do-while form, NOT the while(true)+bottom-break rendering.
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "do\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "} while (") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while (true)") == null);
+    // The body `continue` survives. The bottom condition is the INLINED comparison over
+    // the persistent counter (so a continue re-evaluates it), not a bare SSA temp — the
+    // old broken form tested the condition via `if (!(<temp>)) break;`.
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "continue;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "break;") == null);
 }
 
 test "do-while with body control flow honest-errors (not crash/miscompile) in HLSL (#244)" {
