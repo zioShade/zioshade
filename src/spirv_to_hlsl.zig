@@ -281,6 +281,7 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ImageDrefGather, .ImageQueryLod, .ImageQueryLevels, .ImageQuerySamples,
         .ImageRead, .AtomicCompareExchange, .AtomicFAddEXT,
         .BitReverse, .BitCount,
+        .BitFieldInsert, .BitFieldSExtract, .BitFieldUExtract,
         .GroupNonUniformElect, .GroupNonUniformAll, .GroupNonUniformAny, .GroupNonUniformAllEqual,
         .GroupNonUniformBroadcast, .GroupNonUniformBroadcastFirst,
         .GroupNonUniformBallot,
@@ -355,6 +356,110 @@ fn resolveHlslRegister(options: HlslCompileOptions, set: u32, binding: u32, fall
         if (rb.set == set and rb.binding == binding) return rb.register;
     }
     return fallback;
+}
+
+// HLSL has no native bitfieldExtract/bitfieldInsert, so SPIR-V OpBitField{Insert,
+// SExtract,UExtract} are lowered to generated helper functions — verbatim the
+// `spvBitfield*` helpers `spirv-cross --hlsl` emits. Each helper is emitted at most once
+// (gated by moduleBitfieldNeeds) with the full scalar+vec2/3/4 overload set so HLSL
+// overload resolution picks the right width. Insert is uint-based (bit-level insert is
+// signedness-agnostic; a signed result is cast back at the call site); UExtract is
+// uint-based (zero-extend); SExtract is int-based (sign-extends via the shift trick).
+const spv_bitfield_insert_hlsl =
+    \\uint spvBitfieldInsert(uint Base, uint Insert, uint Offset, uint Count)
+    \\{
+    \\    uint Mask = Count == 32 ? 0xffffffff : (((1u << Count) - 1) << (Offset & 31));
+    \\    return (Base & ~Mask) | ((Insert << Offset) & Mask);
+    \\}
+    \\uint2 spvBitfieldInsert(uint2 Base, uint2 Insert, uint Offset, uint Count)
+    \\{
+    \\    uint Mask = Count == 32 ? 0xffffffff : (((1u << Count) - 1) << (Offset & 31));
+    \\    return (Base & ~Mask) | ((Insert << Offset) & Mask);
+    \\}
+    \\uint3 spvBitfieldInsert(uint3 Base, uint3 Insert, uint Offset, uint Count)
+    \\{
+    \\    uint Mask = Count == 32 ? 0xffffffff : (((1u << Count) - 1) << (Offset & 31));
+    \\    return (Base & ~Mask) | ((Insert << Offset) & Mask);
+    \\}
+    \\uint4 spvBitfieldInsert(uint4 Base, uint4 Insert, uint Offset, uint Count)
+    \\{
+    \\    uint Mask = Count == 32 ? 0xffffffff : (((1u << Count) - 1) << (Offset & 31));
+    \\    return (Base & ~Mask) | ((Insert << Offset) & Mask);
+    \\}
+    \\
+    \\
+;
+const spv_bitfield_uextract_hlsl =
+    \\uint spvBitfieldUExtract(uint Base, uint Offset, uint Count)
+    \\{
+    \\    uint Mask = Count == 32 ? 0xffffffff : ((1 << Count) - 1);
+    \\    return (Base >> Offset) & Mask;
+    \\}
+    \\uint2 spvBitfieldUExtract(uint2 Base, uint Offset, uint Count)
+    \\{
+    \\    uint Mask = Count == 32 ? 0xffffffff : ((1 << Count) - 1);
+    \\    return (Base >> Offset) & Mask;
+    \\}
+    \\uint3 spvBitfieldUExtract(uint3 Base, uint Offset, uint Count)
+    \\{
+    \\    uint Mask = Count == 32 ? 0xffffffff : ((1 << Count) - 1);
+    \\    return (Base >> Offset) & Mask;
+    \\}
+    \\uint4 spvBitfieldUExtract(uint4 Base, uint Offset, uint Count)
+    \\{
+    \\    uint Mask = Count == 32 ? 0xffffffff : ((1 << Count) - 1);
+    \\    return (Base >> Offset) & Mask;
+    \\}
+    \\
+    \\
+;
+const spv_bitfield_sextract_hlsl =
+    \\int spvBitfieldSExtract(int Base, int Offset, int Count)
+    \\{
+    \\    int Mask = Count == 32 ? -1 : ((1 << Count) - 1);
+    \\    int Masked = (Base >> Offset) & Mask;
+    \\    int ExtendShift = (32 - Count) & 31;
+    \\    return (Masked << ExtendShift) >> ExtendShift;
+    \\}
+    \\int2 spvBitfieldSExtract(int2 Base, int Offset, int Count)
+    \\{
+    \\    int Mask = Count == 32 ? -1 : ((1 << Count) - 1);
+    \\    int2 Masked = (Base >> Offset) & Mask;
+    \\    int ExtendShift = (32 - Count) & 31;
+    \\    return (Masked << ExtendShift) >> ExtendShift;
+    \\}
+    \\int3 spvBitfieldSExtract(int3 Base, int Offset, int Count)
+    \\{
+    \\    int Mask = Count == 32 ? -1 : ((1 << Count) - 1);
+    \\    int3 Masked = (Base >> Offset) & Mask;
+    \\    int ExtendShift = (32 - Count) & 31;
+    \\    return (Masked << ExtendShift) >> ExtendShift;
+    \\}
+    \\int4 spvBitfieldSExtract(int4 Base, int Offset, int Count)
+    \\{
+    \\    int Mask = Count == 32 ? -1 : ((1 << Count) - 1);
+    \\    int4 Masked = (Base >> Offset) & Mask;
+    \\    int ExtendShift = (32 - Count) & 31;
+    \\    return (Masked << ExtendShift) >> ExtendShift;
+    \\}
+    \\
+    \\
+;
+
+const HlslBitfieldNeeds = struct { insert: bool = false, uextract: bool = false, sextract: bool = false };
+
+/// Scan the module for the three OpBitField* ops so each helper family is emitted once.
+fn moduleBitfieldNeeds(m: *const ParsedModule) HlslBitfieldNeeds {
+    var r = HlslBitfieldNeeds{};
+    for (m.instructions) |inst| {
+        switch (inst.op) {
+            .BitFieldInsert => r.insert = true,
+            .BitFieldSExtract => r.sextract = true,
+            .BitFieldUExtract => r.uextract = true,
+            else => {},
+        }
+    }
+    return r;
 }
 
 pub fn spirvToHLSL(
@@ -453,6 +558,13 @@ pub fn spirvToHLSL(
     const w = compat.listWriter(&output, alloc);
 
     try w.writeAll("// Generated by glslpp SPIR-V -> HLSL cross-compiler\n\n");
+
+    // HLSL has no native bitfield builtins — emit the spvBitfield* helper(s) once for each
+    // family actually used (gated by a module scan), then call them at use sites.
+    const bf_needs = moduleBitfieldNeeds(&module);
+    if (bf_needs.insert) try w.writeAll(spv_bitfield_insert_hlsl);
+    if (bf_needs.uextract) try w.writeAll(spv_bitfield_uextract_hlsl);
+    if (bf_needs.sextract) try w.writeAll(spv_bitfield_sextract_hlsl);
 
     // Emit struct forward declarations for types used in cbuffers
     var emitted_structs = std.AutoHashMap(u32, void).init(aa);
@@ -3542,6 +3654,37 @@ fn emitInstruction(
         .BitReverse => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
             try w.print("    {s} {s} = reversebits({s});\n", .{ rt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
+        },
+        // OpBitFieldInsert: base, insert, offset, count. The spvBitfieldInsert helper is
+        // uint-based; a signed result is cast back from the uint return (like spirv-cross).
+        .BitFieldInsert => {
+            if (inst.words.len < 7) return;
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const base = names.get(inst.words[3]) orelse "0";
+            const insert = names.get(inst.words[4]) orelse "0";
+            const offset = names.get(inst.words[5]) orelse "0";
+            const count = names.get(inst.words[6]) orelse "0";
+            // hlslType returns exactly "int[N]" (signed) or "uint[N]" (unsigned) for integer
+            // types, and OpBitFieldInsert is integer-only — so startsWith("int") selects the
+            // signed forms without ever matching the 'u'-prefixed unsigned ones.
+            if (std.mem.startsWith(u8, rt, "int")) {
+                try w.print("    {s} {s} = {s}(spvBitfieldInsert({s}, {s}, {s}, {s}));\n", .{ rt, rn, rt, base, insert, offset, count });
+            } else {
+                try w.print("    {s} {s} = spvBitfieldInsert({s}, {s}, {s}, {s});\n", .{ rt, rn, base, insert, offset, count });
+            }
+        },
+        // OpBitFieldSExtract: value, offset, count → int-based helper (sign-extends).
+        .BitFieldSExtract => {
+            if (inst.words.len < 6) return;
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            try w.print("    {s} {s} = spvBitfieldSExtract({s}, {s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0", names.get(inst.words[4]) orelse "0", names.get(inst.words[5]) orelse "0" });
+        },
+        // OpBitFieldUExtract: value, offset, count → uint-based helper (zero-extends).
+        .BitFieldUExtract => {
+            if (inst.words.len < 6) return;
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            try w.print("    {s} {s} = spvBitfieldUExtract({s}, {s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0", names.get(inst.words[4]) orelse "0", names.get(inst.words[5]) orelse "0" });
         },
 
         // Conversions
