@@ -3199,3 +3199,27 @@ test "T-inv.2: MSL spvInverse helper is emitted once and only for used dims (#ga
     // Defined exactly once despite two call sites.
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, msl, "float3x3 spvInverse3x3(float3x3 m)"));
 }
+
+// Integer clamp (GLSL.std.450 SClamp/UClamp) must lower to plain `clamp`, NOT
+// `fast::clamp` — `metal::fast::clamp` is a float-only fast-math op; applied to ints it
+// converts through float (precision loss past 2^24) or fails to compile. spirv-cross uses
+// plain `clamp` for integer clamp (fast::clamp only for float, GLSL FClamp).
+test "T-clamp.1: MSL integer clamp uses clamp(), not fast::clamp() (#gaps sclamp)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { int si; ivec2 sv; uint ui; } u;
+        \\void main() {
+        \\    int a = clamp(u.si, 2, 8);          // SClamp
+        \\    ivec2 b = clamp(u.sv, ivec2(1), ivec2(9)); // SClamp (vector)
+        \\    uint c = clamp(u.ui, 2u, 8u);        // UClamp
+        \\    o = vec4(float(a + b.x) + float(c), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    try assertContains(msl, "= clamp("); // integer clamp lowers to plain clamp
+    // No float clamp in this source, so the absence of `fast::clamp` is unambiguous
+    // evidence the integer (S/UClamp) paths use plain clamp.
+    try assertNotContains(msl, "fast::clamp"); // never the float-only fast-math op on ints
+}
