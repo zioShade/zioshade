@@ -3957,6 +3957,21 @@ fn emitInstruction(
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord,
             });
         },
+        // OpImageQueryLod (textureQueryLod): SampledImage, Coordinate → result vec2.
+        // HLSL Texture.CalculateLevelOfDetail(sampler, coord) returns the clamped LOD as a
+        // scalar; spirv-cross splats it to the vec2 result (.xx) for both components. (The
+        // .y component — the unclamped LOD in GLSL — is thereby approximated as the clamped
+        // value, matching spirv-cross; CalculateLevelOfDetailUnclamped would be exact.)
+        .ImageQueryLod => {
+            if (inst.words.len < 5) return;
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
+            const coord = names.get(inst.words[4]) orelse "uv";
+            const parts = splitPair(si);
+            try w.print("    {s} {s} = {s}.CalculateLevelOfDetail({s}, {s}).xx;\n", .{
+                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord,
+            });
+        },
         .ImageSampleDrefImplicitLod => {
             // Shadow texture: HLSL uses .SampleCmp(sampler, coord, compare)
             const rt = try hlslType(module, inst.words[1], names, alloc);
