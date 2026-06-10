@@ -1176,6 +1176,33 @@ fn moduleInverseDims(m: *const ParsedModule) InverseDims {
     return r;
 }
 
+/// The default-interpolation accessor appended to a pull-model `interpolant<>` input's
+/// body alias so that PLAIN reads compile. The InterpolateAt* ExtInst arm strips this
+/// EXACT suffix to recover the `in.<name>` base for its own method calls — the two sites
+/// MUST use this single constant so they can never drift apart (a drift would turn a
+/// valid pull-model shader into a false `error.UnsupportedOp` rejection).
+const pull_model_center_suffix = ".interpolate_at_center()";
+
+/// Scan the module for GLSL.std.450 InterpolateAtCentroid(76)/InterpolateAtSample(77)/
+/// InterpolateAtOffset(78) ExtInsts and collect the id of each interpolant operand
+/// (words[5], a pointer to the queried Input variable). These inputs must be declared
+/// as `interpolant<T, interpolation::perspective>` in the stage-in struct and read via
+/// method calls (Metal pull-model interpolation, MSL 2.3+). Returns a set of operand
+/// ids; the caller is responsible for `deinit`. For the common case the operand is the
+/// top-level Input OpVariable (which appears in `stage_inputs`); interface-block-member
+/// or array interpolants (operand = an OpAccessChain result, not a stage-input var) are
+/// caught downstream and honest-errored rather than silently mis-emitted.
+fn collectPullModelInputs(m: *const ParsedModule, alloc: std.mem.Allocator) !std.AutoHashMap(u32, void) {
+    var set = std.AutoHashMap(u32, void).init(alloc);
+    for (m.instructions) |inst| {
+        if (inst.op == .ExtInst and inst.words.len >= 6) {
+            const ext = inst.words[4];
+            if (ext == 76 or ext == 77 or ext == 78) try set.put(inst.words[5], {});
+        }
+    }
+    return set;
+}
+
 /// The exact `spvUnsafeArray<T, Num>` template emitted by `spirv-cross --msl`
 /// (reproduced verbatim so glslpp output is structurally equivalent).
 const spv_unsafe_array_template =
@@ -1557,6 +1584,12 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         collectStageInputs(&module, &names, &decs, &stage_inputs, aa);
     }
 
+    // Pull-model interpolation: the set of Input variable ids queried by
+    // interpolateAtCentroid/Sample/Offset. Those inputs are declared
+    // `interpolant<T, interpolation::perspective>` and read via method calls.
+    var pull_model = try collectPullModelInputs(&module, aa);
+    defer pull_model.deinit();
+
     // Vertex stage outputs (layout(location) out ... + gl_Position). Collected
     // with ORIGINAL names so `main0_out` fields use the source name while body
     // stores are rewritten to `out.<name>` (incl. `out.gl_Position`) later.
@@ -1596,6 +1629,11 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             if (inst.op == .ImageQueryLod) return error.UnsupportedOp;
         }
     }
+
+    // Pull-model interpolation (interpolant<> + .interpolate_at_*() methods) is an
+    // MSL 2.3+ feature. Below 2.3, honest-error rather than emit non-compiling MSL —
+    // matching spirv-cross, which throws "Pull-model interpolation requires MSL 2.3."
+    if (options.metal_version < 23 and pull_model.count() > 0) return error.UnsupportedOp;
 
     const need_unsafe_array = moduleNeedsUnsafeArray(&module);
     if (need_unsafe_array) try w.writeAll(spv_unsafe_array_template);
@@ -1742,6 +1780,11 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             const tn = try mslType(&module, si.type_id, &names, aa);
             if (is_vertex) {
                 try w.print("    {s} {s} [[attribute({d})]];\n", .{ tn, si.name, si.location });
+            } else if (pull_model.contains(si.var_id)) {
+                // Pull-model interpolated input: declare as interpolant<T, P> so the
+                // body can call .interpolate_at_centroid()/_sample()/_offset()/_center().
+                // spirv-cross uses interpolation::perspective for these (even for flat).
+                try w.print("    interpolant<{s}, interpolation::perspective> {s} [[user(locn{d})]];\n", .{ tn, si.name, si.location });
             } else {
                 try w.print("    {s} {s} [[user(locn{d})]];\n", .{ tn, si.name, si.location });
             }
@@ -1938,9 +1981,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     }
 
     // Emit non-entry functions first
-    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings); }
+    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings, &pull_model); }
     // Emit entry function last
-    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings);
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings, &pull_model);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -2602,7 +2645,12 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         // pack_float_to_half2x16.
         60 => "unpack_snorm2x16_to_float", 61 => "unpack_unorm2x16_to_float",
         63 => "unpack_snorm4x8_to_float", 64 => "unpack_unorm4x8_to_float",
-        76 => "interpolate_at_centroid", 77 => "interpolate_at_sample", 78 => "interpolate_at_offset",
+        // 76/77/78 (InterpolateAtCentroid/Sample/Offset) are intentionally NOT mapped
+        // here: Metal has no such free functions. They are handled in the .ExtInst
+        // dispatch arm as METHOD calls on an `interpolant<>` field. Leaving them out so
+        // that, if a refactor ever bypasses that arm, emitStd450 produces a VISIBLE
+        // `// unhandled std450 #76` stub rather than silently re-emitting the broken
+        // free-function form this fix removed.
         else => null,
     };
 }
@@ -2627,6 +2675,7 @@ fn emitFunction(
     binding_shift: i32,
     argument_buffers: bool,
     resource_bindings: []const MslResourceBinding,
+    pull_model: *const std.AutoHashMap(u32, void),
 ) !void {
     const fi = getDef(m, func_id) orelse return;
     if (fi.op != .Function or fi.words.len < 5) return;
@@ -2757,7 +2806,14 @@ fn emitFunction(
         // with no per-instruction rewrite. The struct fields above already
         // captured the ORIGINAL source names, so the rename is body-only.
         for (stage_inputs.items) |si| {
-            const aliased = std.fmt.allocPrint(alloc, "in.{s}", .{si.name}) catch continue;
+            // A pull-model interpolated input is an `interpolant<>` field, so a PLAIN
+            // read must go through .interpolate_at_center() (the default-interpolation
+            // accessor). The InterpolateAt* ExtInst arms strip this known suffix to
+            // recover the `in.<name>` base for their own method calls.
+            const aliased = if (pull_model.contains(si.var_id))
+                std.fmt.allocPrint(alloc, "in.{s}{s}", .{ si.name, pull_model_center_suffix }) catch continue
+            else
+                std.fmt.allocPrint(alloc, "in.{s}", .{si.name}) catch continue;
             if (names.fetchPut(si.var_id, aliased) catch null) |old| alloc.free(old.value);
         }
 
@@ -4206,6 +4262,36 @@ fn emitInstruction(
                     const id = inst.words[2];
                     try w.print("    {s} _fmsb_{d} = select({s}, {s}(-1) - {s}, {s} < {s}(0));\n", .{ at, id, x, at, x, x, at });
                     try w.print("    {s} {s} = {s}(select(clz({s}(0)) - (clz(_fmsb_{d}) + {s}(1)), {s}(-1), _fmsb_{d} == {s}(0)));\n", .{ rt, rn, rt, at, id, at, at, id, at });
+                }
+            } else if (instruction == 76 or instruction == 77 or instruction == 78) {
+                // Pull-model interpolation. Metal has NO free functions for these — the
+                // interpolant must be queried as a METHOD on the `interpolant<>` stage-in
+                // field (MSL 2.3+; the < 2.3 honest-error guard runs in spirvToMSL).
+                //   76 InterpolateAtCentroid(p)   -> in.p.interpolate_at_centroid()
+                //   77 InterpolateAtSample(p, s)   -> in.p.interpolate_at_sample(s)
+                //   78 InterpolateAtOffset(p, o)   -> in.p.interpolate_at_offset(o + 0.4375)
+                // The interpolant operand (words[5]) is the Input variable, which the
+                // stage-input rename aliased to `in.<name>.interpolate_at_center()`; strip
+                // that known suffix to recover the `in.<name>` base. If the operand is NOT
+                // a wrapped top-level interpolant (e.g. an interface-block member or array
+                // element — operand is an OpAccessChain result, never renamed), the strip
+                // fails and we honest-error rather than emit a method call on a plain field.
+                if (inst.words.len < 6) return;
+                const rt = try mslType(m, inst.words[1], names, alloc);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const raw = names.get(inst.words[5]) orelse return error.UnsupportedOp;
+                if (!std.mem.endsWith(u8, raw, pull_model_center_suffix)) return error.UnsupportedOp;
+                const base = raw[0 .. raw.len - pull_model_center_suffix.len];
+                if (instruction == 76) {
+                    try w.print("    {s} {s} = {s}.interpolate_at_centroid();\n", .{ rt, rn, base });
+                } else if (instruction == 77) {
+                    if (inst.words.len < 7) return; // needs the sample-index operand
+                    const s = names.get(inst.words[6]) orelse "0";
+                    try w.print("    {s} {s} = {s}.interpolate_at_sample({s});\n", .{ rt, rn, base, s });
+                } else {
+                    if (inst.words.len < 7) return; // needs the offset operand
+                    const o = names.get(inst.words[6]) orelse "0";
+                    try w.print("    {s} {s} = {s}.interpolate_at_offset({s} + 0.4375);\n", .{ rt, rn, base, o });
                 }
             } else {
                 try emitStd450(m, names, inst, instruction, w, alloc);
