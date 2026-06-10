@@ -3326,3 +3326,76 @@ test "T-qlod.3: the MSL 2.2 query guard does not trip a plain-sampling shader (#
     try assertContains(msl, ".sample(");
     try assertNotContains(msl, "// unhandled");
 }
+
+// ---------------------------------------------------------------------------
+// #271: pull-model interpolation (interpolateAtCentroid/Sample/Offset).
+// Metal's pull-model interpolation requires the fragment input to be declared
+// as `interpolant<T, interpolation::P>` and queried via METHOD calls
+// (in.v.interpolate_at_centroid()), not the non-existent free functions the
+// backend used to emit (interpolate_at_centroid(in.v)). It is an MSL 2.3+
+// feature; below 2.3 we honest-error (matching spirv-cross). Oracle:
+// spirv-cross --msl --msl-version 30000.
+const interp_src: [:0]const u8 =
+    \\#version 450
+    \\layout(location = 0) in vec2 v;
+    \\layout(location = 0) out vec4 o;
+    \\void main() {
+    \\    vec2 a = interpolateAtCentroid(v);
+    \\    vec2 b = interpolateAtSample(v, 2);
+    \\    vec2 c = interpolateAtOffset(v, vec2(0.1));
+    \\    o = vec4(a + b + c, 0.0);
+    \\}
+;
+
+test "T-interp.1: MSL pull-model interpolation uses interpolant<> + method calls on 2.3+ (#271)" {
+    const msl = try compileToMslStageVer(interp_src, .fragment, 23);
+    defer alloc.free(msl);
+    // Input field becomes interpolant<float2, interpolation::perspective>.
+    try assertContains(msl, "interpolant<float2, interpolation::perspective>");
+    // Method-call form, not the non-existent free functions.
+    try assertContains(msl, ".interpolate_at_centroid()");
+    try assertContains(msl, ".interpolate_at_sample(");
+    try assertContains(msl, ".interpolate_at_offset(");
+    // spirv-cross's GLSL→Metal offset fixup, emitted only on the offset method call.
+    try assertContains(msl, "+ 0.4375");
+    // The old broken free-function call must be gone.
+    try assertNotContains(msl, "interpolate_at_centroid(in");
+    try assertNotContains(msl, "// unhandled");
+}
+
+test "T-interp.2: MSL pull-model interpolation honest-errors below MSL 2.3 (#271)" {
+    // interpolant<> + method-call interpolation is MSL 2.3+. Below it, fail loud
+    // rather than emit non-compiling MSL (matching spirv-cross's refusal).
+    try std.testing.expectError(error.UnsupportedOp, compileToMslStageVer(interp_src, .fragment, 22));
+}
+
+test "T-interp.3: a plain read of a pull-model input becomes interpolate_at_center() (#271)" {
+    // Once an input is declared interpolant<>, EVERY read must be a method call;
+    // a plain (non-pull) read of the same input lowers to .interpolate_at_center().
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 v;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(interpolateAtCentroid(v) + v, 0.0); }
+    ;
+    const msl = try compileToMslStageVer(src, .fragment, 23);
+    defer alloc.free(msl);
+    try assertContains(msl, ".interpolate_at_centroid()");
+    try assertContains(msl, ".interpolate_at_center()");
+    try assertNotContains(msl, "// unhandled");
+}
+
+test "T-interp.4: the MSL 2.3 interpolation guard does not trip a plain-input shader (#271)" {
+    // A shader with plain location inputs and NO pull-model interpolation must
+    // still compile below 2.3 — the guard is scoped to InterpolateAt* ExtInsts.
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 v;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(v, 0.0, 1.0); }
+    ;
+    const msl = try compileToMslStageVer(src, .fragment, 21);
+    defer alloc.free(msl);
+    try assertNotContains(msl, "interpolant<");
+    try assertNotContains(msl, "// unhandled");
+}
