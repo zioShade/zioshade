@@ -3778,3 +3778,29 @@ test "wgsl: spec-constant-sized function-local array is an honest error" {
     ;
     try std.testing.expectError(error.UnsupportedOp, compileCompToWgsl(src));
 }
+
+// #170 (derivatives): the FINE-quality derivative variants — dFdxFine /
+// dFdyFine / fwidthFine — lower to OpDPdxFine (210) / OpDPdyFine (211) /
+// OpFwidthFine (212). The WGSL backend already mapped the plain (dpdx/dpdy/
+// fwidth) and Coarse (dpdxCoarse/…) variants, but the Fine arms were missing,
+// so these honest-errored even though WGSL HAS dpdxFine/dpdyFine/fwidthFine
+// builtins (a missing-but-representable gap, not a true unrepresentable op).
+// Oracle: naga validates dpdxFine/dpdyFine/fwidthFine on a vec2<f32>.
+test "wgsl: fine-quality derivatives map to dpdxFine/dpdyFine/fwidthFine" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec2 a = dFdxFine(uv);
+        \\    vec2 b = dFdyFine(uv);
+        \\    vec2 c = fwidthFine(uv);
+        \\    o = vec4(a + b + c, 0.0, 0.0);
+        \\}
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "dpdxFine(");
+    try assertContains(wgsl, "dpdyFine(");
+    try assertContains(wgsl, "fwidthFine(");
+}
