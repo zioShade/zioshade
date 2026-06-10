@@ -26,7 +26,7 @@ const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32, descr
 // `buildMslTextureType` and read at the emit sites. It is intentionally NOT
 // defaulted: a construction site that forgets it should be a compile error, not
 // a silent `texture2d<float>` for an int/cube/array sampler (#203).
-const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0, is_depth: bool = false, dim: u32 = 1, arrayed: bool = false, msl_type: []const u8, var_id: u32 = 0 };
+const TextureDecl = struct { name: []const u8, binding: u32, descriptor_set: u32 = 0, is_depth: bool = false, dim: u32 = 1, arrayed: bool = false, msl_type: []const u8, var_id: u32 = 0, is_storage: bool = false };
 const MemberKey = struct { struct_id: u32, member_index: u32 };
 /// A stage input that becomes a `main0_in` field and is referenced in the body
 /// as `in.<name>`. For fragment the field is `T name [[user(locnN)]]`; for
@@ -216,10 +216,10 @@ fn mslTextureFamily(is_depth: bool, dim: u32, arrayed: bool) []const u8 {
 /// `int`, or `uint` (decoded from the OpTypeImage sampled type); DEPTH textures
 /// always use `float` (their `.sample_compare` is float-only). Returns an
 /// arena-allocated string; falls back to a `<float>` literal on OOM.
-fn buildMslTextureType(alloc: std.mem.Allocator, is_depth: bool, dim: u32, arrayed: bool, component: []const u8) []const u8 {
+fn buildMslTextureType(alloc: std.mem.Allocator, is_depth: bool, dim: u32, arrayed: bool, component: []const u8, access_suffix: []const u8) []const u8 {
     const fam = mslTextureFamily(is_depth, dim, arrayed);
     const comp = if (is_depth) "float" else component;
-    return std.fmt.allocPrint(alloc, "{s}<{s}>", .{ fam, comp }) catch (if (arrayed) "texture2d_array<float>" else "texture2d<float>");
+    return std.fmt.allocPrint(alloc, "{s}<{s}{s}>", .{ fam, comp, access_suffix }) catch (if (arrayed) "texture2d_array<float>" else "texture2d<float>");
 }
 
 /// The MSL `<component>` spelling for a sampled texture, read from the
@@ -1239,6 +1239,53 @@ fn collectAtomicImages(m: *const ParsedModule, alloc: std.mem.Allocator) !std.Au
     return set;
 }
 
+const ImageAccess = struct { read: bool = false, write: bool = false };
+
+/// Map each storage-image variable id to whether it is actually READ (OpImageRead)
+/// and/or WRITTEN (OpImageWrite). Used to pick the MSL `access::` qualifier, matching
+/// spirv-cross: read+write → read_write, write-only → write, read-only or atomic-only
+/// (neither OpImageRead nor OpImageWrite — the atomic goes through the backing buffer)
+/// → no qualifier (default sample access, which still supports `.read()`). The image
+/// operand of OpImageRead/Write is an OpLoad of the image variable, so a load→var map
+/// resolves it back to the UniformConstant variable.
+fn collectImageAccess(m: *const ParsedModule, alloc: std.mem.Allocator) !std.AutoHashMap(u32, ImageAccess) {
+    var map = std.AutoHashMap(u32, ImageAccess).init(alloc);
+    var load_to_var = std.AutoHashMap(u32, u32).init(alloc);
+    defer load_to_var.deinit();
+    for (m.instructions) |inst| {
+        if (inst.op == .Load and inst.words.len >= 4) {
+            const pd = getDef(m, inst.words[3]) orelse continue;
+            if (pd.op == .Variable and pd.words.len >= 4) {
+                const sc: spirv.StorageClass = @enumFromInt(pd.words[3]);
+                if (sc == .UniformConstant) try load_to_var.put(inst.words[2], inst.words[3]);
+            }
+        }
+    }
+    for (m.instructions) |inst| {
+        if (inst.op == .ImageRead and inst.words.len >= 4) {
+            if (load_to_var.get(inst.words[3])) |vid| {
+                const e = try map.getOrPutValue(vid, .{});
+                e.value_ptr.read = true;
+            }
+        } else if (inst.op == .ImageWrite and inst.words.len >= 4) { // image, coord, texel
+            if (load_to_var.get(inst.words[1])) |vid| {
+                const e = try map.getOrPutValue(vid, .{});
+                e.value_ptr.write = true;
+            }
+        }
+    }
+    return map;
+}
+
+/// The MSL `access::` suffix (including the leading `, `) for a storage image with the
+/// given actual read/write usage. read+write → `, access::read_write`; write-only →
+/// `, access::write`; read-only / unused → `` (default sample access supports `.read()`).
+fn mslStorageAccessSuffix(acc: ImageAccess) []const u8 {
+    if (acc.read and acc.write) return ", access::read_write";
+    if (acc.write) return ", access::write";
+    return "";
+}
+
 /// True if any OpImageTexelPointer (image atomic) lives in a NON-entry function. The
 /// emulation binds the `device atomic_T*` backing buffer only in the entry-point
 /// signature, so a non-entry helper performing an image atomic would reference an
@@ -1637,7 +1684,16 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     defer cbuffers.deinit(aa);
     var textures = std.ArrayList(TextureDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
     defer textures.deinit(aa);
-    collectResources(&module, &names, &decs, &cbuffers, &textures, aa);
+    // Per-storage-image read/write usage → picks the MSL access:: qualifier.
+    var img_access = try collectImageAccess(&module, aa);
+    defer img_access.deinit();
+    // Storage-image atomics: image var-ids backed by a `device atomic_T*` buffer. These
+    // must NOT take an access:: qualifier (their texture is used only for .get_width(),
+    // which needs read/sample access; the actual read/write goes through the backing
+    // buffer). Collected here so collectResources can suppress the suffix for them.
+    var atomic_images = try collectAtomicImages(&module, aa);
+    defer atomic_images.deinit();
+    collectResources(&module, &names, &decs, &cbuffers, &textures, &img_access, &atomic_images, aa);
 
     // Stage inputs (layout(location) in ...). Collected with their ORIGINAL
     // names BEFORE any body-emit rename, so the `main0_in` struct fields use
@@ -1655,11 +1711,6 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // `interpolant<T, interpolation::perspective>` and read via method calls.
     var pull_model = try collectPullModelInputs(&module, aa);
     defer pull_model.deinit();
-
-    // Storage-image atomics: the image var-ids that need a buffer-backed atomic
-    // emulation (`device atomic_T*` backing buffer + spvImage2DAtomicCoord macro).
-    var atomic_images = try collectAtomicImages(&module, aa);
-    defer atomic_images.deinit();
 
     // Vertex stage outputs (layout(location) out ... + gl_Position). Collected
     // with ORIGINAL names so `main0_out` fields use the source name while body
@@ -2225,7 +2276,7 @@ fn collectMemberOffsets(m: *const ParsedModule, offsets: *std.AutoHashMap(Member
     }
 }
 
-fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), cb: *std.ArrayList(CbufferDecl), tex: *std.ArrayList(TextureDecl), alloc: std.mem.Allocator) void {
+fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), cb: *std.ArrayList(CbufferDecl), tex: *std.ArrayList(TextureDecl), img_access: *const std.AutoHashMap(u32, ImageAccess), atomic_images: *const std.AutoHashMap(u32, void), alloc: std.mem.Allocator) void {
     for (m.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
         const rt = inst.words[1]; const rid = inst.words[2]; const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
@@ -2233,7 +2284,17 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pt = pi.words[3];
         switch (sc) {
             .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding, .descriptor_set=set}) catch {}; },
-            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; const name = names.get(rid) orelse "tex"; const is_depth = imageTypeIsDepth(m, pei); var img = pei; if (img.op == .TypeSampledImage and img.words.len > 2) { img = getDef(m, img.words[2]) orelse img; } const dim: u32 = if (img.op == .TypeImage and img.words.len > 3) img.words[3] else 1; const arrayed: bool = img.op == .TypeImage and img.words.len > 5 and img.words[5] == 1; const comp = mslSampledComponent(m, img); const msl_type = buildMslTextureType(alloc, is_depth, dim, arrayed, comp); switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth,.dim=dim,.arrayed=arrayed,.msl_type=msl_type,.var_id=rid}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth,.dim=dim,.arrayed=arrayed,.msl_type=msl_type,.var_id=rid}) catch {};}, else=>{}} },
+            .UniformConstant => { const pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const set = getDecVal(decs, rid, .descriptor_set) orelse 0; const name = names.get(rid) orelse "tex"; const is_depth = imageTypeIsDepth(m, pei); var img = pei; if (img.op == .TypeSampledImage and img.words.len > 2) { img = getDef(m, img.words[2]) orelse img; } const dim: u32 = if (img.op == .TypeImage and img.words.len > 3) img.words[3] else 1; const arrayed: bool = img.op == .TypeImage and img.words.len > 5 and img.words[5] == 1;
+                // A bare OpTypeImage with Sampled==2 is a STORAGE image (read/write/atomic,
+                // no combined sampler). It takes an MSL `access::` qualifier driven by its
+                // actual OpImageRead/OpImageWrite usage; sampled images keep default access.
+                const is_storage = img.op == .TypeImage and img.words.len > 7 and img.words[7] == 2;
+                // Atomic images take NO access:: qualifier — their texture is used only for
+                // .get_width() in spvImage2DAtomicCoord (which needs read/sample access; the
+                // read/write goes through the backing buffer), so a co-occurring imageStore
+                // must not push it to access::write (which forbids .get_width()).
+                const access_suffix = if (is_storage and !atomic_images.contains(rid)) mslStorageAccessSuffix(img_access.get(rid) orelse .{}) else "";
+                const comp = mslSampledComponent(m, img); const msl_type = buildMslTextureType(alloc, is_depth, dim, arrayed, comp, access_suffix); switch(pei.op){ .TypeSampledImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth,.dim=dim,.arrayed=arrayed,.msl_type=msl_type,.var_id=rid,.is_storage=is_storage}) catch {};}, .TypeImage=>{tex.append(alloc,.{.name=name,.binding=binding,.descriptor_set=set,.is_depth=is_depth,.dim=dim,.arrayed=arrayed,.msl_type=msl_type,.var_id=rid,.is_storage=is_storage}) catch {};}, else=>{}} },
             else => {},
         }
     }
@@ -3103,6 +3164,21 @@ fn emitFunction(
                 if (!first_param) try w.writeAll(", ");
                 const cb_b = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
                 try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{cb.name, cb.name, cb_b});
+                first_param = false;
+            }
+            // Textures/storage images (#284): compute kernels previously bound NO textures,
+            // so any imageLoad/imageStore/sample referenced an undeclared identifier. Bind
+            // each here; sampled images also get a `sampler`, storage images do not. Atomic
+            // images are bound by the #267 block below (texture + backing buffer), so skip them.
+            for (textures.items) |tex| {
+                if (atomic_images.contains(tex.var_id)) continue;
+                if (!first_param) try w.writeAll(", ");
+                const tex_b = resolveMslSlot(resource_bindings, binding_shift, tex.descriptor_set, tex.binding);
+                if (tex.is_storage) {
+                    try w.print("{s} {s} [[texture({d})]]", .{ tex.msl_type, tex.name, tex_b });
+                } else {
+                    try w.print("{s} {s} [[texture({d})]], sampler {s}Smplr [[sampler({d})]]", .{ tex.msl_type, tex.name, tex_b, tex.name, tex_b });
+                }
                 first_param = false;
             }
         }
