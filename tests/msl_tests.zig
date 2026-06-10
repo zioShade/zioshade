@@ -3096,3 +3096,51 @@ test "T-bits.4: MSL findLSB/findMSB are componentwise for vectors (typed splats)
     try assertContains(msl, "int2(select("); // result cast to ivec2
     try assertContains(msl, "int2(-1) - "); // signed-vector negative flip (findMSB(ivec2))
 }
+
+// packHalf2x16/unpackHalf2x16 have NO MSL builtin — Metal converts via half + as_type.
+// glslpp emitted the invented `pack_float_to_half2x16`/`unpack_half2x16_to_float`, which
+// do not exist → non-compiling MSL. The unorm/snorm variants (pack_float_to_unorm2x16,
+// etc.) ARE real MSL builtins and stay. spirv-cross: `as_type<uint>(half2(x))` /
+// `float2(as_type<half2>(x))`.
+test "T-pack.1: MSL packHalf2x16/unpackHalf2x16 use half+as_type, not invented builtins (#gaps packhalf)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { vec2 v2; uint p; } u;
+        \\void main() {
+        \\    uint a = packHalf2x16(u.v2);
+        \\    vec2 b = unpackHalf2x16(u.p);
+        \\    o = vec4(float(a) + b.x, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    try assertContains(msl, "= as_type<uint>(half2("); // packHalf2x16 (declared uint)
+    try assertContains(msl, "= float2(as_type<half2>("); // unpackHalf2x16 (declared float2)
+    try assertNotContains(msl, "pack_float_to_half2x16"); // invented, non-existent builtin
+    try assertNotContains(msl, "unpack_half2x16_to_float"); // invented, non-existent builtin
+}
+
+// Regression guard: the unorm/snorm pack/unpack builtins are REAL MSL functions and must
+// be left untouched by the packHalf fix.
+test "T-pack.2: MSL unorm/snorm pack/unpack keep their real MSL builtins (#gaps packhalf)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(binding = 0) uniform U { vec2 v2; vec4 v4; uint p; } u;
+        \\void main() {
+        \\    uint a = packUnorm2x16(u.v2);
+        \\    uint b = packSnorm4x8(u.v4);
+        \\    vec4 c = unpackUnorm4x8(u.p);
+        \\    o = vec4(float(a + b) + c.w, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    try assertContains(msl, "pack_float_to_unorm2x16(");
+    try assertContains(msl, "pack_float_to_snorm4x8(");
+    try assertContains(msl, "unpack_unorm4x8_to_float(");
+    // The invented half builtins must never reappear, even alongside the real ones.
+    try assertNotContains(msl, "pack_float_to_half2x16");
+    try assertNotContains(msl, "unpack_half2x16_to_float");
+}

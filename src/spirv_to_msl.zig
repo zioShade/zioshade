@@ -2451,9 +2451,10 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         35 => "modf", 36 => "modf", 51 => "frexp",
         54 => "pack_float_to_snorm4x8", 55 => "pack_float_to_unorm4x8",
         56 => "pack_float_to_snorm2x16", 57 => "pack_float_to_unorm2x16",
-        58 => "pack_float_to_half2x16",
+        // 58 (PackHalf2x16) / 62 (UnpackHalf2x16) have no MSL builtin — handled inline in
+        // the .ExtInst arm via half+as_type. Intentionally NOT mapped here (a bypass would
+        // honest-error rather than emit the non-existent pack_float_to_half2x16).
         60 => "unpack_snorm2x16_to_float", 61 => "unpack_unorm2x16_to_float",
-        62 => "unpack_half2x16_to_float",
         63 => "unpack_snorm4x8_to_float", 64 => "unpack_unorm4x8_to_float",
         76 => "interpolate_at_centroid", 77 => "interpolate_at_sample", 78 => "interpolate_at_offset",
         else => null,
@@ -3982,6 +3983,22 @@ fn emitInstruction(
                 }
                 try w.print("    {s} {s};\n", .{ second_type, second_name });
                 try w.print("    {s} {s} = {s}({s}, {s});\n", .{ fract_type, fract_name, func_name, input_name, second_name });
+            } else if (instruction == 58 or instruction == 62) {
+                if (inst.words.len < 6) return; // one operand
+                // packHalf2x16(58) / unpackHalf2x16(62) have NO MSL builtin — Metal's
+                // pack_float_to_* / unpack_*_to_float cover only unorm/snorm. Convert
+                // through `half` + `as_type` like spirv-cross. GLSL fixes the types with
+                // no overloads (packHalf2x16: vec2 -> uint; unpackHalf2x16: uint -> vec2),
+                // so the result/operand types are hardcoded:
+                //   packHalf2x16(vec2)   -> as_type<uint>(half2(x))
+                //   unpackHalf2x16(uint) -> float2(as_type<half2>(x))
+                const rn = names.get(inst.words[2]) orelse "v";
+                const x = names.get(inst.words[5]) orelse "x";
+                if (instruction == 58) {
+                    try w.print("    uint {s} = as_type<uint>(half2({s}));\n", .{ rn, x });
+                } else {
+                    try w.print("    float2 {s} = float2(as_type<half2>({s}));\n", .{ rn, x });
+                }
             } else if (instruction == 73 or instruction == 74 or instruction == 75) {
                 if (inst.words.len < 6) return; // these ExtInsts have exactly one operand
                 // findLSB / findMSB(signed) / findMSB(unsigned) — GLSL.std.450
