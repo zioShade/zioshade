@@ -1050,8 +1050,9 @@ fn std450ToGlsl(val: u32) ?[]const u8 {
         31 => "sqrt", 32 => "inversesqrt", 33 => "determinant",
         34 => "inverse",
         36 => "modf",
-        37 => "min", 38 => "max", 39 => "min",
-        40 => "max", 41 => "min", 42 => "max", 43 => "clamp", 44 => "clamp",
+        // GLSL.std.450 spec order: FMin(37) UMin(38) SMin(39) FMax(40) UMax(41) SMax(42).
+        37 => "min", 38 => "min", 39 => "min",
+        40 => "max", 41 => "max", 42 => "max", 43 => "clamp", 44 => "clamp",
         45 => "clamp", 46 => "mix", 48 => "step", 49 => "smoothstep",
         50 => "fma",
         52 => "frexp",
