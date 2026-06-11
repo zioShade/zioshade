@@ -1294,15 +1294,43 @@ test "wgsl: fragment-shader interlock errors honestly (WGSL has no interlock)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "interlock") != null);
 }
 
-// A SPIR-V opcode that glslpp's `Op` enum does not NAME (here OpIAddCarry=149,
-// emitted by GLSL `uaddCarry`) must fail loud with error.UnsupportedOp — never
-// crash. The honest-error fallback formatted the op via `@tagName(inst.op)`,
-// which PANICS ("invalid enum value") on a non-exhaustive enum value with no
-// matching field, so the process aborted on perfectly valid glslang SPIR-V
-// instead of reporting the honest error. glslpp's own frontend rejects
-// `uaddCarry`, so glslang is the oracle that produces the op. (#170)
+// A SPIR-V opcode that glslpp's `Op` enum does not NAME (here OpUMulExtended=151,
+// emitted by GLSL `umulExtended`) must fail loud with error.UnsupportedOp — never
+// crash. The honest-error fallback formatted the op via `@tagName(inst.op)`, which
+// PANICS ("invalid enum value") on a non-exhaustive enum value with no matching
+// field, so the process aborted on perfectly valid glslang SPIR-V instead of
+// reporting the honest error. `umulExtended` needs a u64 intermediate that core
+// WGSL lacks, so unlike uaddCarry/usubBorrow it stays a (loud) honest error — and
+// it is still a tag-less opcode, so it exercises the same `@tagName`-panic path.
+// glslpp's own frontend rejects `umulExtended`, so glslang is the oracle. (#170)
 test "wgsl: an opcode the Op enum doesn't name fails loud, not a @tagName panic (#170)" {
-    const spirv = try compileToSpirv("iaddcarry_honest",
+    const spirv = try compileToSpirv("umulextended_honest",
+        \\#version 450
+        \\layout(location = 0) flat in uvec2 v;
+        \\layout(location = 0) out uvec2 o;
+        \\void main() {
+        \\    uint msb;
+        \\    uint lsb;
+        \\    umulExtended(v.x, v.y, msb, lsb);
+        \\    o = uvec2(lsb, msb);
+        \\}
+    );
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    // The detail must identify the unnamed op by its numeric opcode (151) rather
+    // than crash trying to look up a non-existent enum tag name.
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "151") != null);
+}
+
+// #170: OpIAddCarry / OpISubBorrow (GLSL uaddCarry/usubBorrow) return a 2-member
+// {result, carry|borrow} struct that is consumed only by OpCompositeExtract. They
+// have no struct-returning WGSL builtin, but each member IS representable: member 0
+// is the wrapping add/sub (WGSL u32 arithmetic wraps, matching SPIR-V), member 1 is
+// the carry/borrow recovered with `select`. glslpp's own frontend rejects these, so
+// glslang is the oracle. Previously honest-errored (error.UnsupportedOp).
+test "wgsl: scalar uaddCarry lowers to a naga-valid select idiom (#170)" {
+    const spirv = try compileToSpirv("uaddcarry_scalar",
         \\#version 450
         \\layout(location = 0) flat in uvec2 v;
         \\layout(location = 0) out uvec2 o;
@@ -1313,11 +1341,69 @@ test "wgsl: an opcode the Op enum doesn't name fails loud, not a @tagName panic 
         \\}
     );
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    // The detail must identify the unnamed op by its numeric opcode (149) rather
-    // than crash trying to look up a non-existent enum tag name.
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
-    try std.testing.expect(std.mem.indexOf(u8, detail, "149") != null);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // Carry is recovered via select (no struct-returning builtin leaks).
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "select(") != null);
+    // The wrapping sum (member 0) is a plain addition.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, " + ") != null);
+    try nagaValidateOrSkip(wgsl, "uaddcarry-scalar");
+}
+
+test "wgsl: scalar usubBorrow lowers to a naga-valid select idiom (#170)" {
+    const spirv = try compileToSpirv("usubborrow_scalar",
+        \\#version 450
+        \\layout(location = 0) flat in uvec2 v;
+        \\layout(location = 0) out uvec2 o;
+        \\void main() {
+        \\    uint borrow;
+        \\    uint d = usubBorrow(v.x, v.y, borrow);
+        \\    o = uvec2(d, borrow);
+        \\}
+    );
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // Borrow is recovered via select on a less-than comparison.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "select(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, " - ") != null);
+    try nagaValidateOrSkip(wgsl, "usubborrow-scalar");
+}
+
+test "wgsl: vector uaddCarry lowers componentwise (naga-valid) (#170)" {
+    const spirv = try compileToSpirv("uaddcarry_vec",
+        \\#version 450
+        \\layout(location = 0) flat in uvec4 v;
+        \\layout(location = 0) out uvec4 o;
+        \\void main() {
+        \\    uvec2 carry;
+        \\    uvec2 s = uaddCarry(v.xy, v.zw, carry);
+        \\    o = uvec4(s, carry);
+        \\}
+    );
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "select(") != null);
+    try nagaValidateOrSkip(wgsl, "uaddcarry-vec");
+}
+
+test "wgsl: vector usubBorrow lowers componentwise (naga-valid) (#170)" {
+    const spirv = try compileToSpirv("usubborrow_vec",
+        \\#version 450
+        \\layout(location = 0) flat in uvec4 v;
+        \\layout(location = 0) out uvec4 o;
+        \\void main() {
+        \\    uvec2 borrow;
+        \\    uvec2 d = usubBorrow(v.xy, v.zw, borrow);
+        \\    o = uvec4(d, borrow);
+        \\}
+    );
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "select(") != null);
+    try nagaValidateOrSkip(wgsl, "usubborrow-vec");
 }
 
 test "wgsl: unmapped input built-in (gl_PointCoord) errors honestly" {
