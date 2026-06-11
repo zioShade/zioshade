@@ -854,6 +854,31 @@ test "#173 item1: matrix-element const-array global cross-compiles to glslang-va
     try assertGlslangAccepts(alloc, "matrix-const-array", g, .fragment);
 }
 
+// #297: assert the FIRST `= <call>` assignment in `glsl` declares its result,
+// i.e. the statement is `<type> <name> = <call>...` and not a bare
+// `<name> = <call>...`. This directly encodes the #297 regression (an undeclared
+// atomic result) and — unlike `assertGlslangAccepts`, which SkipZigTests when the
+// Vulkan SDK is absent — it always runs, so the regression is caught even on a
+// glslang-less CI.
+fn assertResultDeclared(glsl: []const u8, call: []const u8) !void {
+    const needle = try std.fmt.allocPrint(alloc, "= {s}", .{call});
+    defer alloc.free(needle);
+    const at = std.mem.indexOf(u8, glsl, needle) orelse {
+        std.debug.print("\n[#297] call `{s}` was never emitted:\n{s}\n", .{ call, glsl });
+        return error.CallNotEmitted;
+    };
+    const line_start = if (std.mem.lastIndexOfScalar(u8, glsl[0..at], '\n')) |nl| nl + 1 else 0;
+    const lhs = std.mem.trim(u8, glsl[line_start..at], " \t"); // text before "= call"
+    // A declared assignment has at least two tokens: `<type> <name>`.
+    var it = std.mem.tokenizeAny(u8, lhs, " \t");
+    var tokens: usize = 0;
+    while (it.next()) |_| tokens += 1;
+    if (tokens < 2) {
+        std.debug.print("\n[#297] undeclared result — emitted `{s} = {s}...` (no type prefix)\n", .{ lhs, call });
+        return error.UndeclaredResult;
+    }
+}
+
 // #297: SSBO atomic ops emit their result assignment WITHOUT a type declaration,
 // e.g. `v7 = atomicCompSwap(b.lock, 7u, 9u);` where `v7` is never declared →
 // glslang rejects with "'v7' : undeclared identifier". The result name needs the
@@ -878,9 +903,9 @@ test "#297: SSBO atomic-op results are declared (glslang-valid)" {
     defer alloc.free(spirv);
     const g = try glslpp.spirvToGLSL(alloc, spirv, .{});
     defer alloc.free(g);
-    // The result-type prefix must be present (RED emitted a bare `v = atomicCompSwap`).
-    try std.testing.expect(std.mem.indexOf(u8, g, "= atomicCompSwap(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, g, "uint ") != null);
+    // The atomic result must carry a type prefix (RED emitted a bare
+    // `v = atomicCompSwap(...)` → undeclared identifier).
+    try assertResultDeclared(g, "atomicCompSwap(");
     try assertGlslangAccepts(alloc, "ssbo-atomic-decl", g, .compute);
 }
 
@@ -903,6 +928,6 @@ test "#297: image atomic-op results are declared (glslang-valid)" {
     defer alloc.free(spirv);
     const g = try glslpp.spirvToGLSL(alloc, spirv, .{});
     defer alloc.free(g);
-    try std.testing.expect(std.mem.indexOf(u8, g, "= imageAtomicCompSwap(") != null);
+    try assertResultDeclared(g, "imageAtomicCompSwap(");
     try assertGlslangAccepts(alloc, "image-atomic-decl", g, .compute);
 }
