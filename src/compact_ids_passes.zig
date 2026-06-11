@@ -3648,8 +3648,12 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                         if (float_zero_ids.isSet(a)) try replacements.put(alloc, result_id, b);
                     },
                     131 => { // OpFSub
+                        // `x - 0.0 = x` is safe. The `x - x` case was BROKEN two ways and is
+                        // removed: (a) it mapped the result to operand `b` (= x), so `5.0-5.0`
+                        // folded to `5.0`, not `0.0` — a wrong-value miscompile; (b) even a
+                        // correct fold to a literal 0 would be wrong for IEEE (`Inf-Inf = NaN`).
+                        // Leaving the OpFSub in place computes the right value for every input.
                         if (float_zero_ids.isSet(b)) try replacements.put(alloc, result_id, a);
-                        if (a == b) try replacements.put(alloc, result_id, b); // x - x = 0
                     },
                     136 => { // OpFDiv
                         if (float_one_ids.isSet(b)) try replacements.put(alloc, result_id, a);
@@ -3659,8 +3663,10 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                         if (int_zero_ids.isSet(a)) try replacements.put(alloc, result_id, b);
                     },
                     130 => { // OpISub
+                        // `x - 0 = x` is safe. The `x - x` case is removed: it mapped the
+                        // result to operand `b` (= x), so `u - u` folded to `u`, not `0` — a
+                        // wrong-value miscompile. (Leaving the OpISub computes the correct 0.)
                         if (int_zero_ids.isSet(b)) try replacements.put(alloc, result_id, a);
-                        if (a == b) try replacements.put(alloc, result_id, b); // x - x = 0
                     },
                     135 => { // OpSDiv
                         if (int_one_ids.isSet(b)) try replacements.put(alloc, result_id, a);
@@ -3676,16 +3682,17 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                         if (int_zero_ids.isSet(a)) try replacements.put(alloc, result_id, a);
                     },
                     133 => { // OpFMul
+                        // `x * 1.0 = x` is exact for ALL float values (incl. NaN/Inf), so it
+                        // is safe. `x * 0.0 = 0.0` is NOT: IEEE `Inf*0` and `NaN*0` are NaN,
+                        // and OpFMul carries no nnan/ninf fast-math contract — folding it was a
+                        // silent-wrong miscompile. Only the identity-multiply fold is kept.
                         if (float_one_ids.isSet(b)) try replacements.put(alloc, result_id, a);
                         if (float_one_ids.isSet(a)) try replacements.put(alloc, result_id, b);
-                        // x * 0.0 = 0.0 (replace with the zero operand)
-                        if (float_zero_ids.isSet(b)) try replacements.put(alloc, result_id, b);
-                        if (float_zero_ids.isSet(a)) try replacements.put(alloc, result_id, a);
                     },
-                    142 => { // OpVectorTimesScalar: vec * 1.0 = vec, vec * 0.0 = zero
+                    142 => { // OpVectorTimesScalar: only `vec * 1.0 = vec` (NOT `* 0.0` — Inf/NaN * 0 = NaN)
                         if (float_one_ids.isSet(b)) try replacements.put(alloc, result_id, a);
                     },
-                    143 => { // OpMatrixTimesScalar: mat * 1.0 = mat, mat * 0.0 = zero
+                    143 => { // OpMatrixTimesScalar: only `mat * 1.0 = mat` (NOT `* 0.0` — Inf/NaN * 0 = NaN)
                         if (float_one_ids.isSet(b)) try replacements.put(alloc, result_id, a);
                     },
                     197 => { // OpBitwiseOr
@@ -6207,8 +6214,11 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                     const af: f32 = @bitCast(av);
                     const bf: f32 = @bitCast(bv);
                     switch (opcode) {
-                        180 => { bool_result = af == bf; }, // OpFOrdEqual
-                        182 => { bool_result = af != bf; }, // OpFOrdNotEqual
+                        180 => { bool_result = af == bf; }, // OpFOrdEqual (false for NaN — `==` already gives that)
+                        // OpFOrdNotEqual is ORDERED: false when either operand is NaN. Zig's
+                        // `af != bf` returns TRUE for NaN, so guard it (the other ordered
+                        // comparisons below already yield false for NaN via `< > <= >=`).
+                        182 => { bool_result = !std.math.isNan(af) and !std.math.isNan(bf) and af != bf; }, // OpFOrdNotEqual
                         184 => { bool_result = af < bf; },   // OpFOrdLessThan
                         186 => { bool_result = af > bf; },   // OpFOrdGreaterThan
                         188 => { bool_result = af <= bf; },  // OpFOrdLessThanEqual
