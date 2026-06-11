@@ -69,6 +69,24 @@ fn isOldStyleSSBOVar(m: *const ParsedModule, id: u32) bool {
     return structHasBufferBlock(m, pt);
 }
 
+/// True if `id` is an SSBO variable declared as an ANONYMOUS block — its instance name is
+/// empty (glslangValidator emits an empty `OpName` for `buffer B { ... };`). An anonymous
+/// block exposes its members directly in global scope, so member access must be BARE (`a`),
+/// never `{instance}.a` — and crucially never the leading-dot `.a` produced when the empty
+/// instance name is prefixed. glslang rejects `.a` with "unexpected DOT". Mirrors the
+/// gl_PerVertex builtin-block base suppression (isBuiltinBlockVar). Compute-gated to match
+/// the SSBO emission loop and isUniformBlockVar's BufferBlock exclusion: only there is the
+/// block actually emitted anonymously; elsewhere it routes through the named cbuffer path.
+fn isAnonymousSSBOVar(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32) bool {
+    if (m.execution_model != .GLCompute) return false;
+    const def = getDef(m, id) orelse return false;
+    if (def.op != .Variable or def.words.len < 4) return false;
+    const sc: spirv.StorageClass = @enumFromInt(def.words[3]);
+    if (sc != .StorageBuffer and !isOldStyleSSBOVar(m, id)) return false;
+    const nm = names.get(id) orelse return true; // absent OpName ⇒ anonymous
+    return nm.len == 0;
+}
+
 fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(m, id) orelse return null;
     switch(inst.op) {
@@ -175,11 +193,15 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     // A gl_PerVertex-style built-in block: emit no base instance — its members
     // lower to bare gl_* names (handled per-index below), matching spirv-cross.
     const base_is_builtin_block = isBuiltinBlockVar(m, base_id);
+    // An anonymous SSBO block: suppress the (empty) instance base and emit the first
+    // member level bare (`a`), never `.a` — glslang rejects the leading dot. (#304 follow-up)
+    const base_is_anon = isAnonymousSSBOVar(m, names, base_id);
     // Use a stack buffer to avoid heap allocation for typical access chains
     var writer = compat.StackBufWriter(512).init();
-    if (!base_is_cb and !base_is_builtin_block) writer.writeAll(base_name);
+    if (!base_is_cb and !base_is_builtin_block and !base_is_anon) writer.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
     var cb_level: bool = base_is_cb; // only first level uses cb_prefix
+    var anon_level: bool = base_is_anon; // only first member level drops the dot
     for (indices) |index_id| {
         const idx_inst = getDef(m, index_id);
         if (idx_inst) |def| {
@@ -204,7 +226,7 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                         // Use struct member name for nested struct access
                         var mname_buf: [32]u8 = undefined;
                         const mname = getMemberName(m, cur_type.?, val, &mname_buf);
-                        writer.print(".{s}", .{mname});
+                        if (anon_level) { writer.writeAll(mname); anon_level = false; } else writer.print(".{s}", .{mname});
                     }
                 } else {
                     writer.print("[{d}]", .{val});
@@ -233,9 +255,10 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     // Fallback to heap allocation for long chains
     var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
     defer buf.deinit(alloc);
-    if (!base_is_cb and !base_is_builtin_block) try buf.appendSlice(alloc, base_name);
+    if (!base_is_cb and !base_is_builtin_block and !base_is_anon) try buf.appendSlice(alloc, base_name);
     cur_type = resolvePointee(m, base_id);
     var cb_level2: bool = base_is_cb;
+    var anon_level2: bool = base_is_anon;
     for (indices) |index_id| {
         const idx_inst = getDef(m, index_id);
         if (idx_inst) |def| {
@@ -256,7 +279,7 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     } else {
                         var mname_buf: [32]u8 = undefined;
                         const mname = getMemberName(m, cur_type.?, val, &mname_buf);
-                        try buf.print(alloc, ".{s}", .{mname});
+                        if (anon_level2) { try buf.appendSlice(alloc, mname); anon_level2 = false; } else try buf.print(alloc, ".{s}", .{mname});
                     }
                 } else {
                     try buf.print(alloc, "[{d}]", .{val});
@@ -292,9 +315,11 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     const base_is_cb = isUniformBlockVar(m, base_id);
     const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
     const base_is_builtin_block = isBuiltinBlockVar(m, base_id);
-    if (!base_is_cb and !base_is_builtin_block) try w.writeAll(base_name);
+    const base_is_anon = isAnonymousSSBOVar(m, names, base_id);
+    if (!base_is_cb and !base_is_builtin_block and !base_is_anon) try w.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
     var cb_level: bool = base_is_cb;
+    var anon_level: bool = base_is_anon;
     for (indices) |index_id| {
         const idx_inst = getDef(m, index_id);
         if (idx_inst) |def| {
@@ -319,7 +344,7 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     } else {
                         var mname_buf: [32]u8 = undefined;
                         const mname = getMemberName(m, cur_type.?, val, &mname_buf);
-                        try w.print(".{s}", .{mname});
+                        if (anon_level) { try w.writeAll(mname); anon_level = false; } else try w.print(".{s}", .{mname});
                     }
                 } else {
                     try w.print("[{d}]", .{val});
@@ -3197,9 +3222,17 @@ fn emitInstruction(
             if (ptr_def.op != .TypePointer or ptr_def.words.len < 4) return error.UnsupportedOp;
             var mbuf: [32]u8 = undefined;
             const mname = getMemberName(m, ptr_def.words[3], member_idx, &mbuf);
+            // An anonymous block exposes its members in global scope, so the runtime array is
+            // referenced BARE (`count.length()`); prefixing the empty instance name yields a
+            // leading-dot `.count.length()` that glslang rejects with "unexpected DOT" — the
+            // same suppression the access-chain emitters apply via isAnonymousSSBOVar.
+            const anon = isAnonymousSSBOVar(m, names, struct_ptr);
             // GLSL `.length()` yields `int`; OpArrayLength's result type is `uint`. Wrap so
             // the declared type matches without relying on an implicit int→uint conversion.
-            try w.print("    {s} {s} = {s}({s}.{s}.length());\n", .{ rtt, rn, rtt, inst_name, mname });
+            if (anon)
+                try w.print("    {s} {s} = {s}({s}.length());\n", .{ rtt, rn, rtt, mname })
+            else
+                try w.print("    {s} {s} = {s}({s}.{s}.length());\n", .{ rtt, rn, rtt, inst_name, mname });
         },
         else => {
             try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});
