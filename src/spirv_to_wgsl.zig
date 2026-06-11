@@ -6407,15 +6407,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const x = names.get(inst.words[3]) orelse "0";
-                if (std.mem.eql(u8, rt, "bool")) {
-                    // Scalar NaN test: x != x is true iff x is NaN (the standard idiom).
-                    try writeInd(w, indent);
-                    try w.print("let {s}: bool = ({s} != {s});\n", .{ result_name, x, x });
-                } else {
-                    // Vector isnan (bvecN) has no clean WGSL form (no componentwise !=).
-                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no isNan for vector type '{s}'", .{rt}) catch null;
-                    return error.UnsupportedOp;
-                }
+                // NaN test: `x != x` is true iff x is NaN. WGSL comparison operators are
+                // componentwise on vectors (returning vecN<bool>), so the SAME idiom covers
+                // both the scalar (bool) and vector (bvecN) result — no special case needed.
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = ({s} != {s});\n", .{ result_name, rt, x, x });
             },
             .IsInf => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
@@ -6430,10 +6426,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     try writeInd(w, indent);
                     try w.print("let {s}: bool = ({s} != 0.0 && {s} * 2.0 == {s});\n", .{ result_name, x, x, x });
                 } else {
-                    // Vector isinf (bvecN) has no clean WGSL form (no componentwise &&
-                    // on bool vectors). Honest-error, parallel to vector isnan above.
-                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no isInf for vector type '{s}'", .{rt}) catch null;
-                    return error.UnsupportedOp;
+                    // Vector isinf (bvecN): the same idiom, componentwise. WGSL `&` is
+                    // componentwise logical-AND on bool vectors (`&&` is scalar-only), and
+                    // `v != vecN(0.0)` / `v*2.0 == v` are componentwise → vecN<bool>. The
+                    // zero literal must match the operand's float vector type. naga-validated.
+                    const op_type_id = getTypeOf(module, inst.words[3]) orelse {
+                        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL isInf: unresolved operand type for '{s}'", .{rt}) catch null;
+                        return error.UnsupportedOp;
+                    };
+                    const op_type = try wgslType(module, op_type_id, names, arena);
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = ({s} != {s}(0.0)) & ({s} * 2.0 == {s});\n", .{ result_name, rt, x, op_type, x, x });
                 }
             },
 
@@ -7287,6 +7290,34 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             const result_name = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[3]) orelse "0";
             try writeIndentStatic(w, indent); try w.print("let {s}: {s} = bitcast<{s}>({s});\n", .{ result_name, rt, rt, val });
+        },
+        // IsNan/IsInf must be handled here too (the loop/switch REPLAY path), or
+        // `isnan`/`isinf` used in a loop CONDITION (deferred into the loop-header replay
+        // range) honest-errors despite the main-path lowering. Mirrors the emitBody arms
+        // exactly: scalar AND vector via the componentwise idioms. (#170)
+        .IsNan => {
+            const rt = try wgslType(module, inst.words[1], names, arena);
+            const result_name = names.get(inst.words[2]) orelse "v";
+            const x = names.get(inst.words[3]) orelse "0";
+            try writeIndentStatic(w, indent);
+            try w.print("let {s}: {s} = ({s} != {s});\n", .{ result_name, rt, x, x });
+        },
+        .IsInf => {
+            const rt = try wgslType(module, inst.words[1], names, arena);
+            const result_name = names.get(inst.words[2]) orelse "v";
+            const x = names.get(inst.words[3]) orelse "0";
+            if (std.mem.eql(u8, rt, "bool")) {
+                try writeIndentStatic(w, indent);
+                try w.print("let {s}: bool = ({s} != 0.0 && {s} * 2.0 == {s});\n", .{ result_name, x, x, x });
+            } else {
+                const op_type_id = getTypeOf(module, inst.words[3]) orelse {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL isInf: unresolved operand type for '{s}'", .{rt}) catch null;
+                    return error.UnsupportedOp;
+                };
+                const op_type = try wgslType(module, op_type_id, names, arena);
+                try writeIndentStatic(w, indent);
+                try w.print("let {s}: {s} = ({s} != {s}(0.0)) & ({s} * 2.0 == {s});\n", .{ result_name, rt, x, op_type, x, x });
+            }
         },
         .ExtInst => {
             // Handle GLSL.std.450 extended instructions in switch replay
