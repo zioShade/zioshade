@@ -14517,11 +14517,35 @@ test "T-qlod.1: HLSL textureQueryLod uses CalculateLevelOfDetail (#gaps querylod
     try assertNotContains(hlsl, "// unhandled");
 }
 
-// #294: runtime-sized SSBO array `.length()` lowers to OpArrayLength. HLSL would express
-// this via a StructuredBuffer/ByteAddressBuffer `.GetDimensions(...)` — not yet wired — so
-// it HONEST-ERRORS (error.UnsupportedOp) rather than the silent-wrong `// unhandled op 68`.
-test "T-arrlen.1: runtime SSBO array .length() honest-errors in HLSL (#294)" {
+// #296: runtime-sized SSBO array `.length()` (OpArrayLength) now lowers to HLSL's
+// `RWStructuredBuffer<T>.GetDimensions(count, stride)` (the element COUNT is the array
+// length). glslpp flattens a single-runtime-array SSBO `{ T data[]; }` to
+// `RWStructuredBuffer<T>` (see the dxc-2048-byte test above), so GetDimensions returns the
+// length directly — simpler than spirv-cross's ByteAddressBuffer `(bytes-off)/stride` model
+// (which it uses because it keeps a byte buffer). dxc-validated; conformance validates SPIR-V
+// only, so this guards the emitted HLSL string.
+test "T-arrlen.1: runtime SSBO array .length() lowers to RWStructuredBuffer.GetDimensions (#296)" {
     const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(std430,binding=1) buffer Out { uint n; };\nvoid main(){ n = uint(d.length()); }";
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "RWStructuredBuffer<float> B");
+    try assertContains(hlsl, "B.GetDimensions(");
+    // The two-out-param RWStructuredBuffer overload (count, stride) — guards against a
+    // regression to a one-arg (ByteAddressBuffer) form, and that the length comes from count.
+    try assertContains(hlsl, "_dim_count");
+    try assertContains(hlsl, "_dim_stride");
+    try assertNotContains(hlsl, "// unhandled");
+}
+
+// #296: a MULTI-member SSBO with a trailing runtime array does NOT flatten to
+// `RWStructuredBuffer<T>` (HLSL forbids unsized array struct members; the element count
+// would be the struct count, not the array length), so `.length()` on it honest-errors
+// rather than emitting a wrong GetDimensions. (Only the flattened single-array case is
+// faithfully representable.)
+test "T-arrlen.2: multi-member SSBO .length() honest-errors in HLSL (#296)" {
+    const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { uint count; float data[]; } b;\nlayout(std430,binding=1) buffer Out { uint n; } o;\nvoid main(){ o.n = uint(b.data.length()); }";
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
