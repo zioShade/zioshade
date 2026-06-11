@@ -2859,86 +2859,96 @@ fn emitInstruction(
 
         // Atomic operations → GLSL atomic* builtins
         .AtomicIAdd => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
             switch (classifyAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomicAdd({s}, {s});\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = imageAtomicAdd({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+                .ssbo => |ptr| try w.print("    {s} {s} = atomicAdd({s}, {s});\n", .{rtt, rn, ptr, val}),
+                .image => |p| try w.print("    {s} {s} = imageAtomicAdd({s}, {s}, {s});\n", .{rtt, rn, p.img, p.coord, val}),
             }
         },
         .AtomicISub => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
             switch (classifyAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomicAdd({s}, -{s});\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = imageAtomicAdd({s}, {s}, -{s});\n", .{rn, p.img, p.coord, val}),
+                .ssbo => |ptr| try w.print("    {s} {s} = atomicAdd({s}, -{s});\n", .{rtt, rn, ptr, val}),
+                .image => |p| try w.print("    {s} {s} = imageAtomicAdd({s}, {s}, -{s});\n", .{rtt, rn, p.img, p.coord, val}),
             }
         },
         .AtomicOr => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
             switch (classifyAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomicOr({s}, {s});\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = imageAtomicOr({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+                .ssbo => |ptr| try w.print("    {s} {s} = atomicOr({s}, {s});\n", .{rtt, rn, ptr, val}),
+                .image => |p| try w.print("    {s} {s} = imageAtomicOr({s}, {s}, {s});\n", .{rtt, rn, p.img, p.coord, val}),
             }
         },
         .AtomicXor => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
             switch (classifyAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomicXor({s}, {s});\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = imageAtomicXor({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+                .ssbo => |ptr| try w.print("    {s} {s} = atomicXor({s}, {s});\n", .{rtt, rn, ptr, val}),
+                .image => |p| try w.print("    {s} {s} = imageAtomicXor({s}, {s}, {s});\n", .{rtt, rn, p.img, p.coord, val}),
             }
         },
         .AtomicAnd => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
             switch (classifyAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomicAnd({s}, {s});\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = imageAtomicAnd({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+                .ssbo => |ptr| try w.print("    {s} {s} = atomicAnd({s}, {s});\n", .{rtt, rn, ptr, val}),
+                .image => |p| try w.print("    {s} {s} = imageAtomicAnd({s}, {s}, {s});\n", .{rtt, rn, p.img, p.coord, val}),
             }
         },
         .AtomicSMin, .AtomicUMin => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
             switch (classifyAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomicMin({s}, {s});\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = imageAtomicMin({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+                .ssbo => |ptr| try w.print("    {s} {s} = atomicMin({s}, {s});\n", .{rtt, rn, ptr, val}),
+                .image => |p| try w.print("    {s} {s} = imageAtomicMin({s}, {s}, {s});\n", .{rtt, rn, p.img, p.coord, val}),
             }
         },
         .AtomicSMax, .AtomicUMax => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
             switch (classifyAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomicMax({s}, {s});\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = imageAtomicMax({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+                .ssbo => |ptr| try w.print("    {s} {s} = atomicMax({s}, {s});\n", .{rtt, rn, ptr, val}),
+                .image => |p| try w.print("    {s} {s} = imageAtomicMax({s}, {s}, {s});\n", .{rtt, rn, p.img, p.coord, val}),
             }
         },
         .AtomicExchange => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
             switch (classifyAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomicExchange({s}, {s});\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = imageAtomicExchange({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+                .ssbo => |ptr| try w.print("    {s} {s} = atomicExchange({s}, {s});\n", .{rtt, rn, ptr, val}),
+                .image => |p| try w.print("    {s} {s} = imageAtomicExchange({s}, {s}, {s});\n", .{rtt, rn, p.img, p.coord, val}),
             }
         },
         .AtomicCompareExchange => {
             // OpAtomicCompareExchange: result_type, result, pointer, scope, eq-sem,
             // uneq-sem, value(new/data), comparator(compare) — data=words[7], compare=words[8].
+            const rtt = try glslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
             const cmp = if (inst.words.len > 8) names.get(inst.words[8]) orelse "0" else "0";
             switch (classifyAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomicCompSwap({s}, {s}, {s});\n", .{rn, ptr, cmp, val}),
-                .image => |p| try w.print("    {s} = imageAtomicCompSwap({s}, {s}, {s}, {s});\n", .{rn, p.img, p.coord, cmp, val}),
+                .ssbo => |ptr| try w.print("    {s} {s} = atomicCompSwap({s}, {s}, {s});\n", .{rtt, rn, ptr, cmp, val}),
+                .image => |p| try w.print("    {s} {s} = imageAtomicCompSwap({s}, {s}, {s}, {s});\n", .{rtt, rn, p.img, p.coord, cmp, val}),
             }
         },
         .AtomicFAddEXT => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0.0" else "0.0";
             switch (classifyAtomicPtr(m, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} = atomicAdd({s}, {s});\n", .{rn, ptr, val}),
-                .image => |p| try w.print("    {s} = imageAtomicAdd({s}, {s}, {s});\n", .{rn, p.img, p.coord, val}),
+                .ssbo => |ptr| try w.print("    {s} {s} = atomicAdd({s}, {s});\n", .{rtt, rn, ptr, val}),
+                .image => |p| try w.print("    {s} {s} = imageAtomicAdd({s}, {s}, {s});\n", .{rtt, rn, p.img, p.coord, val}),
             }
         },
 
