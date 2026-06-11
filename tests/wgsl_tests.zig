@@ -1205,7 +1205,8 @@ test "wgsl: scalar isnan lowers to (x != x); scalar isinf to a naga-valid idiom"
         defer alloc.free(spirv);
         const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
         defer alloc.free(wgsl);
-        try std.testing.expect(std.mem.indexOf(u8, wgsl, "!=") != null);
+        // Pin the (x != x) let-binding idiom, not just any `!=` in the output.
+        try std.testing.expect(std.mem.indexOf(u8, wgsl, "bool = (") != null);
         try std.testing.expect(std.mem.indexOf(u8, wgsl, "isnan(") == null);
         try nagaValidateOrSkip(wgsl, "isnan-scalar");
     }
@@ -3873,4 +3874,74 @@ test "wgsl: named-instance SSBO array b.d.length() -> arrayLength(&b.d)" {
     try assertContains(wgsl, ".d)");
     try assertNotContains(wgsl, "unhandled");
     try nagaValidateOrSkip(wgsl, "ssbo_named_instance_length");
+}
+
+// #170: VECTOR isnan/isinf (OpIsNan/OpIsInf with a bvecN result) previously honest-errored
+// — only the scalar forms were lowered. WGSL comparison operators are componentwise on
+// vectors (returning vecN<bool>), and `&` is componentwise logical-AND on bool vectors, so
+// both have a faithful, naga-valid lowering: isnan(v) -> (v != v); isinf(v) -> (v != vecN(0.0))
+// & (v * 2.0 == v). No `isnan`/`isinf`/`isNan`/`isInf` identifier may leak (naga rejects).
+// Each is exercised in its OWN shader: a combined isnan+isinf shader currently has its
+// OpIsInf value-numbered into the OpIsNan result by the SPIR-V optimizer (a pre-existing,
+// orthogonal silent-wrong), which would erase the isinf path before the backend sees it.
+test "wgsl: VECTOR isnan lowers to (v != v) (#170)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(location = 0) in vec3 v;
+        \\void main() { bvec3 n = isnan(v); o = vec4(float(any(n)), 0.0, 0.0, 1.0); }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "vec3<bool> = (v != v)");
+    try assertNotContains(wgsl, "isnan");
+    try assertNotContains(wgsl, "isNan");
+    try assertNotContains(wgsl, "unhandled");
+    try nagaValidateOrSkip(wgsl, "vector_isnan");
+}
+
+test "wgsl: VECTOR isinf lowers to the componentwise (v != vecN(0.0)) & (v*2 == v) idiom (#170)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(location = 0) in vec3 v;
+        \\void main() { bvec3 i = isinf(v); o = vec4(float(any(i)), 0.0, 0.0, 1.0); }
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "!= vec3f(0.0)) & ("); // componentwise &, float-typed zero
+    try assertContains(wgsl, "* 2.0 == ");
+    try assertNotContains(wgsl, "isinf");
+    try assertNotContains(wgsl, "isInf");
+    try assertNotContains(wgsl, "unhandled");
+    try nagaValidateOrSkip(wgsl, "vector_isinf");
+}
+
+// #170: isnan/isinf used in a LOOP CONDITION are deferred into the loop-header REPLAY range
+// (emitSimpleInstruction), a distinct emit path from the straight-line body. Without arms
+// there too, `while (!isnan(x))` honest-errors despite the main-path lowering. This guards
+// the replay path emits the same naga-valid idiom.
+test "wgsl: isnan in a loop condition lowers via the replay path (#170)" {
+    // The loop CONDITION is solely `isnan(x)` so the only op deferred into the loop-header
+    // replay range is OpIsNan (a richer condition would also need LogicalAnd/comparison
+    // replay arms, which are pre-existing gaps unrelated to this fix). The `(x != x)` idiom
+    // must appear inside the emitted `loop {` and be naga-valid.
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float x = a;
+        \\    while (isnan(x)) { x = 0.0; }
+        \\    o = vec4(x, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const wgsl = try compileToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "loop {");
+    try assertContains(wgsl, "!= "); // the (x != x) idiom, emitted in the replay path
+    try assertNotContains(wgsl, "isnan");
+    try assertNotContains(wgsl, "isNan");
+    try assertNotContains(wgsl, "unhandled");
+    try nagaValidateOrSkip(wgsl, "isnan_loop_condition");
 }
