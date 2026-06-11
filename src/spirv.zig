@@ -148,6 +148,8 @@ pub const Op = enum(u16) {
     DPdxCoarse = 213,
     DPdyCoarse = 214,
     FwidthCoarse = 215,
+    LogicalEqual = 164,
+    LogicalNotEqual = 165,
     LogicalOr = 166,
     LogicalAnd = 167,
     LogicalNot = 168,
@@ -615,4 +617,7 @@ test "opcode values match SPIR-V spec" {
     try std.testing.expectEqual(@as(u16, 128), @intFromEnum(Op.IAdd));
     try std.testing.expectEqual(@as(u16, 169), @intFromEnum(Op.Select));
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(Op.Not));
+    // Guard the (easily-transposed) boolean-equality opcodes, adjacent to LogicalOr=166.
+    try std.testing.expectEqual(@as(u16, 164), @intFromEnum(Op.LogicalEqual));
+    try std.testing.expectEqual(@as(u16, 165), @intFromEnum(Op.LogicalNotEqual));
 }

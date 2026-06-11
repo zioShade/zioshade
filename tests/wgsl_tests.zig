@@ -1294,6 +1294,48 @@ test "wgsl: fragment-shader interlock errors honestly (WGSL has no interlock)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "interlock") != null);
 }
 
+// #170: OpLogicalEqual (164) / OpLogicalNotEqual (165) — GLSL bool `==`/`!=` and
+// `equal`/`notEqual` on bvecN — had no WGSL mapping and honest-errored, even though
+// WGSL's `==`/`!=` operators apply directly to bool (and componentwise to vecN<bool>).
+// glslang is the oracle (these opcodes are emitted by boolean comparisons).
+test "wgsl: scalar bool ==/!= (OpLogicalEqual/NotEqual) lower to naga-valid operators (#170)" {
+    const spirv = try compileToSpirv("logical_eq_scalar",
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bool a = uv.x > 0.3;
+        \\    bool b = uv.x < 0.7;
+        \\    bool eq = (a == b);
+        \\    bool ne = (a != b);
+        \\    fragColor = vec4(eq ? 1.0 : 0.0, ne ? 1.0 : 0.0, 0.0, 1.0);
+        \\}
+    );
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "logical-eq-scalar");
+}
+
+test "wgsl: bvec equal/notEqual (vector OpLogicalEqual/NotEqual) lower componentwise (#170)" {
+    const spirv = try compileToSpirv("logical_eq_vec",
+        \\#version 450
+        \\layout(location = 0) flat in ivec4 iv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec2 a = bvec2(iv.x > 0, iv.y > 0);
+        \\    bvec2 b = bvec2(iv.z > 0, iv.w > 0);
+        \\    bvec2 e = equal(a, b);
+        \\    bvec2 n = notEqual(a, b);
+        \\    fragColor = vec4(float(e.x), float(n.y), 0.0, 1.0);
+        \\}
+    );
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "logical-eq-vec");
+}
+
 // A SPIR-V opcode that glslpp's `Op` enum does not NAME (here OpUMulExtended=151,
 // emitted by GLSL `umulExtended`) must fail loud with error.UnsupportedOp — never
 // crash. The honest-error fallback formatted the op via `@tagName(inst.op)`, which
