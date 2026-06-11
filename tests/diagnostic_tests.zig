@@ -112,6 +112,27 @@ test "parser error reports line and column" {
     }
 }
 
+test "parser: malformed float exponent fails loud, not silent 0.0" {
+    const alloc = std.testing.allocator;
+    // The lexer accepts an exponent marker with no exponent digits (`1e`, `1.5e+`), but
+    // std.fmt.parseFloat rejects those. They were silently folded to 0.0 (silent-wrong);
+    // glslang rejects them ("bad character in float exponent"), so they must fail loud.
+    const bad1: [:0]const u8 = "#version 450\nlayout(location=0) out vec4 o;\nvoid main(){ float x = 1e; o = vec4(x); }";
+    // The parser records the malformed-literal error and recovers; semantic analysis
+    // (fail_on_recorded_errors) then rejects it — the same fail-loud channel the int path
+    // uses, surfacing as SemanticFailed. The point is it ERRORS, not that it is 0.0.
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, bad1, .{ .stage = .fragment }));
+    const bad2: [:0]const u8 = "#version 450\nlayout(location=0) out vec4 o;\nvoid main(){ float x = 1.5e+; o = vec4(x); }";
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, bad2, .{ .stage = .fragment }));
+    // Well-formed float forms must still compile (no over-rejection): trailing dot, leading
+    // dot, plain/negative/positive exponent, float suffix.
+    inline for (.{ "1.5e3", "1.", ".5", "1.5e-3", "2.0e+4", "3.0f", "0.0", "1e3" }) |lit| {
+        const ok: [:0]const u8 = "#version 450\nlayout(location=0) out vec4 o;\nvoid main(){ float x = " ++ lit ++ "; o = vec4(x); }";
+        const okr = try glslpp.compileToSPIRV(alloc, ok, .{ .stage = .fragment });
+        alloc.free(okr);
+    }
+}
+
 test "break outside loop reports meaningful context" {
     const alloc = std.testing.allocator;
 
