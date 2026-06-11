@@ -3222,9 +3222,17 @@ fn emitInstruction(
             if (ptr_def.op != .TypePointer or ptr_def.words.len < 4) return error.UnsupportedOp;
             var mbuf: [32]u8 = undefined;
             const mname = getMemberName(m, ptr_def.words[3], member_idx, &mbuf);
+            // An anonymous block exposes its members in global scope, so the runtime array is
+            // referenced BARE (`count.length()`); prefixing the empty instance name yields a
+            // leading-dot `.count.length()` that glslang rejects with "unexpected DOT" — the
+            // same suppression the access-chain emitters apply via isAnonymousSSBOVar.
+            const anon = isAnonymousSSBOVar(m, names, struct_ptr);
             // GLSL `.length()` yields `int`; OpArrayLength's result type is `uint`. Wrap so
             // the declared type matches without relying on an implicit int→uint conversion.
-            try w.print("    {s} {s} = {s}({s}.{s}.length());\n", .{ rtt, rn, rtt, inst_name, mname });
+            if (anon)
+                try w.print("    {s} {s} = {s}({s}.length());\n", .{ rtt, rn, rtt, mname })
+            else
+                try w.print("    {s} {s} = {s}({s}.{s}.length());\n", .{ rtt, rn, rtt, inst_name, mname });
         },
         else => {
             try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});

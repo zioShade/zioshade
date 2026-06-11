@@ -757,6 +757,53 @@ test "ssbo round-trip: anonymous BufferBlock multiple bare members" {
     try roundTripAcceptsAt(alloc, "ssbo_anonymous_multi", ssbo_anonymous_multi, .compute, 450);
 }
 
+// An anonymous SSBO block with a runtime-sized array member calling `.length()`
+// (OpArrayLength). The faithful native form must be `count.length()` — BARE — not
+// `.count.length()`; the empty-instance leading dot is the same "unexpected DOT" rejection,
+// and `.length()` is emitted by a SEPARATE code path from the access-chain emitters.
+const ssbo_anonymous_length: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(std430, binding = 0) buffer B { float count[]; };
+    \\void main() { count[0] = float(count.length()); }
+;
+
+test "ssbo round-trip: anonymous BufferBlock runtime-array .length() accepted" {
+    try roundTripAcceptsAt(alloc, "ssbo_anonymous_length", ssbo_anonymous_length, .compute, 450);
+}
+
+// An anonymous SSBO coexisting with a NAMED UBO. Pins that anonymous-base suppression does not
+// leak into the UBO's `{cb}_1.{cb}_m{idx}` cbuffer access path — `alpha` (SSBO) stays bare
+// while `scale` (UBO) keeps its instance-qualified member access.
+const ssbo_anonymous_with_ubo: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(std140, binding = 0) uniform U { uint scale; } u;
+    \\layout(std430, binding = 1) buffer B { uint alpha; uint beta; };
+    \\void main() { beta = alpha * u.scale; }
+;
+
+test "ssbo round-trip: anonymous BufferBlock coexists with named UBO" {
+    try roundTripAcceptsAt(alloc, "ssbo_anonymous_with_ubo", ssbo_anonymous_with_ubo, .compute, 450);
+    // Structural pin (acceptance alone can't tell bare `alpha` from a wrong-but-accepted
+    // `B_block.alpha`): the SSBO member must be referenced BARE, never with a leading dot.
+    const spirv = try compileToSpirvViaGlslang(alloc, ssbo_anonymous_with_ubo, .compute);
+    defer alloc.free(spirv);
+    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 450 });
+    defer alloc.free(glsl);
+    if (std.mem.indexOf(u8, glsl, ".alpha") != null or std.mem.indexOf(u8, glsl, ".beta") != null) {
+        std.debug.print("\nanonymous SSBO member emitted with a leading dot:\n{s}\n", .{glsl});
+        return error.AnonymousSSBOLeadingDot;
+    }
+    // `beta` is assigned bare in the body (`beta = …`); the declaration emits `uint beta;`,
+    // so a `beta =` occurrence can only be the bare body store (SSA temps mean the rhs is a
+    // `v{n}`, so we can't assert `beta = alpha` literally).
+    if (std.mem.indexOf(u8, glsl, "beta =") == null) {
+        std.debug.print("\nanonymous SSBO member not assigned bare:\n{s}\n", .{glsl});
+        return error.AnonymousSSBONotBare;
+    }
+}
+
 /// Assert the glslpp GLSL output declares `src`'s SSBO as a writable `buffer` block with
 /// ORIGINAL member names, not the read-only `uniform std140` cbuffer form with synthesized
 /// `_m{idx}` members. This isolates the buffer-block fix from the orthogonal atomic-result
