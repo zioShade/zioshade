@@ -657,6 +657,141 @@ const attrib_vert_src: [:0]const u8 =
     \\void main() { vColor = aPos; gl_Position = vec4(aPos, 1.0); }
 ;
 
+// glslangValidator encodes an SSBO (`buffer B { ... } b;`) as a `Uniform`-storage-class
+// variable whose STRUCT TYPE carries the `BufferBlock` decoration (pre-SPIR-V-1.3 style),
+// unlike glslpp's own frontend which uses the `StorageBuffer` storage class. The GLSL
+// backend used to look for `BufferBlock` on the VARIABLE id — which never matches — so
+// glslang SSBOs were misrouted to the read-only `uniform std140` cbuffer path: member
+// access desynced (`b_m0` undeclared) and stores hit a uniform (`l-value required`). (#296)
+const ssbo_atomic_comp: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(std430, binding = 0) buffer B { uint lock; uint slot; uint total; uint out_old; } b;
+    \\void main() {
+    \\    uint a = atomicCompSwap(b.lock, 7u, 9u);
+    \\    b.out_old = a;
+    \\}
+;
+
+const ssbo_image_atomic_store: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(r32ui, binding = 0) uniform uimage2D img;
+    \\layout(std430, binding = 1) buffer B { uint out_old; } b;
+    \\void main() { b.out_old = imageAtomicCompSwap(img, ivec2(0), 5u, 3u); }
+;
+
+// Plain (non-atomic) SSBO read+write through a glslang BufferBlock. Exercises the SAME
+// buffer-block mis-emission as the atomic repros (member access + store) while isolating it
+// from the atomic result-declaration path (#297) — the whole output must be glslang-clean.
+const ssbo_read_write: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(std430, binding = 0) buffer B { uint lock; uint slot; uint total; uint out_old; } b;
+    \\void main() {
+    \\    b.out_old = b.lock + b.slot + b.total;
+    \\}
+;
+
+// A glslang BufferBlock SSBO with a runtime-sized array member, calling `.length()`
+// (OpArrayLength). The buffer is now declared with original member names, so the faithful
+// native `b.d.length()` form is valid — the arm must not honest-error on the Uniform+
+// BufferBlock encoding just because its storage class is not StorageBuffer.
+const ssbo_runtime_length: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(std430, binding = 0) buffer B { float d[]; } b;
+    \\void main() { b.d[0] = float(b.d.length()); }
+;
+
+// A compute shader mixing a real UBO (`Uniform` + `Block`) with an SSBO (`BufferBlock`).
+// The discrimination is exactly what the fix hinges on: only the BufferBlock-decorated
+// struct becomes a writable `buffer`; the plain UBO must stay a read-only `uniform` block.
+const ssbo_with_ubo: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(std140, binding = 0) uniform U { uint scale; } u;
+    \\layout(std430, binding = 1) buffer B { uint lock; uint out_old; } b;
+    \\void main() { b.out_old = b.lock * u.scale; }
+;
+
+test "ssbo round-trip: glslang BufferBlock read+write accepted as a buffer" {
+    try roundTripAcceptsAt(alloc, "ssbo_read_write", ssbo_read_write, .compute, 450);
+}
+
+test "ssbo round-trip: compute UBO stays uniform while SSBO becomes a buffer" {
+    try roundTripAcceptsAt(alloc, "ssbo_with_ubo", ssbo_with_ubo, .compute, 450);
+}
+
+test "ssbo round-trip: glslang BufferBlock runtime-array .length() accepted" {
+    try roundTripAcceptsAt(alloc, "ssbo_runtime_length", ssbo_runtime_length, .compute, 450);
+}
+
+/// Assert the glslpp GLSL output declares `src`'s SSBO as a writable `buffer` block with
+/// ORIGINAL member names, not the read-only `uniform std140` cbuffer form with synthesized
+/// `_m{idx}` members. This isolates the buffer-block fix from the orthogonal atomic-result
+/// declaration issue (#297), so it holds for the exact atomic repros from the bug report.
+fn assertSSBODeclaredAsBuffer(allocator: std.mem.Allocator, src: [:0]const u8) !void {
+    const spirv = try compileToSpirvViaGlslang(allocator, src, .compute);
+    defer allocator.free(spirv);
+    const glsl = try glslpp.spirvToGLSL(allocator, spirv, .{ .version = 450 });
+    defer allocator.free(glsl);
+    // Symptom 2: the block must be a `std430 buffer`, never a read-only `std140 uniform`
+    // block. These repro shaders have NO real UBO, so any `std140` means the SSBO was
+    // misrouted to the cbuffer path — a format-independent check (robust to spacing/layout
+    // changes in the `uniform … { } …` declaration line).
+    if (std.mem.indexOf(u8, glsl, "buffer b_block") == null or
+        std.mem.indexOf(u8, glsl, "std140") != null)
+    {
+        std.debug.print("\nSSBO not declared as a buffer block:\n{s}\n", .{glsl});
+        return error.SSBONotBuffer;
+    }
+    // Symptom 1: members keep their ORIGINAL names; no synthesized `b_m{idx}` desync.
+    if (std.mem.indexOf(u8, glsl, "b.out_old") == null or
+        std.mem.indexOf(u8, glsl, "b_m0") != null)
+    {
+        std.debug.print("\nSSBO member access desynced (synthesized name):\n{s}\n", .{glsl});
+        return error.SSBOMemberDesync;
+    }
+}
+
+// The exact repros from the bug report. With #297 (atomic result-type declaration) on
+// main, the whole output is glslang-clean, so these assert end-to-end acceptance AND pin
+// the buffer-block structure (defense-in-depth: a future regression that still produced
+// glslang-accepted output but reverted to a `uniform` block would be caught structurally).
+test "ssbo round-trip: glslang BufferBlock atomicCompSwap accepted (symptom 1)" {
+    try roundTripAcceptsAt(alloc, "ssbo_atomic_comp", ssbo_atomic_comp, .compute, 450);
+    try assertSSBODeclaredAsBuffer(alloc, ssbo_atomic_comp);
+}
+
+test "ssbo round-trip: glslang BufferBlock imageAtomic store accepted (symptom 2)" {
+    try roundTripAcceptsAt(alloc, "ssbo_image_atomic_store", ssbo_image_atomic_store, .compute, 450);
+    try assertSSBODeclaredAsBuffer(alloc, ssbo_image_atomic_store);
+}
+
+// Stage-gating guard: the SSBO emission loop is compute-only, and the buffer-block exclusion
+// in isUniformBlockVar/collectResources is gated on the SAME compute condition. A non-compute
+// (fragment) glslang SSBO must therefore NOT be routed to the `buffer` path (which would
+// reference an undeclared block) — it keeps its prior uniform-block rendering. This pins
+// "zero non-compute behavior change" and catches an accidental un-gating.
+const ssbo_fragment_read: [:0]const u8 =
+    \\#version 450
+    \\layout(std430, binding = 0) buffer B { uint v; } b;
+    \\layout(location = 0) out vec4 o;
+    \\void main() { o = vec4(float(b.v)); }
+;
+
+test "ssbo gating: non-compute glslang SSBO is NOT emitted as a buffer block" {
+    const spirv = try compileToSpirvViaGlslang(alloc, ssbo_fragment_read, .fragment);
+    defer alloc.free(spirv);
+    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 450 });
+    defer alloc.free(glsl);
+    if (std.mem.indexOf(u8, glsl, "buffer b_block") != null) {
+        std.debug.print("\nnon-compute SSBO wrongly routed to buffer path:\n{s}\n", .{glsl});
+        return error.NonComputeSSBORoutedToBuffer;
+    }
+}
+
 test "glsl-version acceptance: UBO frag valid at 330/400/410/420/440/450/460" {
     inline for (.{ 330, 400, 410, 420, 440, 450, 460 }) |v| {
         try roundTripAcceptsAt(alloc, "ubo_frag", ubo_frag_src, .fragment, v);
