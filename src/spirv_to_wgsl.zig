@@ -4235,7 +4235,12 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
             if (std.mem.indexOfScalar(u8, trimmed, ' ')) |space_idx| {
                 const potential_name = trimmed[0..space_idx];
                 if (space_idx + 2 < trimmed.len and trimmed[space_idx + 1] == '=' and trimmed[space_idx + 2] != '=') {
-                    const name_copy = try arena.dupe(u8, potential_name);
+                    // A member/swizzle write (`v.z = …`, `m._0 = …`) mutates the BASE
+                    // variable, so register the identifier up to the first `.`/`[` —
+                    // NOT the full `v.z` (which would leave `v` looking immutable and
+                    // get it wrongly promoted to `let`, then illegally member-assigned).
+                    const base = potential_name[0 .. std.mem.indexOfAny(u8, potential_name, ".[") orelse potential_name.len];
+                    const name_copy = try arena.dupe(u8, base);
                     try mutable_names.put(name_copy, {});
                 }
             }
@@ -6450,12 +6455,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
             },
 
-            // CompositeInsert
+            // CompositeInsert. SPIR-V operand order is `OpCompositeInsert <rt>
+            // <result> <Object> <Composite> <Indices...>` — words[3] is the OBJECT
+            // being inserted and words[4] is the base COMPOSITE. (These were read
+            // swapped, so `v = OpCompositeInsert objW.w P 2` emitted `let v = P.w;
+            // v.z = P;` — both backwards AND an illegal mutation of an immutable
+            // `let`. Surfaced by textureProj(sampler2DShadow), whose coordinate
+            // glslang builds with exactly this op.)
             .CompositeInsert => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
-                const composite = names.get(inst.words[3]) orelse "c";
-                const object = names.get(inst.words[4]) orelse "o";
+                const object = names.get(inst.words[3]) orelse "o";
+                const composite = names.get(inst.words[4]) orelse "c";
                 // Build access chain from indices with type-aware member names
                 var access = std.ArrayList(u8).initCapacity(arena, 64) catch return;
                 defer access.deinit(arena);
@@ -6496,8 +6507,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const sw = switch (idx) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => "[0]" };
                     try access.appendSlice(arena, sw);
                 }
-                // First copy composite, then set the field
-                try writeInd(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, composite });
+                // Copy the base composite into a MUTABLE local, then overwrite the
+                // indexed component with the inserted object (`var`, not `let`, so
+                // the member assignment is legal WGSL).
+                try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ result_name, rt, composite });
                 try writeInd(w, indent); try w.print("{s}{s} = {s};\n", .{ result_name, access.items, object });
             },
 
@@ -6728,13 +6741,44 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             // Projective DEPTH-COMPARE sampling (textureProj on a shadow sampler).
-            // WGSL's textureSampleCompare takes a NON-projective coordinate and a
-            // depth reference; the projective divide of BOTH coord and ref is
-            // value-sensitive with no faithful builtin mapping. Fail loud rather
-            // than silently dropping the perspective divide on the compare.
+            // WGSL has no projective compare builtin, but textureProj has a faithful
+            // manual lowering — the SAME perspective divide as the non-Dref proj
+            // handler above, applied to BOTH the coordinate AND the depth reference.
+            // SPIR-V's OpImageSampleProjDref divides coord and Dref by the
+            // coordinate's last component, so for textureProj(sampler2DShadow, P) —
+            // which glslang encodes as coord=(P.x,P.y,P.w,P.w), Dref=P.z — the result
+            // is textureSampleCompare(t, s, P.xy / P.w, P.z / P.w). Dropping the Dref
+            // divide would be silent-wrong (naga accepts it). Cube/arrayed shadow
+            // proj has no clean map (projectiveCoordDim → null) and still fails loud.
             .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod => {
-                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no projective depth-compare sampling ({s})", .{@tagName(inst.op)}) catch null;
-                return error.UnsupportedOp;
+                const dim = projectiveCoordDim(module, inst.words[3]) orelse {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no projective depth-compare sampling for this sampler kind ({s})", .{@tagName(inst.op)}) catch null;
+                    return error.UnsupportedOp;
+                };
+                const rt = try wgslType(module, inst.words[1], names, arena);
+                const result_name = names.get(inst.words[2]) orelse "v";
+                const tex_name = names.get(inst.words[3]) orelse "tex";
+                const coord = names.get(inst.words[4]) orelse "uv";
+                const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+                // Leading spatial components = the sampler dim (.x/.xy/.xyz). The
+                // divisor = the coordinate's LAST component (depends on the coord
+                // vector width, not the sampler dim) — exactly as the non-Dref path.
+                const lead: []const u8 = switch (dim) {
+                    1 => ".x",
+                    2 => ".xy",
+                    else => ".xyz",
+                };
+                const coord_comps = vectorComponentCount(module, inst.words[4]) orelse (dim + 1);
+                const last_comp: []const u8 = switch (coord_comps) {
+                    2 => ".y",
+                    3 => ".z",
+                    else => ".w",
+                };
+                // ProjExplicitLod's LOD (must be 0 for a shadow sample) is dropped:
+                // WGSL has no projective-compare-with-LOD builtin, and the implicit
+                // form already samples the base level for depth textures.
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}{s} / {s}{s}, {s} / {s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, dref, coord, last_comp });
             },
 
             // ReadClockKHR — shader clock
