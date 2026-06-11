@@ -5147,14 +5147,22 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
     defer vector_type_ids.deinit(alloc);
     var vector_value_ids = std.AutoHashMapUnmanaged(u32, void).empty;
     defer vector_value_ids.deinit(alloc);
+    // Component count per OpTypeVector id, and per vector-typed VALUE id. Needed by the
+    // shuffle-extract fold to use vec1's SOURCE width (not the shuffle result width) as the
+    // vec1/vec2 index boundary.
+    var type_vec_width = std.AutoHashMapUnmanaged(u32, u32).empty;
+    defer type_vec_width.deinit(alloc);
+    var value_vec_width = std.AutoHashMapUnmanaged(u32, u32).empty;
+    defer value_vec_width.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
         const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
-        if (opcode == 23 and wc >= 4) { // OpTypeVector
+        if (opcode == 23 and wc >= 4) { // OpTypeVector: [op, result_type, component_type, count]
             vector_type_ids.put(alloc, words[pos + 1], {}) catch {};
+            type_vec_width.put(alloc, words[pos + 1], words[pos + 3]) catch {};
         }
         // Track IDs whose type is a vector
         const info = compact_ids.getOpInfo(opcode) orelse { pos = ie; continue; };
@@ -5162,6 +5170,7 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
             2 => { // type + result
                 if (pos + 2 < ie and vector_type_ids.contains(words[pos + 1])) {
                     vector_value_ids.put(alloc, words[pos + 2], {}) catch {};
+                    if (type_vec_width.get(words[pos + 1])) |w| value_vec_width.put(alloc, words[pos + 2], w) catch {};
                 }
             },
             3 => { // result only (no type word in instruction)
@@ -5174,7 +5183,7 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
 
     if (construct_map.count() == 0 and insert_map.count() == 0) return words;
 
-    // Phase 1b: Also build map of OpVectorShuffle: result_id -> (vec1_id, vec2_id, []shuffle_indices)
+    // Phase 1c: Also build map of OpVectorShuffle: result_id -> (vec1_id, vec2_id, []shuffle_indices)
     var shuffle_map = std.AutoHashMapUnmanaged(u32, struct { vec1: u32, vec2: u32, indices: std.ArrayListUnmanaged(u32) }){};
     defer {
         var sit = shuffle_map.iterator();
@@ -5298,18 +5307,28 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
         const ie = pos + wc;
         if (ie > words.len) break;
 
-        if (opcode == 81 and wc >= 5) { // OpCompositeExtract
+        if (opcode == 81 and wc == 5) { // OpCompositeExtract, SINGLE index (a shuffle result is
+            // a vector → only single-index extracts apply; restricting to wc==5 also keeps the
+            // emitted 5-word replacement header consistent with the original instruction).
             const result_id = words[pos + 2];
             const composite_id = words[pos + 3];
             const index = words[ie - 1];
             if (shuffle_map.get(composite_id)) |shuffle| {
                 if (index < shuffle.indices.items.len) {
                     const shuffle_idx = shuffle.indices.items[index];
-                    const vec1_len: u32 = @intCast(shuffle.indices.items.len);
-                    if (shuffle_idx < vec1_len) {
-                        try shuffle_extract_map.put(alloc, result_id, .{ .composite = shuffle.vec1, .index = shuffle_idx });
-                    } else {
-                        try shuffle_extract_map.put(alloc, result_id, .{ .composite = shuffle.vec2, .index = shuffle_idx - vec1_len });
+                    // The vec1/vec2 boundary is vec1's SOURCE component count, NOT the shuffle
+                    // result width. (Using the result width mis-routed e.g. `v.zw` then `.x`:
+                    // shuffle_idx 2 with a result width 2 wrongly went to vec2[0] = v.x instead
+                    // of vec1[2] = v.z.) `0xFFFFFFFF` is the undefined-component marker — never
+                    // fold it. If vec1's width is unknown, skip the fold (leave the extract).
+                    if (shuffle_idx != 0xFFFFFFFF) {
+                        if (value_vec_width.get(shuffle.vec1)) |vec1_len| {
+                            if (shuffle_idx < vec1_len) {
+                                try shuffle_extract_map.put(alloc, result_id, .{ .composite = shuffle.vec1, .index = shuffle_idx });
+                            } else {
+                                try shuffle_extract_map.put(alloc, result_id, .{ .composite = shuffle.vec2, .index = shuffle_idx - vec1_len });
+                            }
+                        }
                     }
                 }
             }
