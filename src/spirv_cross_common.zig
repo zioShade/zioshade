@@ -170,6 +170,7 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix,
         .Dot, .Transpose, .OuterProduct,
         .Select, .LogicalOr, .LogicalAnd, .LogicalNot,
+        .LogicalEqual, .LogicalNotEqual,
         .IEqual, .INotEqual,
         .UGreaterThan, .SGreaterThan, .UGreaterThanEqual, .SGreaterThanEqual,
         .ULessThan, .SLessThan, .ULessThanEqual, .SLessThanEqual,
