@@ -853,3 +853,56 @@ test "#173 item1: matrix-element const-array global cross-compiles to glslang-va
     defer alloc.free(g);
     try assertGlslangAccepts(alloc, "matrix-const-array", g, .fragment);
 }
+
+// #297: SSBO atomic ops emit their result assignment WITHOUT a type declaration,
+// e.g. `v7 = atomicCompSwap(b.lock, 7u, 9u);` where `v7` is never declared →
+// glslang rejects with "'v7' : undeclared identifier". The result name needs the
+// result-type prefix: `uint v7 = atomicCompSwap(...)`. The existing T-atomic.*
+// tests only assert the call substring and never glslang-validate, so this slipped
+// through. We compile via glslpp's own frontend (as those tests do) so the SSBO
+// member access stays `b.lock`, then run glslang as the authoritative gate on the
+// emitted GLSL — which previously failed solely on the undeclared atomic results.
+test "#297: SSBO atomic-op results are declared (glslang-valid)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { uint lock; uint slot; uint total; uint out_old; } b;
+        \\void main() {
+        \\    uint a = atomicCompSwap(b.lock, 7u, 9u);
+        \\    uint c = atomicExchange(b.slot, 42u);
+        \\    uint d = atomicAdd(b.total, 37u);
+        \\    b.out_old = a + c + d;
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    const g = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    defer alloc.free(g);
+    // The result-type prefix must be present (RED emitted a bare `v = atomicCompSwap`).
+    try std.testing.expect(std.mem.indexOf(u8, g, "= atomicCompSwap(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, g, "uint ") != null);
+    try assertGlslangAccepts(alloc, "ssbo-atomic-decl", g, .compute);
+}
+
+// #297: the IMAGE atomic branches share the same missing-declaration bug. When the
+// result of imageAtomicCompSwap/imageAtomicExchange is consumed, the undeclared
+// result name makes glslang reject the output.
+test "#297: image atomic-op results are declared (glslang-valid)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(r32ui, binding = 0) uniform uimage2D img;
+        \\layout(std430, binding = 1) buffer B { uint out_old; } b;
+        \\void main() {
+        \\    uint a = imageAtomicCompSwap(img, ivec2(0), 5u, 3u);
+        \\    uint c = imageAtomicExchange(img, ivec2(1), 8u);
+        \\    b.out_old = a + c;
+        \\}
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    const g = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    defer alloc.free(g);
+    try std.testing.expect(std.mem.indexOf(u8, g, "= imageAtomicCompSwap(") != null);
+    try assertGlslangAccepts(alloc, "image-atomic-decl", g, .compute);
+}
