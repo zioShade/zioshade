@@ -626,7 +626,7 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         }
         const shifted = common.applyBindingShift(cb.binding, options.binding_shift);
         try w.print("layout(binding = {d}, std140) uniform {s}\n{{\n", .{shifted, cb.name});
-        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa);
+        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa, false);
         try w.print("}} {s}_1;\n\n", .{cb.name});
     }
 
@@ -642,11 +642,20 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 const binding = getDecVal(&decs, rid, .binding) orelse continue;
                 const shifted_binding = common.applyBindingShift(binding, options.binding_shift);
                 const name = names.get(rid) orelse continue;
-                try w.print("layout(std430, binding = {d}) buffer {s}\n{{\n", .{shifted_binding, name});
-                // Emit struct members from the pointee type
+                // The block TYPE tag must differ from the INSTANCE name (`name`), or glslang
+                // rejects `buffer B { ... } B;` with "block instance name redefinition". The
+                // body accesses members as `{name}.{member}`, so the instance stays `name`;
+                // the type gets a distinct `{name}_block` tag (the tag is never referenced).
+                const block_tag = std.fmt.allocPrint(aa, "{s}_block", .{name}) catch return error.OutOfMemory;
+                try w.print("layout(std430, binding = {d}) buffer {s}\n{{\n", .{shifted_binding, block_tag});
+                // Emit struct members. StorageBuffer-class SSBOs access members by their
+                // ORIGINAL names (`B.d`), so declare them that way. Old-style Uniform +
+                // BufferBlock SSBOs go through isUniformBlockVar → the body spells members
+                // `{name}_m{idx}`, so they MUST keep that naming or the declaration desyncs.
+                const use_original = sc == .StorageBuffer;
                 const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
                 if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
-                    try emitStructMembers(&module, &names, ptr_inst.words[3], name, w, aa);
+                    try emitStructMembers(&module, &names, ptr_inst.words[3], name, w, aa, use_original);
                 }
                 try w.print("}} {s};\n\n", .{name});
             }
@@ -905,7 +914,7 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .TypeVoid,.TypeBool,.TypeInt,.TypeFloat,.TypeVector,.TypeMatrix,.TypeImage,.TypeSampler,.TypeSampledImage,.TypeArray,.TypeRuntimeArray,.TypeStruct,.TypePointer,.TypeFunction,.TypeForwardPointer,.TypeAccelerationStructureKHR,.TypeRayQueryKHR,.TypeTensorARM => if(words.len>1) words[1] else null,
         .ConstantTrue,.ConstantFalse,.Constant,.ConstantComposite,.SpecConstant,.SpecConstantTrue,.SpecConstantFalse,.SpecConstantComposite,.SpecConstantOp,.Undef => if(words.len>2) words[2] else null,
         .Variable,.Function,.FunctionParameter => if(words.len>2) words[2] else null,
-        .Load,.AccessChain,.CompositeConstruct,.CompositeExtract,.CompositeInsert,.VectorShuffle,.SampledImage,.ImageSampleImplicitLod,.ImageSampleExplicitLod,.ImageFetch,.ImageGather,.ImageQuerySizeLod,.ImageQuerySize,.ImageTexelPointer,.FunctionCall,.CopyObject,.Phi,.ConvertFToS,.ConvertSToF,.ConvertUToF,.ConvertFToU,.UConvert,.SConvert,.FConvert,.Bitcast,.SNegate,.FNegate,.IAdd,.FAdd,.ISub,.FSub,.IMul,.FMul,.UDiv,.SDiv,.FDiv,.UMod,.SRem,.SMod,.FRem,.FMod,.VectorTimesScalar,.MatrixTimesScalar,.VectorTimesMatrix,.MatrixTimesVector,.MatrixTimesMatrix,.Dot,.Transpose,.OuterProduct,.Select,.LogicalOr,.LogicalAnd,.LogicalNot,.IEqual,.INotEqual,.UGreaterThan,.SGreaterThan,.UGreaterThanEqual,.SGreaterThanEqual,.ULessThan,.SLessThan,.ULessThanEqual,.SLessThanEqual,.FOrdEqual,.FOrdNotEqual,.FOrdLessThan,.FOrdGreaterThan,.FOrdLessThanEqual,.FOrdGreaterThanEqual,.FUnordEqual,.FUnordNotEqual,.FUnordLessThan,.FUnordGreaterThan,.FUnordLessThanEqual,.FUnordGreaterThanEqual,.ShiftRightLogical,.ShiftRightArithmetic,.ShiftLeftLogical,.BitwiseOr,.BitwiseXor,.BitwiseAnd,.Not,.BitReverse,.BitCount,.BitFieldInsert,.BitFieldSExtract,.BitFieldUExtract,.IsNan,.IsInf,.All,.Any,.DPdx,.DPdy,.Fwidth,.DPdxFine,.DPdyFine,.FwidthFine,.DPdxCoarse,.DPdyCoarse,.FwidthCoarse,.VectorExtractDynamic,.ExtInst,.OpImage,.AtomicIAdd,.AtomicISub,.AtomicExchange,.AtomicSMin,.AtomicUMin,.AtomicSMax,.AtomicUMax,.AtomicAnd,.AtomicOr,.AtomicXor,.ImageSampleDrefImplicitLod,.ImageSampleDrefExplicitLod,.ImageSampleProjImplicitLod,.ImageSampleProjExplicitLod,.ImageDrefGather,.ImageQueryLod,.ImageQueryLevels,.ImageQuerySamples,.ImageRead,.AtomicCompareExchange,.AtomicFAddEXT => if(words.len>2) words[2] else null,
+        .Load,.AccessChain,.CompositeConstruct,.CompositeExtract,.CompositeInsert,.VectorShuffle,.SampledImage,.ImageSampleImplicitLod,.ImageSampleExplicitLod,.ImageFetch,.ImageGather,.ImageQuerySizeLod,.ImageQuerySize,.ImageTexelPointer,.FunctionCall,.CopyObject,.Phi,.ConvertFToS,.ConvertSToF,.ConvertUToF,.ConvertFToU,.UConvert,.SConvert,.FConvert,.Bitcast,.SNegate,.FNegate,.IAdd,.FAdd,.ISub,.FSub,.IMul,.FMul,.UDiv,.SDiv,.FDiv,.UMod,.SRem,.SMod,.FRem,.FMod,.VectorTimesScalar,.MatrixTimesScalar,.VectorTimesMatrix,.MatrixTimesVector,.MatrixTimesMatrix,.Dot,.Transpose,.OuterProduct,.Select,.LogicalOr,.LogicalAnd,.LogicalNot,.IEqual,.INotEqual,.UGreaterThan,.SGreaterThan,.UGreaterThanEqual,.SGreaterThanEqual,.ULessThan,.SLessThan,.ULessThanEqual,.SLessThanEqual,.FOrdEqual,.FOrdNotEqual,.FOrdLessThan,.FOrdGreaterThan,.FOrdLessThanEqual,.FOrdGreaterThanEqual,.FUnordEqual,.FUnordNotEqual,.FUnordLessThan,.FUnordGreaterThan,.FUnordLessThanEqual,.FUnordGreaterThanEqual,.ShiftRightLogical,.ShiftRightArithmetic,.ShiftLeftLogical,.BitwiseOr,.BitwiseXor,.BitwiseAnd,.Not,.BitReverse,.BitCount,.BitFieldInsert,.BitFieldSExtract,.BitFieldUExtract,.IsNan,.IsInf,.All,.Any,.DPdx,.DPdy,.Fwidth,.DPdxFine,.DPdyFine,.FwidthFine,.DPdxCoarse,.DPdyCoarse,.FwidthCoarse,.VectorExtractDynamic,.ExtInst,.OpImage,.AtomicIAdd,.AtomicISub,.AtomicExchange,.AtomicSMin,.AtomicUMin,.AtomicSMax,.AtomicUMax,.AtomicAnd,.AtomicOr,.AtomicXor,.ImageSampleDrefImplicitLod,.ImageSampleDrefExplicitLod,.ImageSampleProjImplicitLod,.ImageSampleProjExplicitLod,.ImageDrefGather,.ImageQueryLod,.ImageQueryLevels,.ImageQuerySamples,.ImageRead,.AtomicCompareExchange,.AtomicFAddEXT,.ArrayLength => if(words.len>2) words[2] else null,
         else => null,
     };
 }
@@ -1069,11 +1078,36 @@ fn getMemberName(m: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *
     return common.commonGetMemberName(m.instructions, struct_id, member_idx, buf, "m");
 }
 
-fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, cb_name: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
+// `original_names = false` (uniform/cbuffer blocks): members are named `{cb_name}_m{idx}`
+// to match the cbuffer access path (`{cb}_1.{cb}_m{idx}`). `original_names = true` (SSBO
+// storage blocks): members keep their ORIGINAL names (`getMemberName`) and emit array
+// brackets — `[N]` for a sized array, `[]` for a runtime array (`OpTypeRuntimeArray`) — to
+// match the SSBO body access (`B.d`) and enable native `.length()`. The two callers
+// disagreed before, producing glslang-rejected desynced output for SSBOs (#296).
+fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, cb_name: []const u8, w: anytype, alloc: std.mem.Allocator, original_names: bool) !void {
     const inst = getDef(m, struct_id) orelse return; if (inst.op != .TypeStruct) return;
     for (inst.words[2..], 0..) |mt_id, mi| {
-        const mti = getDef(m, mt_id); if (mti) |mi2| { if (mi2.op == .TypeArray and mi2.words.len > 3) { const et = try glslType(m, mi2.words[2], names, alloc); const li = getDef(m, mi2.words[3]); const lv: u32 = if(li)|l| l.words[3] else 1; try w.print("    {s} {s}_m{d}[{d}];\n", .{et, cb_name, mi, lv}); continue; } }
-        const mt = try glslType(m, mt_id, names, alloc); try w.print("    {s} {s}_m{d};\n", .{mt, cb_name, mi});
+        var mbuf: [32]u8 = undefined;
+        const mname: []const u8 = if (original_names) getMemberName(m, struct_id, @intCast(mi), &mbuf) else "";
+        const mti = getDef(m, mt_id);
+        if (mti) |mi2| {
+            if (mi2.op == .TypeArray and mi2.words.len > 3) {
+                const et = try glslType(m, mi2.words[2], names, alloc);
+                const li = getDef(m, mi2.words[3]); const lv: u32 = if(li)|l| (if (l.words.len > 3) l.words[3] else 1) else 1;
+                if (original_names) try w.print("    {s} {s}[{d}];\n", .{et, mname, lv})
+                else try w.print("    {s} {s}_m{d}[{d}];\n", .{et, cb_name, mi, lv});
+                continue;
+            }
+            if (mi2.op == .TypeRuntimeArray and mi2.words.len > 2) {
+                const et = try glslType(m, mi2.words[2], names, alloc);
+                if (original_names) try w.print("    {s} {s}[];\n", .{et, mname})
+                else try w.print("    {s} {s}_m{d}[];\n", .{et, cb_name, mi});
+                continue;
+            }
+        }
+        const mt = try glslType(m, mt_id, names, alloc);
+        if (original_names) try w.print("    {s} {s};\n", .{mt, mname})
+        else try w.print("    {s} {s}_m{d};\n", .{mt, cb_name, mi});
     }
 }
 
@@ -3086,12 +3120,35 @@ fn emitInstruction(
             try w.writeAll(");\n");
         },
         .ArrayLength => {
-            // Runtime SSBO array `.length()` (OpArrayLength). GLSL has `.length()`
-            // natively, but the GLSL backend's SSBO member naming (`{block}_m{idx}` vs
-            // the original member name) and result-id registration aren't yet wired for
-            // it — emitting it now would desync the declaration from the access. Honest-
-            // error rather than the silent-wrong `// unhandled op 68` (#294; GLSL follow-up).
-            return error.UnsupportedOp;
+            // OpArrayLength %uint %result %structPtr <memberLiteral> → GLSL's native
+            // `instance.member.length()`. The SSBO declaration now uses original member
+            // names + `[]` (see emitStructMembers original_names path), so `B.d.length()`
+            // matches the body access form. (#296; faithful GLSL for #294's OpArrayLength.)
+            if (inst.words.len < 5) return error.UnsupportedOp;
+            const rtt = try glslType(m, inst.words[1], names, alloc); // uint
+            const rn = names.get(inst.words[2]) orelse return error.UnsupportedOp;
+            const struct_ptr = inst.words[3];
+            const member_idx = inst.words[4];
+            const inst_name = names.get(struct_ptr) orelse return error.UnsupportedOp;
+            // Resolve the struct type behind the variable's pointer; the structure operand
+            // must be a direct OpVariable (not an access chain into an array-of-blocks etc.).
+            const var_def = getDef(m, struct_ptr) orelse return error.UnsupportedOp;
+            if (var_def.op != .Variable or var_def.words.len < 4) return error.UnsupportedOp;
+            // The faithful `instance.member.length()` form is only valid when the SSBO is
+            // actually DECLARED in the output: storage buffers are declared only for the
+            // compute stage (see the is_compute guard above), and only StorageBuffer-class
+            // members are accessed by their original name (Uniform+BufferBlock spell them
+            // `{name}_m{idx}`, which this arm does not reconstruct). Outside that, fall back
+            // to the honest error rather than reference an undeclared buffer (silent-wrong).
+            const sc: spirv.StorageClass = @enumFromInt(var_def.words[3]);
+            if (m.execution_model != .GLCompute or sc != .StorageBuffer) return error.UnsupportedOp;
+            const ptr_def = getDef(m, var_def.words[1]) orelse return error.UnsupportedOp;
+            if (ptr_def.op != .TypePointer or ptr_def.words.len < 4) return error.UnsupportedOp;
+            var mbuf: [32]u8 = undefined;
+            const mname = getMemberName(m, ptr_def.words[3], member_idx, &mbuf);
+            // GLSL `.length()` yields `int`; OpArrayLength's result type is `uint`. Wrap so
+            // the declared type matches without relying on an implicit int→uint conversion.
+            try w.print("    {s} {s} = {s}({s}.{s}.length());\n", .{ rtt, rn, rtt, inst_name, mname });
         },
         else => {
             try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});
