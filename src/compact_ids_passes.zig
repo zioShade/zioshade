@@ -5462,14 +5462,16 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
             const result_id = words[pos + 2]; // result
             const sig_type = words[pos + 1]; // result type
             const sig_base_and_indices = words[pos + 3 .. ie]; // base + indices
-            const sig_len: u32 = 1 + @as(u32, @intCast(sig_base_and_indices.len));
+            // Opcode-prefixed signature (uniform with the other CSE blocks that share
+            // all_sig_words) — see the pure-value-op note below for why the opcode is in the key.
+            const sig_len: u32 = 2 + @as(u32, @intCast(sig_base_and_indices.len));
 
             // Check for duplicate in current block first
             var found_dup = false;
             for (block_sigs.items) |entry| {
                 if (entry.sig_len == sig_len) {
                     const existing_sig = all_sig_words.items[entry.sig_start .. entry.sig_start + sig_len];
-                    if (existing_sig[0] == sig_type and std.mem.eql(u32, existing_sig[1..], sig_base_and_indices)) {
+                    if (existing_sig[0] == @as(u32, opcode) and existing_sig[1] == sig_type and std.mem.eql(u32, existing_sig[2..], sig_base_and_indices)) {
                         try sub_map.put(alloc, result_id, entry.result_id);
                         found_dup = true;
                         break;
@@ -5481,7 +5483,7 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
                 for (entry_block_sigs.items) |entry| {
                     if (entry.sig_len == sig_len) {
                         const existing_sig = all_sig_words.items[entry.sig_start .. entry.sig_start + sig_len];
-                        if (existing_sig[0] == sig_type and std.mem.eql(u32, existing_sig[1..], sig_base_and_indices)) {
+                        if (existing_sig[0] == @as(u32, opcode) and existing_sig[1] == sig_type and std.mem.eql(u32, existing_sig[2..], sig_base_and_indices)) {
                             try sub_map.put(alloc, result_id, entry.result_id);
                             found_dup = true;
                             break;
@@ -5491,6 +5493,7 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
             }
             if (!found_dup) {
                 const sig_start: u32 = @intCast(all_sig_words.items.len);
+                try all_sig_words.append(alloc, @as(u32, opcode)); // opcode FIRST (uniform key)
                 try all_sig_words.append(alloc, sig_type);
                 try all_sig_words.appendSlice(alloc, sig_base_and_indices);
                 try block_sigs.append(alloc, .{ .result_id = result_id, .sig_start = sig_start, .sig_len = sig_len });
@@ -5506,13 +5509,13 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
             const result_id = words[pos + 2]; // result
             const sig_type = words[pos + 1]; // result type
             const sig_operands = words[pos + 3 .. ie]; // image + sampler
-            const sig_len: u32 = 1 + @as(u32, @intCast(sig_operands.len));
+            const sig_len: u32 = 2 + @as(u32, @intCast(sig_operands.len)); // opcode-prefixed (uniform key)
 
             var found_dup = false;
             for (block_sigs.items) |entry| {
                 if (entry.sig_len == sig_len) {
                     const existing_sig = all_sig_words.items[entry.sig_start .. entry.sig_start + sig_len];
-                    if (existing_sig[0] == sig_type and std.mem.eql(u32, existing_sig[1..], sig_operands)) {
+                    if (existing_sig[0] == @as(u32, opcode) and existing_sig[1] == sig_type and std.mem.eql(u32, existing_sig[2..], sig_operands)) {
                         try sub_map.put(alloc, result_id, entry.result_id);
                         found_dup = true;
                         break;
@@ -5523,7 +5526,7 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
                 for (entry_block_sigs.items) |entry| {
                     if (entry.sig_len == sig_len) {
                         const existing_sig = all_sig_words.items[entry.sig_start .. entry.sig_start + sig_len];
-                        if (existing_sig[0] == sig_type and std.mem.eql(u32, existing_sig[1..], sig_operands)) {
+                        if (existing_sig[0] == @as(u32, opcode) and existing_sig[1] == sig_type and std.mem.eql(u32, existing_sig[2..], sig_operands)) {
                             try sub_map.put(alloc, result_id, entry.result_id);
                             found_dup = true;
                             break;
@@ -5533,6 +5536,7 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
             }
             if (!found_dup) {
                 const sig_start: u32 = @intCast(all_sig_words.items.len);
+                try all_sig_words.append(alloc, @as(u32, opcode)); // opcode FIRST (uniform key)
                 try all_sig_words.append(alloc, sig_type);
                 try all_sig_words.appendSlice(alloc, sig_operands);
                 try block_sigs.append(alloc, .{ .result_id = result_id, .sig_start = sig_start, .sig_len = sig_len });
@@ -5548,12 +5552,13 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
             80, // OpCompositeConstruct
             81, // OpCompositeExtract
             84, // OpTranspose
-            126, 127, // FNegate, SNegate
-            128, 129, 130, 131, 132, 133, // FAdd, FSub, FMul, FDiv, FMod, ...
+            126, 127, // SNegate, FNegate
+            128, 129, 130, 131, 132, 133, // IAdd, FAdd, ISub, FSub, IMul, FMul
             136, // FDiv
             142, 143, 144, 145, 146, 147, 148, // Vector/Matrix ops
             109, 110, 111, 112, // Conversions
-            154, 155, 156, 157, // Derivatives
+            154, 155, 156, 157, // OpAny, OpAll, OpIsNan, OpIsInf — NOT derivatives (207-215,
+            // which are screen-position-dependent and must NOT be CSE-eligible)
             166, 167, 168, 170, 171, // Logical ops
             169, // Select
             177, 178, 179, 180, 182, 184, 186, 188, 190, // Comparisons
@@ -5564,13 +5569,16 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
             const result_id = words[pos + 2]; // result
             const sig_type = words[pos + 1]; // result type
             const sig_operands = words[pos + 3 .. ie]; // constituents
-            const sig_len: u32 = 1 + @as(u32, @intCast(sig_operands.len));
+            // The signature MUST include the OPCODE: distinct ops with the same result type
+            // and operands (e.g. isnan(v)/isinf(v) → bvecN over the same v, or all(b)/any(b))
+            // are NOT redundant. Keying on (type, operands) alone merged them — a silent-wrong.
+            const sig_len: u32 = 2 + @as(u32, @intCast(sig_operands.len)); // opcode + type + operands
 
             var found_dup = false;
             for (block_sigs.items) |entry| {
                 if (entry.sig_len == sig_len) {
                     const existing_sig = all_sig_words.items[entry.sig_start .. entry.sig_start + sig_len];
-                    if (existing_sig[0] == sig_type and std.mem.eql(u32, existing_sig[1..], sig_operands)) {
+                    if (existing_sig[0] == @as(u32, opcode) and existing_sig[1] == sig_type and std.mem.eql(u32, existing_sig[2..], sig_operands)) {
                         try sub_map.put(alloc, result_id, entry.result_id);
                         found_dup = true;
                         break;
@@ -5581,7 +5589,7 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
                 for (entry_block_sigs.items) |entry| {
                     if (entry.sig_len == sig_len) {
                         const existing_sig = all_sig_words.items[entry.sig_start .. entry.sig_start + sig_len];
-                        if (existing_sig[0] == sig_type and std.mem.eql(u32, existing_sig[1..], sig_operands)) {
+                        if (existing_sig[0] == @as(u32, opcode) and existing_sig[1] == sig_type and std.mem.eql(u32, existing_sig[2..], sig_operands)) {
                             try sub_map.put(alloc, result_id, entry.result_id);
                             found_dup = true;
                             break;
@@ -5591,6 +5599,7 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
             }
             if (!found_dup) {
                 const sig_start: u32 = @intCast(all_sig_words.items.len);
+                try all_sig_words.append(alloc, @as(u32, opcode)); // opcode FIRST (uniform key)
                 try all_sig_words.append(alloc, sig_type);
                 try all_sig_words.appendSlice(alloc, sig_operands);
                 try block_sigs.append(alloc, .{ .result_id = result_id, .sig_start = sig_start, .sig_len = sig_len });

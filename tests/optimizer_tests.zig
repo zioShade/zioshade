@@ -659,3 +659,56 @@ test "frontend: sibling load re-loads after swizzle compound-assign store-back (
     defer alloc.free(spirv);
     try assertLoadAfterSwizzleStore(spirv);
 }
+
+// Walk the instruction stream (header is 5 words) counting a specific opcode, so an
+// operand WORD that happens to equal the opcode value is not miscounted as an instruction.
+fn countOpcodeStrict(spirv: []const u32, opcode: u16) u32 {
+    var i: usize = 5;
+    var count: u32 = 0;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(spirv[i] & 0xFFFF)) == opcode) count += 1;
+        i += wc;
+    }
+    return count;
+}
+
+// The CSE pass (cseWithinBlocks) keyed redundant ops on (result_type, operands) WITHOUT
+// the OPCODE, so `isnan(v)` and `isinf(v)` (both bvecN over the same v) collided and the
+// second was merged into the first — a silent-wrong miscompile (`any(isinf(v))` silently
+// became `any(isnan(v))`). Both ops must survive optimization as distinct instructions.
+test "optimizer: CSE does not merge OpIsInf into OpIsNan (distinct opcodes, same operand)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(location = 0) in vec3 v;
+        \\void main() {
+        \\    bvec3 n = isnan(v);
+        \\    bvec3 i = isinf(v);
+        \\    o = vec4(float(any(n)) + float(any(i)), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.IsNan)) >= 1);
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.IsInf)) >= 1);
+}
+
+// Sibling guard: `all(v)` and `any(v)` over the same bvec also collided under the
+// opcode-less CSE key (All=155, Any=154 were both eligible). They must stay distinct.
+test "optimizer: CSE does not merge OpAll into OpAny (distinct opcodes, same operand)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(location = 0) in vec3 v;
+        \\void main() {
+        \\    bvec3 b = lessThan(v, vec3(0.5));
+        \\    o = vec4(float(all(b)) + float(any(b)) * 2.0, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.All)) >= 1);
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.Any)) >= 1);
+}
