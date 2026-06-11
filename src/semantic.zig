@@ -4737,12 +4737,10 @@ const Analyzer = struct {
                 if (std.mem.eql(u8, node.data.name, "length") and node.data.children.len == 1) {
                     var arr_size: ?u32 = null;
                     const first_child = node.data.children[0];
-                    // Try identifier lookup first (avoids emitting unnecessary IR).
-                    // NOTE: this handles only the ANONYMOUS-block form
-                    // (`buffer B { float d[]; }; → d.length()`). A named-instance block
-                    // (`buffer B { float d[]; } b; → b.d.length()`) parses with
-                    // first_child.tag == .member_access, falls through to the fold path
-                    // below, and remains the pre-existing fold-0 limitation (#294 follow-up).
+                    // Try identifier lookup first (avoids emitting unnecessary IR). This
+                    // handles the ANONYMOUS-block form (`buffer B { float d[]; }; →
+                    // d.length()`); the named-instance form (`… } b; → b.d.length()`,
+                    // a .member_access node) is handled in the `else if` just below.
                     if (first_child.tag == .identifier) {
                         if (self.lookup(first_child.data.name)) |sym| {
                             // RUNTIME-sized SSBO array (`buffer B { float d[]; }; … d.length()`):
@@ -4771,6 +4769,42 @@ const Analyzer = struct {
                                 return .{ .ty = .uint, .id = id };
                             }
                             if (sym.ty == .array) arr_size = sym.ty.array.size;
+                        }
+                    } else if (first_child.tag == .member_access and first_child.data.children.len >= 1) {
+                        // Named-instance block: `buffer B { float d[]; } b; → b.d.length()`.
+                        // The member_access child[0] is the instance var `b` (a .named struct
+                        // var = the SPIR-V struct pointer) and node.data.name is the member
+                        // `d`. Resolve b's pointer + d's member index and emit OpArrayLength
+                        // when d is a genuinely-runtime array (size==0, no size_name) — #294/#296.
+                        const inst_node = first_child.data.children[0];
+                        if (inst_node.tag == .identifier) {
+                            if (self.lookup(inst_node.data.name)) |inst_sym| {
+                                if (inst_sym.ty == .named) {
+                                    if (self.types.get(inst_sym.ty.named)) |td| {
+                                        const mname = first_child.data.name;
+                                        for (td.members, 0..) |member, i| {
+                                            if (!std.mem.eql(u8, member.name, mname)) continue;
+                                            if (member.ty == .array and member.ty.array.size == 0 and
+                                                member.ty.array.size_name == null)
+                                            {
+                                                const id = self.allocId();
+                                                const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                                operands[0] = .{ .id = inst_sym.ir_id }; // struct pointer
+                                                operands[1] = .{ .literal_int = @as(u32, @intCast(i)) }; // member index
+                                                try self.instructions.append(self.alloc, .{
+                                                    .tag = .array_length,
+                                                    .result_type = null,
+                                                    .result_id = id,
+                                                    .operands = operands,
+                                                    .ty = .uint,
+                                                });
+                                                return .{ .ty = .uint, .id = id };
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     // Fallback: evaluate expression and check type
