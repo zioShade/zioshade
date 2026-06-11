@@ -717,6 +717,46 @@ test "optimizer: CSE does not merge OpIsInf into OpIsNan (distinct opcodes, same
     try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.IsInf)) >= 1);
 }
 
+// Count OpCompositeExtract (opcode 81) instructions whose (single) literal index == `idx`.
+// Walks the instruction stream so operand words aren't miscounted.
+fn countExtractWithIndex(spirv: []const u32, idx: u32) u32 {
+    var i: usize = 5;
+    var count: u32 = 0;
+    while (i < spirv.len) {
+        const wc = spirv[i] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(spirv[i] & 0xFFFF)) == 81 and wc == 5 and spirv[i + 4] == idx) count += 1;
+        i += wc;
+    }
+    return count;
+}
+
+// foldCompositeExtract's shuffle-extract fold (Phase 2b) used the shuffle RESULT width as the
+// vec1/vec2 boundary instead of vec1's SOURCE component count, so `vec2 m = v.zw; float b = m.x;`
+// folded to `OpCompositeExtract v 0` (= v.x) instead of `v 2` (= v.z) — a silent-wrong
+// miscompile. (Gated behind a non-empty sub_map, so the `packed` Construct→Extract fold is
+// present to enable Phase 2b.) The extract must pick component 2 (v.z), never 0 (v.x).
+test "optimizer: shuffle-extract folds to the right component (v.zw then .x = v.z, not v.x)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 col;
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 1) in float s;
+        \\void main() {
+        \\    vec3 packed = vec3(s, s + 1.0, s + 2.0); // Construct->Extract fold -> sub_map non-empty
+        \\    float a = packed.z;
+        \\    vec2 m = v.zw;                           // OpVectorShuffle v v 2 3
+        \\    float b = m.x;                           // == v.z (component 2)
+        \\    col = vec4(a, b, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    // b must extract component 2 (v.z); the bug produced an extract of component 0 (v.x).
+    try std.testing.expectEqual(@as(u32, 0), countExtractWithIndex(spirv, 0));
+    try std.testing.expect(countExtractWithIndex(spirv, 2) >= 1);
+}
+
 // algebraicSimpl folded `x * 0.0 → 0.0` for floats, which is WRONG per IEEE: Inf*0 and
 // NaN*0 are NaN, not 0. The fold (OpFMul case) was a silent-wrong miscompile. `x * 1.0`
 // stays foldable (exact for all values). The OpFMul must survive here (its operand can be
