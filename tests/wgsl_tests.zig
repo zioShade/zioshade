@@ -996,6 +996,39 @@ fn runShadowValidTest(c: ShadowCase) !void {
     try nagaValidateOrSkip(wgsl, c.name);
 }
 
+// Projective depth-compare: `textureProj(sampler2DShadow, vec4 P)` was honest-
+// errored ("WGSL has no projective depth-compare sampling") even though it has a
+// faithful lowering. glslang encodes it as coord=(P.x,P.y,P.w,P.w), Dref=P.z, and
+// SPIR-V's OpImageSampleProjDref divides BOTH the coordinate AND the Dref by the
+// coordinate's last component — so the correct WGSL is
+//   textureSampleCompare(t, s, P.xy / P.w, P.z / P.w)
+// (mirrors the non-Dref projective handler, which already does the coord divide).
+// Dropping the Dref divide is silent-wrong (naga accepts it); this test pins BOTH
+// divides via the divisor appearing twice, plus naga as ground truth. (#170)
+test "wgsl: textureProj(sampler2DShadow) lowers to a projective textureSampleCompare" {
+    const spirv = try compileToSpirv("proj_shadow_2d",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DShadow sh;
+        \\layout(location = 0) in vec4 P;
+        \\layout(location = 0) out float o;
+        \\void main() { o = textureProj(sh, P); }
+    );
+    defer alloc.free(spirv);
+    // Previously error.UnsupportedOp; must now emit valid WGSL.
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "texture_depth_2d");
+    try assertContains(wgsl, "sampler_comparison");
+    try assertContains(wgsl, "textureSampleCompare(");
+    // The spatial coordinate must be sliced to .xy and perspective-divided...
+    try assertContains(wgsl, ".xy /");
+    // ...and the perspective divide must apply to BOTH the coordinate and the
+    // depth reference (the bug the old honest-error claimed was unavoidable): the
+    // single divisor expression therefore appears at least twice in the call.
+    try std.testing.expect(std.mem.count(u8, wgsl, " / ") >= 2);
+    try nagaValidateOrSkip(wgsl, "proj-shadow-2d");
+}
+
 // ---------------------------------------------------------------------------
 // Non-depth ARRAY textures (sampler2DArray, samplerCubeArray, ...). Mirrors the
 // depth-array path: the type name must carry `_array` AND the sample/fetch/gather
@@ -2391,10 +2424,13 @@ test "wgsl: textureProj(sampler3D, vec4) lowers to coord.xyz / coord.w" {
     try nagaValidateOrSkip(wgsl, "textureProj-3d-vec4");
 }
 
-test "wgsl: projective shadow (sampler2DShadow) is an honest error" {
-    // Projective depth-compare has no clean WGSL mapping (textureSampleCompare
-    // takes no projective coord and the divided ref is value-sensitive). Fail
-    // loud rather than silently drop the depth compare.
+test "wgsl: projective shadow (sampler2DShadow) lowers to a projective compare" {
+    // Projective depth-compare HAS a faithful lowering: textureProj divides both
+    // the coordinate and the depth reference by the coordinate's last component,
+    // so textureProj(sampler2DShadow, P) → textureSampleCompare(t, s, P.xy / P.w,
+    // P.z / P.w). (Was previously honest-errored; #170.) Uses glslpp's OWN frontend
+    // — a different SPIR-V producer than the glslang-based test above, covering the
+    // OpCompositeInsert coordinate-packing both emit.
     const source: [:0]const u8 =
         \\#version 450
         \\layout(binding=0) uniform sampler2DShadow tex;
@@ -2403,7 +2439,14 @@ test "wgsl: projective shadow (sampler2DShadow) is an honest error" {
     ;
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleCompare(");
+    try assertContains(wgsl, ".xy /");
+    // The perspective divide must apply to BOTH coord and depth ref (same divisor
+    // appears at least twice in the call).
+    try std.testing.expect(std.mem.count(u8, wgsl, " / ") >= 2);
+    try nagaValidateOrSkip(wgsl, "proj-shadow-frontend");
 }
 
 test "wgsl: fragment-shader interlock is an honest error (no WGSL equivalent)" {
