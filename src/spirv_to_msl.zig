@@ -2124,10 +2124,37 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         if (emitted_const_array) try w.writeAll("\n");
     }
 
+    // Faithful runtime SSBO `.length()` (#296): assign each storage buffer that is the
+    // structure operand of an OpArrayLength a slot in the host-provided
+    // `spvBufferSizeConstants` array (spirv-cross's scheme). Only wired for the COMPUTE,
+    // non-argbuf path with NO co-occurring image-atomic backing buffer (which competes for
+    // the same trailing [[buffer]] slots). When the map stays empty, the `.ArrayLength`
+    // arm honest-errors — keeping the param emission and the body emission coupled.
+    var arraylen_buf_index = std.AutoHashMap(u32, u32).init(aa);
+    if (is_compute and !options.argument_buffers and atomic_images.count() == 0) {
+        var next_size_idx: u32 = 0;
+        for (module.instructions) |inst| {
+            if (inst.op == .ArrayLength and inst.words.len >= 4) {
+                const sp = inst.words[3];
+                if (!arraylen_buf_index.contains(sp)) {
+                    arraylen_buf_index.put(sp, next_size_idx) catch {};
+                    next_size_idx += 1;
+                }
+            }
+        }
+    }
+    // `spvBufferSizeConstants` is injected ONLY into the entry kernel signature, so the
+    // faithful `.length()` lowering must fire only in the entry function body. Non-entry
+    // (helper) functions get an EMPTY map → their `.ArrayLength` arm honest-errors instead
+    // of referencing an undeclared `spvBufferSizeConstants` (the same non-entry honest-error
+    // discipline as the #267 image-atomic backing buffer). A helper `arr.length()` thus
+    // fails loud rather than emitting silent-wrong MSL.
+    var arraylen_empty = std.AutoHashMap(u32, u32).init(aa);
+
     // Emit non-entry functions first
-    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings, &pull_model, &atomic_images); }
+    for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings, &pull_model, &atomic_images, &arraylen_empty); }
     // Emit entry function last
-    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings, &pull_model, &atomic_images);
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings, &pull_model, &atomic_images, &arraylen_buf_index);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -2179,7 +2206,7 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .TypeVoid,.TypeBool,.TypeInt,.TypeFloat,.TypeVector,.TypeMatrix,.TypeImage,.TypeSampler,.TypeSampledImage,.TypeArray,.TypeRuntimeArray,.TypeStruct,.TypePointer,.TypeFunction,.TypeForwardPointer,.TypeAccelerationStructureKHR,.TypeRayQueryKHR,.TypeTensorARM => if(words.len>1) words[1] else null,
         .ConstantTrue,.ConstantFalse,.Constant,.ConstantComposite,.SpecConstant,.SpecConstantTrue,.SpecConstantFalse,.SpecConstantComposite,.SpecConstantOp,.Undef => if(words.len>2) words[2] else null,
         .Variable,.Function,.FunctionParameter => if(words.len>2) words[2] else null,
-        .Load,.AccessChain,.CompositeConstruct,.CompositeExtract,.CompositeInsert,.VectorShuffle,.SampledImage,.ImageSampleImplicitLod,.ImageSampleExplicitLod,.ImageFetch,.ImageGather,.ImageQuerySizeLod,.ImageQuerySize,.ImageTexelPointer,.FunctionCall,.CopyObject,.Phi,.ConvertFToS,.ConvertSToF,.ConvertUToF,.ConvertFToU,.UConvert,.SConvert,.FConvert,.Bitcast,.SNegate,.FNegate,.IAdd,.FAdd,.ISub,.FSub,.IMul,.FMul,.UDiv,.SDiv,.FDiv,.UMod,.SRem,.SMod,.FRem,.FMod,.VectorTimesScalar,.MatrixTimesScalar,.VectorTimesMatrix,.MatrixTimesVector,.MatrixTimesMatrix,.Dot,.Transpose,.OuterProduct,.Select,.LogicalOr,.LogicalAnd,.LogicalNot,.IEqual,.INotEqual,.UGreaterThan,.SGreaterThan,.UGreaterThanEqual,.SGreaterThanEqual,.ULessThan,.SLessThan,.ULessThanEqual,.SLessThanEqual,.FOrdEqual,.FOrdNotEqual,.FOrdLessThan,.FOrdGreaterThan,.FOrdLessThanEqual,.FOrdGreaterThanEqual,.FUnordEqual,.FUnordNotEqual,.FUnordLessThan,.FUnordGreaterThan,.FUnordLessThanEqual,.FUnordGreaterThanEqual,.ShiftRightLogical,.ShiftRightArithmetic,.ShiftLeftLogical,.BitwiseOr,.BitwiseXor,.BitwiseAnd,.Not,.BitReverse,.BitCount,.BitFieldInsert,.BitFieldSExtract,.BitFieldUExtract,.IsNan,.IsInf,.All,.Any,.DPdx,.DPdy,.Fwidth,.DPdxFine,.DPdyFine,.FwidthFine,.DPdxCoarse,.DPdyCoarse,.FwidthCoarse,.VectorExtractDynamic,.ExtInst,.OpImage,.AtomicIAdd,.AtomicISub,.AtomicExchange,.AtomicSMin,.AtomicUMin,.AtomicSMax,.AtomicUMax,.AtomicAnd,.AtomicOr,.AtomicXor,.AtomicCompareExchange,.AtomicFAddEXT,.ImageSampleDrefImplicitLod,.ImageSampleDrefExplicitLod,.ImageSampleProjImplicitLod,.ImageSampleProjExplicitLod,.ImageDrefGather,.ImageQueryLod,.ImageQueryLevels,.ImageQuerySamples,.ImageRead => if(words.len>2) words[2] else null,
+        .Load,.AccessChain,.CompositeConstruct,.CompositeExtract,.CompositeInsert,.VectorShuffle,.SampledImage,.ImageSampleImplicitLod,.ImageSampleExplicitLod,.ImageFetch,.ImageGather,.ImageQuerySizeLod,.ImageQuerySize,.ImageTexelPointer,.FunctionCall,.CopyObject,.Phi,.ConvertFToS,.ConvertSToF,.ConvertUToF,.ConvertFToU,.UConvert,.SConvert,.FConvert,.Bitcast,.SNegate,.FNegate,.IAdd,.FAdd,.ISub,.FSub,.IMul,.FMul,.UDiv,.SDiv,.FDiv,.UMod,.SRem,.SMod,.FRem,.FMod,.VectorTimesScalar,.MatrixTimesScalar,.VectorTimesMatrix,.MatrixTimesVector,.MatrixTimesMatrix,.Dot,.Transpose,.OuterProduct,.Select,.LogicalOr,.LogicalAnd,.LogicalNot,.IEqual,.INotEqual,.UGreaterThan,.SGreaterThan,.UGreaterThanEqual,.SGreaterThanEqual,.ULessThan,.SLessThan,.ULessThanEqual,.SLessThanEqual,.FOrdEqual,.FOrdNotEqual,.FOrdLessThan,.FOrdGreaterThan,.FOrdLessThanEqual,.FOrdGreaterThanEqual,.FUnordEqual,.FUnordNotEqual,.FUnordLessThan,.FUnordGreaterThan,.FUnordLessThanEqual,.FUnordGreaterThanEqual,.ShiftRightLogical,.ShiftRightArithmetic,.ShiftLeftLogical,.BitwiseOr,.BitwiseXor,.BitwiseAnd,.Not,.BitReverse,.BitCount,.BitFieldInsert,.BitFieldSExtract,.BitFieldUExtract,.IsNan,.IsInf,.All,.Any,.DPdx,.DPdy,.Fwidth,.DPdxFine,.DPdyFine,.FwidthFine,.DPdxCoarse,.DPdyCoarse,.FwidthCoarse,.VectorExtractDynamic,.ExtInst,.OpImage,.AtomicIAdd,.AtomicISub,.AtomicExchange,.AtomicSMin,.AtomicUMin,.AtomicSMax,.AtomicUMax,.AtomicAnd,.AtomicOr,.AtomicXor,.AtomicCompareExchange,.AtomicFAddEXT,.ImageSampleDrefImplicitLod,.ImageSampleDrefExplicitLod,.ImageSampleProjImplicitLod,.ImageSampleProjExplicitLod,.ImageDrefGather,.ImageQueryLod,.ImageQueryLevels,.ImageQuerySamples,.ImageRead,.ArrayLength => if(words.len>2) words[2] else null,
         else => null,
     };
 }
@@ -2831,6 +2858,7 @@ fn emitFunction(
     resource_bindings: []const MslResourceBinding,
     pull_model: *const std.AutoHashMap(u32, void),
     atomic_images: *const std.AutoHashMap(u32, void),
+    arraylen_buf_index: *const std.AutoHashMap(u32, u32),
 ) !void {
     const fi = getDef(m, func_id) orelse return;
     if (fi.op != .Function or fi.words.len < 5) return;
@@ -3032,7 +3060,7 @@ fn emitFunction(
         }
 
         try w.writeAll(")\n{\n");
-        try emitBody(m, names, decs, func_idx, w, alloc, is_frag, output_var_id, cbuffers, textures);
+        try emitBody(m, names, decs, func_idx, w, alloc, is_frag, output_var_id, cbuffers, textures, arraylen_buf_index);
         try w.writeAll("}\n\n");
 
         // Now emit the entry wrapper
@@ -3220,6 +3248,28 @@ fn emitFunction(
             }
         }
 
+        // Faithful runtime SSBO `.length()` (#296): bind the host-provided buffer-size
+        // array (spirv-cross's `spvBufferSizeConstants`). Appended at the next free
+        // [[buffer]] slot ABOVE all SSBO/UBO slots so no existing binding shifts. The map
+        // is non-empty only on the compute, non-argbuf, no-atomic-image path (see the
+        // build site in spirvToMSL), which is exactly where this kernel signature is used.
+        if (arraylen_buf_index.count() > 0) {
+            var max_buf_slot: u32 = 0;
+            var have_buf = false;
+            for (storage_buffers.items) |sb| {
+                const s = resolveMslSlot(resource_bindings, binding_shift, sb.descriptor_set, sb.binding);
+                if (!have_buf or s > max_buf_slot) { max_buf_slot = s; have_buf = true; }
+            }
+            for (cbuffers.items) |cb| {
+                const s = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
+                if (!have_buf or s > max_buf_slot) { max_buf_slot = s; have_buf = true; }
+            }
+            const size_slot: u32 = if (have_buf) max_buf_slot + 1 else 0;
+            if (!first_param) try w.writeAll(", ");
+            try w.print("constant uint* spvBufferSizeConstants [[buffer({d})]]", .{size_slot});
+            first_param = false;
+        }
+
         // Thread position
         if (!first_param) try w.writeAll(", ");
         try w.writeAll("uint3 gl_GlobalInvocationID [[thread_position_in_grid]]");
@@ -3272,7 +3322,7 @@ fn emitFunction(
             }
         }
 
-        try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures);
+        try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures, arraylen_buf_index);
         try w.writeAll("}\n");
         return;
     }
@@ -3346,7 +3396,7 @@ fn emitFunction(
             first_param = false;
         }
         try w.writeAll(")\n{\n");
-        try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures);
+        try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures, arraylen_buf_index);
         try w.writeAll("}\n\n");
 
         // ---- Wrapper: vertex main0_out main0(main0_in in [[stage_in]], ...) ----
@@ -3468,7 +3518,7 @@ fn emitFunction(
     }
 
     try w.writeAll(")\n{\n");
-    try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures);
+    try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures, arraylen_buf_index);
     try w.writeAll("}\n");
 }
 
@@ -3485,6 +3535,7 @@ fn emitBody(
     output_var_id: ?u32,
     cbuffers: *const std.ArrayList(CbufferDecl),
     textures: *const std.ArrayList(TextureDecl),
+    arraylen_buf_index: *const std.AutoHashMap(u32, u32),
 ) !void {
     var label_map = std.AutoHashMap(u32, usize).init(alloc);
     defer label_map.deinit();
@@ -3570,7 +3621,7 @@ fn emitBody(
         if (inst.op == .LoopMerge and inst.words.len >= 3) {
             const merge_lbl = inst.words[1];
             const cont_lbl = inst.words[2];
-            idx = try emitWhileLoopMSL(m, names, decs, idx, merge_lbl, cont_lbl, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, cbuffers, textures);
+            idx = try emitWhileLoopMSL(m, names, decs, idx, merge_lbl, cont_lbl, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, cbuffers, textures, arraylen_buf_index);
             continue;
         }
 
@@ -3583,10 +3634,10 @@ fn emitBody(
             if (ml) |mval| {
                 const he = fl != null and fl.? != mval;
                 try w.print("    if ({s})\n    {{\n", .{cn});
-                idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures);
+                idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, arraylen_buf_index);
                 if (he) {
                     try w.writeAll("    } else {\n");
-                    idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures);
+                    idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, arraylen_buf_index);
                 }
                 try w.writeAll("    }\n");
                 if (label_map.get(mval)) |mi| { idx = mi; }
@@ -3610,7 +3661,7 @@ fn emitBody(
                 try w.print("    switch ({s}) {{\n", .{sn});
                 if (dl != mval) {
                     try w.writeAll("    default:\n");
-                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures);
+                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, arraylen_buf_index);
                 }
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
@@ -3618,7 +3669,7 @@ fn emitBody(
                     const target = inst.words[wi + 1];
                     if (target == mval) continue;
                     try w.print("    case {d}:\n", .{cv});
-                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures);
+                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, arraylen_buf_index);
                 }
                 try w.writeAll("    }\n");
                 if (label_map.get(mval)) |mi| { idx = mi; }
@@ -3632,7 +3683,7 @@ fn emitBody(
             continue;
         }
 
-        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, output_var_id, cbuffers, textures);
+        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, output_var_id, cbuffers, textures, arraylen_buf_index);
     }
 }
 
@@ -3720,6 +3771,7 @@ fn emitWhileLoopMSL(
     is_frag: bool, ovid: ?u32,
     cbuffers: *const std.ArrayList(CbufferDecl),
     textures: *const std.ArrayList(TextureDecl),
+    arraylen_buf_index: *const std.AutoHashMap(u32, u32),
 ) !usize {
     // Two patterns after LoopMerge:
     // Pattern A: LoopMerge; Branch cond_label; ...; BranchConditional cond, body, merge
@@ -3845,7 +3897,7 @@ fn emitWhileLoopMSL(
                 const cinst = m.instructions[ci0];
                 if (cinst.op == .FunctionEnd or cinst.op == .Label or cinst.op == .Branch) break;
                 if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
-                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures);
+                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
             }
         }
         if (g_loop_phis) |lp| {
@@ -3871,7 +3923,7 @@ fn emitWhileLoopMSL(
             while (ci < cond_end) : (ci += 1) {
                 const cinst = m.instructions[ci];
                 if (cinst.op == .Label or cinst.op == .Branch or cinst.op == .SelectionMerge or cinst.op == .LoopMerge) continue;
-                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures);
+                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
             }
         }
     } else {
@@ -3885,7 +3937,7 @@ fn emitWhileLoopMSL(
         while (hp < loop_idx) : (hp += 1) {
             const hinst = m.instructions[hp];
             if (hinst.op == .Phi or hinst.op == .Label or hinst.op == .SelectionMerge or hinst.op == .LoopMerge or hinst.op == .Branch or hinst.op == .BranchConditional) continue;
-            try emitInstruction(m, names, decs, hinst, w, alloc, is_frag, ovid, cbuffers, textures);
+            try emitInstruction(m, names, decs, hinst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
         }
         cond_name = names.get(bc.words[1]) orelse cond_name;
     }
@@ -3910,7 +3962,7 @@ fn emitWhileLoopMSL(
                 if (binst.words.len >= 3) {
                     const nmerge = binst.words[1];
                     const ncont = binst.words[2];
-                    bi = try emitWhileLoopMSL(m, names, decs, bi, nmerge, ncont, label_map, bc_merge, w, alloc, is_frag, ovid, cbuffers, textures);
+                    bi = try emitWhileLoopMSL(m, names, decs, bi, nmerge, ncont, label_map, bc_merge, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
                     bi -= 1;
                 }
                 continue;
@@ -3938,26 +3990,26 @@ fn emitWhileLoopMSL(
                         try w.writeAll("        continue;\n");
                     } else if (tl_is_trivial_continue and nhe) {
                         try w.print("        if ({s}) continue;\n", .{ncn});
-                        bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures);
+                        bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
                     } else if (tl_is_trivial_break) {
                         try w.print("        if ({s}) break;\n", .{ncn});
                         if (nhe) {
-                            bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures);
+                            bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
                         }
                     } else if (fl_is_trivial_continue) {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
-                        bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures);
+                        bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
                         try w.writeAll("        } continue;\n");
                     } else if (fl_is_trivial_break and !nhe) {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
-                        bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures);
+                        bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
                         try w.writeAll("        }\n");
                     } else {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
-                        bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures);
+                        bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
                         if (nhe) {
                             try w.writeAll("        } else {\n");
-                            bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures);
+                            bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
                         }
                         try w.writeAll("        }\n");
                     }
@@ -3965,7 +4017,7 @@ fn emitWhileLoopMSL(
                 }
                 continue;
             }
-            try emitInstruction(m, names, decs, binst, w, alloc, is_frag, ovid, cbuffers, textures);
+            try emitInstruction(m, names, decs, binst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
         }
     }
     // Emit continue block (e.g., i++ in for-loops). For phi-counter loops the
@@ -3983,7 +4035,7 @@ fn emitWhileLoopMSL(
                 if (cinst.op == .Branch) break;
                 if (cinst.op == .BranchConditional) break; // do-while back-edge — handled below
                 if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
-                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures);
+                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
             }
         }
     }
@@ -4024,6 +4076,7 @@ fn emitBlock(
     is_frag: bool, ovid: ?u32, indent: []const u8,
     cbuffers: *const std.ArrayList(CbufferDecl),
     textures: *const std.ArrayList(TextureDecl),
+    arraylen_buf_index: *const std.AutoHashMap(u32, u32),
 ) !usize {
     const si = lm.get(label) orelse return error.InvalidSpirv;
     var i: usize = si + 1;
@@ -4042,10 +4095,10 @@ fn emitBlock(
             if (nm) |nmv| {
                 const he = fl != null and fl.? != nmv;
                 try w.print("{s}    if ({s})\n{s}    {{\n", .{indent, cn, indent});
-                i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures);
+                i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, arraylen_buf_index);
                 if (he) {
                     try w.print("{s}    }} else {{\n", .{indent});
-                    i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures);
+                    i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, arraylen_buf_index);
                 }
                 try w.print("{s}    }}\n", .{indent});
                 if (lm.get(nmv)) |nmi| { i = nmi; }
@@ -4054,7 +4107,7 @@ fn emitBlock(
             }
             continue;
         }
-        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid, cbuffers, textures);
+        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
     }
     return i;
 }
@@ -4077,6 +4130,7 @@ fn emitInstruction(
     is_frag: bool, ovid: ?u32,
     cbuffers: *const std.ArrayList(CbufferDecl),
     textures: *const std.ArrayList(TextureDecl),
+    arraylen_buf_index: *const std.AutoHashMap(u32, u32),
 ) !void {
     _ = decs;
     switch (inst.op) {
@@ -5137,11 +5191,41 @@ fn emitInstruction(
                 try w.print("    dispatch_mesh_threadgroups(mesh_grid, {s}, {s}, {s});\n", .{x, y, z});
             }
         },
-        // Runtime SSBO array `.length()` (OpArrayLength). MSL expresses this via a
-        // passed buffer-length constant — not yet wired here. Honest-error rather than
-        // the silent-wrong `// unhandled op 68` the default arm would emit (#294; MSL
-        // follow-up).
-        .ArrayLength => return error.UnsupportedOp,
+        // Runtime SSBO array `.length()` (OpArrayLength). MSL has no buffer-length query;
+        // spirv-cross passes a host-provided `spvBufferSizeConstants` array and computes
+        // `(bufferByteSize - memberOffset) / elementStride`. The structure operand's slot in
+        // that array is `arraylen_buf_index` (built only on the supported compute/non-argbuf/
+        // no-atomic path); absent → honest-error (no silent-wrong undeclared identifier).
+        .ArrayLength => {
+            if (inst.words.len < 5) return error.UnsupportedOp;
+            const struct_ptr = inst.words[3];
+            const member_idx = inst.words[4];
+            const size_idx = arraylen_buf_index.get(struct_ptr) orelse return error.UnsupportedOp;
+            const var_def = getDef(m, struct_ptr) orelse return error.UnsupportedOp;
+            if (var_def.op != .Variable or var_def.words.len < 4) return error.UnsupportedOp;
+            const ptr_def = getDef(m, var_def.words[1]) orelse return error.UnsupportedOp;
+            if (ptr_def.op != .TypePointer or ptr_def.words.len < 4) return error.UnsupportedOp;
+            const struct_id = ptr_def.words[3];
+            const struct_inst = getDef(m, struct_id) orelse return error.UnsupportedOp;
+            if (struct_inst.op != .TypeStruct or struct_inst.words.len < 3 + @as(usize, member_idx)) return error.UnsupportedOp;
+            const member_type = struct_inst.words[2 + @as(usize, member_idx)];
+            const mt_def = getDef(m, member_type) orelse return error.UnsupportedOp;
+            if (mt_def.op != .TypeRuntimeArray) return error.UnsupportedOp;
+            const stride = arrayStrideOf(m, member_type) orelse return error.UnsupportedOp;
+            // Member byte offset (OpMemberDecorate <struct> <member> Offset N); default 0.
+            var offset: u32 = 0;
+            for (m.instructions) |di| {
+                if (di.op == .MemberDecorate and di.words.len >= 5 and
+                    di.words[1] == struct_id and di.words[2] == member_idx)
+                {
+                    const dec: spirv.Decoration = @enumFromInt(di.words[3]);
+                    if (dec == .offset) { offset = di.words[4]; break; }
+                }
+            }
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            try w.print("    {s} {s} = (spvBufferSizeConstants[{d}] - {d}) / {d};\n", .{ rtt, rn, size_idx, offset, stride });
+        },
 
         else => {
             try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});

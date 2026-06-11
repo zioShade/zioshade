@@ -3676,12 +3676,58 @@ test "T-interp.4: the MSL 2.3 interpolation guard does not trip a plain-input sh
     try assertNotContains(msl, "// unhandled");
 }
 
-// #294: runtime-sized SSBO array `.length()` lowers to OpArrayLength. MSL would express
-// this via a passed buffer-length constant — not yet wired — so it HONEST-ERRORS
-// (error.UnsupportedOp) rather than the silent-wrong `// unhandled op 68`.
-test "T-arrlen.1: runtime SSBO array .length() honest-errors in MSL (#294)" {
+// #296: runtime-sized SSBO array `.length()` (OpArrayLength) now lowers to MSL's
+// `spvBufferSizeConstants` scheme (spirv-cross's). A host-bound `constant uint*
+// spvBufferSizeConstants [[buffer(N)]]` array (appended above all SSBO/UBO slots) carries
+// each storage buffer's byte size; the length is `(size - memberOffset) / elementStride`.
+// Wired for the compute, non-argbuf path (no co-occurring image-atomic backing buffer);
+// other shapes honest-error. MSL is spirv-cross-gated (no Metal compiler), so this guards
+// the emitted string against the spirv-cross oracle form.
+test "T-arrlen.1: runtime SSBO array .length() lowers to spvBufferSizeConstants in MSL (#296)" {
     const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(std430,binding=1) buffer Out { uint n; };\nvoid main(){ n = uint(d.length()); }";
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    const msl = try glslpp.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    // The host-bound size buffer is declared as a kernel param at the next free [[buffer]]
+    // slot ABOVE the two SSBOs (0,1) — slot 2; pinning it guards the slot computation.
+    try assertContains(msl, "constant uint* spvBufferSizeConstants [[buffer(2)]]");
+    // length = (size - offset) / stride; member offset 0, float stride 4.
+    try assertContains(msl, "spvBufferSizeConstants[0]");
+    try assertContains(msl, ") / 4");
+    try assertNotContains(msl, "// unhandled");
+}
+
+// #296: multi-member SSBO `{ uint count; float data[]; }` — the runtime array is member 1
+// at byte offset 4 (after the uint). The length formula subtracts that member offset:
+// (size - 4) / 4. Exercises the OpMemberDecorate Offset scan (the single-member case has
+// offset 0, so the subtraction is invisible there).
+test "T-arrlen.3: multi-member SSBO .length() uses the member byte offset in MSL (#296)" {
+    const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { uint count; float data[]; } b;\nlayout(std430,binding=1) buffer O { uint n; } o;\nvoid main(){ o.n = b.count + uint(b.data.length()); }";
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    const msl = try glslpp.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "(spvBufferSizeConstants[0] - 4) / 4");
+    try assertNotContains(msl, "// unhandled");
+}
+
+// #296: the spvBufferSizeConstants param is only injected into the legacy (non-argbuf)
+// compute kernel signature, so a runtime `.length()` under argument_buffers honest-errors
+// rather than referencing an unbound identifier.
+test "T-arrlen.4: runtime SSBO .length() under argument_buffers honest-errors in MSL (#296)" {
+    const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(std430,binding=1) buffer Out { uint n; };\nvoid main(){ n = uint(d.length()); }";
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true }));
+}
+
+// #296: a runtime SSBO `.length()` in a NON-compute (fragment) stage stays an honest error —
+// the spvBufferSizeConstants param is only injected into the compute kernel signature, so a
+// fragment `.length()` would reference an unbound identifier. Fail loud instead.
+test "T-arrlen.2: runtime SSBO array .length() in a fragment shader honest-errors in MSL (#296)" {
+    const source: [:0]const u8 = "#version 450\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(location=0) out float o;\nvoid main(){ o = float(d.length()); }";
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToMSL(alloc, spirv, .{}));
 }
