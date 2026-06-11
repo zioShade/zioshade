@@ -34,7 +34,39 @@ fn isUniformBlockVar(m: *const ParsedModule, id: u32) bool {
     if (!isUniformVar(m, id)) return false;
     const pt = resolvePointee(m, id) orelse return false;
     const ti = getDef(m, pt) orelse return false;
-    return ti.op == .TypeStruct;
+    if (ti.op != .TypeStruct) return false;
+    // An old-style SSBO (`Uniform` storage + `BufferBlock`-decorated struct) is declared as a
+    // writable `buffer` block — but ONLY in the compute stage, where the SSBO emission loop
+    // runs (it is `is_compute`-gated, matching #296's `.length()` gate). There it keeps its
+    // original member names + `{instance}.{member}` access, so it must NOT take the cbuffer
+    // `{name}_1.{name}_m{idx}` form. Outside compute it is still emitted via the uniform-block
+    // path, so keep treating it as a UBO there to avoid referencing an undeclared block. (#296)
+    if (m.execution_model == .GLCompute and structHasBufferBlock(m, pt)) return false;
+    return true;
+}
+
+/// True if struct type `struct_id` carries the `BufferBlock` decoration. glslangValidator
+/// encodes a pre-SPIR-V-1.3 SSBO as a `Uniform`-storage variable whose STRUCT TYPE (not the
+/// variable) is decorated `BufferBlock`. Checking the variable id — as the SSBO detection
+/// did before — never matched, so glslang SSBOs were misrouted to the read-only `uniform`
+/// cbuffer path. The decoration is an `OpDecorate` (not `OpMemberDecorate`) on the type.
+fn structHasBufferBlock(m: *const ParsedModule, struct_id: u32) bool {
+    for (m.instructions) |inst| {
+        if (inst.op == .Decorate and inst.words.len >= 3 and inst.words[1] == struct_id) {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[2]);
+            if (dec == .buffer_block) return true;
+        }
+    }
+    return false;
+}
+
+/// True if `id` is an old-style SSBO variable: `Uniform` storage class whose pointee struct
+/// type carries `BufferBlock` (glslangValidator's SSBO encoding). glslpp's own frontend uses
+/// the `StorageBuffer` storage class instead, so this only catches glslang-produced SPIR-V.
+fn isOldStyleSSBOVar(m: *const ParsedModule, id: u32) bool {
+    if (!isUniformVar(m, id)) return false;
+    const pt = resolvePointee(m, id) orelse return false;
+    return structHasBufferBlock(m, pt);
 }
 
 fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
@@ -635,8 +667,11 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         for (module.instructions) |inst| {
             if (inst.op == .Variable and inst.words.len >= 4) {
                 const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-                // SSBOs use StorageBuffer storage class (SPIR-V 1.3+) or Uniform + BufferBlock decoration
-                const is_ssbo = sc == .StorageBuffer or (sc == .Uniform and hasDec(&decs, inst.words[2], .buffer_block));
+                // SSBOs use StorageBuffer storage class (SPIR-V 1.3+) or, from glslangValidator,
+                // Uniform storage + a BufferBlock-decorated STRUCT TYPE. The BufferBlock decoration
+                // sits on the struct type, not the variable, so detect it via the pointee (#296).
+                const is_old_style = isOldStyleSSBOVar(&module, inst.words[2]);
+                const is_ssbo = sc == .StorageBuffer or is_old_style;
                 if (!is_ssbo) continue;
                 const rid = inst.words[2];
                 const binding = getDecVal(&decs, rid, .binding) orelse continue;
@@ -648,11 +683,11 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 // the type gets a distinct `{name}_block` tag (the tag is never referenced).
                 const block_tag = std.fmt.allocPrint(aa, "{s}_block", .{name}) catch return error.OutOfMemory;
                 try w.print("layout(std430, binding = {d}) buffer {s}\n{{\n", .{shifted_binding, block_tag});
-                // Emit struct members. StorageBuffer-class SSBOs access members by their
-                // ORIGINAL names (`B.d`), so declare them that way. Old-style Uniform +
-                // BufferBlock SSBOs go through isUniformBlockVar → the body spells members
-                // `{name}_m{idx}`, so they MUST keep that naming or the declaration desyncs.
-                const use_original = sc == .StorageBuffer;
+                // Emit struct members by their ORIGINAL names (`b.lock`) for BOTH SSBO
+                // encodings: StorageBuffer-class and old-style Uniform+BufferBlock now both
+                // bypass isUniformBlockVar (see structHasBufferBlock there), so the body
+                // accesses members as `{instance}.{member}` — declare them to match. (#296)
+                const use_original = true;
                 const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
                 if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
                     try emitStructMembers(&module, &names, ptr_inst.words[3], name, w, aa, use_original);
@@ -1067,7 +1102,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pi = getDef(m, rt) orelse continue; if (pi.op != .TypePointer or pi.words.len < 4) continue;
         const pt = pi.words[3];
         switch (sc) {
-            .Uniform => { if (hasDec(decs, rid, .buffer_block)) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding}) catch {}; },
+            .Uniform => { if (hasDec(decs, rid, .buffer_block) or (m.execution_model == .GLCompute and structHasBufferBlock(m, pt))) continue; const binding = getDecVal(decs, rid, .binding) orelse 0; cb.append(alloc, .{.name=names.get(rid) orelse "Globals", .type_id=pt, .binding=binding}) catch {}; },
             .UniformConstant => { var pei = getDef(m, pt) orelse continue; const binding = getDecVal(decs, rid, .binding) orelse 0; const name = names.get(rid) orelse "tex"; var arr_sz: u32 = 0; if (pei.op == .TypeArray and pei.words.len > 3) { const li = getDef(m, pei.words[3]); arr_sz = if (li != null and li.?.op == .Constant and li.?.words.len > 3) li.?.words[3] else 0; pei = getDef(m, pei.words[2]) orelse continue; } switch(pei.op){ .TypeSampledImage=>{ const si_img = if (pei.words.len > 2) getDef(m, pei.words[2]) else null; const si_st = if (si_img != null and si_img.?.words.len > 2) getDef(m, si_img.?.words[2]) else null; const si_uint = si_st != null and si_st.?.op == .TypeInt and si_st.?.words.len > 3 and si_st.?.words[3] == 0; const si_int = si_st != null and si_st.?.op == .TypeInt and si_st.?.words.len > 3 and si_st.?.words[3] != 0; const si_dim: []const u8 = blk: { if (si_img != null and si_img.?.words.len > 3) { break :blk switch(si_img.?.words[3]) { 0 => "1D", 1 => "2D", 2 => "3D", 3 => "Cube", 4 => "Rect", 5 => "Buffer", 6 => "SubpassData", else => "2D" }; } break :blk "2D"; }; const si_arrayed = si_img != null and si_img.?.words.len > 5 and si_img.?.words[5] == 1; tex.append(alloc,.{.name=name,.binding=binding,.is_uint=si_uint,.is_int=si_int,.dim_str=si_dim,.array_size=arr_sz,.arrayed=si_arrayed}) catch {};}, .TypeImage=>{ const sampled: u32 = if (pei.words.len > 7) pei.words[7] else 0; const is_storage = sampled == 2; const st_inst = if (pei.words.len > 2) getDef(m, pei.words[2]) else null; const is_uint = st_inst != null and st_inst.?.op == .TypeInt and st_inst.?.words.len > 3 and st_inst.?.words[3] == 0; const is_int = st_inst != null and st_inst.?.op == .TypeInt and st_inst.?.words.len > 3 and st_inst.?.words[3] != 0; const fmt: []const u8 = blk: { if (pei.words.len > 8) { break :blk switch(pei.words[8]) { 0 => "rgba8f", 1 => "rgba32f", 2 => "rgba16f", 3 => "r32f", 4 => "rgba8", 5 => "rgba8_snorm", 6 => "rg32f", 7 => "rg16f", 8 => "r11f_g11f_b10f", 9 => "r16f", 10 => "rgba16", 11 => "rgb10_a2", 12 => "rg8", 13 => "rg8_snorm", 14 => "r8", 15 => "r8_snorm", 16 => "rgba16_snorm", 17 => "rgba32i", 18 => "rgba16i", 19 => "rgba8i", 20 => "rg32i", 21 => "rg16i", 22 => "rg8i", 23 => "r32i", 24 => "rgba32ui", 25 => "rgba16ui", 26 => "rgba8ui", 27 => "rg32ui", 28 => "rg16ui", 29 => "rg8ui", 30...33 => "r32ui", else => "rgba8f" }; } break :blk "rgba8f"; }; const dim: []const u8 = blk: { if (pei.words.len > 3) { break :blk switch(pei.words[3]) { 0 => "1D", 1 => "2D", 2 => "3D", 3 => "Cube", 4 => "Rect", 5 => "Buffer", 6 => "SubpassData", else => "2D" }; } break :blk "2D"; }; const img_arrayed = pei.words.len > 5 and pei.words[5] == 1; tex.append(alloc,.{.name=name,.binding=binding,.is_storage=is_storage,.format_str=fmt,.dim_str=dim,.is_uint=is_uint,.is_int=is_int,.array_size=arr_sz,.arrayed=img_arrayed}) catch {};}, else=>{}} },
             else => {},
         }

@@ -657,6 +657,95 @@ const attrib_vert_src: [:0]const u8 =
     \\void main() { vColor = aPos; gl_Position = vec4(aPos, 1.0); }
 ;
 
+// glslangValidator encodes an SSBO (`buffer B { ... } b;`) as a `Uniform`-storage-class
+// variable whose STRUCT TYPE carries the `BufferBlock` decoration (pre-SPIR-V-1.3 style),
+// unlike glslpp's own frontend which uses the `StorageBuffer` storage class. The GLSL
+// backend used to look for `BufferBlock` on the VARIABLE id — which never matches — so
+// glslang SSBOs were misrouted to the read-only `uniform std140` cbuffer path: member
+// access desynced (`b_m0` undeclared) and stores hit a uniform (`l-value required`). (#296)
+const ssbo_atomic_comp: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(std430, binding = 0) buffer B { uint lock; uint slot; uint total; uint out_old; } b;
+    \\void main() {
+    \\    uint a = atomicCompSwap(b.lock, 7u, 9u);
+    \\    b.out_old = a;
+    \\}
+;
+
+const ssbo_image_atomic_store: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(r32ui, binding = 0) uniform uimage2D img;
+    \\layout(std430, binding = 1) buffer B { uint out_old; } b;
+    \\void main() { b.out_old = imageAtomicCompSwap(img, ivec2(0), 5u, 3u); }
+;
+
+// Plain (non-atomic) SSBO read+write through a glslang BufferBlock. Exercises the SAME
+// buffer-block mis-emission as the atomic repros (member access + store) but without the
+// orthogonal SSBO/image atomic result-declaration issue (#297, fixed separately), so the
+// whole output must be glslang-clean.
+const ssbo_read_write: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(std430, binding = 0) buffer B { uint lock; uint slot; uint total; uint out_old; } b;
+    \\void main() {
+    \\    b.out_old = b.lock + b.slot + b.total;
+    \\}
+;
+
+// A compute shader mixing a real UBO (`Uniform` + `Block`) with an SSBO (`BufferBlock`).
+// The discrimination is exactly what the fix hinges on: only the BufferBlock-decorated
+// struct becomes a writable `buffer`; the plain UBO must stay a read-only `uniform` block.
+const ssbo_with_ubo: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(std140, binding = 0) uniform U { uint scale; } u;
+    \\layout(std430, binding = 1) buffer B { uint lock; uint out_old; } b;
+    \\void main() { b.out_old = b.lock * u.scale; }
+;
+
+test "ssbo round-trip: glslang BufferBlock read+write accepted as a buffer" {
+    try roundTripAcceptsAt(alloc, "ssbo_read_write", ssbo_read_write, .compute, 450);
+}
+
+test "ssbo round-trip: compute UBO stays uniform while SSBO becomes a buffer" {
+    try roundTripAcceptsAt(alloc, "ssbo_with_ubo", ssbo_with_ubo, .compute, 450);
+}
+
+/// Assert the glslpp GLSL output declares `src`'s SSBO as a writable `buffer` block with
+/// ORIGINAL member names, not the read-only `uniform std140` cbuffer form with synthesized
+/// `_m{idx}` members. This isolates the buffer-block fix from the orthogonal atomic-result
+/// declaration issue (#297), so it holds for the exact atomic repros from the bug report.
+fn assertSSBODeclaredAsBuffer(allocator: std.mem.Allocator, src: [:0]const u8) !void {
+    const spirv = try compileToSpirvViaGlslang(allocator, src, .compute);
+    defer allocator.free(spirv);
+    const glsl = try glslpp.spirvToGLSL(allocator, spirv, .{ .version = 450 });
+    defer allocator.free(glsl);
+    // Symptom 2: the block must be a `buffer`, never a read-only `uniform` block.
+    if (std.mem.indexOf(u8, glsl, "buffer b_block") == null or
+        std.mem.indexOf(u8, glsl, "uniform b\n") != null)
+    {
+        std.debug.print("\nSSBO not declared as a buffer block:\n{s}\n", .{glsl});
+        return error.SSBONotBuffer;
+    }
+    // Symptom 1: members keep their ORIGINAL names; no synthesized `b_m{idx}` desync.
+    if (std.mem.indexOf(u8, glsl, "b.out_old") == null or
+        std.mem.indexOf(u8, glsl, "b_m0") != null)
+    {
+        std.debug.print("\nSSBO member access desynced (synthesized name):\n{s}\n", .{glsl});
+        return error.SSBOMemberDesync;
+    }
+}
+
+test "ssbo struct: glslang BufferBlock atomicCompSwap member declared by original name" {
+    try assertSSBODeclaredAsBuffer(alloc, ssbo_atomic_comp);
+}
+
+test "ssbo struct: glslang BufferBlock store target is a buffer, not a uniform" {
+    try assertSSBODeclaredAsBuffer(alloc, ssbo_image_atomic_store);
+}
+
 test "glsl-version acceptance: UBO frag valid at 330/400/410/420/440/450/460" {
     inline for (.{ 330, 400, 410, 420, 440, 450, 460 }) |v| {
         try roundTripAcceptsAt(alloc, "ubo_frag", ubo_frag_src, .fragment, v);
