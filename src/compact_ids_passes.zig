@@ -3416,10 +3416,20 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
     var ac_from_func = std.AutoHashMapUnmanaged(u32, void).empty; // ac_result_id -> void
     defer ac_from_func.deinit(alloc);
 
+    // Map every tracked pointer (a var or an access chain into one) to its ROOT variable, so
+    // a load through ANY chain can invalidate pending stores through SIBLING chains of the
+    // same root (runtime indices may coincide → they alias). Without this, a store through
+    // `b.data[i]` survived only an `OpLoad` of the SAME chain id, not a sibling read like
+    // `b.data[0]` — letting an observed store be wrongly eliminated (silent-wrong, esp. for
+    // SSBOs which are also cross-invocation observable). Mirrors the frontend #256 discipline.
+    var chain_root = std.AutoHashMapUnmanaged(u32, u32).empty; // ptr_id -> root var id
+    defer chain_root.deinit(alloc);
+
     // Seed with func-local var ids
     var fl_it = trackable.iterator(.{});
     while (fl_it.next()) |idx| {
         try ac_from_func.put(alloc, @as(u32, @intCast(idx)), {});
+        try chain_root.put(alloc, @as(u32, @intCast(idx)), @as(u32, @intCast(idx))); // root = self
     }
 
     // Propagate through AccessChains
@@ -3430,11 +3440,12 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
         while (pos < words.len) {
             const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
             if (wc == 0) break;
-            if (opcode == 65 and wc >= 4) { // OpAccessChain
+            if ((opcode == 65 or opcode == 66) and wc >= 4) { // Op(InBounds)AccessChain
                 const result_id = words[pos + 2];
                 const base_ptr = words[pos + 3];
                 if (ac_from_func.contains(base_ptr) and !ac_from_func.contains(result_id) and result_id < bound) {
                     try ac_from_func.put(alloc, result_id, {});
+                    try chain_root.put(alloc, result_id, chain_root.get(base_ptr) orelse base_ptr);
                     changed = true;
                 }
             }
@@ -3473,10 +3484,23 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
         if (opcode == 61 and wc >= 4) { // OpLoad: type, result, ptr
             const ptr = words[pos + 3];
-            // If we load from a tracked pointer, the previous store is NOT dead
+            // A load through a tracked pointer may observe a pending store through ANY sibling
+            // chain of the same root (a runtime index could coincide), so invalidate EVERY
+            // tracked store sharing this root — not just the same ptr id.
             if (ac_from_func.contains(ptr)) {
-                // Remove tracking for this pointer (store is needed)
-                _ = last_store_pos.remove(ptr);
+                const load_root = chain_root.get(ptr) orelse ptr;
+                var to_clear = std.ArrayListUnmanaged(u32).empty;
+                defer to_clear.deinit(alloc);
+                var sit = last_store_pos.iterator();
+                while (sit.next()) |e| {
+                    const sptr = e.key_ptr.*;
+                    if ((chain_root.get(sptr) orelse sptr) == load_root) {
+                        // MUST NOT swallow OOM here: a dropped key leaves an observed store
+                        // tracked, and a later same-ptr store would then wrongly eliminate it.
+                        try to_clear.append(alloc, sptr);
+                    }
+                }
+                for (to_clear.items) |k| _ = last_store_pos.remove(k);
             }
             pos += wc;
             continue;
@@ -3487,7 +3511,7 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
             opcode == 63 or // OpCopyMemory
             opcode == 224 or // OpControlBarrier
             opcode == 225 or // OpMemoryBarrier
-            (opcode >= 207 and opcode <= 230)) // Atomic operations
+            (opcode >= 207 and opcode <= 242)) // EmitVertex/EndPrimitive (observe output stores) + ALL atomics (227-242 read+modify memory)
         {
             last_store_pos.clearRetainingCapacity();
             pos += wc;
