@@ -2146,7 +2146,7 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
         .BitwiseAnd, .BitwiseOr, .BitwiseXor,
         .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
         .FOrdEqual, .FOrdNotEqual,
-        .LogicalAnd, .LogicalOr,
+        .LogicalAnd, .LogicalOr, .LogicalEqual, .LogicalNotEqual,
         => {
             // words[1] is result type (may be pointer)
             if (inst.words.len > 1) {
@@ -6074,6 +6074,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // Logical
             .LogicalOr => try emitBinOp(module, names, &inline_exprs, inst, "||", w, arena, indent),
             .LogicalAnd => try emitBinOp(module, names, &inline_exprs, inst, "&&", w, arena, indent),
+            // Boolean equality (GLSL bool `==`/`!=`, `equal`/`notEqual` on bvecN).
+            // WGSL `==`/`!=` apply to bool and are componentwise on vecN<bool>. (#170)
+            .LogicalEqual => try emitBinOp(module, names, &inline_exprs, inst, "==", w, arena, indent),
+            .LogicalNotEqual => try emitBinOp(module, names, &inline_exprs, inst, "!=", w, arena, indent),
             .LogicalNot => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 try writeInd(w, indent); try w.print("let {s}: {s} = !{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "true" });
@@ -7567,6 +7571,8 @@ fn getBinOpSymbol(op: spirv.Op) ?[]const u8 {
         .BitwiseXor => "^",
         .LogicalAnd => "&&",
         .LogicalOr => "||",
+        .LogicalEqual => "==",
+        .LogicalNotEqual => "!=",
         .SLessThan => "<",
         .SGreaterThan => ">",
         .ULessThan => "<",
