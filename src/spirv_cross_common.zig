@@ -204,7 +204,16 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .SubgroupAllKHR, .SubgroupAnyKHR,
         => if (words.len > 2) words[2] else null,
 
-        else => null,
+        else => blk: {
+            // OpIAddCarry (149) / OpISubBorrow (150): `spirv.Op` is non-exhaustive and
+            // does NOT name these, but each DOES define a result id (result-type word
+            // [1], result word[2]). Index it by raw opcode number so getDef/collectNames
+            // can resolve the {result, carry|borrow} struct that the WGSL backend lowers
+            // via OpCompositeExtract. (#170)
+            const opc = @intFromEnum(op);
+            if (opc == 149 or opc == 150) break :blk if (words.len > 2) words[2] else null;
+            break :blk null;
+        },
     };
 }
 
