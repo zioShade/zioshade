@@ -280,6 +280,7 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod,
         .ImageDrefGather, .ImageQueryLod, .ImageQueryLevels, .ImageQuerySamples,
         .ImageRead, .AtomicCompareExchange, .AtomicFAddEXT,
+        .ArrayLength,
         .BitReverse, .BitCount,
         .BitFieldInsert, .BitFieldSExtract, .BitFieldUExtract,
         .GroupNonUniformElect, .GroupNonUniformAll, .GroupNonUniformAny, .GroupNonUniformAllEqual,
@@ -4672,11 +4673,45 @@ fn emitInstruction(
             }
         },
 
-        // Runtime SSBO array `.length()` (OpArrayLength). HLSL would express this via a
-        // StructuredBuffer/ByteAddressBuffer `.GetDimensions(...)` against the specific
-        // buffer model — not yet wired here. Honest-error rather than the silent-wrong
-        // `// unhandled op 68` the default arm would emit (#294; HLSL follow-up).
-        .ArrayLength => return error.UnsupportedOp,
+        // Runtime SSBO array `.length()` (OpArrayLength). glslpp flattens a single-
+        // runtime-array SSBO `{ T data[]; }` to `RWStructuredBuffer<T>` (ssboRuntimeArray-
+        // Element); on that, `GetDimensions(out count, out stride)` returns the element
+        // COUNT — exactly the array length. Emit that. Any other shape (multi-member SSBO,
+        // non-flattened struct, member index != 0, or a member that isn't a runtime array)
+        // is NOT cleanly representable in this buffer model → honest-error rather than emit
+        // a wrong length (#296; faithful HLSL for #294's OpArrayLength).
+        .ArrayLength => {
+            if (inst.words.len < 5) return error.UnsupportedOp;
+            const struct_ptr = inst.words[3];
+            const member_idx = inst.words[4];
+            const var_def = getDef(module, struct_ptr) orelse return error.UnsupportedOp;
+            if (var_def.op != .Variable or var_def.words.len < 4) return error.UnsupportedOp;
+            const sc: spirv.StorageClass = @enumFromInt(var_def.words[3]);
+            if (sc != .StorageBuffer and sc != .Uniform) return error.UnsupportedOp;
+            const ptr_def = getDef(module, var_def.words[1]) orelse return error.UnsupportedOp;
+            if (ptr_def.op != .TypePointer or ptr_def.words.len < 4) return error.UnsupportedOp;
+            const struct_id = ptr_def.words[3];
+            // Only the flattened single-runtime-array SSBO maps to RWStructuredBuffer<T>.
+            if (member_idx != 0 or ssboRuntimeArrayElement(module, struct_id) == null) return error.UnsupportedOp;
+            // OpArrayLength is only valid on a runtime array; confirm the member is one
+            // (a flattened FIXED-size `{ T data[N]; }` would give a wrong/constant length).
+            const struct_inst = getDef(module, struct_id) orelse return error.UnsupportedOp;
+            if (struct_inst.words.len < 3) return error.UnsupportedOp;
+            const member0 = getDef(module, struct_inst.words[2]) orelse return error.UnsupportedOp;
+            if (member0.op != .TypeRuntimeArray) return error.UnsupportedOp;
+            // `.ArrayLength` is in resultIdFromOp, so collectNames assigns a name; the
+            // fallback derives a unique name from the result id (never the shared `"v"`,
+            // which would redeclare two temps + the result if it ever collided).
+            const result_name = names.get(inst.words[2]) orelse (std.fmt.allocPrint(alloc, "v{d}", .{inst.words[2]}) catch "v");
+            // Use the buffer's name VERBATIM (minus the `__ssbo_buf__` sentinel) to match
+            // the SSBO declaration + body access — both emit this raw `clean_name`, so it
+            // must NOT be re-sanitized here (that would desync from the declared identifier).
+            const buf_raw = names.get(struct_ptr) orelse return error.UnsupportedOp;
+            const buf_name = if (std.mem.startsWith(u8, buf_raw, "__ssbo_buf__")) buf_raw["__ssbo_buf__".len..] else buf_raw;
+            const rtt = try hlslType(module, inst.words[1], names, alloc);
+            try w.print("    uint {s}_dim_count, {s}_dim_stride; {s}.GetDimensions({s}_dim_count, {s}_dim_stride);\n", .{ result_name, result_name, buf_name, result_name, result_name });
+            try w.print("    {s} {s} = {s}_dim_count;\n", .{ rtt, result_name, result_name });
+        },
 
         else => {
             // Mesh/task shader ops
