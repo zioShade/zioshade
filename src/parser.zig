@@ -2081,7 +2081,15 @@ const Parser = struct {
                     raw_text[0 .. raw_text.len - 1]
                 else
                     raw_text;
-                const val = std.fmt.parseFloat(f64, num_text) catch 0.0;
+                // A malformed float literal — the lexer accepts an exponent marker with no
+                // exponent digits (`1e`, `1.5e+`), which std.fmt.parseFloat rejects. glslang
+                // rejects these too ("bad character in float exponent"); fail loud rather than
+                // silently substituting 0.0 (silent-wrong), mirroring the int path above which
+                // routes a malformed/over-range literal to an honest downstream rejection.
+                const val = std.fmt.parseFloat(f64, num_text) catch {
+                    self.recordErrorLoc();
+                    return error.UnexpectedToken;
+                };
                 return .{
                     .tag = .float_literal,
                     .loc = self.nodeLoc(tok),
