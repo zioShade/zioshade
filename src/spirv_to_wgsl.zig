@@ -176,6 +176,20 @@ fn opName(op: spirv.Op) []const u8 {
     return std.enums.tagName(spirv.Op, op) orelse "unknown";
 }
 
+/// SPIR-V extended-arithmetic opcodes whose result is a 2-member struct. `spirv.Op`
+/// is non-exhaustive and does NOT name these (`@tagName` would panic), so they must
+/// be matched by raw opcode number, not an `.IAddCarry`-style enum literal.
+/// OpIAddCarry = 149, OpISubBorrow = 150.
+fn isAddCarry(op: spirv.Op) bool {
+    return @intFromEnum(op) == 149;
+}
+fn isSubBorrow(op: spirv.Op) bool {
+    return @intFromEnum(op) == 150;
+}
+fn isAddCarryOrSubBorrow(op: spirv.Op) bool {
+    return isAddCarry(op) or isSubBorrow(op);
+}
+
 /// Record which GLSL.std.450 instruction had no WGSL mapping (into the
 /// threadlocal detail), then return the honest error. Use at every
 /// `UnsupportedExtInst` site: `return recordUnsupportedExtInst(op);`.
@@ -2156,7 +2170,16 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
             }
             return null;
         },
-        else => return null,
+        else => {
+            // OpIAddCarry (149) / OpISubBorrow (150) carry their {result,carry|borrow}
+            // struct type in words[1] (like the named binary ops above) but `spirv.Op`
+            // does not name them, so they cannot be a switch prong. Reporting the
+            // struct type here makes the `src_is_struct` guards (emit path + dead-
+            // extract pre-scan) correctly suppress the vector-swizzle collapse of
+            // their member extracts. (#170)
+            if (isAddCarryOrSubBorrow(inst.op) and inst.words.len > 1) return inst.words[1];
+            return null;
+        },
     }
 }
 
@@ -4627,6 +4650,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             const scan_inst = module.instructions[ii];
             if (scan_inst.op == .FunctionEnd) break;
             if (scan_inst.op != .CompositeExtract or scan_inst.words.len <= 4) continue;
+            // Leave OpIAddCarry/OpISubBorrow member extracts alone — their struct
+            // result is never emitted, so inlining would rename them to
+            // `<unemitted-result>.<member>` (an undefined identifier). They are
+            // recomputed from the operands in the CompositeExtract arm. (#170)
+            if (getDef(module, scan_inst.words[3])) |src_def| {
+                if (isAddCarryOrSubBorrow(src_def.op)) continue;
+            }
             const result_id = scan_inst.words[2];
             const uses = use_count.get(result_id) orelse 0;
             if (uses > 3 or uses < 2) continue;
@@ -4767,7 +4797,20 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         break;
                     }
                 }
-                if (lead_count >= 2 and lead_source != null) {
+                // Only a VECTOR source has a swizzle form to collapse into. A struct
+                // source (e.g. the {result,carry} struct of OpIAddCarry/OpISubBorrow)
+                // must NOT have its member extracts marked dead here — the emit path's
+                // matching `src_is_struct` guard keeps them as separate args, so
+                // dropping them would leave those args referencing undefined names. (#170)
+                var src_is_struct = false;
+                if (lead_source) |ls| {
+                    if (resolveTypeOf(module, ls)) |st| {
+                        if (getDef(module, st)) |sd2| {
+                            if (sd2.op == .TypeStruct) src_is_struct = true;
+                        }
+                    }
+                }
+                if (lead_count >= 2 and lead_source != null and !src_is_struct) {
                     // Mark the leading CompositeExtract results as dead
                     // ONLY if they're not used elsewhere (single use absorbed by swizzle)
                     for (scan_inst.words[3..], 0..) |comp_id, ci| {
@@ -5823,6 +5866,35 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (dead_extracts.contains(inst.words[2]) or inline_loads.contains(inst.words[2])) continue;
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
+                // OpIAddCarry/OpISubBorrow extract: the struct result has no WGSL
+                // value (see the no-op arm). Recompute the requested member straight
+                // from the operands. Member 0 is the wrapping add/sub (WGSL unsigned
+                // arithmetic wraps, matching SPIR-V); member 1 is the carry/borrow
+                // flag, 1 exactly where the unsigned op over/under-flowed:
+                //   carry  = (x + y) < x   (the sum wrapped below an addend)
+                //   borrow = x < y         (the minuend is smaller than the subtrahend)
+                // `select`/`<` are componentwise, so scalar and vector forms share
+                // one path. Single-index extract only (these structs are flat). (#170)
+                if (inst.words.len == 5) {
+                    if (getDef(module, inst.words[3])) |sd| {
+                        if (isAddCarryOrSubBorrow(sd.op) and sd.words.len >= 5) {
+                            const x = names.get(sd.words[3]) orelse "0u";
+                            const y = names.get(sd.words[4]) orelse "0u";
+                            try writeInd(w, indent);
+                            if (inst.words[4] == 0) {
+                                const op_str: []const u8 = if (isAddCarry(sd.op)) "+" else "-";
+                                try w.print("let {s}: {s} = ({s} {s} {s});\n", .{ result_name, rt, x, op_str, y });
+                            } else {
+                                const cond = if (isAddCarry(sd.op))
+                                    try std.fmt.allocPrint(arena, "({s} + {s}) < {s}", .{ x, y, x })
+                                else
+                                    try std.fmt.allocPrint(arena, "{s} < {s}", .{ x, y });
+                                try w.print("let {s}: {s} = select({s}(0u), {s}(1u), {s});\n", .{ result_name, rt, rt, rt, cond });
+                            }
+                            continue;
+                        }
+                    }
+                }
                 const composite = names.get(inst.words[3]) orelse "c";
                 // Build type-aware access expression
                 var expr = std.ArrayList(u8).initCapacity(alloc, 64) catch return;
@@ -6930,6 +7002,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             else => {
+                // OpIAddCarry (149) / OpISubBorrow (150) — GLSL uaddCarry/usubBorrow.
+                // `spirv.Op` does not name them (non-exhaustive enum), so they reach
+                // the else arm and must be matched by opcode number. Each yields a
+                // 2-member {result, carry|borrow} struct whose ONLY consumer is
+                // OpCompositeExtract; there is no struct-returning WGSL builtin, so the
+                // result id needs no WGSL value here — every extracted member is
+                // recomputed directly from the operands in the CompositeExtract arm
+                // (member 0 = the wrapping add/sub, member 1 = the carry/borrow via
+                // `select`). The `dead_extracts`/inline pre-scans are guarded so the
+                // member extracts survive to reach that arm. (#170)
+                if (isAddCarryOrSubBorrow(inst.op)) continue;
+
                 // No mapping for this op in the main emit path. The old fallback
                 // emitted `// unhandled op N` + `var <name>: T;` — an UNINITIALIZED
                 // var (garbage value) that is nonetheless syntactically valid WGSL,
