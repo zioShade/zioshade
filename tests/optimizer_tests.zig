@@ -224,7 +224,11 @@ test "optimizer: composite extract from constant composite is folded" {
     try std.testing.expect(spirv.len > 0);
 }
 
-test "optimizer: algebraic simplification x-x=0" {
+test "optimizer: float u - u is NOT folded (the fold produced `u`, and Inf-Inf=NaN)" {
+    // The `x - x` fold was REMOVED: it mapped the result to operand `b` (= x), so `u - u`
+    // computed `u` instead of `0` (wrong-value miscompile); and even a correct fold to a
+    // literal 0 would be wrong for IEEE (`Inf - Inf = NaN`). Leaving the OpFSub computes the
+    // right value for every input, so it must survive.
     const source =
         \\#version 450
         \\out vec4 FragColor;
@@ -236,24 +240,42 @@ test "optimizer: algebraic simplification x-x=0" {
     ;
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
-    // u - u should fold to 0.0 — no OpFSub should remain
-    try std.testing.expectEqual(@as(u32, 0), countOpcode(spirv, @intFromEnum(glslpp.spirv.Op.FSub)));
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.FSub)) >= 1);
 }
 
-test "optimizer: algebraic simplification x*0=0" {
+test "optimizer: integer u - u is NOT folded to `u` (was a wrong-value miscompile)" {
+    // Same bug for OpISub: `u - u` mapped to operand `u` instead of 0. Removed; the OpISub
+    // survives and computes the correct 0 at runtime.
     const source =
         \\#version 450
         \\out vec4 FragColor;
-        \\uniform float u;
+        \\uniform int u;
         \\void main() {
-        \\    float zero = u * 0.0;
-        \\    FragColor = vec4(zero, 0.0, 0.0, 1.0);
+        \\    int diff = u - u;
+        \\    FragColor = vec4(float(diff), 0.0, 0.0, 1.0);
         \\}
     ;
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
-    // u * 0.0 should fold to 0.0 — no OpFMul should remain
-    try std.testing.expectEqual(@as(u32, 0), countOpcode(spirv, @intFromEnum(glslpp.spirv.Op.FMul)));
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.ISub)) >= 1);
+}
+
+test "optimizer: algebraic simplification x*0=0 (INTEGER — valid, no NaN/Inf)" {
+    // INTEGER x*0 folds to 0 — this is exact for integers (no NaN/Inf). (The FLOAT u*0.0
+    // fold was REMOVED — Inf*0/NaN*0 are NaN; see the dedicated float test above.)
+    const source =
+        \\#version 450
+        \\out vec4 FragColor;
+        \\uniform int u;
+        \\void main() {
+        \\    int zero = u * 0;
+        \\    FragColor = vec4(float(zero), 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    // u * 0 should fold to 0 — no OpIMul should remain
+    try std.testing.expectEqual(@as(u32, 0), countOpcode(spirv, @intFromEnum(glslpp.spirv.Op.IMul)));
 }
 
 test "optimizer: inline trivial functions" {
@@ -693,6 +715,26 @@ test "optimizer: CSE does not merge OpIsInf into OpIsNan (distinct opcodes, same
     defer alloc.free(spirv);
     try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.IsNan)) >= 1);
     try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.IsInf)) >= 1);
+}
+
+// algebraicSimpl folded `x * 0.0 → 0.0` for floats, which is WRONG per IEEE: Inf*0 and
+// NaN*0 are NaN, not 0. The fold (OpFMul case) was a silent-wrong miscompile. `x * 1.0`
+// stays foldable (exact for all values). The OpFMul must survive here (its operand can be
+// Inf at runtime), not be replaced by the zero constant.
+test "optimizer: x * 0.0 is NOT folded to 0.0 for floats (Inf*0 = NaN)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 col;
+        \\layout(location = 0) in float t;
+        \\void main() {
+        \\    float big = 1.0 / t;   // +Inf when t == 0
+        \\    float r = big * 0.0;   // Inf*0 == NaN per IEEE, must NOT fold to 0.0
+        \\    col = vec4(r, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.FMul)) >= 1);
 }
 
 // Sibling guard: `all(v)` and `any(v)` over the same bvec also collided under the
