@@ -1261,6 +1261,32 @@ test "wgsl: fragment-shader interlock errors honestly (WGSL has no interlock)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "interlock") != null);
 }
 
+// A SPIR-V opcode that glslpp's `Op` enum does not NAME (here OpIAddCarry=149,
+// emitted by GLSL `uaddCarry`) must fail loud with error.UnsupportedOp — never
+// crash. The honest-error fallback formatted the op via `@tagName(inst.op)`,
+// which PANICS ("invalid enum value") on a non-exhaustive enum value with no
+// matching field, so the process aborted on perfectly valid glslang SPIR-V
+// instead of reporting the honest error. glslpp's own frontend rejects
+// `uaddCarry`, so glslang is the oracle that produces the op. (#170)
+test "wgsl: an opcode the Op enum doesn't name fails loud, not a @tagName panic (#170)" {
+    const spirv = try compileToSpirv("iaddcarry_honest",
+        \\#version 450
+        \\layout(location = 0) flat in uvec2 v;
+        \\layout(location = 0) out uvec2 o;
+        \\void main() {
+        \\    uint carry;
+        \\    uint s = uaddCarry(v.x, v.y, carry);
+        \\    o = uvec2(s, carry);
+        \\}
+    );
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    // The detail must identify the unnamed op by its numeric opcode (149) rather
+    // than crash trying to look up a non-existent enum tag name.
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "149") != null);
+}
+
 test "wgsl: unmapped input built-in (gl_PointCoord) errors honestly" {
     // gl_PointCoord has no WGSL @builtin. It must fail loud — previously it hit
     // an `else => \"position\"` fallback that fabricated a bogus

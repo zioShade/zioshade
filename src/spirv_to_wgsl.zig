@@ -166,6 +166,16 @@ fn glslStd450Name(op: u32) []const u8 {
     };
 }
 
+/// Safe display name for an `Op` in a diagnostic. `Op` is a NON-EXHAUSTIVE enum
+/// (`_,`), so a SPIR-V opcode glslpp does not name (e.g. OpIAddCarry=149 from
+/// GLSL `uaddCarry`) parses to a tag-less value. `@tagName` PANICS on such a
+/// value ("invalid enum value"), which turned the honest-error path into a hard
+/// process crash on perfectly valid input. Use this instead of `@tagName` at any
+/// honest-error site that an UNKNOWN op can reach (the main + replay fallbacks).
+fn opName(op: spirv.Op) []const u8 {
+    return std.enums.tagName(spirv.Op, op) orelse "unknown";
+}
+
 /// Record which GLSL.std.450 instruction had no WGSL mapping (into the
 /// threadlocal detail), then return the honest error. Use at every
 /// `UnsupportedExtInst` site: `return recordUnsupportedExtInst(op);`.
@@ -6885,7 +6895,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // flipping this to an honest error regresses nothing. If a future
                 // REPRESENTABLE op surfaces here, give it a real naga-validated arm
                 // rather than re-introducing the placeholder.)
-                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unsupported op '{s}' in main emit path", .{@tagName(inst.op)}) catch null;
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unsupported op '{s}' (opcode {d}) in main emit path", .{ opName(inst.op), @intFromEnum(inst.op) }) catch null;
                 return error.UnsupportedOp;
             },
         }
@@ -7405,7 +7415,7 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             // non-existent WGSL function (e.g. `VectorShuffle(...)`), which naga
             // always rejects (silent-wrong). Fail loud instead. (No naga-passing
             // shader can reach here: the leaked opcode name is never valid WGSL.)
-            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unsupported op '{s}' in switch/loop replay path", .{@tagName(inst.op)}) catch null;
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unsupported op '{s}' (opcode {d}) in switch/loop replay path", .{ opName(inst.op), @intFromEnum(inst.op) }) catch null;
             return error.UnsupportedOp;
         },
     }
