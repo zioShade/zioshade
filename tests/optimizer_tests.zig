@@ -717,6 +717,38 @@ test "optimizer: CSE does not merge OpIsInf into OpIsNan (distinct opcodes, same
     try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.IsInf)) >= 1);
 }
 
+// redundantStoreElim dropped a store that is OBSERVED by an ALIASING load. It keyed "last
+// store" on the exact access-chain ptr id and only un-tracked it on a SAME-id load — never on
+// a sibling-chain / whole-var read into the same root. So `b.data[i] = A; ... read b.data[0..]
+// ...; b.data[i] = B;` deleted store A (the read of b.data[0] could be b.data[i]). For an SSBO
+// the deleted store is observable cross-invocation too. Both stores to b.data[i] must survive.
+test "optimizer: redundantStoreElim keeps a store observed by an aliasing sibling load (SSBO)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { float data[]; } b;
+        \\layout(std430, binding = 1) buffer O { float s; } o;
+        \\layout(std430, binding = 2) buffer I { int idx; float k; } u;
+        \\void main() {
+        \\    int i = u.idx;
+        \\    b.data[i] = u.k + 1.0;                            // store A
+        \\    float s = b.data[0] + b.data[1] + b.data[2];      // aliasing reads of b.data[i]
+        \\    b.data[i] = u.k + 2.0;                            // store B
+        \\    o.s = s;
+        \\}
+    ;
+    const opt = try compileCompute(source);
+    defer alloc.free(opt);
+    const noopt = try compileComputeNoOpt(source);
+    defer alloc.free(noopt);
+    // If store A (`b.data[i] = u.k + 1.0`) is wrongly eliminated, its value computation
+    // `u.k + 1.0` (an OpFAdd) becomes dead and is DCE'd too. Every OpFAdd here is otherwise
+    // live (k+1 → store A, k+2 → store B, the three reads → o.s), and none is constant-
+    // foldable (k is a runtime SSBO load), so the OpFAdd count is removal-free UNLESS the
+    // aliasing bug fires. Pin it to the unoptimized count. (OpFAdd = 129.)
+    try std.testing.expectEqual(countOpcodeStrict(noopt, 129), countOpcodeStrict(opt, 129));
+}
+
 // Count OpCompositeExtract (opcode 81) instructions whose (single) literal index == `idx`.
 // Walks the instruction stream so operand words aren't miscounted.
 fn countExtractWithIndex(spirv: []const u32, idx: u32) u32 {
