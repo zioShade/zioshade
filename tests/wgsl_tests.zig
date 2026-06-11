@@ -3854,3 +3854,23 @@ test "wgsl: runtime SSBO array .length() -> arrayLength(&buf.member)" {
     try assertNotContains(wgsl, ".arr)");
     try nagaValidateOrSkip(wgsl, "ssbo_array_length");
 }
+
+// #294/#296: the NAMED-INSTANCE block form (`buffer B { float d[]; } b; → b.d.length()`)
+// — a `.member_access` node, not a bare identifier — must also lower to OpArrayLength →
+// `arrayLength(&b.d)`, not fold to 0. The frontend resolves the instance var `b` (the
+// struct pointer) + the member `d`'s index. Oracle: naga validates `arrayLength(&b.d)`.
+test "wgsl: named-instance SSBO array b.d.length() -> arrayLength(&b.d)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { float d[]; } b;
+        \\layout(std430, binding = 1) buffer Out { uint n; };
+        \\void main() { n = uint(b.d.length()); }
+    ;
+    const wgsl = try compileCompToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "arrayLength(&");
+    try assertContains(wgsl, ".d)");
+    try assertNotContains(wgsl, "unhandled");
+    try nagaValidateOrSkip(wgsl, "ssbo_named_instance_length");
+}
