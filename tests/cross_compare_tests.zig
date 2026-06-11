@@ -727,6 +727,36 @@ test "ssbo round-trip: glslang BufferBlock runtime-array .length() accepted" {
     try roundTripAcceptsAt(alloc, "ssbo_runtime_length", ssbo_runtime_length, .compute, 450);
 }
 
+// An ANONYMOUS SSBO block (no instance name after `}`). glslangValidator encodes this as a
+// `Uniform`-storage variable whose struct type is decorated `BufferBlock` and whose variable
+// name resolves to EMPTY. Members must be declared with NO instance name and referenced BARE
+// (`a`, `b`), not `.a`/`.b` — a leading dot makes glslang reject with "syntax error,
+// unexpected DOT". The NAMED-instance form is covered above; this pins the anonymous form.
+const ssbo_anonymous: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(std430, binding = 0) buffer B { uint a; uint b; };
+    \\void main() { b = a; }
+;
+
+test "ssbo round-trip: anonymous glslang BufferBlock accepted (no instance name)" {
+    try roundTripAcceptsAt(alloc, "ssbo_anonymous", ssbo_anonymous, .compute, 450);
+}
+
+// An anonymous SSBO block with MULTIPLE distinct members, each its own access chain. Pins
+// that every top-level member is referenced bare (`a`, `b`, `c`) — the anon-base suppression
+// is per-chain, not consumed once across the whole shader.
+const ssbo_anonymous_multi: [:0]const u8 =
+    \\#version 450
+    \\layout(local_size_x = 1) in;
+    \\layout(std430, binding = 0) buffer B { uint a; uint b; uint c; };
+    \\void main() { c = a + b; a = c; }
+;
+
+test "ssbo round-trip: anonymous BufferBlock multiple bare members" {
+    try roundTripAcceptsAt(alloc, "ssbo_anonymous_multi", ssbo_anonymous_multi, .compute, 450);
+}
+
 /// Assert the glslpp GLSL output declares `src`'s SSBO as a writable `buffer` block with
 /// ORIGINAL member names, not the read-only `uniform std140` cbuffer form with synthesized
 /// `_m{idx}` members. This isolates the buffer-block fix from the orthogonal atomic-result
