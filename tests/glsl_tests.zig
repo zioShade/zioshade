@@ -2216,13 +2216,54 @@ test "T-uni.4: multi-dim bare uniform array keeps all dimensions (#289)" {
     try assertNotContains(glsl, "w_1");
 }
 
-// #294: runtime-sized SSBO array `.length()` now lowers to OpArrayLength (not the prior
-// fold-to-0 silent-wrong). The GLSL backend's SSBO member naming + result-id registration
-// aren't yet wired for it, so it HONEST-ERRORS (error.UnsupportedOp) rather than emit the
-// silent-wrong `// unhandled op 68`. (GLSL native `.length()` support is a follow-up.)
-test "T-arrlen.1: runtime SSBO array .length() honest-errors in GLSL (#294)" {
+// #296: runtime-sized SSBO array `.length()` (OpArrayLength) now lowers to GLSL's native
+// `instance.member.length()`. This also fixes the pre-existing SSBO-declaration silent-wrong:
+// members were declared `{block}_m{idx}` with NO `[]` for runtime arrays, while the body
+// accessed the ORIGINAL member name (`B.d`) — glslang rejected the desynced output. SSBO
+// members now declare with their original names + array brackets; the block gets a distinct
+// type tag so it doesn't collide with the instance name (glslang `block instance name
+// redefinition`). Conformance validates SPIR-V only, so this guards the emitted GLSL string;
+// the output was hand-validated glslang-clean (matches spirv-cross's `.length()` lowering).
+test "T-arrlen.1: runtime SSBO array .length() lowers to native GLSL .length() (#296)" {
     const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(std430,binding=1) buffer Out { uint n; };\nvoid main(){ n = uint(d.length()); }";
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    defer alloc.free(glsl);
+    // Runtime array member declared with original name + `[]` (was silent-wrong `float B_m0;`).
+    try assertContains(glsl, "float d[];");
+    // Block TYPE tag is distinct from the instance name (`buffer B { ... } B;` is rejected
+    // by glslang as "block instance name redefinition"); the body accesses `B.d`.
+    try assertContains(glsl, "buffer B_block");
+    // `.length()` emitted on the instance.member form (was honest-error / fold-0).
+    try assertContains(glsl, "B.d.length()");
+    // No silent-wrong unhandled-op marker.
+    try assertNotContains(glsl, "// unhandled");
+}
+
+// #296: named-instance SSBO (`buffer B { uint count; float data[]; } b;`) with a scalar
+// member preceding the runtime array. Verifies: (a) the .length() instance prefix is the
+// INSTANCE name (`b`), not the block tag; (b) the member index resolves correctly so the
+// scalar is declared `uint count;` (not an array) and the runtime member is `float data[];`.
+test "T-arrlen.2: named-instance multi-member SSBO .length() resolves the right member (#296)" {
+    const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { uint count; float data[]; } b;\nlayout(std430,binding=1) buffer O { uint n; } o;\nvoid main(){ o.n = b.count + uint(b.data.length()); }";
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    defer alloc.free(glsl);
+    try assertContains(glsl, "uint count;");     // scalar member, not an array
+    try assertContains(glsl, "float data[];");   // runtime array member with []
+    try assertContains(glsl, "b.data.length()"); // instance.member.length(), instance = `b`
+    try assertNotContains(glsl, "// unhandled");
+}
+
+// #296: a runtime SSBO array `.length()` in a NON-compute stage stays an honest error.
+// Storage buffers are only declared for the compute stage, so emitting `B.d.length()` in a
+// fragment shader would reference an undeclared buffer (silent-wrong). The OpArrayLength arm
+// guards on stage + StorageBuffer class and falls back to error.UnsupportedOp.
+test "T-arrlen.3: SSBO .length() in a fragment shader honest-errors (no undeclared buffer) (#296)" {
+    const source: [:0]const u8 = "#version 450\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(location=0) out float o;\nvoid main(){ o = float(d.length()); }";
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToGLSL(alloc, spirv, .{}));
 }
