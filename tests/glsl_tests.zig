@@ -33,6 +33,38 @@ fn assertNotContains(haystack: []const u8, needle: []const u8) !void {
     return error.TestUnexpectedFind;
 }
 
+/// Compile GLSL → SPIR-V with the *glslang* reference compiler (NOT glslpp's own
+/// frontend). Needed for opcodes glslpp's frontend never emits — e.g. glslang
+/// lowers every GLSL float `!=` to OpFUnordNotEqual, whereas the glslpp frontend
+/// emits the ordered OpFOrdNotEqual. Skips the test if glslang is unavailable.
+fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
+    const tmp_src = try std.fmt.allocPrint(alloc, "/tmp/glsl_test_{s}.frag", .{name});
+    defer alloc.free(tmp_src);
+    const tmp_spv = try std.fmt.allocPrint(alloc, "/tmp/glsl_test_{s}.spv", .{name});
+    defer alloc.free(tmp_spv);
+    {
+        const src_file = try std.fs.createFileAbsolute(tmp_src, .{});
+        defer src_file.close();
+        try src_file.writeAll(std.mem.sliceTo(source, 0));
+    }
+    const glslang = glslpp.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    const result = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ glslang, "-V", tmp_src, "-o", tmp_spv },
+    }) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+
+    const spv_file = std.fs.openFileAbsolute(tmp_spv, .{ .mode = .read_only }) catch return error.SkipZigTest;
+    defer spv_file.close();
+    const data = try spv_file.readToEndAlloc(alloc, 1024 * 1024);
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders
 // ---------------------------------------------------------------------------
@@ -2266,4 +2298,39 @@ test "T-arrlen.3: SSBO .length() in a fragment shader honest-errors (no undeclar
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToGLSL(alloc, spirv, .{}));
+}
+
+// #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
+// `do { … } while (<inlined cond>);` (#246), which requires rebuilding the bottom
+// condition over persistent vars via `tryInlineDoWhileCond`. When that condition is
+// a FLOAT `!=` it compiles (via glslang) to an OpFUnordNotEqual back-edge, but the
+// rebuild mapped only the ORDERED `.FOrdNotEqual` (plus the integer compare family) —
+// `.FUnordNotEqual` fell through to `else => null`, so the caller honest-errored with
+// `error.UnstructuredControlFlow` even though the construct is perfectly representable:
+// GLSL's `!=` operator is itself unordered (true when either operand is NaN) = exactly
+// OpFUnordNotEqual. The main `emitBinOp` path already mapped `.FUnordNotEqual` → `!=`;
+// only this do-while inline path missed it. glslpp's own frontend emits the ordered
+// FOrdNotEqual for float `!=`, so the gap is reachable only through external SPIR-V
+// (glslang/spirv-opt) via the spirvToGLSL public API.
+test "T-dowhile.funord: do-while body-cf + float `!=` (OpFUnordNotEqual) -> native do/while (#170)" {
+    const spirv = compileToSpirv("dowhile_funord_ne",
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float v = x;
+        \\    do {
+        \\        v += 1.0;
+        \\        if (v == 3.0) continue;
+        \\    } while (v != 10.0);
+        \\    o = vec4(v);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    // Native bottom-test loop with the float `!=` rebuilt inline, NOT an honest-error.
+    try assertContains(glsl, "} while (");
+    try assertContains(glsl, "!=");
+    try assertContains(glsl, "continue;");
 }

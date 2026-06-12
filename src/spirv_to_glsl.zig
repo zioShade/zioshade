@@ -1784,7 +1784,13 @@ fn tryInlineDoWhileCond(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
         .SLessThanEqual, .ULessThanEqual, .FOrdLessThanEqual => "<=",
         .SGreaterThanEqual, .UGreaterThanEqual, .FOrdGreaterThanEqual => ">=",
         .IEqual, .FOrdEqual => "==",
-        .INotEqual, .FOrdNotEqual => "!=",
+        // glslang lowers every GLSL float `!=` to the UNORDERED OpFUnordNotEqual, and
+        // GLSL's `!=` operator is itself unordered (true on NaN) → an exact 1:1 match.
+        // Only FUnordNotEqual is added here: the other FUnord* compares have no ordered-
+        // operator equivalent (==,<,>,<=,>= are all ordered, NaN→false), so this inline
+        // path deliberately leaves them to honest-error rather than risk a NaN-silent-
+        // wrong mapping. (#170)
+        .INotEqual, .FOrdNotEqual, .FUnordNotEqual => "!=",
         else => null,
     };
     if (op_str) |ops| {
