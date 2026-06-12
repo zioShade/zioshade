@@ -6191,18 +6191,47 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const coord = names.get(inst.words[4]) orelse "uv";
-                const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
                 const tex_name = names.get(inst.words[3]) orelse "tex";
                 const sampler_arg = resolveSamplerArg(module, names, inst.words[3], tex_name, arena);
-                // Arrayed: textureSampleLevel(t, s, coord.xy, i32(round(coord.z)), lod).
-                // Layer rounded for glslang parity (see ImageSampleImplicitLod).
                 const shape = arrayedSampleShape(module, inst.words[3]);
-                if (shape.arrayed) {
-                    const cs = arrayedCoordSwizzle(shape.comps);
-                    const ls = arrayedLayerSwizzle(shape.comps);
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, lod });
+                // Image-operands mask (words[5]) selects the explicit-LOD variant.
+                const mask: u32 = if (inst.words.len > 5) inst.words[5] else 0;
+                // Grad (0x4): explicit ddx/ddy gradients (GLSL textureGrad). Operands
+                // follow bit order — ddx (words[6]), ddy (words[7]), then an optional
+                // ConstOffset (0x8) at words[8]. WGSL spells this textureSampleGrad;
+                // the gradient must NOT be squeezed into textureSampleLevel's scalar
+                // LOD slot (that was both wrong and a naga reject). Any operand bit
+                // beyond Grad|ConstOffset has no faithful WGSL form → honest-error.
+                if ((mask & 0x4) != 0) {
+                    if ((mask & ~@as(u32, 0x4 | 0x8)) != 0) return error.UnsupportedImageOperands;
+                    // A well-formed Grad carries BOTH gradients (ddx=words[6],
+                    // ddy=words[7]); truncated/malformed SPIR-V honest-errors rather
+                    // than indexing out of bounds (don't panic on bad input).
+                    if (inst.words.len <= 7) return error.UnsupportedImageOperands;
+                    const ddx = names.get(inst.words[6]) orelse "0";
+                    const ddy = names.get(inst.words[7]) orelse "0";
+                    const off_suffix: []const u8 = if ((mask & 0x8) != 0 and inst.words.len > 8)
+                        try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[8]) orelse "vec2<i32>(0)"})
+                    else
+                        "";
+                    if (shape.arrayed) {
+                        const cs = arrayedCoordSwizzle(shape.comps);
+                        const ls = arrayedLayerSwizzle(shape.comps);
+                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleGrad({s}, {s}, {s}{s}, i32(round({s}{s})), {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, ddx, ddy, off_suffix });
+                    } else {
+                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleGrad({s}, {s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, ddx, ddy, off_suffix });
+                    }
                 } else {
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, lod });
+                    const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+                    // Arrayed: textureSampleLevel(t, s, coord.xy, i32(round(coord.z)), lod).
+                    // Layer rounded for glslang parity (see ImageSampleImplicitLod).
+                    if (shape.arrayed) {
+                        const cs = arrayedCoordSwizzle(shape.comps);
+                        const ls = arrayedLayerSwizzle(shape.comps);
+                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, lod });
+                    } else {
+                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, lod });
+                    }
                 }
             },
 
