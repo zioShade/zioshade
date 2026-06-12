@@ -162,7 +162,7 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ImageTexelPointer, .FunctionCall,
         .CopyObject, .Phi,
         .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
-        .UConvert, .SConvert, .FConvert, .Bitcast,
+        .UConvert, .SConvert, .FConvert, .Bitcast, .QuantizeToF16,
         .SNegate, .FNegate,
         .IAdd, .FAdd, .ISub, .FSub, .IMul, .FMul,
         .UDiv, .SDiv, .FDiv, .UMod, .SRem, .SMod, .FRem, .FMod,
