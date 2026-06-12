@@ -4405,3 +4405,54 @@ test "wgsl: textureGrad (OpImageSampleExplicitLod Grad) -> textureSampleGrad (#1
     try assertNotContains(wgsl, "textureSampleLevel");
     try nagaValidateOrSkip(wgsl, "tex-grad");
 }
+
+// #170: WGSL forbids the filtering textureSample/textureSampleLevel builtins on
+// INTEGER textures (texture_2d<i32>/<u32> are non-filterable) — only textureLoad is
+// allowed. GLSL `texture(isampler2D, uv)` (a normalized-coordinate sample of an
+// integer texture) therefore has no faithful WGSL form. glslpp emitted
+// `textureSample(s, s_sampler, uv)` on a `texture_2d<i32>` — naga rejects it ("Entry
+// point invalid") = silent-wrong. It must honest-error instead. (texelFetch on the
+// same isampler2D is unaffected — it lowers to textureLoad, which integer textures
+// DO support.)
+test "wgsl: texture() on an integer sampler honest-errors, not naga-invalid textureSample (#170)" {
+    const spirv = compileToSpirv("isampler_sample",
+        \\#version 450
+        \\layout(binding = 0) uniform isampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(texture(s, uv)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedIntegerTextureSample, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
+// The texelFetch counterpart MUST still compile: textureLoad is valid on integer
+// textures, so the honest-error above must be narrow (sample ops only). (#170)
+test "wgsl: texelFetch on an integer sampler still lowers to textureLoad (#170)" {
+    const spirv = compileToSpirv("isampler_fetch",
+        \\#version 450
+        \\layout(binding = 0) uniform isampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(texelFetch(s, ivec2(uv), 0)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureLoad(");
+    try nagaValidateOrSkip(wgsl, "isampler-fetch");
+}
+
+// Projective sampling of an integer texture is the same non-filterable case as the
+// plain sample arms — must honest-error, not emit a naga-invalid textureSample. (#170)
+test "wgsl: textureProj on an integer sampler honest-errors (#170)" {
+    const spirv = compileToSpirv("isampler_proj",
+        \\#version 450
+        \\layout(binding = 0) uniform isampler2D s;
+        \\layout(location = 0) in vec3 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(textureProj(s, uv)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedIntegerTextureSample, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
