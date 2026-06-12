@@ -111,6 +111,7 @@ pub const Op = enum(u16) {
     UConvert = 113, // OpUConvert
     SConvert = 114, // OpSConvert
     FConvert = 115, // OpFConvert
+    QuantizeToF16 = 116, // OpQuantizeToF16
     IsNan = 156,
     IsInf = 157,
     All = 155,
@@ -620,4 +621,5 @@ test "opcode values match SPIR-V spec" {
     // Guard the (easily-transposed) boolean-equality opcodes, adjacent to LogicalOr=166.
     try std.testing.expectEqual(@as(u16, 164), @intFromEnum(Op.LogicalEqual));
     try std.testing.expectEqual(@as(u16, 165), @intFromEnum(Op.LogicalNotEqual));
+    try std.testing.expectEqual(@as(u16, 116), @intFromEnum(Op.QuantizeToF16));
 }

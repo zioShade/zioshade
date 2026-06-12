@@ -2133,7 +2133,7 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
         .ConstantComposite, .SpecConstantComposite,
         .Constant, .ConstantTrue, .ConstantFalse, .SpecConstant,
         .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
-        .UConvert, .SConvert, .FConvert, .Bitcast,
+        .UConvert, .SConvert, .FConvert, .Bitcast, .QuantizeToF16,
         .VectorShuffle, .CompositeExtract, .VectorTimesScalar,
         .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector,
         .MatrixTimesMatrix, .OuterProduct, .Transpose, .ImageSampleImplicitLod,
@@ -6433,6 +6433,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .DPdxCoarse => try emitCall(module, names, inst, "dpdxCoarse", w, arena, indent),
             .DPdyCoarse => try emitCall(module, names, inst, "dpdyCoarse", w, arena, indent),
             .FwidthCoarse => try emitCall(module, names, inst, "fwidthCoarse", w, arena, indent),
+
+            // OpQuantizeToF16 (116): quantize a 32-bit float to f16
+            // precision/range, then widen back to f32. WGSL's `quantizeToF16`
+            // has identical semantics (componentwise on vecN<f32>), so scalar and
+            // vector share this one unary-call arm. glslang never emits this from
+            // GLSL — it comes from optimizers/tools/hand-written SPIR-V consumed
+            // via spirvToWGSL. (#170)
+            .QuantizeToF16 => try emitCall(module, names, inst, "quantizeToF16", w, arena, indent),
 
             // Subgroup operations (AUDIT FIX, #170 G5 Pass 2). These previously
             // emitted WGSL subgroup builtins (subgroupElect/Ballot/Broadcast/

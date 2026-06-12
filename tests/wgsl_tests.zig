@@ -4233,3 +4233,69 @@ test "wgsl: isnan in a loop condition lowers via the replay path (#170)" {
     try assertNotContains(wgsl, "unhandled");
     try nagaValidateOrSkip(wgsl, "isnan_loop_condition");
 }
+
+// Rewrite the opcode of the FIRST instruction whose opcode == `from` to `to`,
+// preserving the word count. Used to inject an opcode glslang does not itself
+// emit by reusing an instruction with an identical operand layout. Returns
+// error if no such instruction is found (keeps the test honest).
+fn patchFirstOpcode(words: []u32, from: u16, to: u16) !void {
+    var pos: usize = 5; // skip the 5-word header
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) return error.MalformedSpirv;
+        if (@as(u16, @truncate(words[pos] & 0xFFFF)) == from) {
+            words[pos] = (wc << 16) | to;
+            return;
+        }
+        pos += wc;
+    }
+    return error.OpcodeNotFound;
+}
+
+// #170: OpQuantizeToF16 (116) — quantize a 32-bit float to the precision/range
+// expressible by a 16-bit float, then widen back to 32 bits. WGSL has an EXACT
+// 1:1 builtin, `quantizeToF16`, with identical semantics (componentwise on
+// vectors). The opcode was absent from glslpp's `Op` enum entirely, so it
+// honest-errored (UnsupportedOp) instead of lowering. glslang never emits
+// OpQuantizeToF16 from GLSL (there is no GLSL builtin), so — like the other
+// external-SPIR-V #170 fixes — we synthesize it by reusing an OpFNegate
+// instruction (identical {result-type, result-id, operand} layout) and
+// patching its opcode. The point of the fix is the spirvToWGSL public API used
+// on optimizer-/tool-produced or hand-written SPIR-V.
+test "wgsl: scalar OpQuantizeToF16 lowers to quantizeToF16 (naga-valid) (#170)" {
+    const spirv = try compileToSpirv("quantize_scalar",
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float q = -a; // OpFNegate, patched to OpQuantizeToF16
+        \\    o = vec4(q, 0.0, 0.0, 1.0);
+        \\}
+    );
+    defer alloc.free(spirv);
+    try patchFirstOpcode(spirv, 127, 116); // OpFNegate(127) -> OpQuantizeToF16(116)
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "quantizeToF16(");
+    try assertNotContains(wgsl, "unhandled");
+    try nagaValidateOrSkip(wgsl, "quantize-scalar");
+}
+
+test "wgsl: vector OpQuantizeToF16 lowers componentwise to quantizeToF16 (naga-valid) (#170)" {
+    const spirv = try compileToSpirv("quantize_vec",
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec3 q = -a; // OpFNegate (vec3), patched to OpQuantizeToF16
+        \\    o = vec4(q, 1.0);
+        \\}
+    );
+    defer alloc.free(spirv);
+    try patchFirstOpcode(spirv, 127, 116); // OpFNegate(127) -> OpQuantizeToF16(116)
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "quantizeToF16(");
+    try assertNotContains(wgsl, "unhandled");
+    try nagaValidateOrSkip(wgsl, "quantize-vec");
+}
