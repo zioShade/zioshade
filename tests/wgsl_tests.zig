@@ -4600,3 +4600,24 @@ test "wgsl: bitCount on an unsigned vector wraps to the signed result type (#170
     try assertContains(wgsl, "countOneBits");
     try nagaValidateOrSkip(wgsl, "bitcount-uvec");
 }
+
+// #170: OpBitFieldSExtract / OpBitFieldUExtract / OpBitFieldInsert result ids were
+// NOT registered in the shared collectNames table (resultIdFromOp listed BitReverse
+// and BitCount but omitted the three bitfield ops), so the result was UNNAMED. The
+// extractBits emit then used the fallback name `v` while the consuming OpStore used a
+// DIFFERENT fallback (`0`) — producing `r = 0;` (a scalar `0` stored into a `vec2i`
+// var = naga store-type mismatch, AND the bitfield result silently dropped). Naming
+// the result makes both sites agree.
+test "wgsl: bitfieldExtract on a vector stores the result, not 0 (#170)" {
+    const spirv = compileToSpirv("bitfield_extract_vec",
+        \\#version 450
+        \\layout(location = 0) flat in ivec2 k;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { ivec2 r = bitfieldExtract(k, 2, 5); o = vec4(vec2(r), 0.0, 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "extractBits(");
+    try nagaValidateOrSkip(wgsl, "bitfield-extract-vec");
+}
