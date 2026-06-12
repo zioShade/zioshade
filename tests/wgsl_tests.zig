@@ -4383,3 +4383,25 @@ test "wgsl: conditional break in loop body emits break, not an empty if (#170)" 
     }
     try nagaValidateOrSkip(wgsl, "cond-break-body");
 }
+
+// #170: OpImageSampleExplicitLod with a `Grad` image operand (GLSL textureGrad —
+// explicit ddx/ddy gradients) was lowered to `textureSampleLevel(t, s, coord, ddx)`
+// — the handler ignored the image-operands mask and misread the GRADIENT vec2 as a
+// scalar LOD. That is both semantically wrong AND naga-invalid ("Sample level (exact)
+// type is invalid", a vec2 where a scalar f32 is required). WGSL spells explicit-
+// gradient sampling `textureSampleGrad(t, s, coord, ddx, ddy)`.
+test "wgsl: textureGrad (OpImageSampleExplicitLod Grad) -> textureSampleGrad (#170)" {
+    const spirv = compileToSpirv("tex_grad",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureGrad(s, uv, vec2(0.1), vec2(0.2)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleGrad(");
+    try assertNotContains(wgsl, "textureSampleLevel");
+    try nagaValidateOrSkip(wgsl, "tex-grad");
+}
