@@ -4456,3 +4456,45 @@ test "wgsl: textureProj on an integer sampler honest-errors (#170)" {
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedIntegerTextureSample, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
+
+// #170: the STRUCT form of GLSL frexp/modf — `frexp(x, e)` with a separate out-param,
+// which glslang lowers to OpExtInst FrexpStruct (52) returning a `{fract, exp}` struct
+// consumed by OpCompositeExtract — was emitted as `let v: ResType = frexp(x)` using
+// glslang's struct type name `ResType` (UNDEFINED in WGSL) plus generic `._0`/`._1`
+// member access. WGSL `frexp(x)` returns an un-nameable builtin struct with `.fract`
+// and `.exp` fields, so the result must be emitted WITHOUT a type annotation and the
+// extracts mapped to the named fields. (The POINTER forms Frexp=51/Modf=35 were
+// already handled.)
+test "wgsl: frexp struct-form lowers to .fract/.exp, not ResType._0/._1 (#170)" {
+    const spirv = compileToSpirv("frexp_struct",
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { int e; float m = frexp(x, e); float r = ldexp(m, e); o = vec4(r, float(e), 0.0, 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "frexp(");
+    try assertContains(wgsl, ".fract");
+    try assertNotContains(wgsl, "ResType");
+    try assertNotContains(wgsl, "._0");
+    try nagaValidateOrSkip(wgsl, "frexp-struct");
+}
+
+// modf struct-form (ModfStruct=36): members are {fract, whole}. (#170)
+test "wgsl: modf struct-form lowers to .fract/.whole, not ResType._0/._1 (#170)" {
+    const spirv = compileToSpirv("modf_struct",
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { float ip; float fp = modf(x, ip); o = vec4(fp, ip, 0.0, 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "modf(");
+    try assertNotContains(wgsl, "ResType");
+    try assertNotContains(wgsl, "._0");
+    try nagaValidateOrSkip(wgsl, "modf-struct");
+}
