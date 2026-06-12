@@ -2448,6 +2448,18 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         return error.UnsupportedSamplerArray;
     }
 
+    // WGSL has no 64-bit float (f64 / GLSL `double`) — not even a core extension.
+    // `wgslType` collapses every OpTypeFloat to `f32`, and f64 CONSTANTS are misread
+    // (the 64-bit IEEE-754 bit pattern reinterpreted as f32 = garbage), so a `double`
+    // shader silently computes WRONG values while still validating. Fail loud on any
+    // 64-bit float type rather than emit a silently-wrong f32 downgrade. (#170)
+    for (module.instructions) |finst| {
+        if (finst.op == .TypeFloat and finst.words.len > 2 and finst.words[2] == 64) {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no 64-bit float (double) type", .{}) catch null;
+            return error.UnsupportedDoubleType;
+        }
+    }
+
     // WGSL forbids recursion — direct OR mutual (the spec disallows any cycle in
     // the call graph). Lenient front-ends can hand us a recursive SPIR-V call
     // graph; emitting it produces WGSL functions that call themselves, which naga
