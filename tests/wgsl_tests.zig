@@ -4498,3 +4498,27 @@ test "wgsl: modf struct-form lowers to .fract/.whole, not ResType._0/._1 (#170)"
     try assertNotContains(wgsl, "._0");
     try nagaValidateOrSkip(wgsl, "modf-struct");
 }
+
+// #170: an ANONYMOUS SSBO block (`buffer B { float d[]; };` with no instance name)
+// emitted an EMPTY WGSL variable name — `var<storage, read_write> : B;` (a naga syntax
+// error, "expected identifier") and member accesses with no base (`.d[0]`). glslang
+// names the block TYPE ("B") but emits an empty OpName for the variable instance, so
+// the `orelse "buffer"` fallback never fired (the name is "" not null). A name is now
+// synthesized from the block type and registered in the names map so BOTH the
+// declaration and the access chains use it. (Named SSBOs were already fine.)
+test "wgsl: anonymous SSBO block gets a synthesized var name (naga-valid) (#170)" {
+    const spirv = compileToSpirv("anon_ssbo",
+        \\#version 450
+        \\layout(std430, binding = 0) buffer B { float d[]; };
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(d[0] + x); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The storage variable must have a name (NOT `var<storage, read_write> : B;`) and
+    // the member access must carry the base (NOT a bare `.d[`).
+    try assertNotContains(wgsl, "read_write> :");
+    try nagaValidateOrSkip(wgsl, "anon-ssbo");
+}

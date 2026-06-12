@@ -356,6 +356,18 @@ fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
     return common.getDef(module, id);
 }
 
+/// True if `candidate` is already used as the WGSL name of some variable OTHER than
+/// `except_id`. Used to keep a synthesized identifier (e.g. an anonymous-block
+/// variable name) collision-free against every other name in the module. (#170)
+fn nameInUse(names: *const std.AutoHashMap(u32, []const u8), candidate: []const u8, except_id: u32) bool {
+    var it = names.iterator();
+    while (it.next()) |e| {
+        if (e.key_ptr.* == except_id) continue;
+        if (std.mem.eql(u8, e.value_ptr.*, candidate)) return true;
+    }
+    return false;
+}
+
 /// For a CompositeExtract whose source is an OpExtInst FrexpStruct (52) / ModfStruct
 /// (36), returns the WGSL builtin result-struct field name for member `idx`: index 0
 /// is `.fract`, index 1 is `.exp` (frexp) / `.whole` (modf). glslang names the SPIR-V
@@ -3078,8 +3090,29 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             else cb.type_id;
             break :blk try wgslType(&module, actual_type, &names, arena);
         };
-        // Avoid name collision: if variable name same as type name, rename the variable
+        // Anonymous block (`buffer B { … };` with no instance name): glslang names the
+        // block TYPE but emits an EMPTY OpName for the variable, so `cb.name` is "" (not
+        // null — the `orelse` fallback never fired). That produced an invalid
+        // `var<storage> : T;` (naga: "expected identifier") and base-less member
+        // accesses (`.d[0]`). Synthesize a name from the block type and register it in
+        // `names` so the declaration AND the access chains (emitted later) both use it. (#170)
         var var_name: []const u8 = cb.name;
+        if (var_name.len == 0) {
+            // Pick `{type}_buf`, bumping a numeric suffix until it collides with no
+            // other variable name — so two anonymous blocks, or a user variable that
+            // happens to be named `{type}_buf`, cannot produce a duplicate WGSL
+            // identifier (naga "redefinition"). (#170)
+            var counter: u32 = 0;
+            var synth = try std.fmt.allocPrint(alloc, "{s}_buf", .{type_name});
+            while (nameInUse(&names, synth, cb.result_id)) {
+                alloc.free(synth);
+                counter += 1;
+                synth = try std.fmt.allocPrint(alloc, "{s}_buf_{d}", .{ type_name, counter });
+            }
+            if (try names.fetchPut(cb.result_id, synth)) |old| alloc.free(old.value);
+            var_name = synth;
+        }
+        // Avoid name collision: if variable name same as type name, rename the variable
         if (std.mem.eql(u8, cb.name, type_name)) {
             // Find the variable's result ID and rename it in the names map
             for (module.instructions) |vinst| {
