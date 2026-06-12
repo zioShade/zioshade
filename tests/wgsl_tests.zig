@@ -4544,3 +4544,20 @@ test "wgsl: unbounded descriptor sampler array honest-errors (#170)" {
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
+
+// #170: WGSL has no 64-bit float (f64 / GLSL `double`) — not even a core extension.
+// glslpp's type mapping collapsed every OpTypeFloat to f32 AND misread f64 CONSTANTS
+// (the 64-bit IEEE-754 bit pattern reinterpreted as f32 = garbage — e.g. `1.0e15lf`
+// emitted as ~6.2e-16), so a `double` shader silently computed WRONG values while
+// producing naga-valid output. It must honest-error instead of downgrading. (The
+// frontend honest-errors double; this is the external-SPIR-V path via spirvToWGSL.)
+test "wgsl: double (64-bit float) honest-errors instead of silently downgrading (#170)" {
+    const spirv = compileToSpirv("double_type",
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { double d = double(x) * 1.0e15lf; o = vec4(float(d)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedDoubleType, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
