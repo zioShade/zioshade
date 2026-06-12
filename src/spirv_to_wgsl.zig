@@ -6700,13 +6700,25 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // ImageGather
             .ImageGather => {
-                // textureGatherOffsets lowers to OpImageGather with the
-                // ConstOffsets image operand (mask bit 0x20 at word[6], the
-                // 4-offset array id at word[7]). WGSL's textureGather takes no
-                // per-texel offset array, so emitting a plain textureGather here
-                // would SILENTLY DROP the offsets (silent-wrong). Fail loudly
-                // instead; per-texel emulation (4 gathers) is a follow-up.
-                if (inst.words.len > 6 and (inst.words[6] & 0x20) != 0) {
+                // WGSL textureGather accepts at most ONE image operand: a single
+                // CONSTANT offset (ConstOffset, mask bit 0x8), lowered to the
+                // trailing const-offset argument below. EVERY other operand is
+                // unrepresentable and MUST fail loud rather than silently drop
+                // (dropping gathers the wrong texels while naga still accepts the
+                // shorter call — silent-wrong):
+                //   ConstOffsets 0x20 — the 4-offset per-texel array (textureGatherOffsets);
+                //                       WGSL has no per-texel offset array. Per-texel
+                //                       emulation (4 gathers) is a possible follow-up.
+                //   Offset       0x10 — a RUNTIME (non-const) offset (GL_ARB_gpu_shader5);
+                //                       WGSL's offset must be a const-expression.
+                //   Sample       0x40 — multisample gather index; unsupported here.
+                // No-operand flag bits (NonPrivateTexel 0x400, VolatileTexel 0x800,
+                // SignExtend 0x1000, ZeroExtend 0x2000, Nontemporal 0x4000) also trip
+                // this guard. They consume no operand word — so the word[7] indexing
+                // below stays correct regardless — and could in principle ride along
+                // with a lone ConstOffset, but honest-erroring them is acceptable
+                // (honest-error > silent-wrong) and keeps this lowering simple.
+                if (inst.words.len > 6 and (inst.words[6] & ~@as(u32, 0x8)) != 0) {
                     return error.UnsupportedImageOperands;
                 }
                 const rt = try wgslType(module, inst.words[1], names, arena);
@@ -6722,6 +6734,28 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const component = names.get(inst.words[5]) orelse "0";
+                // A single ConstOffset image operand (mask bit 0x8) — GLSL
+                // textureGatherOffset — maps to WGSL textureGather's trailing
+                // const-offset argument: textureGather(component, t, s, coords,
+                // [array_index,] offset). The offset is a constant vec2<i32>
+                // (SPIR-V requires ConstOffset be a constant), emitted verbatim
+                // as the operand at word[7] (the only image operand once the
+                // ConstOffsets/4-offset form is honest-errored above; Bias/Lod/
+                // Grad are invalid on a gather). Dropping it silently gathers the
+                // WRONG texels (naga accepts the shorter call). The suffix is ""
+                // for a plain gather so both arrayed/non-arrayed paths share it.
+                const offset_suffix: []const u8 = if (inst.words.len > 7 and (inst.words[6] & 0x8) != 0) blk: {
+                    // The ConstOffset operand is a constant collectNames resolves
+                    // for every ConstantComposite, so this miss is not reachable
+                    // for well-formed glslang/spirv-opt output. Fail loud anyway:
+                    // emitting the gather WITHOUT the offset would silently sample
+                    // the wrong texels (the silent-wrong this whole arm prevents).
+                    const off = names.get(inst.words[7]) orelse {
+                        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL textureGather offset operand (ConstOffset) is an unresolved constant", .{}) catch null;
+                        return error.UnsupportedImageOperands;
+                    };
+                    break :blk try std.fmt.allocPrint(arena, ", {s}", .{off});
+                } else "";
                 // WGSL textureGather takes the component as the FIRST argument:
                 // textureGather(component, texture, sampler, coords). Emitting the
                 // GLSL order (tex, sampler, coords, component) makes naga read the
@@ -6733,9 +6767,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (shape.arrayed) {
                     const cs = arrayedCoordSwizzle(shape.comps);
                     const ls = arrayedLayerSwizzle(shape.comps);
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s}{s}, i32(round({s}{s})));\n", .{ result_name, rt, component, tex_name, tex_name, coord, cs, coord, ls });
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s}{s}, i32(round({s}{s})){s});\n", .{ result_name, rt, component, tex_name, tex_name, coord, cs, coord, ls, offset_suffix });
                 } else {
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s});\n", .{ result_name, rt, component, tex_name, tex_name, coord });
+                    try writeInd(w, indent); try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s}{s});\n", .{ result_name, rt, component, tex_name, tex_name, coord, offset_suffix });
                 }
             },
 

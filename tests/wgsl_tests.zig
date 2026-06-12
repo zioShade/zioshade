@@ -718,7 +718,11 @@ test "wgsl inverse(mat2) lowers to spvInverse2 helper (naga-validated)" {
 // WGSL backend must FAIL LOUDLY rather than silently emit a plain
 // `textureGather` that drops the offsets. ImageGather IS otherwise mapped in
 // WGSL, so it needs a specific ConstOffsets guard (the unmapped-op path does
-// not cover it).
+// not cover it). NOTE: glslpp's OWN frontend DOES compile `textureGatherOffsets`
+// (the 4-offset form, via the .image_gather_offsets IR tag → ConstOffsets 0x20),
+// so this test uses the internal compileToSPIRV path — unlike the single-offset
+// `textureGatherOffset` below, which the frontend rejects and must be compiled
+// through glslang.
 test "wgsl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent plain gather" {
     const source: [:0]const u8 =
         \\#version 450
@@ -730,6 +734,93 @@ test "wgsl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent
         \\}
     ;
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+
+    try std.testing.expectError(
+        error.UnsupportedImageOperands,
+        glslpp.spirvToWGSL(alloc, spirv, .{}),
+    );
+}
+
+// textureGatherOffset (a SINGLE ConstOffset image operand, mask bit 0x8) lowers
+// to OpImageGather carrying a constant `vec2<i32>` offset. Unlike the 4-offset
+// ConstOffsets form, WGSL's `textureGather` DOES take a trailing const-offset
+// argument — `textureGather(component, t, s, coords, offset)` — so the offset
+// must be emitted. Dropping it (the previous behavior) silently gathers the
+// WRONG texels (silent-wrong): the call type-checks and naga accepts it, but the
+// sampled neighborhood is shifted. glslpp's own frontend rejects
+// `textureGatherOffset`, so this is compiled through glslang (external SPIR-V),
+// mirroring the boolean-logic / uaddCarry #170 fixes. (#170)
+test "wgsl: textureGatherOffset (single ConstOffset) keeps the offset, not a silent plain gather" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  o = textureGatherOffset(s, vec2(0.5), ivec2(3, 4), 1);
+        \\}
+    ;
+    const spirv = compileToSpirv("gather_offset", source) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+
+    // The offset must reach the textureGather call as a trailing 5th argument
+    // (the gather without offset ends `...vec2<f32>(0.5))`; with it, a `, ` and
+    // the offset constant follow). Asserting the prefix proves the offset arg
+    // exists; the value check proves the actual (3,4) offset survived.
+    try assertContains(wgsl, "textureGather(1, s, s_sampler, vec2<f32>(0.5), ");
+    try assertContains(wgsl, "(3, 4)");
+    // naga is the ground truth: confirms the offset's type/position is valid.
+    try nagaValidateOrSkip(wgsl, "gather-offset");
+}
+
+// textureGatherOffset on an ARRAYED sampler: WGSL takes the const-offset as the
+// LAST argument, AFTER the separate rounded i32 array_index —
+// textureGather(component, t, s, coords.xy, i32(round(coords.z)), offset).
+// Emitting the offset before the array_index (or dropping it) is silent-wrong;
+// only naga catches the ordering. Guards the arrayed emit branch of the fix.
+test "wgsl: textureGatherOffset on sampler2DArray keeps offset after array_index" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArray s;
+        \\layout(location=0) in vec3 vUV;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  o = textureGatherOffset(s, vUV, ivec2(3, 4), 1);
+        \\}
+    ;
+    const spirv = compileToSpirv("gather_offset_arr", source) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+
+    // array_index (i32(round(vUV.z))) precedes the trailing offset.
+    try assertContains(wgsl, "i32(round(vUV.z)), vec2<i32>(3, 4))");
+    try nagaValidateOrSkip(wgsl, "gather-offset-array");
+}
+
+// A *dynamic* (non-constant) gather offset compiles (with GL_ARB_gpu_shader5) to
+// OpImageGather carrying the runtime `Offset` image operand (mask bit 0x10), NOT
+// the constant ConstOffset (0x8). WGSL's textureGather offset argument must be a
+// const-expression, so a runtime offset has NO faithful mapping — it must FAIL
+// LOUDLY rather than silently drop the offset (which gathers the wrong texels,
+// exactly the bug the ConstOffset lowering fixes). Guards the generalized
+// "any operand except ConstOffset is unsupported" check.
+test "wgsl: textureGatherOffset with a runtime (non-const) offset is an honest error" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\#extension GL_ARB_gpu_shader5 : enable
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) flat in int idx;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  o = textureGatherOffset(s, vec2(0.5), ivec2(idx, 0), 1);
+        \\}
+    ;
+    const spirv = compileToSpirv("gather_offset_dyn", source) catch return error.SkipZigTest;
     defer alloc.free(spirv);
 
     try std.testing.expectError(
