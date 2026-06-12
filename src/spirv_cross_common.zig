@@ -191,6 +191,7 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ImageDrefGather, .ImageQueryLod, .ImageQueryLevels, .ImageQuerySamples,
         .ImageRead, .AtomicCompareExchange, .AtomicFAddEXT,
         .BitReverse, .BitCount,
+        .BitFieldInsert, .BitFieldSExtract, .BitFieldUExtract,
         .GroupNonUniformElect, .GroupNonUniformAll, .GroupNonUniformAny, .GroupNonUniformAllEqual,
         .GroupNonUniformBroadcast, .GroupNonUniformBroadcastFirst,
         .GroupNonUniformBallot,
