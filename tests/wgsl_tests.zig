@@ -4522,3 +4522,25 @@ test "wgsl: anonymous SSBO block gets a synthesized var name (naga-valid) (#170)
     try assertNotContains(wgsl, "read_write> :");
     try nagaValidateOrSkip(wgsl, "anon-ssbo");
 }
+
+// #170: an UNBOUNDED descriptor sampler array (`uniform sampler2D tex[];`,
+// GL_EXT_nonuniform_qualifier) slipped past the sampler-array honest-error guard —
+// which only matched a fixed-size `OpTypeArray`, not the unbounded
+// `OpTypeRuntimeArray`. The backend then DROPPED the (undeclarable) array variable
+// and emitted `textureSample(tex[i], tex[i]_sampler, uv)` — an undeclared `tex[i]`
+// plus a malformed `tex[i]_sampler` (naga reject) = silent-wrong. WGSL core has no
+// sampler/texture arrays (binding_array is non-core), so it must honest-error like
+// the bounded `tex[4]` form already does.
+test "wgsl: unbounded descriptor sampler array honest-errors (#170)" {
+    const spirv = compileToSpirv("unbounded_sampler_array",
+        \\#version 450
+        \\#extension GL_EXT_nonuniform_qualifier : require
+        \\layout(binding = 0) uniform sampler2D tex[];
+        \\layout(location = 0) flat in int i;
+        \\layout(location = 1) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texture(tex[nonuniformEXT(i)], uv); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}

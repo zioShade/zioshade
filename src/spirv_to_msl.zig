@@ -1584,7 +1584,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
 
     // Descriptor sampler/image ARRAYS not yet supported by the MSL backend — fail
     // loud rather than emit broken output (the GLSL backend supports them).
-    if (common.hasOpaqueArrayResource(&module)) return error.UnsupportedSamplerArray;
+    // MSL keeps its existing behavior: honest-error only the bounded `tex[N]` opaque
+    // array (include_runtime = false); the unbounded form is handled elsewhere. (#170)
+    if (common.hasOpaqueArrayResource(&module, false)) return error.UnsupportedSamplerArray;
 
     // Override entry point if requested
     if (!std.mem.eql(u8, options.entry_point_name, "main")) {
