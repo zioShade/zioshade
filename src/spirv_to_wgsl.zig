@@ -628,6 +628,24 @@ fn arrayedSampleShape(module: *const ParsedModule, sampled_image_value_id: u32) 
     return .{ .comps = comps, .arrayed = true };
 }
 
+/// True if the texture behind a sampled-image value id has an INTEGER sampled
+/// component type (GLSL isampler*/usampler* → `texture_2d<i32>`/`<u32>`). WGSL
+/// integer textures are non-filterable: only `textureLoad` is allowed, NOT the
+/// filtering `textureSample`/`textureSampleLevel`/`textureSampleGrad` builtins.
+/// A GLSL `texture(isampler2D, …)` (normalized-coord sample) thus has no faithful
+/// WGSL form — emitting textureSample is a naga reject (silent-wrong) → honest-error.
+/// `texelFetch` is unaffected (it lowers to textureLoad). OpTypeImage layout:
+/// [op, result_id, sampled_type, dim, depth, arrayed, ms, sampled, format]. (#170)
+fn isIntegerSampledImage(module: *const ParsedModule, sampled_image_value_id: u32) bool {
+    const type_id = getTypeOf(module, sampled_image_value_id) orelse return false;
+    var inst = getDef(module, type_id) orelse return false;
+    if (inst.op == .TypePointer and inst.words.len > 3) inst = getDef(module, inst.words[3]) orelse return false;
+    if (inst.op == .TypeSampledImage and inst.words.len > 2) inst = getDef(module, inst.words[2]) orelse return false;
+    if (inst.op != .TypeImage or inst.words.len <= 2) return false;
+    const comp = getDef(module, inst.words[2]) orelse return false;
+    return comp.op == .TypeInt;
+}
+
 /// Shape of an image-size query (OpImageQuerySize[Lod]) on `image_value_id`:
 /// whether the image is arrayed and how many components `textureDimensions`
 /// returns (its spatial dims). GLSL `textureSize`/`imageSize` on an arrayed
@@ -6167,6 +6185,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // Texture sampling
             .ImageSampleImplicitLod => {
+                // WGSL cannot filter integer textures — texture(isampler/usampler)
+                // has no faithful sample form (textureLoad only). (#170)
+                if (isIntegerSampledImage(module, inst.words[3])) return error.UnsupportedIntegerTextureSample;
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const coord = names.get(inst.words[4]) orelse "uv";
@@ -6188,6 +6209,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             .ImageSampleExplicitLod => {
+                // Integer textures are non-filterable in WGSL (textureLoad only). (#170)
+                if (isIntegerSampledImage(module, inst.words[3])) return error.UnsupportedIntegerTextureSample;
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const coord = names.get(inst.words[4]) orelse "uv";
@@ -6884,6 +6907,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // divisor is .z — and a later over-correction blanket honest-errored
             // it, regressing the working 2D case. This is dimension-aware.)
             .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod => {
+                // Integer textures are non-filterable in WGSL — projective sampling
+                // of an isampler/usampler is the same silent-wrong as the plain
+                // sample arms (textureLoad only; no faithful proj form). (#170)
+                if (isIntegerSampledImage(module, inst.words[3])) return error.UnsupportedIntegerTextureSample;
                 const dim = projectiveCoordDim(module, inst.words[3]) orelse {
                     // Cube / arrayed projective: no clean WGSL map — fail loud.
                     last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no projective texture sampling for this sampler kind ({s})", .{@tagName(inst.op)}) catch null;
