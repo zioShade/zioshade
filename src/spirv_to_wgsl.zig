@@ -2448,15 +2448,25 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         return error.UnsupportedSamplerArray;
     }
 
-    // WGSL has no 64-bit float (f64 / GLSL `double`) — not even a core extension.
-    // `wgslType` collapses every OpTypeFloat to `f32`, and f64 CONSTANTS are misread
-    // (the 64-bit IEEE-754 bit pattern reinterpreted as f32 = garbage), so a `double`
-    // shader silently computes WRONG values while still validating. Fail loud on any
-    // 64-bit float type rather than emit a silently-wrong f32 downgrade. (#170)
+    // WGSL has no 64-bit numeric types in core — neither f64 (GLSL `double`) nor
+    // i64/u64 (`int64_t`/`uint64_t`). `wgslType` collapses every OpTypeFloat to `f32`
+    // and every OpTypeInt to i32/u32 REGARDLESS of width, so a 64-bit shader silently
+    // truncates: an f64 constant is misread (the 64-bit IEEE-754 bit pattern
+    // reinterpreted as f32 = garbage), and a 64-bit int constant is truncated to 32
+    // bits (e.g. 1e12 → garbage). Both validate under naga while computing WRONG
+    // values, so fail loud on any 64-bit numeric type. (umulExtended/imulExtended do
+    // NOT introduce an OpTypeInt-64 type — their result is two 32-bit halves — so this
+    // is independent of that ExtInst honest-error path.) (#170)
     for (module.instructions) |finst| {
-        if (finst.op == .TypeFloat and finst.words.len > 2 and finst.words[2] == 64) {
-            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no 64-bit float (double) type", .{}) catch null;
-            return error.UnsupportedDoubleType;
+        if (finst.words.len > 2 and finst.words[2] == 64) {
+            if (finst.op == .TypeFloat) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no 64-bit float (double) type", .{}) catch null;
+                return error.UnsupportedDoubleType;
+            }
+            if (finst.op == .TypeInt) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no 64-bit integer (int64_t/uint64_t) type", .{}) catch null;
+                return error.UnsupportedInt64Type;
+            }
         }
     }
 

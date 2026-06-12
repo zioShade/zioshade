@@ -4561,3 +4561,21 @@ test "wgsl: double (64-bit float) honest-errors instead of silently downgrading 
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedDoubleType, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
+
+// #170: WGSL has no 64-bit integer (i64/u64 / GLSL int64_t/uint64_t) in core. Like
+// the f64 case, `wgslType` collapsed every OpTypeInt to i32/u32 regardless of width,
+// so an `int64_t` shader silently truncated to 32 bits (e.g. a 1e12 constant cannot
+// fit in i32) while producing naga-valid output = silent-wrong. It must honest-error.
+// (umulExtended/imulExtended do NOT introduce an OpTypeInt-64 type — their result is
+// two 32-bit halves — so this guard is independent of that honest-error path.)
+test "wgsl: int64 (64-bit integer) honest-errors instead of silently downgrading (#170)" {
+    const spirv = compileToSpirv("int64_type",
+        \\#version 450
+        \\#extension GL_ARB_gpu_shader_int64 : require
+        \\layout(location = 0) flat in int x;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { int64_t a = int64_t(x) * 1000000000000L; o = vec4(float(a)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedInt64Type, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
