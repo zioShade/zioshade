@@ -4299,3 +4299,48 @@ test "wgsl: vector OpQuantizeToF16 lowers componentwise to quantizeToF16 (naga-v
     try assertNotContains(wgsl, "unhandled");
     try nagaValidateOrSkip(wgsl, "quantize-vec");
 }
+
+// #170: OpFUnordNotEqual (183) — the "unordered" float `!=`. glslang emits it for
+// every GLSL float `!=` / `notEqual()` (the ordered FOrdNotEqual is NOT what GLSL
+// `!=` lowers to). The WGSL backend mapped only the ordered FOrd* compare family,
+// so OpFUnordNotEqual fell through to the honest-error catch-all even though it has
+// an EXACT WGSL equivalent: WGSL comparison operators follow IEEE-754, so WGSL `!=`
+// is itself the *unordered* not-equal (true when either operand is NaN) —
+// componentwise on vecN<f32>. The faithful lowering is therefore the plain `!=`
+// operator (NOT a NaN guard); the other 5 FUnord* ops have no single-operator WGSL
+// match (WGSL's ==,<,>,<=,>= are all ordered) and correctly stay honest-errors.
+test "wgsl: scalar OpFUnordNotEqual (float !=) lowers to != (naga-valid) (#170)" {
+    const spirv = try compileToSpirv("funord_ne_scalar",
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    bool ne = (a != 0.0); // OpFUnordNotEqual
+        \\    o = vec4(ne ? 1.0 : 0.0, 0.0, 0.0, 1.0);
+        \\}
+    );
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "!=");
+    try assertNotContains(wgsl, "unhandled");
+    try nagaValidateOrSkip(wgsl, "funord-ne-scalar");
+}
+
+test "wgsl: vector OpFUnordNotEqual (notEqual) lowers componentwise to != (naga-valid) (#170)" {
+    const spirv = try compileToSpirv("funord_ne_vec",
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    bvec3 n = notEqual(a, vec3(0.0)); // OpFUnordNotEqual (vector)
+        \\    o = vec4(float(n.x), float(n.y), float(n.z), 1.0);
+        \\}
+    );
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "!=");
+    try assertNotContains(wgsl, "unhandled");
+    try nagaValidateOrSkip(wgsl, "funord-ne-vec");
+}

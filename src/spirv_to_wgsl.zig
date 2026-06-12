@@ -2145,7 +2145,7 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
         .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical,
         .BitwiseAnd, .BitwiseOr, .BitwiseXor,
         .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
-        .FOrdEqual, .FOrdNotEqual,
+        .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual,
         .LogicalAnd, .LogicalOr, .LogicalEqual, .LogicalNotEqual,
         => {
             // words[1] is result type (may be pointer)
@@ -6065,7 +6065,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // Comparisons
             .FOrdEqual, .IEqual => try emitBinOp(module, names, &inline_exprs, inst, "==", w, arena, indent),
-            .FOrdNotEqual, .INotEqual => try emitBinOp(module, names, &inline_exprs, inst, "!=", w, arena, indent),
+            // WGSL `!=` follows IEEE-754, so it is the *unordered* not-equal (true
+            // when either operand is NaN) — exactly OpFUnordNotEqual. glslang emits
+            // FUnordNotEqual for every GLSL float `!=`/`notEqual()`. (#170)
+            .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitBinOp(module, names, &inline_exprs, inst, "!=", w, arena, indent),
             .FOrdLessThan, .SLessThan, .ULessThan => try emitBinOp(module, names, &inline_exprs, inst, "<", w, arena, indent),
             .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, &inline_exprs, inst, ">", w, arena, indent),
             .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, &inline_exprs, inst, "<=", w, arena, indent),
@@ -7306,7 +7309,7 @@ fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMa
     switch (cond_def.op) {
         // Comparison ops — inline as "lhs op rhs"
         .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
-        .FOrdEqual, .FOrdNotEqual, .SLessThan, .SGreaterThan, .SLessThanEqual,
+        .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual, .SLessThan, .SGreaterThan, .SLessThanEqual,
         .SGreaterThanEqual, .ULessThan, .UGreaterThan, .ULessThanEqual,
         .UGreaterThanEqual, .IEqual, .INotEqual
         => {
@@ -7629,7 +7632,7 @@ fn getBinOpSymbol(op: spirv.Op) ?[]const u8 {
         .FOrdLessThanEqual => "<=",
         .FOrdGreaterThanEqual => ">=",
         .FOrdEqual => "==",
-        .FOrdNotEqual => "!=",
+        .FOrdNotEqual, .FUnordNotEqual => "!=",
         .IEqual => "==",
         .INotEqual => "!=",
         .VectorTimesScalar, .MatrixTimesScalar => "*",
@@ -7781,7 +7784,7 @@ fn isInlineableArithOp(op: spirv.Op) bool {
         .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod,
         .VectorTimesScalar, .MatrixTimesScalar,
         .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
-        .FOrdEqual, .FOrdNotEqual,
+        .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual,
         .ExtInst
         => true,
         else => false,
@@ -7801,7 +7804,7 @@ fn getInlineBinOp(op: spirv.Op) ?[]const u8 {
         .FOrdLessThanEqual => "<=",
         .FOrdGreaterThanEqual => ">=",
         .FOrdEqual => "==",
-        .FOrdNotEqual => "!=",
+        .FOrdNotEqual, .FUnordNotEqual => "!=",
         else => null,
     };
 }
@@ -7836,7 +7839,7 @@ fn buildInlineExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u3
         .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod,
         .VectorTimesScalar, .MatrixTimesScalar,
         .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
-        .FOrdEqual, .FOrdNotEqual
+        .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual
         => {
             if (inst.words.len < 5) return null;
             const op_sym = getInlineBinOp(inst.op) orelse return null;
