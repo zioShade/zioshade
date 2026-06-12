@@ -228,11 +228,13 @@ pub fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
     return module.instructions[idx];
 }
 
-/// True if the module declares a `UniformConstant` resource that is an ARRAY of an
-/// opaque type (sampler / image / sampled-image) — e.g. `uniform sampler2D tex[4]`.
-/// Backends that don't yet support descriptor arrays use this to honest-error
-/// rather than emit broken output. (The GLSL backend DOES support them.)
-pub fn hasOpaqueArrayResource(module: *const ParsedModule) bool {
+/// True if the module declares an opaque (sampler / texture / sampled-image) array
+/// resource — a GLSL `sampler2D tex[N]` / `tex[]` descriptor array. `include_runtime`
+/// also matches the UNBOUNDED form (`OpTypeRuntimeArray`, from `tex[]` /
+/// GL_EXT_nonuniform_qualifier); pass it for backends with no array-of-opaque support
+/// AT ALL (WGSL core: no binding_array). MSL passes false to preserve its existing
+/// runtime-array handling. The bounded `OpTypeArray` form is always matched.
+pub fn hasOpaqueArrayResource(module: *const ParsedModule, include_runtime: bool) bool {
     for (module.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
@@ -240,7 +242,9 @@ pub fn hasOpaqueArrayResource(module: *const ParsedModule) bool {
         const ptr = getDef(module, inst.words[1]) orelse continue;
         if (ptr.op != .TypePointer or ptr.words.len < 4) continue;
         const pe = getDef(module, ptr.words[3]) orelse continue;
-        if (pe.op != .TypeArray or pe.words.len < 3) continue;
+        const is_array = pe.op == .TypeArray or (include_runtime and pe.op == .TypeRuntimeArray);
+        if (!is_array or pe.words.len < 3) continue;
+        // OpTypeArray and OpTypeRuntimeArray both carry the element type in words[2].
         const el = getDef(module, pe.words[2]) orelse continue;
         if (el.op == .TypeSampledImage or el.op == .TypeSampler or el.op == .TypeImage) return true;
     }
