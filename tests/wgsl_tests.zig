@@ -4621,3 +4621,22 @@ test "wgsl: bitfieldExtract on a vector stores the result, not 0 (#170)" {
     try assertContains(wgsl, "extractBits(");
     try nagaValidateOrSkip(wgsl, "bitfield-extract-vec");
 }
+
+// #170: WGSL `@builtin(sample_index)` MUST be `u32`, but GLSL `gl_SampleID` is signed
+// `int`, so glslpp emitted `@builtin(sample_index) gl_SampleID: i32` — naga rejects
+// ("Built-in type for SampleIndex is invalid. Found Sint"). The existing needs_u32
+// coercion (already applied to vertex_index/instance_index, which WGSL also requires
+// to be u32) must also cover sample_index: declare the entry param `u32` and coerce
+// to the signed name for the body.
+test "wgsl: gl_SampleID (sample_index) entry param is u32, not i32 (#170)" {
+    const spirv = compileToSpirv("sample_id",
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(float(gl_SampleID)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "@builtin(sample_index)");
+    try nagaValidateOrSkip(wgsl, "sample-id");
+}
