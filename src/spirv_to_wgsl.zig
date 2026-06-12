@@ -3952,7 +3952,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 },
             };
             const needs_u32 = switch (bi) {
-                .vertex_id, .instance_id, .vertex_index, .instance_index => true,
+                // WGSL requires these built-ins to be u32, but their GLSL counterparts
+                // are signed int (gl_VertexID/gl_VertexIndex, gl_InstanceID/
+                // gl_InstanceIndex, gl_SampleID). The coercion below declares the entry
+                // param u32 and bridges to the signed name for the body. (sample_index:
+                // naga rejects an i32 param — "Built-in type for SampleIndex invalid".) (#170)
+                .vertex_id, .instance_id, .vertex_index, .instance_index, .sample_id => true,
                 else => false,
             };
             if (needs_u32 and std.mem.eql(u8, type_name, "i32")) {
