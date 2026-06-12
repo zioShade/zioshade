@@ -356,6 +356,22 @@ fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
     return common.getDef(module, id);
 }
 
+/// For a CompositeExtract whose source is an OpExtInst FrexpStruct (52) / ModfStruct
+/// (36), returns the WGSL builtin result-struct field name for member `idx`: index 0
+/// is `.fract`, index 1 is `.exp` (frexp) / `.whole` (modf). glslang names the SPIR-V
+/// struct type `ResType` (UNDEFINED in WGSL) and emits no OpMemberName, so the generic
+/// member lookup would produce `._0`/`._1`; this maps to the named builtin fields.
+/// Returns null when the source is not a frexp/modf struct result. (#170)
+fn frexpModfField(module: *const ParsedModule, source_id: u32, idx: u32) ?[]const u8 {
+    const d = getDef(module, source_id) orelse return null;
+    if (d.op != .ExtInst or d.words.len < 5) return null;
+    return switch (d.words[4]) {
+        52 => switch (idx) { 0 => "fract", 1 => "exp", else => null }, // FrexpStruct
+        36 => switch (idx) { 0 => "fract", 1 => "whole", else => null }, // ModfStruct
+        else => null,
+    };
+}
+
 /// True if the block labeled `label` is a pure unconditional-branch trampoline to
 /// `target` — i.e. `OpLabel <label>` immediately followed by `OpBranch <target>`,
 /// with no value/side-effect instruction in between. glslang `-V` (unoptimized)
@@ -4725,6 +4741,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (st_def) |sd2| {
                         if (sd2.op == .TypeStruct) {
                             is_struct_field = true;
+                            // frexp/modf struct result → WGSL builtin fields, not `._N`. (#170)
+                            if (frexpModfField(module, scan_inst.words[3], idx)) |fld| break :blk fld;
                             break :blk getMemberName(module, st, idx, &field_name_buf);
                         }
                         if (sd2.op == .TypeMatrix) {
@@ -5972,7 +5990,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (ct_inst) |cti| {
                             if (cti.op == .TypeStruct) {
                                 var mname_buf: [32]u8 = undefined;
-                                const mname = getMemberName(module, ct, idx, &mname_buf);
+                                // frexp/modf struct result → WGSL builtin fields (.fract/
+                                // .exp/.whole), not the generic `._N`. (#170)
+                                const mname = frexpModfField(module, inst.words[3], idx) orelse getMemberName(module, ct, idx, &mname_buf);
                                 try expr.print(alloc, ".{s}", .{mname});
                                 if (idx + 2 < cti.words.len) current_type = cti.words[idx + 2] else current_type = null;
                                 continue;
@@ -6365,6 +6385,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                 }
                             }
                             try writeInd(w, indent); try w.print("let {s}: {s} = {s}.fract;\n", .{ result_name, rt, tmp });
+                        } else if (instruction == 52 or instruction == 36) {
+                            // FrexpStruct (52) / ModfStruct (36): the result IS the
+                            // {fract, exp|whole} struct, consumed by OpCompositeExtract.
+                            // Emit the builtin call WITHOUT a type annotation — the
+                            // result type is the un-nameable builtin (`__frexp_result_*`
+                            // / `__modf_result_*`); glslang's struct type name `ResType`
+                            // is undefined in WGSL. The extracts are remapped to the
+                            // named fields (.fract/.exp/.whole) by frexpModfField in the
+                            // CompositeExtract arms. (#170)
+                            const x = names.get(inst.words[5]) orelse "0";
+                            const builtin = if (instruction == 52) "frexp" else "modf";
+                            try writeInd(w, indent); try w.print("let {s} = {s}({s});\n", .{ result_name, builtin, x });
                         } else if (scalarGeomLower(arena, module, names, instruction, inst.words[1], inst.words[5..])) |sexpr| {
                             // Scalar geometric builtin WGSL lacks (normalize/length/
                             // distance/reflect on a scalar) — emit the equivalent.
