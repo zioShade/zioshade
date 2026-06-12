@@ -4579,3 +4579,24 @@ test "wgsl: int64 (64-bit integer) honest-errors instead of silently downgrading
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedInt64Type, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
+
+// #170: GLSL `bitCount` ALWAYS returns a signed int (genIType), even for an unsigned
+// argument, but WGSL `countOneBits(e)` returns the ARGUMENT's type. For a `uvec3`
+// argument the result was emitted as `let v: vec3i = countOneBits(v)` — but
+// countOneBits(vec3u) is vec3u, so naga rejected the mismatch ("the type of `v` is
+// expected to be vec3<i32>, but got vec3<u32>"). Wrap the call in the (signed) result
+// type. (Signed args make it an identity wrap; reverseBits is unaffected because GLSL
+// bitfieldReverse keeps the argument's signedness, matching WGSL.)
+test "wgsl: bitCount on an unsigned vector wraps to the signed result type (#170)" {
+    const spirv = compileToSpirv("bitcount_uvec",
+        \\#version 450
+        \\layout(location = 0) flat in uvec3 v;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { ivec3 c = bitCount(v); o = vec4(vec3(c), 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "countOneBits");
+    try nagaValidateOrSkip(wgsl, "bitcount-uvec");
+}

@@ -6565,7 +6565,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
             .BitCount => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
-                try writeInd(w, indent); try w.print("let {s}: {s} = countOneBits({s});\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+                // GLSL bitCount ALWAYS returns a SIGNED int (genIType), but WGSL
+                // countOneBits returns the ARGUMENT's type — so an unsigned arg yields
+                // u32/vecNu while the result type rt is i32/vecNi (naga: "expected
+                // vec3<i32>, got vec3<u32>"). Wrap in rt(...) to match; it is an
+                // identity when the argument is already signed. (Same shape as the
+                // findMSB/findLSB bit-scan wrap.) (#170)
+                try writeInd(w, indent); try w.print("let {s}: {s} = {s}(countOneBits({s}));\n", .{ names.get(inst.words[2]) orelse "v", rt, rt, names.get(inst.words[3]) orelse "0" });
             },
             // SPIR-V bitfield ops: WGSL has insertBits(e, newbits, offset, count)
             // and extractBits(e, offset, count). The S/U variants of extract
