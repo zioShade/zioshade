@@ -2439,7 +2439,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
 
     // Descriptor sampler/image ARRAYS not yet supported by the WGSL backend
     // (would need binding_array) — fail loud rather than emit broken output.
-    if (common.hasOpaqueArrayResource(&module)) {
+    // WGSL core has no array-of-opaque support (binding_array is non-core), so BOTH
+    // the bounded (`tex[N]`) and unbounded (`tex[]`, GL_EXT_nonuniform_qualifier)
+    // forms must fail loud — the unbounded form otherwise dropped the variable
+    // declaration and emitted an undeclared `tex[i]` + malformed `tex[i]_sampler`. (#170)
+    if (common.hasOpaqueArrayResource(&module, true)) {
         last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL backend does not yet support descriptor sampler/image arrays", .{}) catch null;
         return error.UnsupportedSamplerArray;
     }
