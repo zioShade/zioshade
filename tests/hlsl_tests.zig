@@ -47,6 +47,38 @@ fn assertNotContains(haystack: []const u8, needle: []const u8) !void {
     return error.TestUnexpectedFind;
 }
 
+/// Compile GLSL → SPIR-V with the *glslang* reference compiler (NOT glslpp's own
+/// frontend). Needed for opcodes glslpp's frontend never emits — e.g. glslang
+/// lowers every GLSL float `!=` to OpFUnordNotEqual, whereas the glslpp frontend
+/// emits the ordered OpFOrdNotEqual. Skips the test if glslang is unavailable.
+fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
+    const tmp_src = try std.fmt.allocPrint(alloc, "/tmp/hlsl_test_{s}.frag", .{name});
+    defer alloc.free(tmp_src);
+    const tmp_spv = try std.fmt.allocPrint(alloc, "/tmp/hlsl_test_{s}.spv", .{name});
+    defer alloc.free(tmp_spv);
+    {
+        const src_file = try std.fs.createFileAbsolute(tmp_src, .{});
+        defer src_file.close();
+        try src_file.writeAll(std.mem.sliceTo(source, 0));
+    }
+    const glslang = glslpp.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    const result = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ glslang, "-V", tmp_src, "-o", tmp_spv },
+    }) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+
+    const spv_file = std.fs.openFileAbsolute(tmp_spv, .{ .mode = .read_only }) catch return error.SkipZigTest;
+    defer spv_file.close();
+    const data = try spv_file.readToEndAlloc(alloc, 1024 * 1024);
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------
@@ -9454,6 +9486,36 @@ test "T398.1: do-while with continue -> native do/while (#246, was #244 honest-e
     try assertNotContains(hlsl, "while (true)");
     try assertContains(hlsl, "continue;");
     try assertNotContains(hlsl, "break;");
+}
+
+// #170: same as T398.1 but the bottom condition is a FLOAT `!=`. glslang lowers it to
+// an OpFUnordNotEqual back-edge; `tryInlineDoWhileCond` mapped only the ORDERED
+// `.FOrdNotEqual` (plus the integer compare family), so `.FUnordNotEqual` fell through
+// to `else => null` and the native do-while rebuild honest-errored
+// (`error.UnstructuredControlFlow`) — though it is perfectly representable: HLSL's `!=`
+// is itself unordered (true on NaN) = exactly OpFUnordNotEqual, matching the main
+// emitBinOp path. Reachable only via external SPIR-V (glslpp's frontend emits the
+// ordered FOrdNotEqual for float `!=`).
+test "T398.2: do-while body-cf + float `!=` (OpFUnordNotEqual) -> native do/while (#170)" {
+    const spirv = compileToSpirv("dowhile_funord_ne",
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float v = x;
+        \\    do {
+        \\        v += 1.0;
+        \\        if (v == 3.0) continue;
+        \\    } while (v != 10.0);
+        \\    fragColor = vec4(v);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "} while (");
+    try assertContains(hlsl, "!=");
+    try assertContains(hlsl, "continue;");
 }
 
 test "T399.1: matrix scalar operations" {

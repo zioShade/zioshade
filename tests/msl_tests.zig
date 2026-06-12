@@ -39,6 +39,69 @@ fn assertNotContains(haystack: []const u8, needle: []const u8) !void {
     return error.TestUnexpectedFind;
 }
 
+/// Compile GLSL → SPIR-V with the *glslang* reference compiler (NOT glslpp's own
+/// frontend). Needed for opcodes glslpp's frontend never emits — e.g. glslang
+/// lowers every GLSL float `!=` to OpFUnordNotEqual, whereas the glslpp frontend
+/// emits the ordered OpFOrdNotEqual. Skips the test if glslang is unavailable.
+fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
+    const tmp_src = try std.fmt.allocPrint(alloc, "/tmp/msl_test_{s}.frag", .{name});
+    defer alloc.free(tmp_src);
+    const tmp_spv = try std.fmt.allocPrint(alloc, "/tmp/msl_test_{s}.spv", .{name});
+    defer alloc.free(tmp_spv);
+    {
+        const src_file = try std.fs.createFileAbsolute(tmp_src, .{});
+        defer src_file.close();
+        try src_file.writeAll(std.mem.sliceTo(source, 0));
+    }
+    const glslang = glslpp.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    const result = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ glslang, "-V", tmp_src, "-o", tmp_spv },
+    }) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+
+    const spv_file = std.fs.openFileAbsolute(tmp_spv, .{ .mode = .read_only }) catch return error.SkipZigTest;
+    defer spv_file.close();
+    const data = try spv_file.readToEndAlloc(alloc, 1024 * 1024);
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
+// #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
+// `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
+// persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang
+// emits an OpFUnordNotEqual back-edge, but the rebuild mapped only the ORDERED
+// `.FOrdNotEqual` (plus the integer compare family) — `.FUnordNotEqual` fell through
+// to `else => null`, so the caller honest-errored (`error.UnstructuredControlFlow`)
+// even though MSL's `!=` is itself unordered (true on NaN) = exactly OpFUnordNotEqual,
+// matching the main emitBinOp path. Reachable only via external SPIR-V (glslpp's
+// frontend emits the ordered FOrdNotEqual for float `!=`).
+test "T-dowhile.funord: do-while body-cf + float `!=` (OpFUnordNotEqual) -> native do/while (#170)" {
+    const spirv = compileToSpirv("dowhile_funord_ne",
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float v = x;
+        \\    do {
+        \\        v += 1.0;
+        \\        if (v == 3.0) continue;
+        \\    } while (v != 10.0);
+        \\    o = vec4(v);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try glslpp.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "} while (");
+    try assertContains(msl, "!=");
+    try assertContains(msl, "continue;");
+}
+
 // ---------------------------------------------------------------------------
 // T1: MSL structure
 // ---------------------------------------------------------------------------
