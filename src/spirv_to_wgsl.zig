@@ -356,6 +356,28 @@ fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
     return common.getDef(module, id);
 }
 
+/// True if the block labeled `label` is a pure unconditional-branch trampoline to
+/// `target` — i.e. `OpLabel <label>` immediately followed by `OpBranch <target>`,
+/// with no value/side-effect instruction in between. glslang `-V` (unoptimized)
+/// emits `if (cond) break;` / `if (cond) continue;` as such a trampoline: the
+/// selection's conditional branch points at a SEPARATE block that does nothing but
+/// `OpBranch <loop_merge>` (break) or `OpBranch <loop_continue>` (continue). The
+/// structurizer's break detection otherwise matches only the DIRECT form (the
+/// conditional branch target IS the loop merge), so without this the trampoline
+/// branch is dropped → an empty `if (cond) { }` = silent-wrong. (#170)
+fn isPureBranchTrampoline(module: *const ParsedModule, label: u32, target: u32) bool {
+    var idx: usize = 0;
+    while (idx < module.instructions.len) : (idx += 1) {
+        const li = module.instructions[idx];
+        if (li.op == .Label and li.words.len > 1 and li.words[1] == label) {
+            if (idx + 1 >= module.instructions.len) return false;
+            const nx = module.instructions[idx + 1];
+            return nx.op == .Branch and nx.words.len > 1 and nx.words[1] == target;
+        }
+    }
+    return false;
+}
+
 fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
     return common.getTypeOf(module, id);
 }
@@ -5308,9 +5330,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         try writeInd(w, indent); try w.print("if (!({s})) {{ break; }}\n", .{cond_expr});
                     } else if (pending_merge != null) {
                         const merge_label = pending_merge.?;
-                        // Check if this is a break/continue inside a loop
-                        const true_is_break = in_loop and loop_merge_label != null and true_label == loop_merge_label.?;
-                        const false_is_break = in_loop and loop_merge_label != null and false_label == loop_merge_label.?;
+                        // Check if this is a break/continue inside a loop. The break
+                        // target may be the loop merge DIRECTLY (optimized SPIR-V) or
+                        // an INDIRECT pure trampoline block that just `OpBranch`es to
+                        // the loop merge (glslang `-V`, unoptimized: `if(cond) break;`).
+                        // Both must emit `break;` — missing the trampoline form dropped
+                        // the branch → an empty `if (cond) { }` = silent-wrong. (#170)
+                        const true_is_break = in_loop and loop_merge_label != null and
+                            (true_label == loop_merge_label.? or isPureBranchTrampoline(module, true_label, loop_merge_label.?));
+                        const false_is_break = in_loop and loop_merge_label != null and
+                            (false_label == loop_merge_label.? or isPureBranchTrampoline(module, false_label, loop_merge_label.?));
                         const true_is_continue = in_loop and loop_continue_label != null and true_label == loop_continue_label.?;
                         const false_is_continue = in_loop and loop_continue_label != null and false_label == loop_continue_label.?;
                         if (true_is_break) {

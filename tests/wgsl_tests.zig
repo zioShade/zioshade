@@ -4344,3 +4344,42 @@ test "wgsl: vector OpFUnordNotEqual (notEqual) lowers componentwise to != (naga-
     try assertNotContains(wgsl, "unhandled");
     try nagaValidateOrSkip(wgsl, "funord-ne-vec");
 }
+
+// #170: a conditional `break` inside a loop body — `for(...){ if(cond) break; ... }` —
+// was SILENT-WRONG. glslang `-V` (unoptimized) emits the break as an INDIRECT
+// trampoline: `OpSelectionMerge %m; OpBranchConditional %cond %brk %m` where %brk is
+// a SEPARATE block whose only instruction is `OpBranch <loop_merge>`. The WGSL
+// structurizer's break-detection matched only the DIRECT form (the BranchConditional
+// target IS the loop merge), so the trampoline branch was dropped → `if (cond) { }`
+// EMPTY body → the loop never exits early (ran all 10 iterations instead of stopping
+// at i==5). The fix recognizes a pure break-trampoline target and emits
+// `if (cond) { break; }`, mirroring the direct-break path.
+test "wgsl: conditional break in loop body emits break, not an empty if (#170)" {
+    const spirv = compileToSpirv("cond_break_body",
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 10; i++) {
+        \\        if (i == 5) break;
+        \\        sum += x * float(i);
+        \\    }
+        \\    o = vec4(sum);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // Two breaks expected: the loop-condition exit `if (!(i < 10)) { break; }` AND the
+    // body conditional `if (i == 5) { break; }`. Before the fix only the former existed
+    // (the body break was dropped → empty `if (cond) { }` = silent-wrong infinite-ish).
+    var n: usize = 0;
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, wgsl, pos, "break")) |idx| : (pos = idx + 5) n += 1;
+    if (n < 2) {
+        std.debug.print("expected >=2 'break' in WGSL (loop-exit + body break), got {d}:\n{s}\n", .{ n, wgsl });
+        return error.TestExpectedFind;
+    }
+    try nagaValidateOrSkip(wgsl, "cond-break-body");
+}
