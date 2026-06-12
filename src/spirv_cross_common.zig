@@ -174,7 +174,7 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .IEqual, .INotEqual,
         .UGreaterThan, .SGreaterThan, .UGreaterThanEqual, .SGreaterThanEqual,
         .ULessThan, .SLessThan, .ULessThanEqual, .SLessThanEqual,
-        .FOrdEqual, .FOrdNotEqual, .FOrdLessThan, .FOrdGreaterThan,
+        .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual, .FOrdLessThan, .FOrdGreaterThan,
         .FOrdLessThanEqual, .FOrdGreaterThanEqual,
         .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical,
         .BitwiseOr, .BitwiseXor, .BitwiseAnd, .Not,
