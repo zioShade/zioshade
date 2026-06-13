@@ -456,6 +456,58 @@ fn ioBlockStructType(module: *const ParsedModule, type_id: u32, builtin: ?spirv.
     return sty;
 }
 
+/// The `BuiltIn` decorating member `member_idx` of struct `struct_id`, or null.
+/// Unlike `getDecVal`, this reads `OpMemberDecorate` (member-level decorations are
+/// not in the `decorations` map, which only collects var/id-level `OpDecorate`).
+fn memberBuiltin(module: *const ParsedModule, struct_id: u32, member_idx: u32) ?spirv.BuiltIn {
+    for (module.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 5) continue;
+        if (inst.words[1] != struct_id or inst.words[2] != member_idx) continue;
+        if (@as(spirv.Decoration, @enumFromInt(inst.words[3])) != .built_in) continue;
+        return @enumFromInt(inst.words[4]);
+    }
+    return null;
+}
+
+/// If `var_id` is an Output variable whose pointee is a struct with member 0
+/// decorated `BuiltIn Position`, returns that struct type id. This is glslang's
+/// `gl_PerVertex` Block: it wraps gl_Position (+ gl_PointSize/ClipDistance/
+/// CullDistance) in a member-decorated struct and writes them via
+/// `OpAccessChain <var> <member> + OpStore`, NOT as direct var-level-decorated
+/// outputs the way glslpp's own frontend does. External-SPIR-V only.
+fn perVertexBlockStructType(module: *const ParsedModule, var_id: u32) ?u32 {
+    const vdef = getDef(module, var_id) orelse return null;
+    if (vdef.op != .Variable or vdef.words.len < 4) return null;
+    if (@as(spirv.StorageClass, @enumFromInt(vdef.words[3])) != .Output) return null;
+    const ptr = getDef(module, vdef.words[1]) orelse return null;
+    if (ptr.op != .TypePointer or ptr.words.len < 4) return null;
+    const sty = ptr.words[3];
+    const sdef = getDef(module, sty) orelse return null;
+    if (sdef.op != .TypeStruct) return null;
+    const bi = memberBuiltin(module, sty, 0) orelse return null;
+    if (bi != .position) return null;
+    return sty;
+}
+
+/// True if member `member_idx` of the gl_PerVertex block variable `var_id` is
+/// WRITTEN: i.e. there is an `OpAccessChain <var_id> <const member_idx>` whose
+/// result is the target of an `OpStore`. (glslang declares all four members but
+/// only emits an access chain for the ones the shader actually assigns.)
+fn perVertexMemberWritten(module: *const ParsedModule, var_id: u32, member_idx: u32) bool {
+    for (module.instructions) |inst| {
+        if (inst.op != .AccessChain or inst.words.len < 5) continue;
+        if (inst.words[3] != var_id) continue;
+        const idx_def = getDef(module, inst.words[4]) orelse continue;
+        if (idx_def.op != .Constant or idx_def.words.len < 4) continue;
+        if (idx_def.words[3] != member_idx) continue;
+        const ac_res = inst.words[2];
+        for (module.instructions) |s| {
+            if (s.op == .Store and s.words.len >= 2 and s.words[1] == ac_res) return true;
+        }
+    }
+    return false;
+}
+
 /// True if `target` is reachable from `root_type_id` by descending through
 /// pointer / array / matrix / vector wrappers and struct members. Used to detect
 /// a struct that is BOTH a stage-input interface block AND a data (UBO/SSBO)
@@ -2651,20 +2703,39 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
+    // External glslang vertex shaders wrap gl_Position in a member-decorated
+    // `gl_PerVertex` Block (gl_Position is MEMBER 0, decorated BuiltIn Position;
+    // written via OpAccessChain + OpStore) rather than a direct var-level-decorated
+    // output. Detect that block here so the position output is recognized; member 0
+    // becomes the `@builtin(position)` field of VertexOutput (see below). Requires
+    // member 0 to actually be WRITTEN — a declared-but-unwritten block must still
+    // honest-error like any vertex shader that never assigns gl_Position.
+    var pervertex_var_id: ?u32 = null;
+    var pervertex_struct_type: ?u32 = null;
+    if (is_vertex) {
+        for (output_vars.items) |ovid| {
+            const sty = perVertexBlockStructType(&module, ovid) orelse continue;
+            if (!perVertexMemberWritten(&module, ovid, 0)) continue;
+            pervertex_var_id = ovid;
+            pervertex_struct_type = sty;
+            break;
+        }
+    }
+
     // WGSL requires every vertex entry to return a @builtin(position) value. A
     // vertex shader that never writes gl_Position cannot be lowered to valid
     // WGSL (naga: "Vertex shaders must return a @builtin(position) output").
     // Fabricating one would be silent-wrong, so fail loud with an honest error.
     if (is_vertex and output_vars.items.len > 0) {
-        var has_position = false;
-        for (output_vars.items) |ovid| {
+        var has_position = pervertex_var_id != null;
+        if (!has_position) for (output_vars.items) |ovid| {
             if (getDecVal(&decorations, ovid, .built_in)) |bv| {
                 if (bv == @intFromEnum(spirv.BuiltIn.position)) {
                     has_position = true;
                     break;
                 }
             }
-        }
+        };
         if (!has_position) {
             last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL vertex shader requires a gl_Position (@builtin(position)) output", .{}) catch null;
             return error.UnsupportedOp;
@@ -3680,8 +3751,41 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     const OutputRecon = struct { local_name: []const u8, type_name: []const u8, struct_type: u32 };
     var output_recons = std.AutoHashMap(u32, OutputRecon).init(arena);
     var output_copyouts = std.ArrayList(struct { flat: []const u8, src: []const u8 }).initCapacity(arena, 4) catch return error.OutOfMemory;
-    if (is_vertex and output_vars.items.len > 1) {
+    if (is_vertex and (output_vars.items.len > 1 or pervertex_var_id != null)) {
         for (output_vars.items) |ovid| {
+            // glslang's gl_PerVertex block: member 0 (Position) → the
+            // `@builtin(position)` field; the body's `OpAccessChain <var> 0` store
+            // resolves to `vertex_out.gl_Position` via the io_block alias below.
+            // gl_PointSize/gl_ClipDistance/gl_CullDistance (members 1/2/3) have no
+            // WGSL vertex output, so writing any of them is an honest error rather
+            // than a silent drop. Unwritten members are ignored (the common case).
+            if (pervertex_var_id != null and ovid == pervertex_var_id.?) {
+                const sty = pervertex_struct_type.?;
+                const sdef = getDef(&module, sty) orelse continue;
+                const member_count: u32 = @intCast(sdef.words.len - 2);
+                var mi: u32 = 1;
+                while (mi < member_count) : (mi += 1) {
+                    if (!perVertexMemberWritten(&module, ovid, mi)) continue;
+                    const bi = memberBuiltin(&module, sty, mi);
+                    // No @tagName on the non-exhaustive BuiltIn enum — an unknown
+                    // value would panic (#310). Map only the known gl_PerVertex
+                    // members; anything else gets a generic name.
+                    const bname: []const u8 = if (bi) |b| switch (b) {
+                        .point_size => "gl_PointSize",
+                        .clip_distance => "gl_ClipDistance",
+                        .cull_distance => "gl_CullDistance",
+                        else => "member",
+                    } else "member";
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no vertex output for gl_PerVertex.{s} (point size / clip / cull distance)", .{bname}) catch null;
+                    return error.UnsupportedOp;
+                }
+                var mb0: [32]u8 = undefined;
+                const mname0 = getMemberName(&module, sty, 0, &mb0);
+                const m0type = try wgslType(&module, sdef.words[2], &names, arena);
+                try vertex_output_fields.append(arena, .{ .name = try arena.dupe(u8, mname0), .type_name = m0type, .builtin = "position", .location = null, .flat = false });
+                try io_block_outputs.put(ovid, {});
+                continue;
+            }
             const builtin_val = getDecVal(&decorations, ovid, .built_in);
             const loc_val = getDecVal(&decorations, ovid, .location);
             const var_name = names.get(ovid) orelse continue;
@@ -3760,7 +3864,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
-    if (vertex_output_fields.items.len > 1) {
+    // Build VertexOutput when there are 2+ outputs, OR for a gl_PerVertex block
+    // even with only gl_Position written (a single `@builtin(position)` field is a
+    // valid VertexOutput — the body stores through `vertex_out.gl_Position`).
+    if (vertex_output_fields.items.len > 1 or pervertex_var_id != null) {
         use_vertex_struct = true;
         // Sort: builtin fields first (required by WGSL: @builtin(position) must be first)
         {
@@ -4040,6 +4147,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             const type_name = try wgslType(&module, actual_type, &names, arena);
             try w.print(") -> @location(0) {s} {{\n", .{type_name});
         }
+    } else if (is_vertex and use_vertex_struct) {
+        // VertexOutput already chosen above (multiple outputs, or a gl_PerVertex
+        // block whose member 0 became the @builtin(position) field).
+        try w.writeAll(") -> VertexOutput {\n");
     } else if (is_vertex and output_vars.items.len > 0 and output_var_id != null) {
         if (output_vars.items.len == 1) {
             // Single output — emit simple return type
