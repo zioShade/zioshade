@@ -46,6 +46,43 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     return words;
 }
 
+/// Same as compileToSpirv but writes a `.vert` source so glslang compiles it at
+/// the VERTEX stage (the extension selects the stage). Produces the EXTERNAL
+/// glslang IR shape — notably gl_Position wrapped in a member-decorated
+/// `gl_PerVertex` Block — which glslpp's own frontend never emits.
+fn compileVertToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
+    const tmp_src = try std.fmt.allocPrint(alloc, "/tmp/wgsl_test_{s}.vert", .{name});
+    defer alloc.free(tmp_src);
+    const tmp_spv = try std.fmt.allocPrint(alloc, "/tmp/wgsl_test_{s}_vert.spv", .{name});
+    defer alloc.free(tmp_spv);
+
+    {
+        const src_file = try std.fs.createFileAbsolute(tmp_src, .{});
+        defer src_file.close();
+        try src_file.writeAll(std.mem.sliceTo(source, 0));
+    }
+
+    const glslang = glslpp.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    const result = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ glslang, "-V", tmp_src, "-o", tmp_spv },
+    }) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+
+    const spv_file = try std.fs.openFileAbsolute(tmp_spv, .{ .mode = .read_only });
+    defer spv_file.close();
+    const data = try spv_file.readToEndAlloc(alloc, 1024 * 1024);
+    const words_len = data.len / 4;
+    const words = try alloc.alloc(u32, words_len);
+    for (0..words_len) |i| {
+        words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    }
+    alloc.free(data);
+    return words;
+}
+
 fn assertNotContains(haystack: []const u8, needle: []const u8) !void {
     if (std.mem.indexOf(u8, haystack, needle)) |_| {
         std.debug.print("Did NOT expect to find \"{s}\" in output:\n{s}\n", .{ needle, haystack });
@@ -1588,6 +1625,68 @@ test "wgsl: vertex shader without gl_Position errors honestly" {
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
     const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "gl_Position") != null);
+}
+
+test "wgsl: external glslang vertex shader (gl_PerVertex block) compiles" {
+    // glslang wraps gl_Position in a member-decorated `gl_PerVertex` Block output
+    // struct (OpMemberDecorate <struct> 0 BuiltIn Position; written via
+    // OpAccessChain <var> 0 + OpStore), NOT a direct Position-decorated output var
+    // like glslpp's own frontend. The WGSL output-collection only looked at
+    // VAR-level builtins, so EVERY external glslang vertex shader honest-errored
+    // ("requires a gl_Position output"). The block's member 0 must be recognized
+    // as the @builtin(position) output. (#170)
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec3 pos;
+        \\layout(location=0) out vec3 col;
+        \\void main(){ gl_Position = vec4(pos, 1.0); col = pos; }
+    ;
+    const spirv = compileVertToSpirv("pervertex_block", source) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@vertex") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@builtin(position)") != null);
+    // The position varying carries through and gl_Position is actually written.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "gl_Position =") != null);
+    try nagaValidateOrSkip(wgsl, "pervertex-block");
+}
+
+test "wgsl: external glslang vertex shader writing only gl_Position compiles" {
+    // gl_PerVertex block with no @location varyings — only gl_Position written.
+    // A VertexOutput with a single @builtin(position) field is valid WGSL; the
+    // body stores through `vertex_out.gl_Position`.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec3 pos;
+        \\void main(){ gl_Position = vec4(pos, 1.0); }
+    ;
+    const spirv = compileVertToSpirv("pervertex_posonly", source) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@vertex") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@builtin(position)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "gl_Position =") != null);
+    try nagaValidateOrSkip(wgsl, "pervertex-posonly");
+}
+
+test "wgsl: external glslang vertex shader writing gl_PointSize errors honestly" {
+    // The gl_PerVertex block's gl_PointSize (member 1) has no WGSL output. If the
+    // shader writes it, glslpp must fail loud rather than silently drop it.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec3 pos;
+        \\void main(){ gl_Position = vec4(pos, 1.0); gl_PointSize = 2.0; }
+    ;
+    const spirv = compileVertToSpirv("pervertex_pointsize", source) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    // Must fail because of gl_PointSize specifically — not because gl_Position
+    // went unrecognized (the pre-fix failure mode).
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "PointSize") != null or
+        std.mem.indexOf(u8, detail, "point") != null);
 }
 
 test "wgsl: shared block var is renamed to avoid struct-name collision" {
