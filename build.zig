@@ -400,9 +400,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     wgsl_test_mod.addImport("glslpp", glslpp_mod);
+    const wgsl_test_filter = b.option([]const u8, "wgsl-filter", "Substring filter for test-wgsl test names");
     const run_wgsl_tests = b.addRunArtifact(b.addTest(.{
         .name = "wgsl-tests",
         .root_module = wgsl_test_mod,
+        .filters = if (wgsl_test_filter) |f| &.{f} else &.{},
     }));
     wgsl_test_step.dependOn(&run_wgsl_tests.step);
     test_step.dependOn(&run_wgsl_tests.step);
