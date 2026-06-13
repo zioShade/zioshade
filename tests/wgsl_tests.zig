@@ -4483,6 +4483,65 @@ test "wgsl: conditional break in loop body emits break, not an empty if (#170)" 
     try nagaValidateOrSkip(wgsl, "cond-break-body");
 }
 
+// #170: the CONTINUE sibling of the break fix above. glslang `-V` (unoptimized)
+// emits `if (cond) continue;` as an INDIRECT trampoline: `OpSelectionMerge %m;
+// OpBranchConditional %cond %cont %m` where `%cont` is a SEPARATE block whose only
+// instruction is `OpBranch <loop_continue>`. The structurizer only detected the
+// DIRECT continue form (branch target IS the loop-continue block), so the trampoline
+// fell through to the general selection handler → an empty `if (cond) { }` and the
+// trampoline's `OpBranch <loop_continue>` was skipped → the `continue` was DROPPED
+// = silent-wrong (the rest of the body runs when it should have been skipped). The
+// fix must also route through the phi-update machinery so the loop counter still
+// advances on the early-continue path.
+test "wgsl: conditional continue in loop body emits continue, not an empty if (#170)" {
+    const spirv = compileToSpirv("cond_continue_body",
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 10; i++) {
+        \\        if (i == 3) continue;
+        \\        sum += x * float(i);
+        \\    }
+        \\    o = vec4(sum);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // Before the fix the body `if (i == 3) continue;` was dropped → empty `if (cond) { }`
+    // with NO `continue;` emitted anywhere, so the presence of `continue;` is itself the
+    // discriminator (the loop-exit `if (!cond) { break; }` never emits `continue;`).
+    try assertContains(wgsl, "continue;");
+    try nagaValidateOrSkip(wgsl, "cond-continue-body");
+}
+
+// #170: the negated-condition counterpart of the continue test above — exercises the
+// `false_is_continue` branch (glslang may emit `OpBranchConditional %cond %merge
+// %cont`, i.e. the CONTINUE is on the FALSE edge). Without the trampoline fix this
+// path also dropped the continue.
+test "wgsl: negated conditional continue in loop body emits continue (#170)" {
+    const spirv = compileToSpirv("cond_continue_neg",
+        \\#version 450
+        \\layout(location = 0) in float x;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 10; i++) {
+        \\        if (i < 3) { sum += x; } else { continue; }
+        \\        sum += x * float(i);
+        \\    }
+        \\    o = vec4(sum);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "continue;");
+    try nagaValidateOrSkip(wgsl, "cond-continue-neg");
+}
+
 // #170: OpImageSampleExplicitLod with a `Grad` image operand (GLSL textureGrad —
 // explicit ddx/ddy gradients) was lowered to `textureSampleLevel(t, s, coord, ddx)`
 // — the handler ignored the image-operands mask and misread the GRADIENT vec2 as a
