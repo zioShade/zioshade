@@ -3944,7 +3944,9 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 .workgroup_id => "workgroup_id",
                 .num_workgroups => "num_workgroups",
                 .local_invocation_index => "local_invocation_index",
-                .primitive_id => "primitive_id",
+                // gl_PrimitiveID has NO core-WGSL fragment-input builtin (naga:
+                // "unknown builtin: primitive_id"). It falls to the honest-error else
+                // arm rather than emitting an invalid `@builtin(primitive_id)`. (#170)
                 .sample_id => "sample_index",
                 else => {
                     last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no @builtin for input '{s}'", .{@tagName(bi)}) catch null;

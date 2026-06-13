@@ -4640,3 +4640,17 @@ test "wgsl: gl_SampleID (sample_index) entry param is u32, not i32 (#170)" {
     try assertContains(wgsl, "@builtin(sample_index)");
     try nagaValidateOrSkip(wgsl, "sample-id");
 }
+
+// #170: WGSL has NO `primitive_id` built-in — the core fragment-input builtins are
+// only position/front_facing/sample_index/sample_mask. glslpp mapped gl_PrimitiveID →
+// `@builtin(primitive_id)`, which naga rejects ("unknown builtin: `primitive_id`") =
+// silent-wrong (non-validating WGSL). It must honest-error instead.
+test "wgsl: gl_PrimitiveID honest-errors (WGSL has no primitive_id builtin) (#170)" {
+    const spirv = compileToSpirv("primitive_id",
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(float(gl_PrimitiveID)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
