@@ -32,6 +32,10 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     }) catch return error.SkipZigTest;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
+    // If glslang rejects the source the `.spv` is never written; skip rather than
+    // surface a confusing FileNotFound from the open below (mirrors the exit-code
+    // guard in nagaValidateOrSkip).
+    if (!(result.term == .Exited and result.term.Exited == 0)) return error.SkipZigTest;
 
     const spv_file = try std.fs.openFileAbsolute(tmp_spv, .{ .mode = .read_only });
     defer spv_file.close();
@@ -70,6 +74,10 @@ fn compileVertToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     }) catch return error.SkipZigTest;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
+    // If glslang rejects the source the `.spv` is never written; skip rather than
+    // surface a confusing FileNotFound from the open below (mirrors the exit-code
+    // guard in nagaValidateOrSkip).
+    if (!(result.term == .Exited and result.term.Exited == 0)) return error.SkipZigTest;
 
     const spv_file = try std.fs.openFileAbsolute(tmp_spv, .{ .mode = .read_only });
     defer spv_file.close();
@@ -4877,17 +4885,21 @@ test "wgsl: array-typed stage input honest-errors (only scalars/vectors at @loca
 // (non-block, non-struct) array OUTPUT at a @location is equally invalid WGSL
 // entry IO. A vertex `out vec4 a[2];` varying is emitted by glslang as a single
 // TypeArray output var; the vertex output-assembly path flattens a top-level
-// MATRIX into N column @locations but does NOT handle a top-level array, so the
-// generic emitter would otherwise append `@location(0) a: array<vec4<f32>, 2>`
+// MATRIX into N column @locations but deliberately does NOT flatten a top-level
+// array (that would require runtime reconstruction glslpp doesn't implement), so
+// without the guard the generic emitter would append `@location(0) a: array<...>`
 // to VertexOutput, which naga rejects ("Only numeric scalars and vectors are
 // allowed"). It must honest-error, consistent with the input guard and the
-// existing matrix-MEMBER guards.
+// existing matrix-MEMBER guards. The detail-string check pins this to the array
+// guard rather than any other error.UnsupportedOp path.
 test "wgsl: array-typed stage output honest-errors (only scalars/vectors at @location) (#170)" {
     const spirv = compileVertToSpirv("array_output",
         \\#version 450
         \\layout(location = 0) out vec4 a[2];
-        \\void main() { a[0] = vec4(1.0); a[1] = vec4(2.0); gl_Position = vec4(0.0); }
+        \\void main() { a[0] = vec4(1.0); gl_Position = vec4(0.0); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "array output") != null);
 }
