@@ -2711,6 +2711,43 @@ test "msl: matrix-element const-array global folds and is declared with an initi
     try assertContains(msl, "float4x4(float4(2.0, 0.0, 0.0, 0.0)");
 }
 
+test "msl: nested-array and struct-array const globals fold and are declared with initializers (constant-array.frag)" {
+    // Regression for the spirv-cross `constant-array.frag` witness. The frontend's
+    // Design-A global-const folding cleared its constant caches only ONCE before
+    // the per-initializer loop, so a NESTED array (`vec4[2][2]`) or a STRUCT array
+    // (`Foobar[2]`) whose elements reused a constant minted in an EARLIER
+    // iteration (a 1D array processed first) was served that cross-iteration id —
+    // which fails `isConstantId` (it scans only the current scratch list), so
+    // `tryUpgradeToConstantComposite` could not fold the outer aggregate. The
+    // initializer was dropped and the Private global read uninitialised memory →
+    // the MSL backend honest-errored `UndeclaredPrivateArrayGlobal`. With the
+    // caches cleared per-initializer, both shapes fold and materialise here.
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out vec4 FragColor;
+        \\layout(location = 0) flat in int index;
+        \\struct Foobar { float a; float b; };
+        \\const vec4 foo[3] = vec4[](vec4(1.0), vec4(2.0), vec4(3.0));
+        \\const vec4 foobars[2][2] = vec4[][](vec4[](vec4(1.0), vec4(2.0)), vec4[](vec4(8.0), vec4(10.0)));
+        \\const Foobar foos[2] = Foobar[](Foobar(10.0, 40.0), Foobar(90.0, 70.0));
+        \\void main(){
+        \\  FragColor = foo[index] + foobars[index][index + 1] + vec4(foos[index].a + foos[index].b);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // 1D array still folds (pre-existing); nested array and struct array are the fix.
+    try assertContains(msl, "constant float4 ");
+    // Nested array: declared as a 2D `constant float4 [2][2]` with brace-nested values.
+    try assertContains(msl, "[2][2] = {");
+    try assertContains(msl, "float4(8.0, 8.0, 8.0, 8.0)");
+    // Struct array: declared as a `constant Foobar [2]` with the member values.
+    try assertContains(msl, "constant Foobar ");
+    try assertContains(msl, "{ 10.0, 40.0 }");
+    try assertContains(msl, "{ 90.0, 70.0 }");
+}
+
 // ---------------------------------------------------------------------------
 // T19: arrayed sampler/texture type names + sample-call layer split (#187).
 //

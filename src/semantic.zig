@@ -168,9 +168,23 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         init_consts.deinit(alloc);
     }
     if (analyzer.global_const_ast_inits.count() > 0) {
-        analyzer.const_composite_cache.clearRetainingCapacity();
         var gci = analyzer.global_const_ast_inits.iterator();
         while (gci.next()) |entry| {
+            // Clear BOTH constant caches BEFORE each initializer so every
+            // initializer is fully self-contained: every scalar and composite it
+            // needs is freshly emitted into THIS iteration's scratch list. A
+            // shared cache would return ids minted in a PRIOR iteration (now
+            // committed to `init_consts`, not in the current scratch); those ids
+            // fail `isConstantId` (which only scans the current scratch), so
+            // `tryUpgradeToConstantComposite` cannot fold a NESTED array or a
+            // STRUCT array whose elements were served from the cross-iteration
+            // cache — the outer aggregate would stay a runtime `composite_construct`
+            // and the initializer would be dropped (silent-wrong: the Private
+            // global reads uninitialised memory). Re-emitting duplicate constants
+            // is harmless: codegen dedups them on replay via
+            // emitted_constants/constant_alias (operandValue resolves the alias).
+            analyzer.const_cache.clearRetainingCapacity();
+            analyzer.const_composite_cache.clearRetainingCapacity();
             const gid = entry.key_ptr.*;
             const init_node = entry.value_ptr.*;
             // Only flat module-scope const arrays lower to a Private global we
