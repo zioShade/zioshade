@@ -3843,6 +3843,17 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                         try matrix_outputs.put(ovid, .{ .base_name = try arena.dupe(u8, var_name), .cols = cols, .col_type = col_type });
                         continue;
                     }
+                    // WGSL entry-point IO may only be numeric scalars/vectors — an
+                    // array at a @location is rejected by naga ("Only numeric scalars
+                    // and vectors are allowed"). The matrix arm above flattens matNxM
+                    // into column @locations, but a top-level array varying is not
+                    // reconstructed; emitting `@location(N) a: array<...>` would be
+                    // silent-wrong. This is the OUTPUT symmetry of the array-input
+                    // guard (~4120) and the matrix-MEMBER guards. (#170)
+                    if (mdef.op == .TypeArray or mdef.op == .TypeRuntimeArray) {
+                        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL stage IO must be a scalar/vector: array output at @location({d}) is not supported", .{loc_val orelse 0}) catch null;
+                        return error.UnsupportedOp;
+                    }
                 }
             }
             const type_name = try wgslType(&module, actual_type, &names, arena);
