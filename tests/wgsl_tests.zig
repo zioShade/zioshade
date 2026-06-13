@@ -4836,3 +4836,39 @@ test "wgsl: duplicate glslang OpName for two local vars is deduped (no redefinit
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "dup-local-name");
 }
+
+// #170: WGSL entry-point inputs/outputs may ONLY be numeric scalars or vectors —
+// a matrix at a @location is rejected by naga ("The type [N] cannot be used for
+// user-defined entry point inputs or outputs. Only numeric scalars and vectors
+// are allowed."). glslpp's generic input-param emitter printed a top-level matrix
+// varying as `@location(0) m: mat4x4<f32>` = silent-wrong (non-validating WGSL).
+// (spirv-cross flattens a matrix varying into N column @locations; glslpp does not
+// reconstruct that, and its sibling guards already honest-error on a matrix MEMBER
+// at a @location, so a top-level matrix input must honest-error too, not emit
+// invalid WGSL.) The frontend never emits a matrix stage input; this is the
+// external-SPIR-V path via spirvToWGSL.
+test "wgsl: matrix-typed stage input honest-errors (only scalars/vectors at @location) (#170)" {
+    const spirv = compileToSpirv("matrix_input",
+        \\#version 450
+        \\layout(location = 0) in mat4 m;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = m * vec4(1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
+
+// #170: same rule as the matrix-input case — an ARRAY at a @location is equally
+// invalid WGSL entry IO. A vertex `in vec4 a[2];` attribute is emitted by glslang
+// as a single TypeArray input var (occupying locations 0,1); glslpp's generic
+// input-param emitter would otherwise print `@location(0) a: array<vec4<f32>, 2>`,
+// which naga rejects. It must honest-error (covers the TypeArray arm of the guard).
+test "wgsl: array-typed stage input honest-errors (only scalars/vectors at @location) (#170)" {
+    const spirv = compileVertToSpirv("array_input",
+        \\#version 450
+        \\layout(location = 0) in vec4 a[2];
+        \\void main() { gl_Position = a[0] + a[1]; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
