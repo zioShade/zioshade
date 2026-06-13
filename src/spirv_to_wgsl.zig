@@ -4592,6 +4592,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     // This eliminates unnecessary 'let vN = ptr;' declarations
     // BUT: don't inline if the pointer is also a Store target (to preserve load-before-store semantics)
     var inline_loads = std.AutoHashMap(u32, void).init(arena);
+    // Names already used by an emitted function-local `var`, to dedup collisions:
+    // glslang can emit two DISTINCT OpVariables with the SAME OpName string (e.g. the
+    // compiler-generated `indexable` temps for dynamic indexing of a const array),
+    // which would produce a WGSL "redefinition". (#170)
+    var declared_local_names = std.StringHashMap(void).init(arena);
     // Build set of pointer IDs that are Store targets in this function
     var store_targets = std.AutoHashMap(u32, void).init(arena);
     {
@@ -5706,7 +5711,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                     if (sc == .Function) {
                         const rt = try wgslType(module, inst.words[1], names, arena);
-                        const vn = names.get(inst.words[2]) orelse "v";
+                        // Dedup a name already used by another local var (glslang may
+                        // give two distinct OpVariables the same OpName); rename the
+                        // collider and update the names map so its uses resolve to the
+                        // unique name (the declaration precedes every use). (#170)
+                        var vn = names.get(inst.words[2]) orelse "v";
+                        if (declared_local_names.contains(vn)) {
+                            var n: u32 = 1;
+                            var uniq = try std.fmt.allocPrint(alloc, "{s}_{d}", .{ vn, n });
+                            while (declared_local_names.contains(uniq)) {
+                                alloc.free(uniq);
+                                n += 1;
+                                uniq = try std.fmt.allocPrint(alloc, "{s}_{d}", .{ vn, n });
+                            }
+                            if (try names.fetchPut(inst.words[2], uniq)) |old| alloc.free(old.value);
+                            vn = uniq;
+                        }
+                        try declared_local_names.put(try arena.dupe(u8, vn), {});
                         try writeInd(w, indent); try w.print("var {s}: {s};\n", .{ vn, rt });
                     } else if (sc == .Private) {
                         const rt = try wgslType(module, inst.words[1], names, arena);

@@ -4654,3 +4654,27 @@ test "wgsl: gl_PrimitiveID honest-errors (WGSL has no primitive_id builtin) (#17
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
+
+// #170: dynamically indexing a `const` array at TWO sites makes glslang emit two
+// distinct OpVariables that share the SAME OpName string ("indexable", the local
+// copy it makes per access). glslpp named both `indexable`, so the WGSL had two
+// `var indexable: array<f32,5>;` declarations — naga rejects ("redefinition of
+// `indexable`") = silent-wrong. Function-local var names are now deduped (the second
+// becomes `indexable_1`) and the names map updated so its uses resolve to it.
+test "wgsl: duplicate glslang OpName for two local vars is deduped (no redefinition) (#170)" {
+    const spirv = compileToSpirv("dup_local_name",
+        \\#version 450
+        \\layout(location = 0) flat in int i;
+        \\layout(location = 0) out vec4 o;
+        \\const float weights[5] = float[5](0.1, 0.2, 0.4, 0.2, 0.1);
+        \\void main() {
+        \\    float s = 0.0;
+        \\    for (int j = 0; j < 5; j++) s += weights[j];
+        \\    o = vec4(weights[clamp(i, 0, 4)], s, 0.0, 1.0);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "dup-local-name");
+}
