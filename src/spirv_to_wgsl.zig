@@ -4110,6 +4110,20 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         } else {
             const loc = getDecVal(&decorations, iv.id, .location) orelse i;
+            // WGSL entry-point IO may only be numeric scalars/vectors — a matrix or
+            // array at a @location is rejected by naga ("Only numeric scalars and
+            // vectors are allowed"). spirv-cross flattens a matrix/array varying into
+            // N column/element @locations; glslpp does not reconstruct that, and its
+            // sibling guards already honest-error on a matrix/array MEMBER at a
+            // @location (see emitFlattenedLeafParams), so a top-level matrix/array
+            // input must fail loud too rather than emit a silently-invalid signature. (#170)
+            if (getDef(&module, actual_type)) |td| switch (td.op) {
+                .TypeMatrix, .TypeArray, .TypeRuntimeArray => {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL stage IO must be a scalar/vector: matrix/array input at @location({d}) is not supported", .{loc}) catch null;
+                    return error.UnsupportedOp;
+                },
+                else => {},
+            };
             // Fragment INPUTS that are integer-typed (or GLSL `flat`-qualified)
             // need @interpolate(flat). Vertex inputs are attributes (fetched, not
             // interpolated), so the attribute is illegal there — guard on stage.
