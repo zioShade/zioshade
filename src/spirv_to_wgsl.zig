@@ -5442,8 +5442,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             (true_label == loop_merge_label.? or isPureBranchTrampoline(module, true_label, loop_merge_label.?));
                         const false_is_break = in_loop and loop_merge_label != null and
                             (false_label == loop_merge_label.? or isPureBranchTrampoline(module, false_label, loop_merge_label.?));
-                        const true_is_continue = in_loop and loop_continue_label != null and true_label == loop_continue_label.?;
-                        const false_is_continue = in_loop and loop_continue_label != null and false_label == loop_continue_label.?;
+                        // Continue, like break, may be DIRECT (the branch target IS
+                        // the loop continue block) or an INDIRECT pure trampoline that
+                        // just `OpBranch`es to the continue block (glslang `-V`,
+                        // unoptimized: `if(cond) continue;`). Both must emit `continue;`
+                        // (with the loop's phi/counter updates first) — missing the
+                        // trampoline form dropped the branch → an empty `if (cond) { }`
+                        // = silent-wrong (the body ran when it should have skipped). (#170)
+                        const true_is_continue = in_loop and loop_continue_label != null and
+                            (true_label == loop_continue_label.? or isPureBranchTrampoline(module, true_label, loop_continue_label.?));
+                        const false_is_continue = in_loop and loop_continue_label != null and
+                            (false_label == loop_continue_label.? or isPureBranchTrampoline(module, false_label, loop_continue_label.?));
                         if (true_is_break) {
                             // if (cond) { break; }
                             const inlined2 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
@@ -5459,7 +5468,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         } else if (true_is_continue) {
                             // Emit phi computation + updates before continue, inside the if block
                             // In SPIR-V, continue goes to continue block which computes phi values
-                            // In WGSL, we must compute phi values before the continue keyword
+                            // In WGSL, we must compute phi values before the continue keyword.
+                            // NOTE: unlike the break paths we do NOT inline the condition here —
+                            // the body condition instruction is emitted eagerly by the main
+                            // dispatch (it is not in the deferred loop-header region), so it
+                            // already exists as a `let`; inlining would leave that `let` dangling
+                            // AND duplicate the expression. Referencing the existing name is clean.
                             try writeInd(w, indent); try w.print("if ({s}) {{\n", .{condition});
                             if (loop_stack.items.len > 0) {
                                 const cur = loop_stack.items[loop_stack.items.len - 1];
@@ -5507,7 +5521,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             try writeInd(w, indent); try w.writeAll("}\n");
                             pending_merge = null;
                         } else if (false_is_continue) {
-                            // Emit phi computation + updates before continue, inside the if block
+                            // Emit phi computation + updates before continue, inside the if block.
+                            // Reference the already-emitted condition name (see true_is_continue
+                            // note above — inlining here would dangle the eager `let`).
                             try writeInd(w, indent); try w.print("if (!({s})) {{\n", .{condition});
                             if (loop_stack.items.len > 0) {
                                 const cur = loop_stack.items[loop_stack.items.len - 1];
