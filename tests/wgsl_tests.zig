@@ -4872,3 +4872,22 @@ test "wgsl: array-typed stage input honest-errors (only scalars/vectors at @loca
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
+
+// #170: the OUTPUT-side symmetry of the array-input guard above. A top-level
+// (non-block, non-struct) array OUTPUT at a @location is equally invalid WGSL
+// entry IO. A vertex `out vec4 a[2];` varying is emitted by glslang as a single
+// TypeArray output var; the vertex output-assembly path flattens a top-level
+// MATRIX into N column @locations but does NOT handle a top-level array, so the
+// generic emitter would otherwise append `@location(0) a: array<vec4<f32>, 2>`
+// to VertexOutput, which naga rejects ("Only numeric scalars and vectors are
+// allowed"). It must honest-error, consistent with the input guard and the
+// existing matrix-MEMBER guards.
+test "wgsl: array-typed stage output honest-errors (only scalars/vectors at @location) (#170)" {
+    const spirv = compileVertToSpirv("array_output",
+        \\#version 450
+        \\layout(location = 0) out vec4 a[2];
+        \\void main() { a[0] = vec4(1.0); a[1] = vec4(2.0); gl_Position = vec4(0.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
