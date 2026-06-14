@@ -5250,6 +5250,40 @@ const Codegen = struct {
                     try self.emitWord(coord_id);
                 }
             },
+            .image_sample_offset => {
+                // textureOffset(s, coord, const ivec offset): implicit-LOD sample
+                // with a CONSTANT offset → the ConstOffset image operand (bit 3).
+                // The offset is operand[2] (an OpConstantComposite, validated in
+                // semantic). Dropping it sampled the wrong texels (silent-wrong,
+                // #170). Mirrors the textureLodOffset ConstOffset path below.
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const offset_id = self.operandId(resolved, 2);
+                if (self.stage == .vertex or self.stage == .compute) {
+                    // Implicit LOD is illegal in vertex/compute — convert to an
+                    // explicit Lod 0, keeping the ConstOffset (mask Lod|ConstOffset).
+                    // Mirrors the plain image_sample vertex/compute remap above.
+                    const zero_id = try self.emitFloatConstant(0.0);
+                    try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleExplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(10); // Image Operands Mask: Lod (bit 1) | ConstOffset (bit 3)
+                    try self.emitWord(zero_id);
+                    try self.emitWord(offset_id);
+                } else {
+                    try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageSampleImplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(8); // Image Operands Mask: ConstOffset (bit 3)
+                    try self.emitWord(offset_id);
+                }
+            },
             .image_sample_explicit_lod => {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;

@@ -6211,12 +6211,50 @@ const Analyzer = struct {
                             const is_grad = std.mem.eql(u8, node.data.name, "textureGrad") or std.mem.eql(u8, node.data.name, "textureGradOffset");
                             const is_explicit_lod = is_lod or is_grad or std.mem.eql(u8, node.data.name, "textureProjLod") or std.mem.eql(u8, node.data.name, "textureProjGrad");
                             const is_proj = std.mem.eql(u8, node.data.name, "textureProj");
+                            // textureOffset(s, coord, const ivec offset) →
+                            // image_sample_offset (see ir.zig) so codegen emits the
+                            // SPIR-V ConstOffset image operand. The plain image_sample
+                            // arm dropped operand[2] entirely = silent-wrong (sampled
+                            // the wrong texels). The WGSL back-end carries this offset
+                            // into textureSample(t, s, coord, offset). (#170)
+                            //
+                            // Scope note: the OTHER *Offset sample builtins are left
+                            // as honest-errors, NOT lowered, because that is the
+                            // #170-compliant status quo across ALL back-ends.
+                            // textureGradOffset and textureProjOffset are both absent
+                            // from isTextureBuiltin, so they already fail loud
+                            // (textureGradOffset → "builtin-not-lowerable" via the
+                            // GLSL.std.450 path; textureProjOffset → unrecognized
+                            // identifier). Lowering them here would feed every
+                            // back-end one shared SPIR-V — and the HLSL/MSL sample
+                            // emitters silently DROP the ConstOffset (e.g. HLSL
+                            // .SampleGrad omits the offset arg), turning today's
+                            // honest-error into a NEW silent-wrong. textureOffset is
+                            // safe only because its offset was ALREADY dropped pre-fix
+                            // in those back-ends (status quo, no regression); WGSL is
+                            // the one back-end that now carries it.
+                            const is_tex_offset = !is_shadow_sample and std.mem.eql(u8, node.data.name, "textureOffset");
+                            // The ConstOffset operand MUST be an OpConstantComposite
+                            // (SPIR-V requires it constant). For ivec2(1,0) the arg
+                            // folds to a constant_composite; a non-constant offset
+                            // cannot be a ConstOffset, so honest-error rather than
+                            // emit invalid SPIR-V. Mirrors the textureGatherOffsets
+                            // offsets-constant gate above.
+                            if (is_tex_offset) {
+                                if (arg_tids.items.len < 3 or !self.isConstantId(arg_tids.items[2].id)) {
+                                    last_error_ctx = "texture-offset-not-constant";
+                                    last_error_inner = "texture-offset-not-constant";
+                                    last_error_line = node.loc.line;
+                                    last_error_column = node.loc.column;
+                                    return error.SemanticFailed;
+                                }
+                            }
                             // Shadow samplers use Dref instructions that return float
                             const tag: ir.Instruction.Tag = if (is_shadow_sample) (
                                 if (is_explicit_lod) .image_sample_dref_explicit_lod
                                 else if (is_proj) .image_sample_dref_proj
                                 else .image_sample_dref
-                            ) else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else .image_sample;
+                            ) else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else if (is_tex_offset) .image_sample_offset else .image_sample;
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                             for (arg_tids.items, 0..) |tid, i| {
                                 operands[i] = .{ .id = tid.id };

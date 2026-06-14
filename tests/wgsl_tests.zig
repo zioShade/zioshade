@@ -4662,6 +4662,89 @@ test "wgsl: textureOffset on sampler2DArray keeps the offset after the layer (#1
     try nagaValidateOrSkip(wgsl, "tex-offset-array");
 }
 
+// #170: the FRONTEND analog of the two tests above. The two preceding tests
+// route through glslang (compileToSpirv); this one drives glslpp's OWN frontend
+// (compileToWgsl = compileToSPIRV + spirvToWGSL). glslpp's analyzer ACCEPTS
+// textureOffset and lowers it to `.image_sample` with [sampler, coord, offset],
+// but codegen's `.image_sample` arm emitted OpImageSampleImplicitLod WITHOUT the
+// ConstOffset image operand — silently dropping operand[2]. The native path
+// therefore produced `textureSample(s, s_sampler, uv)` (offset gone) = silent-
+// wrong, sampling the WRONG texels. The offset must survive as a trailing
+// const-offset arg. (Contrast the sibling tests' comment claiming the frontend
+// "rejects textureOffset" — it does not; it drops the offset.)
+test "wgsl: textureOffset via glslpp frontend keeps the ConstOffset (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureOffset(s, uv, ivec2(1, 0)); }
+    );
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(");
+    try assertContains(wgsl, ", vec2<i32>(1, 0))");
+    try nagaValidateOrSkip(wgsl, "tex-offset-frontend");
+}
+
+// #170: textureGradOffset is deliberately NOT lowered by glslpp's frontend (it
+// is absent from isTextureBuiltin, so it honest-errors via "builtin-not-
+// lowerable"). It IS representable in WGSL — textureSampleGrad(t, s, coord, ddx,
+// ddy, offset) — but the frontend emits ONE shared SPIR-V to all back-ends, and
+// the HLSL/MSL sample emitters silently DROP the ConstOffset (HLSL .SampleGrad
+// omits the offset arg). Lowering it here would convert today's honest-error into
+// a NEW silent-wrong on those back-ends. Honest-error is the #170-compliant
+// choice until every back-end carries the offset. (Contrast textureOffset, whose
+// offset was already dropped pre-fix on HLSL/MSL — no regression there.)
+test "wgsl: textureGradOffset honest-errors via the frontend (not silent-wrong) (#170)" {
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRV(alloc,
+            \\#version 450
+            \\layout(binding = 0) uniform sampler2D s;
+            \\layout(location = 0) in vec2 uv;
+            \\layout(location = 0) out vec4 o;
+            \\void main() { o = textureGradOffset(s, uv, vec2(0.1), vec2(0.2), ivec2(1, 0)); }
+        , .{ .stage = .fragment }),
+    );
+}
+
+// #170: textureProjOffset has NO faithful WGSL lowering — WGSL has no projective
+// sampler builtin, and the manual perspective-divide path used for textureProj
+// cannot carry a ConstOffset. It is deliberately kept OUT of isTextureBuiltin so
+// it honest-errors (an unrecognized builtin) rather than emitting a wrong sample.
+// (Compile through the native frontend; expect an error.) This is the
+// #170-compliant counterpart to the textureOffset fix: faithful where
+// representable on the target back-end, loud where not — never silent-wrong.
+test "wgsl: textureProjOffset honest-errors (no faithful lowering) (#170)" {
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRV(alloc,
+            \\#version 450
+            \\layout(binding = 0) uniform sampler2D s;
+            \\layout(location = 0) in vec4 P;
+            \\layout(location = 0) out vec4 o;
+            \\void main() { o = textureProjOffset(s, P, ivec2(1, 0)); }
+        , .{ .stage = .fragment }),
+    );
+}
+
+// #170: textureOffset with a NON-CONSTANT offset cannot become a SPIR-V
+// ConstOffset (which requires an OpConstantComposite). glslpp must honest-error
+// rather than emit invalid SPIR-V / a silently-wrong sample.
+test "wgsl: textureOffset with a non-constant offset honest-errors (#170)" {
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRV(alloc,
+            \\#version 450
+            \\layout(binding = 0) uniform sampler2D s;
+            \\layout(location = 0) in vec2 uv;
+            \\layout(location = 1) flat in ivec2 dyn;
+            \\layout(location = 0) out vec4 o;
+            \\void main() { o = textureOffset(s, uv, dyn); }
+        , .{ .stage = .fragment }),
+    );
+}
+
 // #170: WGSL forbids the filtering textureSample/textureSampleLevel builtins on
 // INTEGER textures (texture_2d<i32>/<u32> are non-filterable) — only textureLoad is
 // allowed. GLSL `texture(isampler2D, uv)` (a normalized-coordinate sample of an
