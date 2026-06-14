@@ -5309,3 +5309,24 @@ test "wgsl: nested sampler array honest-errors (#170)" {
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
+
+// #170: an SSBO that is an ARRAY of blocks whose struct holds a runtime-sized
+// array (`buffer SSBO { vec4 data[]; } ssbos[2];` → `array<SSBO, 2>` where SSBO is
+// `{ data: array<vec4f> }`) is unrepresentable in core WGSL — a runtime-sized
+// array cannot nest inside a fixed-size array (naga "Base type for the array is
+// invalid"), and there is no core-WGSL dynamically-indexed array of runtime-sized
+// storage buffers. glslpp emitted the naga-rejected nesting = silent-wrong; it
+// must honest-error instead. (A PLAIN SSBO with a runtime array still works.)
+test "wgsl: array of SSBO blocks with a runtime-array member honest-errors (#170)" {
+    try std.testing.expectError(error.UnsupportedOp, compileCompToWgsl(
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer SSBO { vec4 data[]; } ssbos[2];
+        \\void main() {
+        \\    ssbos[1].data[gl_GlobalInvocationID.x] = ssbos[0].data[gl_GlobalInvocationID.x];
+        \\}
+    ));
+    // Pin the error to THIS guard (not some other UnsupportedOp path).
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "runtime-sized array member") != null);
+}
