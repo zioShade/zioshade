@@ -4591,6 +4591,54 @@ test "wgsl: texture(s, uv, bias) (OpImageSampleImplicitLod Bias) -> textureSampl
     try nagaValidateOrSkip(wgsl, "tex-bias");
 }
 
+// #170: OpImageSampleImplicitLod with a `ConstOffset` image operand (GLSL
+// textureOffset(s, uv, offset) — a const-offset sample, no bias) was lowered to a
+// plain `textureSample(s, sampler, uv)`, SILENTLY DROPPING the offset = silent-wrong.
+// WGSL's textureSample accepts a trailing const-offset arg —
+// `textureSample(t, s, coord, offset)` — so the (1,0) offset must survive into the
+// output. glslang encodes this as ConstOffset (0x8) with NO Bias bit, so it exercises
+// the non-Bias arm of the handler (the Bias arm at ~6511 already handles its own
+// offset). glslpp's frontend rejects textureOffset, so this goes through glslang.
+test "wgsl: textureOffset(s, uv, offset) (OpImageSampleImplicitLod ConstOffset) keeps the offset (#170)" {
+    const spirv = compileToSpirv("tex_offset",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureOffset(s, uv, ivec2(1, 0)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The offset must reach the textureSample call as a trailing 4th argument; the
+    // bare (dropped-offset) form ends `..., uv)`. The `, vec2<i32>(1, 0))` substring
+    // only occurs as a trailing call arg, proving the (1,0) offset survived.
+    try assertContains(wgsl, "textureSample(");
+    try assertContains(wgsl, ", vec2<i32>(1, 0))");
+    try nagaValidateOrSkip(wgsl, "tex-offset");
+}
+
+// #170: the same ConstOffset drop on the EXPLICIT-LOD path. GLSL
+// textureLodOffset(s, uv, lod, offset) compiles to OpImageSampleExplicitLod with
+// Lod (0x2) | ConstOffset (0x8); the non-Grad arm read only the LOD operand and
+// dropped the offset = silent-wrong. WGSL spells it
+// `textureSampleLevel(t, s, coord, lod, offset)` — the offset is the trailing arg.
+test "wgsl: textureLodOffset (OpImageSampleExplicitLod Lod|ConstOffset) keeps the offset (#170)" {
+    const spirv = compileToSpirv("tex_lod_offset",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureLodOffset(s, uv, 0.0, ivec2(1, 0)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(");
+    try assertContains(wgsl, ", vec2<i32>(1, 0))");
+    try nagaValidateOrSkip(wgsl, "tex-lod-offset");
+}
+
 // #170: WGSL forbids the filtering textureSample/textureSampleLevel builtins on
 // INTEGER textures (texture_2d<i32>/<u32> are non-filterable) — only textureLoad is
 // allowed. GLSL `texture(isampler2D, uv)` (a normalized-coordinate sample of an
