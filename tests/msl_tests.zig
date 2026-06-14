@@ -3794,3 +3794,20 @@ test "T-arrlen.2: runtime SSBO array .length() in a fragment shader honest-error
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToMSL(alloc, spirv, .{}));
 }
+
+// #170: a NESTED sampler array (`sampler1D s[2][2]`) was missed by the shared
+// hasOpaqueArrayResource guard (it checked only one array level), so the MSL
+// backend emitted broken output (undeclared `s`, `.sample()` on a float4) instead
+// of honest-erroring like it does for single-level sampler arrays. Pins the
+// cross-backend behaviour now that the guard unwraps every array level.
+test "T-samplerarr.nested: nested sampler array honest-errors in MSL (#170)" {
+    const spirv = compileToSpirv("nested_sampler_array",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler1D s[2][2];
+        \\layout(location = 0) flat in float c;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texture(s[0][1], c) + texture(s[1][0], c); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToMSL(alloc, spirv, .{}));
+}

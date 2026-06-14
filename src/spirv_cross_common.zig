@@ -247,7 +247,14 @@ pub fn hasOpaqueArrayResource(module: *const ParsedModule, include_runtime: bool
         const is_array = pe.op == .TypeArray or (include_runtime and pe.op == .TypeRuntimeArray);
         if (!is_array or pe.words.len < 3) continue;
         // OpTypeArray and OpTypeRuntimeArray both carry the element type in words[2].
-        const el = getDef(module, pe.words[2]) orelse continue;
+        // Unwrap EVERY array level: a NESTED resource array (e.g. `sampler1D s[2][2]`
+        // = array-of-array-of-sampledimage) must be detected too, not just one level.
+        var el = getDef(module, pe.words[2]) orelse continue;
+        while ((el.op == .TypeArray or el.op == .TypeRuntimeArray) and el.words.len >= 3) {
+            // getDef null = broken/incomplete SPIR-V; `el` stays a TypeArray so the
+            // opaque check below returns false safely (no false positive).
+            el = getDef(module, el.words[2]) orelse break;
+        }
         if (el.op == .TypeSampledImage or el.op == .TypeSampler or el.op == .TypeImage) return true;
     }
     return false;
