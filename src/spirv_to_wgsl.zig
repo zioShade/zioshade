@@ -708,6 +708,32 @@ fn arrayedSampleShape(module: *const ParsedModule, sampled_image_value_id: u32) 
     return .{ .comps = comps, .arrayed = true };
 }
 
+/// Shape of a STORAGE image (the operand of OpImageRead/OpImageWrite) for the
+/// imageLoad/imageStore → textureLoad/textureStore lowering. `arrayed` means the
+/// last coordinate component is an array layer that WGSL takes as a SEPARATE
+/// argument (`textureLoad(t, coord.xy, coord.z)`), not part of the coordinate.
+/// `ms` (multisampled storage, image2DMS) has NO WGSL representation — there is
+/// no multisampled storage texture type — so callers honest-error on it.
+const StorageImageShape = struct { arrayed: bool, ms: bool, spatial: u32 };
+fn storageImageShape(module: *const ParsedModule, image_value_id: u32) StorageImageShape {
+    const none = StorageImageShape{ .arrayed = false, .ms = false, .spatial = 2 };
+    // No OpTypeSampledImage unwrap step (unlike depthCompareShape/arrayedSampleShape):
+    // storage images are never combined-sampler types, so the pointee is the TypeImage.
+    const type_id = getTypeOf(module, image_value_id) orelse return none;
+    var inst = getDef(module, type_id) orelse return none;
+    if (inst.op == .TypePointer and inst.words.len > 3) {
+        inst = getDef(module, inst.words[3]) orelse return none;
+    }
+    if (inst.op != .TypeImage or inst.words.len <= 6) return none;
+    // OpTypeImage: [op, result, sampled_type, Dim, Depth, Arrayed, MS, Sampled, Format]
+    const spatial: u32 = switch (inst.words[3]) {
+        0 => 1, // 1D
+        2 => 3, // 3D (never arrayed)
+        else => 2, // 2D family
+    };
+    return .{ .arrayed = inst.words[5] == 1, .ms = inst.words[6] == 1, .spatial = spatial };
+}
+
 /// True if the texture behind a sampled-image value id has an INTEGER sampled
 /// component type (GLSL isampler*/usampler* → `texture_2d<i32>`/`<u32>`). WGSL
 /// integer textures are non-filterable: only `textureLoad` is allowed, NOT the
@@ -7398,19 +7424,44 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // ImageRead (storage image load)
             .ImageRead => {
+                const shape = storageImageShape(module, inst.words[3]);
+                if (shape.ms) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no multisampled storage texture (image2DMS imageLoad)", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "img";
                 const coord = names.get(inst.words[4]) orelse "uv";
-                try writeInd(w, indent); try w.print("let {s}: {s} = textureLoad({s}, {s});\n", .{ result_name, rt, image, coord });
+                try writeInd(w, indent);
+                if (shape.arrayed) {
+                    // WGSL takes the array layer as a SEPARATE arg: textureLoad(t, coord.xy, coord.z).
+                    const spat: []const u8 = if (shape.spatial == 1) ".x" else ".xy";
+                    const layer: []const u8 = if (shape.spatial == 1) ".y" else ".z";
+                    try w.print("let {s}: {s} = textureLoad({s}, ({s}){s}, ({s}){s});\n", .{ result_name, rt, image, coord, spat, coord, layer });
+                } else {
+                    try w.print("let {s}: {s} = textureLoad({s}, {s});\n", .{ result_name, rt, image, coord });
+                }
             },
 
             // ImageWrite (storage image store)
             .ImageWrite => {
+                const shape = storageImageShape(module, inst.words[1]);
+                if (shape.ms) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no multisampled storage texture (image2DMS imageStore)", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
                 const image = names.get(inst.words[1]) orelse "img";
                 const coord = names.get(inst.words[2]) orelse "uv";
                 const texel = names.get(inst.words[3]) orelse "color";
-                try writeInd(w, indent); try w.print("textureStore({s}, {s}, {s});\n", .{ image, coord, texel });
+                try writeInd(w, indent);
+                if (shape.arrayed) {
+                    const spat: []const u8 = if (shape.spatial == 1) ".x" else ".xy";
+                    const layer: []const u8 = if (shape.spatial == 1) ".y" else ".z";
+                    try w.print("textureStore({s}, ({s}){s}, ({s}){s}, {s});\n", .{ image, coord, spat, coord, layer, texel });
+                } else {
+                    try w.print("textureStore({s}, {s}, {s});\n", .{ image, coord, texel });
+                }
             },
 
             // ImageTexelPointer
