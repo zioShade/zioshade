@@ -6548,12 +6548,29 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     } else {
                         try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, bias, off_suffix });
                     }
-                } else if (shape.arrayed) {
-                    const cs = arrayedCoordSwizzle(shape.comps);
-                    const ls = arrayedLayerSwizzle(shape.comps);
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s}, i32(round({s}{s})));\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls });
                 } else {
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}, {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord });
+                    // Non-Bias path. The only image operand WGSL's plain textureSample
+                    // can carry is a CONSTANT ConstOffset (0x8) — GLSL textureOffset.
+                    // With Bias absent the offset sits at words[6] (bit order). Any
+                    // other operand bit (e.g. the runtime Offset 0x10 of a dynamic
+                    // textureOffset) has no faithful textureSample form → honest-error
+                    // rather than silently dropping it. Mirrors the Bias audit above
+                    // and the Grad audit in ImageSampleExplicitLod (#319/#314/#170).
+                    if ((mask & ~@as(u32, 0x8)) != 0) return error.UnsupportedImageOperands;
+                    var off_suffix: []const u8 = "";
+                    if ((mask & 0x8) != 0) {
+                        // ConstOffset claimed but truncated SPIR-V → honest-error, not
+                        // an out-of-bounds index or a silent offset drop.
+                        if (inst.words.len <= 6) return error.UnsupportedImageOperands;
+                        off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[6]) orelse "vec2<i32>(0)"});
+                    }
+                    if (shape.arrayed) {
+                        const cs = arrayedCoordSwizzle(shape.comps);
+                        const ls = arrayedLayerSwizzle(shape.comps);
+                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s}, i32(round({s}{s})){s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
+                    } else {
+                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, off_suffix });
+                    }
                 }
             },
 
@@ -6594,15 +6611,33 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleGrad({s}, {s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, ddx, ddy, off_suffix });
                     }
                 } else {
+                    // Non-Grad path: explicit Lod (0x2), optionally with a CONSTANT
+                    // ConstOffset (0x8) — GLSL textureLod / textureLodOffset. Operands
+                    // follow bit order: lod (words[6]), then the optional offset
+                    // (words[7]). Reading only the LOD and dropping the offset was
+                    // silent-wrong; any operand bit beyond Lod|ConstOffset has no
+                    // faithful textureSampleLevel form → honest-error. (#170, mirrors
+                    // the Grad arm above.)
+                    if ((mask & ~@as(u32, 0x2 | 0x8)) != 0) return error.UnsupportedImageOperands;
+                    // ExplicitLod REQUIRES the Lod operand on this (non-Grad) arm; a
+                    // ConstOffset-only mask is invalid SPIR-V and would misindex the
+                    // lod onto the offset word. Honest-error rather than read garbage.
+                    if ((mask & 0x2) == 0) return error.UnsupportedImageOperands;
                     const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+                    var off_suffix: []const u8 = "";
+                    if ((mask & 0x8) != 0) {
+                        // ConstOffset claimed but truncated SPIR-V → honest-error.
+                        if (inst.words.len <= 7) return error.UnsupportedImageOperands;
+                        off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[7]) orelse "vec2<i32>(0)"});
+                    }
                     // Arrayed: textureSampleLevel(t, s, coord.xy, i32(round(coord.z)), lod).
                     // Layer rounded for glslang parity (see ImageSampleImplicitLod).
                     if (shape.arrayed) {
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);
-                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, lod });
+                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, lod, off_suffix });
                     } else {
-                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, lod });
+                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, lod, off_suffix });
                     }
                 }
             },
