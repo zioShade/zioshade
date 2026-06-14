@@ -964,6 +964,31 @@ const wgsl_reserved_words = std.StaticStringMap(void).initComptime(.{
     .{ "texture_storage_1d", {} },       .{ "texture_storage_2d", {} },
     .{ "texture_storage_2d_array", {} }, .{ "texture_storage_3d", {} },
     .{ "texture_external", {} },
+    // Predeclared builtin FUNCTION names that glslpp EMITS as calls AND that are
+    // ALSO legal GLSL identifiers — i.e. WGSL builtins whose GLSL counterpart has
+    // a DIFFERENT name, so a GLSL variable can legally be named the WGSL one
+    // (`bitcast`←floatBitsToInt, `select`←OpSelect, `dpdx`←dFdx, `countOneBits`←
+    // bitCount, `reverseBits`←bitfieldReverse, `extractBits`←bitfieldExtract,
+    // `firstLeadingBit`←findMSB, `pack2x16float`←packHalf2x16, `arrayLength`←
+    // `.length()`, …). A shadowing variable makes naga reject the builtin call
+    // ("local declaration cannot be called") = silent-wrong. The builtin call
+    // text is emitted as a fixed string, NOT via the name map, so renaming the
+    // colliding user identifier (→ `name_`) leaves the call intact. (Most other
+    // WGSL builtins — min/max/dot/mix/… — are ALSO GLSL builtins, so they can't
+    // be GLSL identifiers and need no entry.) (#170)
+    .{ "bitcast", {} },                  .{ "select", {} },
+    .{ "dpdx", {} },                     .{ "dpdy", {} },
+    .{ "dpdxCoarse", {} },               .{ "dpdxFine", {} },
+    .{ "dpdyCoarse", {} },               .{ "dpdyFine", {} },
+    .{ "quantizeToF16", {} },            .{ "arrayLength", {} },
+    .{ "countOneBits", {} },             .{ "reverseBits", {} },
+    .{ "extractBits", {} },              .{ "insertBits", {} },
+    .{ "firstLeadingBit", {} },          .{ "firstTrailingBit", {} },
+    .{ "pack2x16float", {} },            .{ "pack2x16snorm", {} },
+    .{ "pack2x16unorm", {} },            .{ "pack4x8snorm", {} },
+    .{ "pack4x8unorm", {} },             .{ "unpack2x16float", {} },
+    .{ "unpack2x16snorm", {} },          .{ "unpack2x16unorm", {} },
+    .{ "unpack4x8snorm", {} },           .{ "unpack4x8unorm", {} },
 });
 
 fn isWgslKeyword(name: []const u8) bool {
