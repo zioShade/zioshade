@@ -303,6 +303,16 @@ pub const Instruction = struct {
         vector_extract_dynamic,
         member_access_op,
         image_sample,
+        // textureOffset(s, coord, const ivec offset) — a non-shadow implicit-LOD
+        // sample carrying a CONSTANT integer offset. A dedicated tag keeps plain
+        // image_sample (texture / texture+bias) codegen byte-identical and lets
+        // codegen emit the SPIR-V ConstOffset image operand. Fixed operand layout:
+        // [sampled_image, coord, offset]; the offset is validated to be an
+        // OpConstantComposite in semantic (ConstOffset must be a constant). The
+        // plain image_sample tag could NOT be reused: its 3rd operand is the LOD
+        // bias of texture(s, uv, bias) — a float, not an int offset — so operand
+        // count alone cannot disambiguate the two.
+        image_sample_offset,
         image_sample_explicit_lod,
         image_sample_grad,
         image_sample_proj,
