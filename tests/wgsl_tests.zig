@@ -5009,3 +5009,27 @@ test "wgsl: a variable named `textureDimensions` is renamed so the builtin still
     try assertContains(wgsl, "textureDimensions(");
     try nagaValidateOrSkip(wgsl, "clash-texturedims");
 }
+
+// #170: an array of UBO blocks (`uniform U { vec4 color; } us[3];`) is wrapped by
+// glslpp as `struct us_wrapper { values: array<U, 3> }` + `var<uniform> us:
+// us_wrapper` (the float/int bare-array path widens to vec4 with a `._wrapped_`
+// field; the struct-array case falls to a sibling branch). The float/int path
+// remapped the base name so accesses go through the wrapper field, but the
+// struct-array fallback did NOT — so the body emitted `us[i].color` instead of
+// `us.values[i].color`, which naga rejects ("invalid field accessor `color`") =
+// silent-wrong. The fallback must apply the same `.values` base-name remap.
+test "wgsl: array of UBO blocks accesses through the wrapper field (#170)" {
+    const spirv = compileToSpirv("ubo_block_array",
+        \\#version 450
+        \\layout(std140, binding = 0) uniform U { vec4 color; } us[3];
+        \\layout(location = 0) flat in int k;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = us[0].color + us[1].color + us[k % 3].color; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // Access must go through the wrapper field, not bare `us[i]`.
+    try assertContains(wgsl, ".values[");
+    try nagaValidateOrSkip(wgsl, "ubo-block-array");
+}
