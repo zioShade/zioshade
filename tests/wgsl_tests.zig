@@ -4903,3 +4903,51 @@ test "wgsl: array-typed stage output honest-errors (only scalars/vectors at @loc
     const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "array output") != null);
 }
+
+// #170: WGSL's reserved-word rename list covered keywords and predeclared TYPE
+// names but MISSED predeclared builtin FUNCTION names like `bitcast` and `select`.
+// `bitcast` is a legal GLSL identifier (GLSL has no such builtin), so a GLSL
+// `float bitcast = ...;` was emitted verbatim as `var bitcast: f32;` — and since
+// glslpp lowers floatBitsToInt() to the WGSL `bitcast<i32>(...)` builtin, the
+// shadowing variable made naga reject the call ("local declaration cannot be
+// called") = silent-wrong. The builtin-function names must be renamed too.
+test "wgsl: a variable named `bitcast` is renamed so the bitcast<T>() builtin still resolves (#170)" {
+    const spirv = compileToSpirv("clash_bitcast",
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float bitcast = v.x;
+        \\    int x = floatBitsToInt(bitcast);
+        \\    o = vec4(intBitsToFloat(x), bitcast, 0.0, 1.0);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The bitcast<i32>() builtin call must survive (the variable is what gets renamed).
+    try assertContains(wgsl, "bitcast<i32>");
+    try nagaValidateOrSkip(wgsl, "clash-bitcast");
+}
+
+// #170: sibling of the bitcast case — a GLSL variable named `select` collides with
+// the WGSL `select(...)` builtin that glslpp emits for OpSelect (here from a
+// `mix(a, b, bool)`). The variable must be renamed (→ `select_`) so the builtin
+// call still resolves; otherwise naga rejects ("local declaration cannot be called").
+test "wgsl: a variable named `select` is renamed so the select() builtin still resolves (#170)" {
+    const spirv = compileToSpirv("clash_select",
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    bool select = v.x > 0.0;
+        \\    float r = mix(v.y, v.z, select);
+        \\    o = vec4(r, float(select), 0.0, 1.0);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "select(");
+    try nagaValidateOrSkip(wgsl, "clash-select");
+}
