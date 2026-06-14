@@ -4951,3 +4951,42 @@ test "wgsl: a variable named `select` is renamed so the select() builtin still r
     try assertContains(wgsl, "select(");
     try nagaValidateOrSkip(wgsl, "clash-select");
 }
+
+// #170: the texture-builtin extension of the bitcast/select rename. The WGSL
+// texture builtins (textureSample, textureLoad, textureDimensions, …) have GLSL
+// counterparts with DIFFERENT names (texture, texelFetch, textureSize), so a GLSL
+// variable can legally be named the WGSL one. glslpp emits the builtin as a call
+// (`textureLoad(...)`), so a `vec4 textureLoad = texelFetch(...)` was emitted as
+// `var textureLoad: vec4f;` and then the texelFetch->textureLoad() call made naga
+// reject ("local declaration cannot be called") = silent-wrong. These names were
+// excluded from the #336 fix and are now reserved too.
+test "wgsl: a variable named `textureLoad` is renamed so the textureLoad() builtin still resolves (#170)" {
+    const spirv = compileToSpirv("clash_textureload",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) flat in ivec2 p;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { vec4 textureLoad = texelFetch(s, p, 0); o = textureLoad; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureLoad(");
+    try nagaValidateOrSkip(wgsl, "clash-textureload");
+}
+
+// #170: sibling — a query-class texture builtin. `ivec2 textureDimensions =
+// textureSize(s,0)` collided with the WGSL `textureDimensions(...)` call.
+test "wgsl: a variable named `textureDimensions` is renamed so the builtin still resolves (#170)" {
+    const spirv = compileToSpirv("clash_texturedims",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { ivec2 textureDimensions = textureSize(s, 0); o = vec4(float(textureDimensions.x)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureDimensions(");
+    try nagaValidateOrSkip(wgsl, "clash-texturedims");
+}

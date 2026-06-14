@@ -989,6 +989,24 @@ const wgsl_reserved_words = std.StaticStringMap(void).initComptime(.{
     .{ "pack4x8unorm", {} },             .{ "unpack2x16float", {} },
     .{ "unpack2x16snorm", {} },          .{ "unpack2x16unorm", {} },
     .{ "unpack4x8snorm", {} },           .{ "unpack4x8unorm", {} },
+    // WGSL texture builtin functions. Their GLSL counterparts have DIFFERENT
+    // names (texture→textureSample, texelFetch→textureLoad, textureSize→
+    // textureDimensions, imageStore→textureStore, textureQueryLevels→
+    // textureNumLevels, textureSamples→textureNumSamples), so the WGSL names are
+    // legal GLSL identifiers and a colliding GLSL var would shadow the emitted
+    // call. (textureGather IS also a GLSL builtin so can't be a GLSL var — listed
+    // for completeness; the entry is harmless.) Same class as bitcast/select.
+    // textureSampleBias / textureSampleBaseClampToEdge are reserved PROACTIVELY —
+    // glslpp does not emit them yet (the ImageSample Bias/MinLod operands are not
+    // currently lowered), but reserving a real WGSL builtin name is always safe. (#170)
+    .{ "textureSample", {} },            .{ "textureSampleBias", {} },
+    .{ "textureSampleLevel", {} },       .{ "textureSampleGrad", {} },
+    .{ "textureSampleCompare", {} },     .{ "textureSampleCompareLevel", {} },
+    .{ "textureSampleBaseClampToEdge", {} }, .{ "textureGather", {} },
+    .{ "textureGatherCompare", {} },     .{ "textureLoad", {} },
+    .{ "textureStore", {} },             .{ "textureDimensions", {} },
+    .{ "textureNumLayers", {} },         .{ "textureNumLevels", {} },
+    .{ "textureNumSamples", {} },
 });
 
 fn isWgslKeyword(name: []const u8) bool {
