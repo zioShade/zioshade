@@ -734,6 +734,29 @@ fn storageImageShape(module: *const ParsedModule, image_value_id: u32) StorageIm
     return .{ .arrayed = inst.words[5] == 1, .ms = inst.words[6] == 1, .spatial = spatial };
 }
 
+/// True if `type_id` is an ARRAY (fixed or runtime) whose element struct contains
+/// a RUNTIME-sized array member — e.g. an array of SSBO blocks
+/// (`buffer SSBO { vec4 data[]; } ssbos[2];` → `array<SSBO, 2>` where SSBO has
+/// `data: array<vec4f>`). WGSL forbids a runtime-sized array nested inside a
+/// fixed-size array (naga: "Base type for the array is invalid"), and there is no
+/// core-WGSL way to express a dynamically-indexed array of runtime-sized storage
+/// buffers (would need per-element separate bindings + static indices). So the
+/// WGSL backend honest-errors rather than emit the naga-rejected nesting.
+fn ssboArrayOfRuntimeArrayStruct(module: *const ParsedModule, type_id: u32) bool {
+    var el = getDef(module, type_id) orelse return false;
+    if (el.op != .TypeArray and el.op != .TypeRuntimeArray) return false;
+    // Unwrap every array level to the element type.
+    while ((el.op == .TypeArray or el.op == .TypeRuntimeArray) and el.words.len >= 3) {
+        el = getDef(module, el.words[2]) orelse return false;
+    }
+    if (el.op != .TypeStruct) return false;
+    for (el.words[2..]) |member_type_id| {
+        const m = getDef(module, member_type_id) orelse continue;
+        if (m.op == .TypeRuntimeArray) return true;
+    }
+    return false;
+}
+
 /// True if the texture behind a sampled-image value id has an INTEGER sampled
 /// component type (GLSL isampler*/usampler* → `texture_2d<i32>`/`<u32>`). WGSL
 /// integer textures are non-filterable: only `textureLoad` is allowed, NOT the
@@ -3098,6 +3121,19 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // other shaders are byte-identical.
     var atomic_vars = std.AutoHashMap(u32, void).init(arena);
     collectAtomicVars(&module, &atomic_vars) catch {};
+
+    // #170: an SSBO that is an ARRAY of blocks whose struct holds a runtime-sized
+    // array (`buffer SSBO { vec4 data[]; } ssbos[2];`) has no core-WGSL form —
+    // a runtime array can't nest inside a fixed array (naga "Base type for the
+    // array is invalid"). glslpp emitted `var<storage> ssbos: array<SSBO, 2>` =
+    // silent-wrong. Honest-error rather than emit naga-rejected WGSL.
+    for (cbuffers.items) |cb| {
+        if (!cb.is_ssbo) continue;
+        if (ssboArrayOfRuntimeArrayStruct(&module, cb.type_id)) {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL cannot express an array of storage blocks with a runtime-sized array member (array<SSBO, N> with a runtime array nested inside)", .{}) catch null;
+            return error.UnsupportedOp;
+        }
+    }
 
     // Detect sub-16 array members of UNIFORM (non-SSBO) blocks (#170 A2). Such
     // members are widened to array<vec4<T>> at emission and swizzled at access
