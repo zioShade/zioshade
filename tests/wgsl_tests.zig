@@ -4598,7 +4598,9 @@ test "wgsl: texture(s, uv, bias) (OpImageSampleImplicitLod Bias) -> textureSampl
 // `textureSample(t, s, coord, offset)` — so the (1,0) offset must survive into the
 // output. glslang encodes this as ConstOffset (0x8) with NO Bias bit, so it exercises
 // the non-Bias arm of the handler (the Bias arm at ~6511 already handles its own
-// offset). glslpp's frontend rejects textureOffset, so this goes through glslang.
+// offset). This routes through glslang (compileToSpirv) to exercise the
+// parsed-SPIR-V → WGSL backend arm with an independent oracle; glslpp's OWN
+// frontend lowering of textureOffset is covered by a separate test below.
 test "wgsl: textureOffset(s, uv, offset) (OpImageSampleImplicitLod ConstOffset) keeps the offset (#170)" {
     const spirv = compileToSpirv("tex_offset",
         \\#version 450
@@ -4684,6 +4686,44 @@ test "wgsl: textureOffset via glslpp frontend keeps the ConstOffset (#170)" {
     try assertContains(wgsl, "textureSample(");
     try assertContains(wgsl, ", vec2<i32>(1, 0))");
     try nagaValidateOrSkip(wgsl, "tex-offset-frontend");
+}
+
+// #170: the 4-arg fragment overload textureOffset(s, P, offset, bias) carries
+// BOTH a constant offset (→ ConstOffset) and an LOD bias (→ Bias). The new
+// image_sample_offset codegen arm must emit Bias|ConstOffset, not just
+// ConstOffset — dropping the bias samples the wrong mip (silent-wrong). WGSL
+// spells this textureSampleBias(t, s, coord, bias, offset).
+test "wgsl: textureOffset(s, uv, offset, bias) keeps BOTH bias and offset (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureOffset(s, uv, ivec2(1, 0), 0.5); }
+    );
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleBias(");
+    try assertContains(wgsl, "0.5");
+    try assertContains(wgsl, ", vec2<i32>(1, 0))");
+    try nagaValidateOrSkip(wgsl, "tex-offset-bias-frontend");
+}
+
+// #170: textureLodOffset with a NON-CONSTANT offset cannot become a SPIR-V
+// ConstOffset (which requires an OpConstantComposite); without a gate codegen
+// would emit ConstOffset pointing at a runtime value = invalid SPIR-V. Must
+// honest-error, mirroring the textureOffset gate.
+test "wgsl: textureLodOffset with a non-constant offset honest-errors (#170)" {
+    try std.testing.expectError(
+        error.SemanticFailed,
+        glslpp.compileToSPIRV(alloc,
+            \\#version 450
+            \\layout(binding = 0) uniform sampler2D s;
+            \\layout(location = 0) in vec2 uv;
+            \\layout(location = 1) flat in ivec2 dyn;
+            \\layout(location = 0) out vec4 o;
+            \\void main() { o = textureLodOffset(s, uv, 0.0, dyn); }
+        , .{ .stage = .fragment }),
+    );
 }
 
 // #170: textureGradOffset is deliberately NOT lowered by glslpp's frontend (it

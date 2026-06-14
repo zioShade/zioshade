@@ -6239,9 +6239,17 @@ const Analyzer = struct {
                             // folds to a constant_composite; a non-constant offset
                             // cannot be a ConstOffset, so honest-error rather than
                             // emit invalid SPIR-V. Mirrors the textureGatherOffsets
-                            // offsets-constant gate above.
-                            if (is_tex_offset) {
-                                if (arg_tids.items.len < 3 or !self.isConstantId(arg_tids.items[2].id)) {
+                            // offsets-constant gate above. textureOffset's offset is
+                            // arg 2; textureLodOffset's (which routes through
+                            // image_sample_explicit_lod's ConstOffset arm) is arg 3.
+                            const offset_arg_idx: ?usize = if (is_tex_offset)
+                                2
+                            else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureLodOffset"))
+                                3
+                            else
+                                null;
+                            if (offset_arg_idx) |oi| {
+                                if (oi >= arg_tids.items.len or !self.isConstantId(arg_tids.items[oi].id)) {
                                     last_error_ctx = "texture-offset-not-constant";
                                     last_error_inner = "texture-offset-not-constant";
                                     last_error_line = node.loc.line;

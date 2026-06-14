@@ -5251,11 +5251,14 @@ const Codegen = struct {
                 }
             },
             .image_sample_offset => {
-                // textureOffset(s, coord, const ivec offset): implicit-LOD sample
-                // with a CONSTANT offset → the ConstOffset image operand (bit 3).
-                // The offset is operand[2] (an OpConstantComposite, validated in
-                // semantic). Dropping it sampled the wrong texels (silent-wrong,
-                // #170). Mirrors the textureLodOffset ConstOffset path below.
+                // textureOffset(s, coord, const ivec offset[, bias]): implicit-LOD
+                // sample with a CONSTANT offset → the ConstOffset image operand
+                // (bit 3). The offset is operand[2] (an OpConstantComposite,
+                // validated in semantic). Dropping it sampled the wrong texels
+                // (silent-wrong, #170). The optional 4th operand is the GLSL
+                // fragment-only LOD bias → the Bias image operand (bit 0); image
+                // operands MUST be emitted in ascending bit order (Bias before
+                // ConstOffset). Mirrors the textureLodOffset ConstOffset path below.
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const sampled_image_id = self.operandId(resolved, 0);
@@ -5264,7 +5267,9 @@ const Codegen = struct {
                 if (self.stage == .vertex or self.stage == .compute) {
                     // Implicit LOD is illegal in vertex/compute — convert to an
                     // explicit Lod 0, keeping the ConstOffset (mask Lod|ConstOffset).
-                    // Mirrors the plain image_sample vertex/compute remap above.
+                    // A bias is illegal outside fragment (rejected by glslang), so
+                    // the 4-arg form cannot validly reach here; emit the const-offset
+                    // form. Mirrors the plain image_sample vertex/compute remap above.
                     const zero_id = try self.emitFloatConstant(0.0);
                     try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleExplicitLod)));
                     try self.emitWord(result_type_id);
@@ -5273,6 +5278,17 @@ const Codegen = struct {
                     try self.emitWord(coord_id);
                     try self.emitWord(10); // Image Operands Mask: Lod (bit 1) | ConstOffset (bit 3)
                     try self.emitWord(zero_id);
+                    try self.emitWord(offset_id);
+                } else if (resolved.operands.len >= 4) {
+                    // textureOffset(s, coord, offset, bias) → Bias|ConstOffset.
+                    const bias_id = self.operandId(resolved, 3);
+                    try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleImplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(9); // Image Operands Mask: Bias (bit 0) | ConstOffset (bit 3)
+                    try self.emitWord(bias_id);
                     try self.emitWord(offset_id);
                 } else {
                     try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageSampleImplicitLod)));
