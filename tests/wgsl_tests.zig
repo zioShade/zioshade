@@ -5251,3 +5251,43 @@ test "wgsl: two arrayLength() calls get distinct names (no redefinition) (#170)"
     try assertContains(wgsl, "arrayLength(");
     try nagaValidateOrSkip(wgsl, "arraylength-dup");
 }
+
+// #170: an ARRAYED storage image (image2DArray) imageLoad/imageStore takes the
+// array layer as the LAST coordinate component in GLSL, but WGSL takes it as a
+// SEPARATE argument: `textureLoad(t, coord.xy, coord.z)`. glslpp emitted
+// `textureLoad(uArr, vec3<i32>(...))` (the layer folded into the coordinate) →
+// naga "wrong number of arguments: expected 3, found 2" = silent-wrong. The
+// layer must be split out for both textureLoad and textureStore.
+test "wgsl: arrayed storage image load/store splits the array layer arg (#170)" {
+    const spirv = compileToSpirv("storage_image_array",
+        \\#version 450
+        \\layout(rgba8, binding = 0) uniform image2DArray uArr;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec4 a = imageLoad(uArr, ivec3(1, 2, 3));
+        \\    imageStore(uArr, ivec3(4, 5, 6), a);
+        \\    o = a;
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, ".xy,"); // spatial coord split from the layer
+    try assertContains(wgsl, ".z)"); // the split-out array layer argument
+    try nagaValidateOrSkip(wgsl, "storage-image-array");
+}
+
+// #170: a MULTISAMPLED storage image (image2DMS) has NO WGSL representation —
+// there is no multisampled storage texture type. glslpp silently dropped the MS
+// aspect (emitting a plain texture_storage_2d) AND the sample index = silent-wrong.
+// It must honest-error instead.
+test "wgsl: multisampled storage image honest-errors (no WGSL MS storage texture) (#170)" {
+    const spirv = compileToSpirv("storage_image_ms",
+        \\#version 450
+        \\layout(rgba8, binding = 0) uniform image2DMS uImage;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = imageLoad(uImage, ivec2(1, 2), 2); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
