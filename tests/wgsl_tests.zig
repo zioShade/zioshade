@@ -4639,6 +4639,29 @@ test "wgsl: textureLodOffset (OpImageSampleExplicitLod Lod|ConstOffset) keeps th
     try nagaValidateOrSkip(wgsl, "tex-lod-offset");
 }
 
+// #170: the ARRAYED ConstOffset branch — textureOffset on a sampler2DArray. WGSL
+// takes the const-offset as the LAST arg, AFTER the separate rounded i32 layer:
+// textureSample(t, s, coord.xy, i32(round(coord.z)), offset). Emitting the offset
+// before the layer (or dropping it) is silent-wrong — only naga catches the
+// ordering. Guards the arrayed emit branch of the fix (the non-arrayed tests above
+// exercise only the scalar-coord branch).
+test "wgsl: textureOffset on sampler2DArray keeps the offset after the layer (#170)" {
+    const spirv = compileToSpirv("tex_offset_arr",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DArray s;
+        \\layout(location = 0) in vec3 uvw;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureOffset(s, uvw, ivec2(1, 0)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The rounded layer index precedes the trailing offset.
+    try assertContains(wgsl, "textureSample(");
+    try assertContains(wgsl, ")), vec2<i32>(1, 0))");
+    try nagaValidateOrSkip(wgsl, "tex-offset-array");
+}
+
 // #170: WGSL forbids the filtering textureSample/textureSampleLevel builtins on
 // INTEGER textures (texture_2d<i32>/<u32> are non-filterable) — only textureLoad is
 // allowed. GLSL `texture(isampler2D, uv)` (a normalized-coordinate sample of an

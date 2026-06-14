@@ -6619,6 +6619,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // faithful textureSampleLevel form → honest-error. (#170, mirrors
                     // the Grad arm above.)
                     if ((mask & ~@as(u32, 0x2 | 0x8)) != 0) return error.UnsupportedImageOperands;
+                    // ExplicitLod REQUIRES the Lod operand on this (non-Grad) arm; a
+                    // ConstOffset-only mask is invalid SPIR-V and would misindex the
+                    // lod onto the offset word. Honest-error rather than read garbage.
+                    if ((mask & 0x2) == 0) return error.UnsupportedImageOperands;
                     const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
                     var off_suffix: []const u8 = "";
                     if ((mask & 0x8) != 0) {
