@@ -6483,7 +6483,35 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // ROUNDED (floor(layer+0.5)) for glslang parity — mirrors the depth-
                 // array path in emitDepthCompare and the MSL rint() lowering.
                 const shape = arrayedSampleShape(module, inst.words[3]);
-                if (shape.arrayed) {
+                // Image-operands mask (words[5]). A `Bias` (0x1) operand carries an
+                // LOD bias (GLSL texture(s, P, bias)). WGSL spells this
+                // textureSampleBias(t, s, coord, [layer,] bias [, offset]) — dropping
+                // the bias is silent-wrong. Bias may pair with ConstOffset (0x8); any
+                // other operand bit has no faithful WGSL form → honest-error. Mirrors
+                // the Grad handling in ImageSampleExplicitLod (#319).
+                const mask: u32 = if (inst.words.len > 5) inst.words[5] else 0;
+                if ((mask & 0x1) != 0) {
+                    if ((mask & ~@as(u32, 0x1 | 0x8)) != 0) return error.UnsupportedImageOperands;
+                    // textureSampleBias is FRAGMENT-ONLY in WGSL — a bias outside a
+                    // fragment shader has no faithful form. Honest-error.
+                    if (module.execution_model != .Fragment) return error.UnsupportedImageOperands;
+                    // Operands follow bit order: bias (words[6]), then an optional
+                    // ConstOffset (words[7]). Truncated/malformed SPIR-V honest-errors
+                    // rather than indexing out of bounds (don't panic on bad input).
+                    if (inst.words.len <= 6) return error.UnsupportedImageOperands;
+                    const bias = names.get(inst.words[6]) orelse "0";
+                    const off_suffix: []const u8 = if ((mask & 0x8) != 0 and inst.words.len > 7)
+                        try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[7]) orelse "vec2<i32>(0)"})
+                    else
+                        "";
+                    if (shape.arrayed) {
+                        const cs = arrayedCoordSwizzle(shape.comps);
+                        const ls = arrayedLayerSwizzle(shape.comps);
+                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, bias, off_suffix });
+                    } else {
+                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, bias, off_suffix });
+                    }
+                } else if (shape.arrayed) {
                     const cs = arrayedCoordSwizzle(shape.comps);
                     const ls = arrayedLayerSwizzle(shape.comps);
                     try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s}, i32(round({s}{s})));\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls });

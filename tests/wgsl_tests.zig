@@ -4572,6 +4572,25 @@ test "wgsl: textureGrad (OpImageSampleExplicitLod Grad) -> textureSampleGrad (#1
     try nagaValidateOrSkip(wgsl, "tex-grad");
 }
 
+// #170: OpImageSampleImplicitLod with a `Bias` image operand (GLSL texture(s, uv, bias)
+// — an LOD-bias sample) was lowered to a plain `textureSample(s, sampler, uv)`, SILENTLY
+// DROPPING the bias = silent-wrong. WGSL spells biased sampling `textureSampleBias(t, s,
+// coord, bias)` (fragment-only). The bias value (here 1.5) must survive into the output.
+test "wgsl: texture(s, uv, bias) (OpImageSampleImplicitLod Bias) -> textureSampleBias (#170)" {
+    const spirv = compileToSpirv("tex_bias",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texture(s, uv, 1.5); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleBias(");
+    try nagaValidateOrSkip(wgsl, "tex-bias");
+}
+
 // #170: WGSL forbids the filtering textureSample/textureSampleLevel builtins on
 // INTEGER textures (texture_2d<i32>/<u32> are non-filterable) — only textureLoad is
 // allowed. GLSL `texture(isampler2D, uv)` (a normalized-coordinate sample of an
