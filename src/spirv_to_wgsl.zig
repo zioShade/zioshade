@@ -3320,9 +3320,28 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                     continue;
                 }
             }
-            // Fallback: emit as-is (may fail naga validation)
+            // Struct/aggregate-element array (e.g. an array of UBO blocks): wrap in
+            // a `values` field for the same WGSL uniform-array stride reason, and —
+            // (Also reached if a float/int array's element count could not be
+            // decoded above — e.g. a spec-constant size — in which case the `.x`
+            // scalar-widening the float/int path would add is absent; that narrow
+            // spec-const-sized-uniform-array case is a separate pre-existing gap.)
+            // like the float/int path above — remap the base name so every access
+            // chain goes through the wrapper field (`us[i].x` → `us.values[i].x`).
+            // Without the remap the body emits `us[i].member`, which naga rejects
+            // ("invalid field accessor"). No `.x` suffix here (no scalar widening).
             try w.print("struct {s}_wrapper {{ values: {s} }};\n\n", .{ var_name, type_name });
             try w.print("@group({d}) @binding({d})\nvar<uniform> {s}: {s}_wrapper;\n\n", .{ group, binding, var_name, var_name });
+            for (module.instructions) |vinst| {
+                if (vinst.op == .Variable and vinst.words.len >= 4) {
+                    const vname = names.get(vinst.words[2]) orelse continue;
+                    if (std.mem.eql(u8, vname, var_name)) {
+                        const wrapper_name = try std.fmt.allocPrint(alloc, "{s}.values", .{var_name});
+                        if (try names.fetchPut(vinst.words[2], wrapper_name)) |old| alloc.free(old.value);
+                        break;
+                    }
+                }
+            }
         } else if (cb.is_ssbo) {
             try w.print("@group({d}) @binding({d})\nvar<storage, read_write> {s}: {s};\n\n", .{ group, binding, var_name, type_name });
         } else {
