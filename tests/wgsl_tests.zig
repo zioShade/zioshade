@@ -5291,3 +5291,21 @@ test "wgsl: multisampled storage image honest-errors (no WGSL MS storage texture
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
 }
+
+// #170: a NESTED array of samplers (`sampler1D s[2][2]`) is doubly-unrepresentable
+// in core WGSL (no sampler arrays at all, let alone nested). The hasOpaqueArrayResource
+// guard checked only ONE array level, so the array-of-array-of-sampledimage slipped
+// past: glslpp emitted sample calls referencing an UNDECLARED `s` and a malformed
+// `s[0][1]_sampler` (naga "expected )") = silent-wrong. The guard must unwrap EVERY
+// array level and honest-error like the single-level form already does.
+test "wgsl: nested sampler array honest-errors (#170)" {
+    const spirv = compileToSpirv("nested_sampler_array",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler1D s[2][2];
+        \\layout(location = 0) flat in float c;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texture(s[0][1], c) + texture(s[1][0], c); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToWGSL(alloc, spirv, .{}));
+}
