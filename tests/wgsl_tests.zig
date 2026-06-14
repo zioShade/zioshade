@@ -5033,3 +5033,27 @@ test "wgsl: array of UBO blocks accesses through the wrapper field (#170)" {
     try assertContains(wgsl, ".values[");
     try nagaValidateOrSkip(wgsl, "ubo-block-array");
 }
+
+// #170: an SSBO array length (`values.length()` → OpArrayLength → WGSL
+// `arrayLength(&Data_data.values)`) was emitted with the bare fallback name `v`
+// because OpArrayLength was MISSING from the shared resultIdFromOp table — so its
+// result id was never registered in the names map. With TWO `.length()` calls in
+// one scope, both results fell back to `let v`, producing `redefinition of `v`` =
+// silent-wrong (naga reject). Registering OpArrayLength's result id gives each
+// call a unique `v{id}` name. (Same class as #327's missing bitfield ops.)
+test "wgsl: two arrayLength() calls get distinct names (no redefinition) (#170)" {
+    const wgsl = compileCompToWgsl(
+        \\#version 450
+        \\layout(local_size_x = 64) in;
+        \\layout(std430, binding = 0) buffer Data { float values[]; };
+        \\void main() {
+        \\    uint i = gl_GlobalInvocationID.x;
+        \\    if (i >= values.length()) return;
+        \\    uint j = i ^ 1u;
+        \\    if (j < values.length()) { values[i] = values[j]; }
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "arrayLength(");
+    try nagaValidateOrSkip(wgsl, "arraylength-dup");
+}

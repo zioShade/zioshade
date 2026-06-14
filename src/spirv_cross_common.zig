@@ -190,6 +190,7 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod,
         .ImageDrefGather, .ImageQueryLod, .ImageQueryLevels, .ImageQuerySamples,
         .ImageRead, .AtomicCompareExchange, .AtomicFAddEXT,
+        .ArrayLength,
         .BitReverse, .BitCount,
         .BitFieldInsert, .BitFieldSExtract, .BitFieldUExtract,
         .GroupNonUniformElect, .GroupNonUniformAll, .GroupNonUniformAny, .GroupNonUniformAllEqual,
