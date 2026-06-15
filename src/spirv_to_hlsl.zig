@@ -478,20 +478,15 @@ pub fn spirvToHLSL(
     // Descriptor sampler/image ARRAYS (`uniform sampler2D tex[4]`) are not yet
     // supported by the HLSL backend (the Texture/SamplerState split needs the
     // index relocated across both). Fail loud rather than emit broken output —
-    // the GLSL backend does support them.
-    for (module.instructions) |inst| {
-        if (inst.op != .Variable or inst.words.len < 4) continue;
-        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-        if (sc != .UniformConstant) continue;
-        const ptr = getDef(&module, inst.words[1]) orelse continue;
-        if (ptr.op != .TypePointer or ptr.words.len < 4) continue;
-        const pe = getDef(&module, ptr.words[3]) orelse continue;
-        if (pe.op == .TypeArray and pe.words.len >= 3) {
-            if (getDef(&module, pe.words[2])) |el| {
-                if (el.op == .TypeSampledImage or el.op == .TypeSampler or el.op == .TypeImage) return error.UnsupportedSamplerArray;
-            }
-        }
-    }
+    // the GLSL backend does support them. Delegate to the shared helper so EVERY
+    // array level is unwrapped: a NESTED array (`sampler1D s[2][2]` =
+    // array-of-array-of-sampledimage) must honest-error too, not just the
+    // single-level form (#170). `include_runtime = true`: HLSL has no unbounded
+    // descriptor-array support (no SM6.6 ResourceDescriptorHeap lowering here), so
+    // the unbounded `tex[]` (OpTypeRuntimeArray) form must also fail loud.
+    // Slice-based entry point: the HLSL backend keeps its own ParsedModule type, so
+    // it passes the raw slices rather than &module (same pattern as commonGetArraySuffix).
+    if (common.hasOpaqueArrayResourceSlices(module.instructions, module.id_defs, true)) return error.UnsupportedSamplerArray;
 
     // Override entry point if requested
     if (!std.mem.eql(u8, options.entry_point_name, "main")) {

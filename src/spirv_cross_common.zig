@@ -237,23 +237,31 @@ pub fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
 /// AT ALL (WGSL core: no binding_array). MSL passes false to preserve its existing
 /// runtime-array handling. The bounded `OpTypeArray` form is always matched.
 pub fn hasOpaqueArrayResource(module: *const ParsedModule, include_runtime: bool) bool {
-    for (module.instructions) |inst| {
+    return hasOpaqueArrayResourceSlices(module.instructions, module.id_defs, include_runtime);
+}
+
+/// Slice-based variant of `hasOpaqueArrayResource` — takes the raw instruction /
+/// id_defs slices via `anytype` so it works across the distinct per-backend
+/// `ParsedModule` types (the HLSL backend keeps its own). Single source of truth
+/// for the multi-level array unwrap; `hasOpaqueArrayResource` delegates here.
+pub fn hasOpaqueArrayResourceSlices(instructions: anytype, id_defs: anytype, include_runtime: bool) bool {
+    for (instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
         if (sc != .UniformConstant) continue;
-        const ptr = getDef(module, inst.words[1]) orelse continue;
+        const ptr = localGetDef(instructions, id_defs, inst.words[1]) orelse continue;
         if (ptr.op != .TypePointer or ptr.words.len < 4) continue;
-        const pe = getDef(module, ptr.words[3]) orelse continue;
+        const pe = localGetDef(instructions, id_defs, ptr.words[3]) orelse continue;
         const is_array = pe.op == .TypeArray or (include_runtime and pe.op == .TypeRuntimeArray);
         if (!is_array or pe.words.len < 3) continue;
         // OpTypeArray and OpTypeRuntimeArray both carry the element type in words[2].
         // Unwrap EVERY array level: a NESTED resource array (e.g. `sampler1D s[2][2]`
         // = array-of-array-of-sampledimage) must be detected too, not just one level.
-        var el = getDef(module, pe.words[2]) orelse continue;
+        var el = localGetDef(instructions, id_defs, pe.words[2]) orelse continue;
         while ((el.op == .TypeArray or el.op == .TypeRuntimeArray) and el.words.len >= 3) {
-            // getDef null = broken/incomplete SPIR-V; `el` stays a TypeArray so the
-            // opaque check below returns false safely (no false positive).
-            el = getDef(module, el.words[2]) orelse break;
+            // localGetDef null = broken/incomplete SPIR-V; `el` stays a TypeArray so
+            // the opaque check below returns false safely (no false positive).
+            el = localGetDef(instructions, id_defs, el.words[2]) orelse break;
         }
         if (el.op == .TypeSampledImage or el.op == .TypeSampler or el.op == .TypeImage) return true;
     }
