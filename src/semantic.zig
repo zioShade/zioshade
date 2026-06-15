@@ -155,11 +155,25 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
     // constants section BEFORE the global OpVariables; record the composite id
     // on the matching Global so its OpVariable references it (word-count 5).
     //
-    // Run with the constant caches cleared so the folded constants are fully
-    // self-contained (every operand is freshly emitted into `init_consts`, not
-    // a dangling id from a discarded scratch list), then clear the caches again
-    // so per-function analysis re-emits its own constants independently — the
-    // exact same invariant the const_cache clear above preserves (#157).
+    // Run with BOTH constant caches cleared BEFORE EACH global so its folded
+    // constants are fully self-contained (every operand is freshly emitted into
+    // `init_consts`, not a dangling id from a discarded scratch list), then clear
+    // the caches again so per-function analysis re-emits its own constants
+    // independently — the exact same invariant the const_cache clear above
+    // preserves (#157).
+    //
+    // Clearing PER-ITERATION (not just once before the loop) is load-bearing: the
+    // caches are keyed by value, so a constant shared between two globals (e.g.
+    // `vec4(1.0)` in both `const vec4 a[3]` and `const vec4 b[2][2]`, or a scalar
+    // like `10.0` reused across arrays) would otherwise hit the cache and return
+    // the FIRST global's id — which lives only in that global's already-detached
+    // `init_consts` slice, NOT in the current global's fresh scratch list. The
+    // later `isConstantId` scan (scratch + emitted functions only) can't see that
+    // id, so `tryUpgradeToConstantComposite` bails, the initializer is judged
+    // non-constant, and the Private OpVariable silently drops its initializer —
+    // tripping the backends' "undeclared private array global" honest-error
+    // (deblasis/glslpp#173). Self-contained-per-global keeps each fold's ids in its own
+    // scratch; codegen dedups the resulting duplicate constants on replay.
     var init_consts: std.ArrayListUnmanaged(ir.Instruction) = .empty;
     errdefer {
         for (init_consts.items) |inst| {
@@ -168,9 +182,10 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         init_consts.deinit(alloc);
     }
     if (analyzer.global_const_ast_inits.count() > 0) {
-        analyzer.const_composite_cache.clearRetainingCapacity();
         var gci = analyzer.global_const_ast_inits.iterator();
         while (gci.next()) |entry| {
+            analyzer.const_cache.clearRetainingCapacity();
+            analyzer.const_composite_cache.clearRetainingCapacity();
             const gid = entry.key_ptr.*;
             const init_node = entry.value_ptr.*;
             // Only flat module-scope const arrays lower to a Private global we
