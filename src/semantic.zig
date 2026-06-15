@@ -169,6 +169,20 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
     }
     if (analyzer.global_const_ast_inits.count() > 0) {
         analyzer.const_composite_cache.clearRetainingCapacity();
+        // Evaluate every initializer into ONE shared scratch list (not a fresh
+        // empty list per initializer). A constant shared between two const
+        // arrays — e.g. `vec4(1.0)` reused by both `foo[3]` and `foobars[2][2]`
+        // — is emitted on first use, cached, and (critically) LEFT in
+        // `self.instructions` so a later initializer that reuses the cached id
+        // still sees it via `isConstantId`. With a per-initializer empty reset
+        // the cached id was absent from the fresh scratch list, so isConstantId
+        // returned false, the composite never upgraded to `constant_composite`,
+        // and the global was emitted with NO initializer (uninitialised Private
+        // array → every backend silent-wrong, MSL honest-errors). Only the
+        // FIRST initializer folded; any later nested-array / struct-array const
+        // that reused a constant silently lost its initializer. (#173)
+        const saved = analyzer.instructions;
+        analyzer.instructions = .empty;
         var gci = analyzer.global_const_ast_inits.iterator();
         while (gci.next()) |entry| {
             const gid = entry.key_ptr.*;
@@ -182,33 +196,34 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
                 if (g.result_id == gid and g.storage_class == .private) target = g;
             }
             if (target == null) continue;
-            // Evaluate into a throwaway scratch list so we capture exactly the
-            // constant instructions this initializer produces.
-            const saved = analyzer.instructions;
-            analyzer.instructions = .empty;
+            // Mark the shared scratch length so a failed-or-non-constant
+            // initializer's partial instructions can be rolled back — only
+            // genuine constant instructions may reach the constants section
+            // (a stray non-const op replayed there is invalid SPIR-V).
+            const mark = analyzer.instructions.items.len;
             const res = analyzer.analyzeExpression(init_node) catch {
-                for (analyzer.instructions.items) |inst| {
+                for (analyzer.instructions.items[mark..]) |inst| {
                     if (inst.operands.len > 0) alloc.free(inst.operands);
                 }
-                analyzer.instructions.deinit(alloc);
-                analyzer.instructions = saved;
+                analyzer.instructions.shrinkRetainingCapacity(mark);
                 continue;
             };
             if (analyzer.isConstantId(res.id)) {
-                try init_consts.appendSlice(alloc, analyzer.instructions.items);
-                // Ownership of the operand slices moved to init_consts — drop the
-                // scratch list WITHOUT freeing the operands.
-                analyzer.instructions.deinit(alloc);
                 target.?.initializer_id = res.id;
                 analyzer.global_const_init_map.put(alloc, gid, res.id) catch {};
             } else {
-                for (analyzer.instructions.items) |inst| {
+                for (analyzer.instructions.items[mark..]) |inst| {
                     if (inst.operands.len > 0) alloc.free(inst.operands);
                 }
-                analyzer.instructions.deinit(alloc);
+                analyzer.instructions.shrinkRetainingCapacity(mark);
             }
-            analyzer.instructions = saved;
         }
+        // Ownership of the surviving constant instructions (and their operand
+        // slices) transfers to init_consts; drop the scratch list WITHOUT
+        // freeing the operands.
+        try init_consts.appendSlice(alloc, analyzer.instructions.items);
+        analyzer.instructions.deinit(alloc);
+        analyzer.instructions = saved;
         analyzer.const_cache.clearRetainingCapacity();
         analyzer.const_composite_cache.clearRetainingCapacity();
     }
