@@ -3659,6 +3659,26 @@ test "T72.2: array of samplers honest-errors (HLSL backend lacks support)" {
     try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
 }
 
+// #170: a NESTED sampler array (`sampler1D s[2][2]`) was missed by the inline
+// HLSL honest-error guard (it checked only ONE array level — the outer array's
+// element is the INNER array, not the sampled image), so the HLSL backend emitted
+// broken output (undeclared `s`, malformed sampler access) instead of
+// honest-erroring like it does for single-level sampler arrays. Mirrors the WGSL
+// "wgsl: nested sampler array honest-errors (#170)" and MSL "T-samplerarr.nested"
+// tests now that the inline guard delegates to the shared
+// common.hasOpaqueArrayResource (which unwraps every array level).
+test "T72.3: nested sampler array honest-errors in HLSL (#170)" {
+    const spirv = compileToSpirv("hlsl_nested_sampler_array",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler1D s[2][2];
+        \\layout(location = 0) flat in float c;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texture(s[0][1], c) + texture(s[1][0], c); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
+}
+
 test "T73.1: GLSL std.450 trig functions (sin, cos, tan)" {
     const source =
         \\#version 450
