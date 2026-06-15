@@ -469,6 +469,93 @@ fn memberBuiltin(module: *const ParsedModule, struct_id: u32, member_idx: u32) ?
     return null;
 }
 
+/// #170: the byte `Offset` decorating member `member_idx` of struct `struct_id`
+/// (`OpMemberDecorate <struct> <idx> Offset N`), or null if undecorated. Block
+/// (UBO/SSBO) struct members always carry it; local/function structs never do.
+fn memberOffset(module: *const ParsedModule, struct_id: u32, member_idx: u32) ?u32 {
+    for (module.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 5) continue;
+        if (inst.words[1] != struct_id or inst.words[2] != member_idx) continue;
+        if (@as(spirv.Decoration, @enumFromInt(inst.words[3])) != .offset) continue;
+        return inst.words[4];
+    }
+    return null;
+}
+
+/// Largest power of two dividing `n` (n>0): `n & -n`. Picks the WGSL `@align`
+/// that reproduces a SPIR-V member byte Offset under WGSL's offset arithmetic —
+/// roundUp(@align, prevEnd) == Offset when @align divides Offset.
+fn largestPow2Divisor(n: u32) u32 {
+    return n & (~n +% 1);
+}
+
+/// The `MatrixStride` decorating member `member_idx` of struct `struct_id`
+/// (`OpMemberDecorate <struct> <idx> MatrixStride N`), or null if undecorated.
+fn memberMatrixStride(module: *const ParsedModule, struct_id: u32, member_idx: u32) ?u32 {
+    for (module.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 5) continue;
+        if (inst.words[1] != struct_id or inst.words[2] != member_idx) continue;
+        if (@as(spirv.Decoration, @enumFromInt(inst.words[3])) != .matrix_stride) continue;
+        return inst.words[4];
+    }
+    return null;
+}
+
+/// #170: a UNIFORM member that is (or whose array element is) a 2-ROW matrix
+/// (`matCx2`) is unrepresentable in core WGSL: std140 packs each column on a
+/// 16-byte stride, but WGSL's `matCx2<f32>` has a fixed 8-byte column stride
+/// (its column type `vec2<f32>` aligns to 8) and there is NO matrix-stride
+/// attribute to override it. Emitting it anyway makes naga ACCEPT a layout that
+/// reads every column past the first from the wrong byte = silent-wrong. The
+/// faithful @align/@size offset pass would otherwise UNMASK this (a UBO formerly
+/// rejected for a nested-member offset now validates with a mis-strided matrix),
+/// so it must honest-error. Returns true when the member's MatrixStride disagrees
+/// with WGSL's natural column stride (8 for 2-row, 16 for 3-/4-row). matCx3/matCx4
+/// already match std140's 16-byte stride; storage (std430/scalar, MatrixStride 8)
+/// also matches and is not a uniform-offset struct, so it never reaches here.
+fn uniformMatrixStrideUnrepresentable(module: *const ParsedModule, struct_id: u32, member_idx: u32, member_type_id: u32) bool {
+    // Unwrap EVERY array level to reach the element type — a multidimensional
+    // matrix array (`mat2 m[2][3]`) is nested OpTypeArrays, and a one-level unwrap
+    // would leave `t` an array and miss the matrix (silent-wrong slips through).
+    // The MatrixStride decoration stays on the member regardless of nesting. Depth
+    // cap mirrors the emit loop's guard against malformed cyclic SPIR-V.
+    var t = member_type_id;
+    var depth: u32 = 0;
+    while (depth < 8) : (depth += 1) {
+        const d = getDef(module, t) orelse break;
+        if ((d.op == .TypeArray or d.op == .TypeRuntimeArray) and d.words.len > 2) t = d.words[2] else break;
+    }
+    const md = getDef(module, t) orelse return false;
+    if (md.op != .TypeMatrix or md.words.len < 4) return false;
+    const col = getDef(module, md.words[2]) orelse return false; // column vector type
+    if (col.op != .TypeVector or col.words.len < 4) return false;
+    const rows = col.words[3];
+    const wgsl_col_stride: u32 = if (rows == 2) 8 else 16; // vec2 aligns to 8; vec3/vec4 to 16
+    const spv_stride = memberMatrixStride(module, struct_id, member_idx) orelse return false;
+    return spv_stride != wgsl_col_stride;
+}
+
+/// #170: collect (into `out`) the set of struct type ids reachable from
+/// `type_id` — itself plus nested struct members, walking through array/matrix/
+/// vector/pointer wrappers. Used to mark every struct reachable from a UNIFORM
+/// block so the offset-attribute pass reproduces its SPIR-V member layout.
+/// Depth-guarded against malformed cyclic SPIR-V; `out` doubles as the visited set.
+fn collectOffsetStructsRec(module: *const ParsedModule, type_id: u32, out: *std.AutoHashMap(u32, void), depth: u32) void {
+    if (depth > 16) return;
+    const d = getDef(module, type_id) orelse return;
+    switch (d.op) {
+        .TypeStruct => {
+            if (out.get(type_id) != null) return;
+            out.put(type_id, {}) catch return;
+            if (d.words.len <= 2) return;
+            for (d.words[2..]) |mt_id| collectOffsetStructsRec(module, mt_id, out, depth + 1);
+        },
+        .TypePointer => if (d.words.len > 3) collectOffsetStructsRec(module, d.words[3], out, depth + 1),
+        .TypeArray, .TypeRuntimeArray, .TypeMatrix, .TypeVector => if (d.words.len > 2) collectOffsetStructsRec(module, d.words[2], out, depth + 1),
+        else => {},
+    }
+}
+
 /// If `var_id` is an Output variable whose pointee is a struct with member 0
 /// decorated `BuiltIn Position`, returns that struct type id. This is glslang's
 /// `gl_PerVertex` Block: it wraps gl_Position (+ gl_PointSize/ClipDistance/
@@ -1376,20 +1463,20 @@ fn wrappedVec4ElemType(module: *const ParsedModule, elem_type_id: u32) []const u
     return "f32";
 }
 
-fn emitStructForwardDecls(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), atomic_fields: *const AtomicFieldMap, wrapped_members: *const WrappedUniformMemberMap) !void {
+fn emitStructForwardDecls(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), atomic_fields: *const AtomicFieldMap, wrapped_members: *const WrappedUniformMemberMap, offset_structs: *const std.AutoHashMap(u32, void)) !void {
     const inst = getDef(module, root_type_id) orelse return;
     switch (inst.op) {
         .TypeStruct => {
-            try emitOneStructForwardDecl(module, names, root_type_id, w, alloc, emitted, emitted_names, atomic_fields, wrapped_members);
+            try emitOneStructForwardDecl(module, names, root_type_id, w, alloc, emitted, emitted_names, atomic_fields, wrapped_members, offset_structs);
         },
-        .TypePointer => if (inst.words.len > 3) try emitStructForwardDecls(module, names, inst.words[3], w, alloc, emitted, emitted_names, atomic_fields, wrapped_members),
-        .TypeArray => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names, atomic_fields, wrapped_members),
-        .TypeMatrix, .TypeVector => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names, atomic_fields, wrapped_members),
+        .TypePointer => if (inst.words.len > 3) try emitStructForwardDecls(module, names, inst.words[3], w, alloc, emitted, emitted_names, atomic_fields, wrapped_members, offset_structs),
+        .TypeArray => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names, atomic_fields, wrapped_members, offset_structs),
+        .TypeMatrix, .TypeVector => if (inst.words.len > 2) try emitStructForwardDecls(module, names, inst.words[2], w, alloc, emitted, emitted_names, atomic_fields, wrapped_members, offset_structs),
         else => {},
     }
 }
 
-fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), atomic_fields: *const AtomicFieldMap, wrapped_members: *const WrappedUniformMemberMap) !void {
+fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), atomic_fields: *const AtomicFieldMap, wrapped_members: *const WrappedUniformMemberMap, offset_structs: *const std.AutoHashMap(u32, void)) !void {
     const inst = getDef(module, type_id) orelse return;
     if (inst.op != .TypeStruct) return;
     if (inst.words.len > 2) {
@@ -1414,7 +1501,7 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
                 const cur_inst = getDef(module, cur_id) orelse break;
                 switch (cur_inst.op) {
                     .TypeStruct => {
-                        try emitOneStructForwardDecl(module, names, cur_id, w, alloc, emitted, emitted_names, atomic_fields, wrapped_members);
+                        try emitOneStructForwardDecl(module, names, cur_id, w, alloc, emitted, emitted_names, atomic_fields, wrapped_members, offset_structs);
                         break;
                     },
                     .TypePointer => {
@@ -1431,6 +1518,37 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
     if (emitted.get(type_id) != null) return;
     const sname = names.get(type_id) orelse "Struct";
     if (emitted_names.get(sname) != null) return;
+
+    // #170: a UNIFORM-reachable block struct must reproduce its SPIR-V member byte
+    // offsets in WGSL — the uniform address space requires struct/array members at
+    // 16-byte boundaries, which std140 already provides but the attribute-less WGSL
+    // hid, so naga recomputed sub-16 offsets and rejected. `want_offsets` gates the
+    // per-member @align/@size emission below; non-uniform structs stay byte-identical.
+    const want_offsets = offset_structs.get(type_id) != null;
+    if (want_offsets and inst.words.len > 2) {
+        // WGSL always places the first struct member at offset 0; a uniform block
+        // whose member 0 sits at a non-zero offset would need a synthetic leading
+        // pad member to reproduce. glslpp's frontend packs member 0 at 0 (std140),
+        // so this is a defensive honest-error guarding against a future silent-wrong.
+        if (memberOffset(module, type_id, 0)) |o0| {
+            if (o0 != 0) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL cannot reproduce a uniform block whose first member is at byte offset {d} (a non-zero leading offset needs a synthetic pad member)", .{o0}) catch null;
+                return error.UnsupportedOp;
+            }
+        }
+        // A 2-row matrix (matCx2) member is unrepresentable in a WGSL uniform: its
+        // std140 16-byte column stride cannot be expressed (WGSL matCx2 is fixed at
+        // 8). Honest-error BEFORE any struct text is written, rather than let the
+        // offset pass UNMASK a silently-wrong matrix (see helper). Pre-scanned here
+        // so the failure is loud and clean (no half-emitted struct).
+        for (inst.words[2..], 0..) |mt_id, mi| {
+            if (uniformMatrixStrideUnrepresentable(module, type_id, @intCast(mi), mt_id)) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL cannot express a 2-row matrix (matCx2) in a uniform block: std140's 16-byte column stride has no WGSL equivalent (matCx2 column stride is fixed at 8)", .{}) catch null;
+                return error.UnsupportedOp;
+            }
+        }
+    }
+
     emitted.put(type_id, {}) catch return;
     try emitted_names.put(sname, {});
     try w.print("struct {s} {{\n", .{sname});
@@ -1442,6 +1560,34 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
         // #170 A2: a sub-16 array element in a UNIFORM block is widened to vec4.
         // The matching swizzle is injected at the access site (buildAccessExprPlain).
         const wrap_kind: ?WrappedUniformMemberKind = wrapped_members.get(.{ .struct_id = type_id, .member_idx = @intCast(mi) });
+
+        // #170: faithful UNIFORM member layout. `@align` pins this member's start to
+        // its SPIR-V byte Offset (min(largestPow2Divisor(off), 16) always divides
+        // off and never exceeds std140's max alignment); `@size` pads it out to the
+        // NEXT member's offset so the following member is placed correctly regardless
+        // of this member's WGSL-natural size (a nested struct or matrix is smaller in
+        // WGSL than under std140). Both derive purely from the Offset decorations, so
+        // the WGSL layout matches the host's std140 packing. Empty for non-uniform.
+        var attrs: []const u8 = "";
+        if (want_offsets) {
+            if (memberOffset(module, type_id, @intCast(mi))) |off| {
+                const member_count = inst.words.len - 2;
+                const a: u32 = if (off == 0) 0 else @min(largestPow2Divisor(off), @as(u32, 16));
+                var nsize: u32 = 0;
+                if (mi + 1 < member_count) {
+                    if (memberOffset(module, type_id, @intCast(mi + 1))) |noff| {
+                        if (noff > off) nsize = noff - off;
+                    }
+                }
+                if (a != 0 and nsize != 0) {
+                    attrs = try std.fmt.allocPrint(alloc, "@align({d}) @size({d}) ", .{ a, nsize });
+                } else if (a != 0) {
+                    attrs = try std.fmt.allocPrint(alloc, "@align({d}) ", .{a});
+                } else if (nsize != 0) {
+                    attrs = try std.fmt.allocPrint(alloc, "@size({d}) ", .{nsize});
+                }
+            }
+        }
 
         // A row_major NON-square matrix needs swapped declared dimensions in
         // WGSL (which has no row_major feature) to read back the logical matrix
@@ -1470,28 +1616,28 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
                 // innermost element; the swizzle is appended at the access site.
                 if (wrap_kind != null) {
                     const vbase = wrappedVec4ElemType(module, mi2.words[2]);
-                    try w.print("    {s}: array<vec4<{s}>, {d}>,\n", .{ mname, vbase, lv });
+                    try w.print("    {s}{s}: array<vec4<{s}>, {d}>,\n", .{ attrs, mname, vbase, lv });
                     continue;
                 }
                 const et = try wgslType(module, mi2.words[2], names, alloc);
                 if (atomic_kind == .array_element) {
-                    try w.print("    {s}: array<atomic<{s}>, {d}>,\n", .{ mname, et, lv });
+                    try w.print("    {s}{s}: array<atomic<{s}>, {d}>,\n", .{ attrs, mname, et, lv });
                 } else {
-                    try w.print("    {s}: array<{s}, {d}>,\n", .{ mname, et, lv });
+                    try w.print("    {s}{s}: array<{s}, {d}>,\n", .{ attrs, mname, et, lv });
                 }
                 continue;
             }
             if (mi2.op == .TypeRuntimeArray and mi2.words.len > 2 and atomic_kind == .array_element) {
                 const et = try wgslType(module, mi2.words[2], names, alloc);
-                try w.print("    {s}: array<atomic<{s}>>,\n", .{ mname, et });
+                try w.print("    {s}{s}: array<atomic<{s}>>,\n", .{ attrs, mname, et });
                 continue;
             }
         }
         const mt = try wgslType(module, mt_id, names, alloc);
         if (atomic_kind == .scalar) {
-            try w.print("    {s}: atomic<{s}>,\n", .{ mname, mt });
+            try w.print("    {s}{s}: atomic<{s}>,\n", .{ attrs, mname, mt });
         } else {
-            try w.print("    {s}: {s},\n", .{ mname, mt });
+            try w.print("    {s}{s}: {s},\n", .{ attrs, mname, mt });
         }
     }
     try w.writeAll("}\n");
@@ -3189,6 +3335,24 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     var no_wrapped_members = WrappedUniformMemberMap.init(arena);
     defer no_wrapped_members.deinit();
 
+    // #170: the set of struct type ids reachable from a UNIFORM block (its pointee
+    // struct + nested struct members). emitOneStructForwardDecl reproduces these
+    // structs' SPIR-V member byte offsets via @align/@size so naga's uniform
+    // address-space layout matches the host's std140 packing. The SAME set is
+    // passed to every struct-emit call site — only uniform-reachable structs are
+    // members, so non-uniform structs skip the attribute pass and stay byte-identical.
+    // SSBO-only structs are NOT marked (storage tolerates the natural sub-16 layout).
+    var uniform_offset_structs = std.AutoHashMap(u32, void).init(arena);
+    defer uniform_offset_structs.deinit();
+    for (cbuffers.items) |cb| {
+        if (cb.is_ssbo) continue;
+        var struct_id = cb.type_id;
+        if (getDef(&module, struct_id)) |pi| {
+            if (pi.op == .TypePointer and pi.words.len > 3) struct_id = pi.words[3];
+        }
+        collectOffsetStructsRec(&module, struct_id, &uniform_offset_structs, 0);
+    }
+
     // Emit struct forward declarations for types used in cbuffers
     var emitted_structs = std.AutoHashMap(u32, void).init(arena);
     defer emitted_structs.deinit();
@@ -3231,8 +3395,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     for (cbuffers.items) |cb| {
-        try emitStructForwardDecls(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &wrapped_uniform_members);
-        try emitOneStructForwardDecl(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &wrapped_uniform_members);
+        try emitStructForwardDecls(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &wrapped_uniform_members, &uniform_offset_structs);
+        try emitOneStructForwardDecl(&module, &names, cb.type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &wrapped_uniform_members, &uniform_offset_structs);
     }
 
     // Emit struct forward declarations for types used as local variables
@@ -3268,7 +3432,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                         if (ti) |tinst| {
                             if (tinst.op == .TypeStruct and local_structs.get(tid) == null) {
                                 local_structs.put(tid, {}) catch {};
-                                try emitOneStructForwardDecl(&module, &names, tid, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
+                                try emitOneStructForwardDecl(&module, &names, tid, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members, &uniform_offset_structs);
                             }
                         }
                     }
@@ -3467,7 +3631,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                             }
                         }
                         // Emit struct declaration for array element types
-                        try emitOneStructForwardDecl(&module, &names, pointee_type, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
+                        try emitOneStructForwardDecl(&module, &names, pointee_type, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members, &uniform_offset_structs);
                         // #170 (F): a `shared` scalar that is a direct atomic target
                         // must be `atomic<T>` (else naga rejects the atomic op).
                         const wg_type: []const u8 = if (atomic_vars.contains(inst.words[2]))
@@ -3667,10 +3831,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             const ft = getDef(&module, func_type_id);
             if (ft) |fti| {
                 if (fti.op == .TypeFunction and fti.words.len > 2) {
-                    try emitOneStructForwardDecl(&module, &names, fti.words[2], w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
+                    try emitOneStructForwardDecl(&module, &names, fti.words[2], w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members, &uniform_offset_structs);
                     // Also emit for param types
                     for (fti.words[3..]) |param_tid| {
-                        try emitOneStructForwardDecl(&module, &names, param_tid, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
+                        try emitOneStructForwardDecl(&module, &names, param_tid, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members, &uniform_offset_structs);
                     }
                 }
             }
@@ -3686,7 +3850,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             {
                 if (scan.words.len > 1) {
                     const type_id = scan.words[1];
-                    try emitOneStructForwardDecl(&module, &names, type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
+                    try emitOneStructForwardDecl(&module, &names, type_id, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members, &uniform_offset_structs);
                 }
             }
         }
@@ -4072,8 +4236,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         var ri = output_recons.iterator();
         while (ri.next()) |e| {
             const sty = e.value_ptr.struct_type;
-            try emitStructForwardDecls(&module, &names, sty, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
-            try emitOneStructForwardDecl(&module, &names, sty, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
+            try emitStructForwardDecls(&module, &names, sty, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members, &uniform_offset_structs);
+            try emitOneStructForwardDecl(&module, &names, sty, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members, &uniform_offset_structs);
         }
     }
 
@@ -4116,7 +4280,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 // emitOneStructForwardDecl emits the member structs but SKIPS the
                 // block struct itself — it was pre-seeded into emitted_structs to
                 // suppress the generic emitter — so we emit the block manually.
-                try emitOneStructForwardDecl(&module, &names, sty, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members);
+                try emitOneStructForwardDecl(&module, &names, sty, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members, &uniform_offset_structs);
                 try w.print("struct {s} {{\n", .{sname});
                 for (sdef.words[2..], 0..) |mt_id, mi| {
                     var mname_buf: [32]u8 = undefined;
