@@ -5444,3 +5444,33 @@ test "wgsl: array of SSBO blocks with a runtime-array member honest-errors (#170
     const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "runtime-sized array member") != null);
 }
+
+// #170: an SSBO that is an ARRAY of blocks whose struct has only FIXED members
+// (`buffer B { vec4 a; vec4 b; } bufs[2];`) IS representable as
+// `var<storage, read_write> bufs: array<B, 2>`. But glslang's legacy SPIR-V
+// encodes such an SSBO as the `Uniform` storage class with `BufferBlock` on the
+// inner STRUCT — and the variable's pointee is the ARRAY, not the struct, so the
+// `hasDec(array, .buffer_block)` check returned false → is_ssbo=false → the var
+// went through the array-of-UBO wrapper path and was emitted READ-ONLY as
+// `var<uniform>`. A store `bufs[1].a = ...` then made naga reject ("writing to
+// this location is not permitted") = silent-wrong. Must emit a writable storage
+// buffer. (Distinct from the runtime-array case above, which is genuinely
+// unrepresentable and correctly honest-errors.) Uses glslang SPIR-V because
+// glslpp's own frontend emits the StorageBuffer class, which never hit the bug.
+test "wgsl: array of SSBO blocks with only fixed members emits writable storage (#170)" {
+    const spirv = compileToSpirv("ssbo_array_fixed",
+        \\#version 450
+        \\layout(std430, binding = 0) buffer B { vec4 a; vec4 b; } bufs[2];
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    bufs[1].a = bufs[0].b;
+        \\    o = bufs[1].a;
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<storage") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<uniform") == null);
+    try nagaValidateOrSkip(wgsl, "ssbo-array-fixed-members");
+}
