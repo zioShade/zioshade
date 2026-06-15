@@ -741,9 +741,17 @@ fn storageImageShape(module: *const ParsedModule, image_value_id: u32) StorageIm
 /// the array, so an array-of-SSBO variable must unwrap to the element struct
 /// before the decoration check — otherwise it is mis-classified as a read-only
 /// uniform and a store is silently rejected by naga. (#170)
+///
+/// `depth` caps the walk: valid SPIR-V types form an acyclic DAG so real array
+/// nesting is 1–2 levels deep, but a malformed/hostile module could encode a
+/// self-referential array type. The cap degrades that gracefully (returns the
+/// last array id → callers treat it as a non-struct, no honest behavior change)
+/// rather than hanging, matching the depth-guarded type walks elsewhere here.
 fn arrayElementType(module: *const ParsedModule, type_id: u32) u32 {
     var tid = type_id;
-    while (getDef(module, tid)) |d| {
+    var depth: u32 = 0;
+    while (depth < 64) : (depth += 1) {
+        const d = getDef(module, tid) orelse break;
         if ((d.op == .TypeArray or d.op == .TypeRuntimeArray) and d.words.len >= 3) {
             tid = d.words[2];
         } else break;
@@ -760,12 +768,11 @@ fn arrayElementType(module: *const ParsedModule, type_id: u32) u32 {
 /// buffers (would need per-element separate bindings + static indices). So the
 /// WGSL backend honest-errors rather than emit the naga-rejected nesting.
 fn ssboArrayOfRuntimeArrayStruct(module: *const ParsedModule, type_id: u32) bool {
-    var el = getDef(module, type_id) orelse return false;
-    if (el.op != .TypeArray and el.op != .TypeRuntimeArray) return false;
-    // Unwrap every array level to the element type.
-    while ((el.op == .TypeArray or el.op == .TypeRuntimeArray) and el.words.len >= 3) {
-        el = getDef(module, el.words[2]) orelse return false;
-    }
+    const head = getDef(module, type_id) orelse return false;
+    if (head.op != .TypeArray and head.op != .TypeRuntimeArray) return false;
+    // Unwrap every array level to the element type (shared primitive, so the
+    // depth cap / cycle guard lives in one place).
+    const el = getDef(module, arrayElementType(module, type_id)) orelse return false;
     if (el.op != .TypeStruct) return false;
     for (el.words[2..]) |member_type_id| {
         const m = getDef(module, member_type_id) orelse continue;
