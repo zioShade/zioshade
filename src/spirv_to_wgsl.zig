@@ -734,6 +734,23 @@ fn storageImageShape(module: *const ParsedModule, image_value_id: u32) StorageIm
     return .{ .arrayed = inst.words[5] == 1, .ms = inst.words[6] == 1, .spatial = spatial };
 }
 
+/// Unwrap every TypeArray / TypeRuntimeArray level of `type_id`, returning the id
+/// of the innermost (non-array) element type. A non-array type is returned
+/// unchanged. Used to reach the block STRUCT behind an `array<Block, N>` pointee:
+/// glslang's legacy SPIR-V puts the `BufferBlock` decoration on the struct, not on
+/// the array, so an array-of-SSBO variable must unwrap to the element struct
+/// before the decoration check — otherwise it is mis-classified as a read-only
+/// uniform and a store is silently rejected by naga. (#170)
+fn arrayElementType(module: *const ParsedModule, type_id: u32) u32 {
+    var tid = type_id;
+    while (getDef(module, tid)) |d| {
+        if ((d.op == .TypeArray or d.op == .TypeRuntimeArray) and d.words.len >= 3) {
+            tid = d.words[2];
+        } else break;
+    }
+    return tid;
+}
+
 /// True if `type_id` is an ARRAY (fixed or runtime) whose element struct contains
 /// a RUNTIME-sized array member — e.g. an array of SSBO blocks
 /// (`buffer SSBO { vec4 data[]; } ssbos[2];` → `array<SSBO, 2>` where SSBO has
@@ -2969,7 +2986,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 const binding = getDecVal(&decorations, result_id, .binding) orelse 0;
                 const set = getDecVal(&decorations, result_id, .descriptor_set) orelse 0;
                 const name = names.get(result_id) orelse "Globals";
-                const is_ssbo = hasDec(&decorations, pointee_type, .buffer_block);
+                // An SSBO is flagged by `BufferBlock` on the block STRUCT. For a
+                // plain block the pointee IS that struct, but for an ARRAY of
+                // blocks (`buffer B { … } bufs[2];`) the pointee is OpTypeArray and
+                // the decoration sits on the element struct — so unwrap array
+                // levels first. Without this, an array-of-SSBO was mis-detected as
+                // a read-only uniform and emitted `var<uniform>`, making a store
+                // `bufs[i].x = …` a naga reject = silent-wrong. (#170)
+                const is_ssbo = hasDec(&decorations, arrayElementType(&module, pointee_type), .buffer_block);
                 try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = is_ssbo, .result_id = result_id });
             },
             .StorageBuffer => {
