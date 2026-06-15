@@ -5474,3 +5474,33 @@ test "wgsl: array of SSBO blocks with only fixed members emits writable storage 
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<uniform") == null);
     try nagaValidateOrSkip(wgsl, "ssbo-array-fixed-members");
 }
+
+// #170: a UNIFORM block whose member offsets are not the WGSL-natural ones —
+// a NESTED struct (`Foo foo`) and an array member follow std140 rules that round
+// a struct/array member up to a 16-byte boundary. glslpp emitted the struct with
+// NO @align/@size attributes, so naga computes the natural offset (foo at byte 8,
+// right after two i32s) and rejects: "The struct member offset 8 is not a multiple
+// of the required alignment 16" on `var<uniform>` — silent-wrong. The fix reads the
+// SPIR-V member Offset decorations and emits @align/@size so the WGSL layout matches
+// (foo lands at offset 16). STORAGE blocks tolerate the natural layout, so only the
+// uniform path was rejected. (tests/spirv-cross/enhanced-layouts.comp, naga baseline reject.)
+test "wgsl: uniform block with nested-struct/array member offsets validates (#170)" {
+    const wgsl = try compileCompToWgsl(
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\struct Foo { int a; int b; int c; };
+        \\layout(std140, binding = 0) uniform UBO {
+        \\    layout(offset = 4) int a;
+        \\    layout(offset = 8) int b;
+        \\    layout(offset = 16) Foo foo;
+        \\    layout(offset = 48) int c[8];
+        \\} ubo;
+        \\layout(std430, binding = 1) buffer SSBO { int out_b; } ssbo;
+        \\void main() { ssbo.out_b = ubo.b; }
+    );
+    defer alloc.free(wgsl);
+    // The nested struct member must carry an @align(16) so naga places it at the
+    // SPIR-V offset (16), not the natural 8.
+    try assertContains(wgsl, "@align(16)");
+    try nagaValidateOrSkip(wgsl, "uniform-nested-offsets");
+}
