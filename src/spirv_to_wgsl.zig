@@ -6599,10 +6599,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // rather than indexing out of bounds (don't panic on bad input).
                     if (inst.words.len <= 6) return error.UnsupportedImageOperands;
                     const bias = names.get(inst.words[6]) orelse "0";
-                    const off_suffix: []const u8 = if ((mask & 0x8) != 0 and inst.words.len > 7)
-                        try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[7]) orelse "vec2<i32>(0)"})
-                    else
-                        "";
+                    // ConstOffset (0x8) appends a trailing const-offset arg. A mask
+                    // that CLAIMS the offset but whose operand word is truncated away
+                    // must honest-error, not silently drop the claimed offset
+                    // (silent-wrong) — mirrors the gather/non-Bias offset guards.
+                    var off_suffix: []const u8 = "";
+                    if ((mask & 0x8) != 0) {
+                        if (inst.words.len <= 7) return error.UnsupportedImageOperands;
+                        off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[7]) orelse "vec2<i32>(0)"});
+                    }
                     if (shape.arrayed) {
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);
@@ -6661,10 +6666,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (inst.words.len <= 7) return error.UnsupportedImageOperands;
                     const ddx = names.get(inst.words[6]) orelse "0";
                     const ddy = names.get(inst.words[7]) orelse "0";
-                    const off_suffix: []const u8 = if ((mask & 0x8) != 0 and inst.words.len > 8)
-                        try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[8]) orelse "vec2<i32>(0)"})
-                    else
-                        "";
+                    // ConstOffset (0x8) appends a trailing const-offset arg (after
+                    // ddx/ddy). A mask that CLAIMS the offset but whose operand word
+                    // is truncated away must honest-error, not silently drop the
+                    // claimed offset (silent-wrong) — mirrors the Bias-arm guard.
+                    var off_suffix: []const u8 = "";
+                    if ((mask & 0x8) != 0) {
+                        if (inst.words.len <= 8) return error.UnsupportedImageOperands;
+                        off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[8]) orelse "vec2<i32>(0)"});
+                    }
                     if (shape.arrayed) {
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);

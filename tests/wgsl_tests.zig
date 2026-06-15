@@ -120,6 +120,31 @@ fn countSpirvOpcode(words: []const u32, opcode: u16) u32 {
     return count;
 }
 
+/// Build a malformed copy of `words` where the FIRST instruction with the given
+/// opcode has its trailing operand word removed (and its word-count header
+/// decremented to match, so the rest of the stream still parses). Used to
+/// synthesize truncated SPIR-V: an image instruction whose mask still claims a
+/// ConstOffset operand but whose offset <id> word is missing. No conformant
+/// producer emits this, but the backend must reject it loudly rather than
+/// silently drop the claimed offset. Caller frees the result.
+fn truncateLastOperand(words: []const u32, opcode: u16) ![]u32 {
+    var pos: usize = 5;
+    while (pos < words.len) {
+        const wc: usize = words[pos] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(words[pos] & 0xFFFF)) == opcode) {
+            const drop_idx = pos + wc - 1; // index of the trailing operand word
+            const out = try alloc.alloc(u32, words.len - 1);
+            @memcpy(out[0..drop_idx], words[0..drop_idx]);
+            @memcpy(out[drop_idx..], words[drop_idx + 1 ..]);
+            out[pos] = (@as(u32, @intCast(wc - 1)) << 16) | @as(u32, opcode);
+            return out;
+        }
+        pos += wc;
+    }
+    return error.OpcodeNotFound;
+}
+
 // Validate WGSL with naga — the external WebGPU validator. The whole point of
 // the "silent-wrong" class of bugs is that glslpp emits text that LOOKS fine
 // (exit 0) but a real validator rejects, so string assertions alone can pass
@@ -4589,6 +4614,95 @@ test "wgsl: texture(s, uv, bias) (OpImageSampleImplicitLod Bias) -> textureSampl
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleBias(");
     try nagaValidateOrSkip(wgsl, "tex-bias");
+}
+
+// #170: OpImageSampleImplicitLod with BOTH Bias (0x1) and ConstOffset (0x8) — GLSL
+// textureOffset(s, uv, offset, bias). The constant offset must reach the
+// textureSampleBias call as a trailing argument; dropping it is silent-wrong (the
+// neighborhood is shifted). Guards the happy path of the Bias-arm offset suffix.
+// (Routes through glslang/compileToSpirv — the external-SPIR-V backend arm —
+// independent of the frontend Bias+ConstOffset test below.)
+test "wgsl: textureOffset(s, uv, offset, bias) keeps the const offset, backend arm (#170)" {
+    const spirv = compileToSpirv("tex_bias_offset",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureOffset(s, uv, ivec2(1, 2), 1.5); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleBias(");
+    try assertContains(wgsl, "vec2<i32>(1, 2)");
+    try nagaValidateOrSkip(wgsl, "tex-bias-offset");
+}
+
+// #170 (defensive): a Bias instruction whose mask CLAIMS a ConstOffset (0x8) but
+// whose offset <id> operand word is truncated away must FAIL LOUDLY, not silently
+// emit a textureSampleBias with the claimed offset dropped. No conformant producer
+// emits this, so we synthesize it by truncating the trailing offset word of a real
+// textureOffset(...,bias) instruction (OpImageSampleImplicitLod = 87). Mirrors the
+// explicit honest-error guards on the sibling non-Bias / textureSampleLevel arms.
+test "wgsl: Bias with a truncated ConstOffset operand is an honest error (#170)" {
+    const spirv = compileToSpirv("tex_bias_trunc",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureOffset(s, uv, ivec2(1, 2), 1.5); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const truncated = truncateLastOperand(spirv, 87) catch return error.SkipZigTest;
+    defer alloc.free(truncated);
+    try std.testing.expectError(
+        error.UnsupportedImageOperands,
+        glslpp.spirvToWGSL(alloc, truncated, .{}),
+    );
+}
+
+// #170: OpImageSampleExplicitLod with BOTH Grad (0x4) and ConstOffset (0x8) — GLSL
+// textureGradOffset(s, uv, ddx, ddy, offset). The constant offset must reach the
+// textureSampleGrad call as a trailing argument (after ddx, ddy); dropping it is
+// silent-wrong. Guards the happy path of the Grad-arm offset suffix. (glslpp's own
+// frontend rejects textureGradOffset — see the honest-error test below — so this
+// drives the external-SPIR-V backend arm via glslang.)
+test "wgsl: textureGradOffset keeps the const offset, backend arm (#170)" {
+    const spirv = compileToSpirv("tex_grad_offset",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureGradOffset(s, uv, vec2(0.1), vec2(0.2), ivec2(2, 3)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleGrad(");
+    try assertContains(wgsl, "vec2<i32>(2, 3)");
+    try nagaValidateOrSkip(wgsl, "tex-grad-offset");
+}
+
+// #170 (defensive): a Grad instruction whose mask CLAIMS a ConstOffset (0x8) but
+// whose offset <id> operand word is truncated away must FAIL LOUDLY, not silently
+// emit a textureSampleGrad with the claimed offset dropped. Synthesized by
+// truncating the trailing offset word of a real textureGradOffset instruction
+// (OpImageSampleExplicitLod = 88).
+test "wgsl: Grad with a truncated ConstOffset operand is an honest error (#170)" {
+    const spirv = compileToSpirv("tex_grad_trunc",
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureGradOffset(s, uv, vec2(0.1), vec2(0.2), ivec2(2, 3)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const truncated = truncateLastOperand(spirv, 88) catch return error.SkipZigTest;
+    defer alloc.free(truncated);
+    try std.testing.expectError(
+        error.UnsupportedImageOperands,
+        glslpp.spirvToWGSL(alloc, truncated, .{}),
+    );
 }
 
 // #170: OpImageSampleImplicitLod with a `ConstOffset` image operand (GLSL
