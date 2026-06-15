@@ -202,6 +202,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
             // (a stray non-const op replayed there is invalid SPIR-V).
             const mark = analyzer.instructions.items.len;
             const res = analyzer.analyzeExpression(init_node) catch {
+                analyzer.purgeRolledBackConstCache(analyzer.instructions.items[mark..]);
                 for (analyzer.instructions.items[mark..]) |inst| {
                     if (inst.operands.len > 0) alloc.free(inst.operands);
                 }
@@ -212,6 +213,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
                 target.?.initializer_id = res.id;
                 analyzer.global_const_init_map.put(alloc, gid, res.id) catch {};
             } else {
+                analyzer.purgeRolledBackConstCache(analyzer.instructions.items[mark..]);
                 for (analyzer.instructions.items[mark..]) |inst| {
                     if (inst.operands.len > 0) alloc.free(inst.operands);
                 }
@@ -913,6 +915,49 @@ const Analyzer = struct {
             }
         }
         return false;
+    }
+
+    /// Drop const-cache entries that point into a rolled-back scratch slice.
+    ///
+    /// The Design-A const-array fold loop (analyzeWithOptions) evaluates every
+    /// `const` global-array initializer into ONE shared scratch list (#173) and,
+    /// when an initializer does not fold to a constant, frees its tail
+    /// (`instructions.items[mark..]`) and `shrinkRetainingCapacity(mark)`s it
+    /// away. But const_cache / const_composite_cache are keyed by value-bits, not
+    /// by scratch lifetime, so a scalar emitted (and cached) by a rolled-back
+    /// initializer leaves a cache entry whose id was just shrunk out of the
+    /// scratch. A later initializer that hits that entry — e.g. the float-literal
+    /// splat path (`vec3(1.0)`) — would splice the dangling id into a SURVIVING
+    /// constant_composite without re-emitting it, producing a forward/dangling
+    /// reference in codegen ("forward referenced IDs have not been defined" =
+    /// invalid SPIR-V). Pass the rolled-back tail (`items[mark..]`) here on each
+    /// rollback so the next initializer re-emits the scalar into the scratch.
+    /// Entries pointing at already-committed shared constants (`items[0..mark]`,
+    /// from prior folded initializers) are NOT in `freed`, so they are untouched
+    /// and #173's cross-initializer dedup survives.
+    fn purgeRolledBackConstCache(self: *Analyzer, freed: []const ir.Instruction) void {
+        if (freed.len == 0) return;
+        inline for (.{ &self.const_cache, &self.const_composite_cache }) |cache| {
+            // Collect first — removing during iteration invalidates the iterator.
+            // `freed` is one initializer's scratch (a handful of constants), so a
+            // linear membership scan beats building a throwaway id set — and keeps
+            // this allocation-light so it cannot itself fail open mid-purge.
+            var doomed: std.ArrayListUnmanaged(u64) = .empty;
+            defer doomed.deinit(self.alloc);
+            var it = cache.iterator();
+            outer: while (it.next()) |e| {
+                for (freed) |inst| {
+                    const rid = inst.result_id orelse continue;
+                    if (rid != e.value_ptr.*) continue;
+                    // Best-effort under OOM: a failed append leaves this stale entry,
+                    // but codegen would still catch the dangling id (and OOM fails the
+                    // compile anyway), so degrade rather than propagate.
+                    doomed.append(self.alloc, e.key_ptr.*) catch {};
+                    continue :outer;
+                }
+            }
+            for (doomed.items) |k| _ = cache.remove(k);
+        }
     }
 
     /// Resolve the constant-composite id that initializes a local array variable.
@@ -9359,6 +9404,73 @@ test "semantic: float array constructor with high-bit uint-literal arg folds to 
         }
     }
     try testing.expect(found_composite);
+}
+
+test "semantic: rolled-back const-array initializer purges its cached scalar (no dangling forward ref)" {
+    // Regression guard for the latent Design-A const-array fold bug: when a
+    // `const` global-array initializer fails to fold, its scratch instructions
+    // are freed and discarded, but the scalar it emitted lingered in
+    // const_cache. A later foldable initializer reusing that scalar via the
+    // float-splat path (`vec3(1.0)`) would splice the FREED id into a surviving
+    // constant_composite — a dangling forward reference = invalid SPIR-V.
+    // purgeRolledBackConstCache must drop the entry so the next initializer
+    // re-emits the scalar into its own scratch list.
+    var analyzer = Analyzer{
+        .alloc = testing.allocator,
+        .scopes = .empty,
+        .globals = .empty,
+        .functions = .empty,
+        .types = .empty,
+        .instructions = .empty,
+        .errors = .empty,
+        .loop_stack = .empty,
+        .overloads = .empty,
+        .tolerate_errors = false,
+        .stage = .fragment,
+    };
+    defer analyzer.deinit();
+
+    // A non-folding initializer emits + caches a scalar into its scratch list.
+    const rolled_back_id = try analyzer.getConstFloat(1.0);
+    try testing.expectEqual(@as(u32, 1), analyzer.const_cache.count());
+    // The cache hands the same id back (dedup) while it is live.
+    try testing.expectEqual(rolled_back_id, try analyzer.getConstFloat(1.0));
+
+    // Stage a constant_composite that reuses the scalar — the exact shape the
+    // float-splat path caches — so the rollback must purge BOTH maps (the
+    // inline-for over const_cache AND const_composite_cache), not just the scalar.
+    const comp_id = analyzer.allocId();
+    const comp_ops = try testing.allocator.alloc(ir.Instruction.Operand, 4);
+    for (0..4) |i| comp_ops[i] = .{ .id = rolled_back_id };
+    try analyzer.instructions.append(testing.allocator, .{
+        .tag = .constant_composite,
+        .result_type = null,
+        .result_id = comp_id,
+        .operands = comp_ops,
+        .ty = .vec4,
+    });
+    try analyzer.const_composite_cache.put(testing.allocator, analyzer.constCompositeKey(.vec4, comp_ops), comp_id);
+    try testing.expectEqual(@as(u32, 1), analyzer.const_composite_cache.count());
+
+    // Roll the initializer back exactly as the fold loop does: purge the cache,
+    // then free + drop the scratch instructions.
+    analyzer.purgeRolledBackConstCache(analyzer.instructions.items);
+    for (analyzer.instructions.items) |inst| {
+        if (inst.operands.len > 0) testing.allocator.free(inst.operands);
+    }
+    analyzer.instructions.clearRetainingCapacity();
+
+    // Both dangling entries are gone — no surviving cache key points at a freed id.
+    try testing.expectEqual(@as(u32, 0), analyzer.const_cache.count());
+    try testing.expectEqual(@as(u32, 0), analyzer.const_composite_cache.count());
+
+    // A sibling foldable initializer requesting the same value now re-emits a
+    // FRESH constant into the current scratch list instead of reusing the freed
+    // id, so it is a real, in-scope constant (isConstantId sees it).
+    const fresh_id = try analyzer.getConstFloat(1.0);
+    try testing.expect(fresh_id != rolled_back_id);
+    try testing.expectEqual(@as(usize, 1), analyzer.instructions.items.len);
+    try testing.expect(analyzer.isConstantId(fresh_id));
 }
 
 test "semantic: literal exceeding u64 range errors honestly" {
