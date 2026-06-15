@@ -489,6 +489,52 @@ fn largestPow2Divisor(n: u32) u32 {
     return n & (~n +% 1);
 }
 
+/// The `MatrixStride` decorating member `member_idx` of struct `struct_id`
+/// (`OpMemberDecorate <struct> <idx> MatrixStride N`), or null if undecorated.
+fn memberMatrixStride(module: *const ParsedModule, struct_id: u32, member_idx: u32) ?u32 {
+    for (module.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 5) continue;
+        if (inst.words[1] != struct_id or inst.words[2] != member_idx) continue;
+        if (@as(spirv.Decoration, @enumFromInt(inst.words[3])) != .matrix_stride) continue;
+        return inst.words[4];
+    }
+    return null;
+}
+
+/// #170: a UNIFORM member that is (or whose array element is) a 2-ROW matrix
+/// (`matCx2`) is unrepresentable in core WGSL: std140 packs each column on a
+/// 16-byte stride, but WGSL's `matCx2<f32>` has a fixed 8-byte column stride
+/// (its column type `vec2<f32>` aligns to 8) and there is NO matrix-stride
+/// attribute to override it. Emitting it anyway makes naga ACCEPT a layout that
+/// reads every column past the first from the wrong byte = silent-wrong. The
+/// faithful @align/@size offset pass would otherwise UNMASK this (a UBO formerly
+/// rejected for a nested-member offset now validates with a mis-strided matrix),
+/// so it must honest-error. Returns true when the member's MatrixStride disagrees
+/// with WGSL's natural column stride (8 for 2-row, 16 for 3-/4-row). matCx3/matCx4
+/// already match std140's 16-byte stride; storage (std430/scalar, MatrixStride 8)
+/// also matches and is not a uniform-offset struct, so it never reaches here.
+fn uniformMatrixStrideUnrepresentable(module: *const ParsedModule, struct_id: u32, member_idx: u32, member_type_id: u32) bool {
+    // Unwrap EVERY array level to reach the element type — a multidimensional
+    // matrix array (`mat2 m[2][3]`) is nested OpTypeArrays, and a one-level unwrap
+    // would leave `t` an array and miss the matrix (silent-wrong slips through).
+    // The MatrixStride decoration stays on the member regardless of nesting. Depth
+    // cap mirrors the emit loop's guard against malformed cyclic SPIR-V.
+    var t = member_type_id;
+    var depth: u32 = 0;
+    while (depth < 8) : (depth += 1) {
+        const d = getDef(module, t) orelse break;
+        if ((d.op == .TypeArray or d.op == .TypeRuntimeArray) and d.words.len > 2) t = d.words[2] else break;
+    }
+    const md = getDef(module, t) orelse return false;
+    if (md.op != .TypeMatrix or md.words.len < 4) return false;
+    const col = getDef(module, md.words[2]) orelse return false; // column vector type
+    if (col.op != .TypeVector or col.words.len < 4) return false;
+    const rows = col.words[3];
+    const wgsl_col_stride: u32 = if (rows == 2) 8 else 16; // vec2 aligns to 8; vec3/vec4 to 16
+    const spv_stride = memberMatrixStride(module, struct_id, member_idx) orelse return false;
+    return spv_stride != wgsl_col_stride;
+}
+
 /// #170: collect (into `out`) the set of struct type ids reachable from
 /// `type_id` — itself plus nested struct members, walking through array/matrix/
 /// vector/pointer wrappers. Used to mark every struct reachable from a UNIFORM
@@ -1487,6 +1533,17 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
         if (memberOffset(module, type_id, 0)) |o0| {
             if (o0 != 0) {
                 last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL cannot reproduce a uniform block whose first member is at byte offset {d} (a non-zero leading offset needs a synthetic pad member)", .{o0}) catch null;
+                return error.UnsupportedOp;
+            }
+        }
+        // A 2-row matrix (matCx2) member is unrepresentable in a WGSL uniform: its
+        // std140 16-byte column stride cannot be expressed (WGSL matCx2 is fixed at
+        // 8). Honest-error BEFORE any struct text is written, rather than let the
+        // offset pass UNMASK a silently-wrong matrix (see helper). Pre-scanned here
+        // so the failure is loud and clean (no half-emitted struct).
+        for (inst.words[2..], 0..) |mt_id, mi| {
+            if (uniformMatrixStrideUnrepresentable(module, type_id, @intCast(mi), mt_id)) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL cannot express a 2-row matrix (matCx2) in a uniform block: std140's 16-byte column stride has no WGSL equivalent (matCx2 column stride is fixed at 8)", .{}) catch null;
                 return error.UnsupportedOp;
             }
         }

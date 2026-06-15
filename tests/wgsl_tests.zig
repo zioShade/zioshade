@@ -5504,3 +5504,52 @@ test "wgsl: uniform block with nested-struct/array member offsets validates (#17
     try assertContains(wgsl, "@align(16)");
     try nagaValidateOrSkip(wgsl, "uniform-nested-offsets");
 }
+
+// #170: a 2-row matrix (matCx2) in a UNIFORM block is unrepresentable in core
+// WGSL — std140 packs each column on a 16-byte stride, but WGSL's matCx2<f32> has
+// a fixed 8-byte column stride and there is NO matrix-stride attribute to override
+// it. naga ACCEPTS the mis-strided matrix (every column past the first reads from
+// the wrong byte = silent-wrong). The faithful @align/@size offset pass would
+// otherwise UNMASK this: a UBO formerly rejected for a nested-member offset now
+// validates with a silently-wrong matrix. So it must honest-error instead. matCx3/
+// matCx4 (16-byte column stride) and storage-block matrices (std430 stride 8 ==
+// WGSL 8) are unaffected.
+test "wgsl: 2-row matrix in a uniform block honest-errors (#170)" {
+    try std.testing.expectError(error.UnsupportedOp, compileToWgsl(
+        \\#version 450
+        \\layout(std140, binding = 0) uniform UBO { mat2 m2; vec4 tail; } ubo;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { vec2 r = ubo.m2 * ubo.tail.xy; o = vec4(r, 0.0, 0.0) + ubo.tail; }
+    ));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "2-row matrix") != null);
+}
+
+// #170 guard scope: a 3-row matrix (mat3) in a uniform block IS representable —
+// its std140 16-byte column stride matches WGSL's mat3x3<f32> column stride (16) —
+// so it must NOT be caught by the matCx2 honest-error and must validate with naga.
+test "wgsl: 3-row matrix in a uniform block validates (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(std140, binding = 0) uniform UBO { mat3 m3; vec4 tail; } ubo;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { vec3 r = ubo.m3 * ubo.tail.xyz; o = vec4(r, 0.0) + ubo.tail; }
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "uniform-mat3");
+}
+
+// #170: the matCx2 guard must unwrap EVERY array level — a multidimensional matrix
+// array (`mat2 m[2][3]`) is nested OpTypeArrays in SPIR-V. A one-level unwrap would
+// leave the type an array, miss the inner matrix, and let the silently-mis-strided
+// matCx2 slip through. Must honest-error like the scalar/single-array forms.
+test "wgsl: multidim 2-row matrix array in a uniform block honest-errors (#170)" {
+    try std.testing.expectError(error.UnsupportedOp, compileToWgsl(
+        \\#version 450
+        \\layout(std140, binding = 0) uniform UBO { mat2 m[2][3]; vec4 tail; } ubo;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { vec2 r = ubo.m[1][2] * ubo.tail.xy; o = vec4(r, 0.0, 0.0) + ubo.tail; }
+    ));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "2-row matrix") != null);
+}
