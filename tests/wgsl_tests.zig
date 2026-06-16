@@ -5553,3 +5553,39 @@ test "wgsl: multidim 2-row matrix array in a uniform block honest-errors (#170)"
     const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "2-row matrix") != null);
 }
+
+// #170: a PUSH_CONSTANT block with a std140 sub-16 array member (`float vals[4]`).
+// The frontend (codegen.zig) emits Block + member layout (Offset/ArrayStride) only
+// for .uniform/.storage_buffer blocks — push-constant blocks were excluded, so the
+// `float[4]` member got NO ArrayStride. The WGSL backend's std140 sub-16 widening
+// (array<f32,N> → array<vec4<f32>,N> + `.x`) gates on ArrayStride==16, so with the
+// stride absent the array stayed `array<f32,4>` (stride 4) → naga "array stride 4
+// is not a multiple of the required alignment 16" = silent-wrong. Including
+// push-constant in the frontend's Block-layout scan emits the stride so the
+// backend widens it. (Named push-constant + anonymous uniform already worked.)
+test "wgsl: push-constant std140 array member is widened (#170)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(push_constant, std140) uniform UBO { float ubo[4]; };
+        \\layout(location = 0) out float FragColor;
+        \\void main() { FragColor = ubo[1]; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "array<vec4<f32>, 4>"); // widened
+    try nagaValidateOrSkip(wgsl, "push-constant-std140-array");
+}
+
+// #170: making push-constant blocks Block-decorated (above) means their bool/bvec
+// members now need the same bool→uint substitution UBO/SSBO members get — SPIR-V
+// forbids OpTypeBool inside a Block. A `bool` member in a push-constant block must
+// produce valid output, not an OpTypeBool-in-Block spirv-val violation.
+test "wgsl: push-constant block with a bool member is valid (bool→uint) (#170)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(push_constant, std140) uniform PC { bool flag; vec4 color; };
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = flag ? color : vec4(0.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "push-constant-bool-member");
+}
