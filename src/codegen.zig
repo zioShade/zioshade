@@ -2577,7 +2577,10 @@ const Codegen = struct {
                 var is_block_struct = false;
                 if (!self.in_interface_block) {
                     for (self.module.globals) |global| {
-                        if (global.storage_class != .uniform and global.storage_class != .storage_buffer) continue;
+                        // Push-constant blocks are Block-decorated too (see needs_block
+                        // scan below), so their bool/bvec members need the same
+                        // bool→uint substitution — SPIR-V forbids OpTypeBool in a Block. (#170)
+                        if (global.storage_class != .uniform and global.storage_class != .storage_buffer and global.storage_class != .push_constant) continue;
                         if (global.ty != .named) continue;
                         if (std.mem.eql(u8, global.ty.named, name)) {
                             is_block_struct = true;
@@ -2663,7 +2666,12 @@ const Codegen = struct {
                 var block_layout: LayoutKind = self.default_layout;
                 var block_row_major = false;
                 for (self.module.globals) |global| {
-                    if (global.storage_class != .uniform and global.storage_class != .storage_buffer) continue;
+                    // Push-constant blocks are SPIR-V Block-decorated interface blocks
+                    // too (they need Block + member Offset/ArrayStride/MatrixStride, and
+                    // spirv-val requires ArrayStride on an array member). Excluding them
+                    // left a `float a[N]` member with NO ArrayStride, so the WGSL backend
+                    // could not std140-widen it → naga "array stride not a multiple of 16". (#170)
+                    if (global.storage_class != .uniform and global.storage_class != .storage_buffer and global.storage_class != .push_constant) continue;
                     if (global.ty != .named) continue;
                     if (!std.mem.eql(u8, global.ty.named, name)) continue;
                     needs_block = true;
@@ -5121,9 +5129,9 @@ const Codegen = struct {
                 } else {
                     // For interface block members, convert bool/bvec to uint/uvec
                     var access_ty = inst.ty;
-                    const is_interface_bool = (sc == .uniform or sc == .storage_buffer) and
+                    const is_interface_bool = (sc == .uniform or sc == .storage_buffer or sc == .push_constant) and
                         (inst.ty == .bool or inst.ty == .bvec2 or inst.ty == .bvec3 or inst.ty == .bvec4);
-                    if (sc == .uniform or sc == .storage_buffer) {
+                    if (sc == .uniform or sc == .storage_buffer or sc == .push_constant) {
                         access_ty = switch (access_ty) {
                             .bool => .uint,
                             .bvec2 => .uvec2,
