@@ -5589,3 +5589,26 @@ test "wgsl: push-constant block with a bool member is valid (bool→uint) (#170)
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "push-constant-bool-member");
 }
+
+// #170: GLSL/SPIR-V leave a shift whose amount is >= the operand bit width
+// undefined; glslang happily emits e.g. `state >> 63u` on a 32-bit uint
+// (rule30.frag). WGSL makes a CONSTANT over-shift a shader-creation error, so
+// naga rejects the faithful translation `v >> u32(63u)` at exit 0 = silent-wrong.
+// Mask the constant amount to the low bits (& 31) — a no-op for in-range amounts,
+// and the same wrap hardware / the HLSL+MSL backends already apply — so the WGSL
+// validates instead of being silently rejected.
+test "wgsl: constant shift amount >= 32 is masked so naga accepts it (#170)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    uint state = uint(uv.x * 64.0);   // runtime, so the shift is not folded
+        \\    uint bit = (state >> 63u) & 1u;   // const over-shift by 63 on a 32-bit uint
+        \\    o = vec4(float(bit));
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "u32(31u)"); // 63 & 31 = 31
+    try nagaValidateOrSkip(wgsl, "const-overshift-masked");
+}
