@@ -6664,9 +6664,21 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const lhs_raw = resolveOperandExpr(module, names, &inline_exprs, inst.words[3], arena, 0);
                 const rhs_raw = resolveOperandExpr(module, names, &inline_exprs, inst.words[4], arena, 0);
                 const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
+                // GLSL/SPIR-V leave a shift by >= the operand bit width undefined
+                // (glslang emits e.g. `state >> 63u` on a 32-bit uint, rule30.frag),
+                // but WGSL makes a CONSTANT over-shift a shader-creation error — naga
+                // rejects the faithful translation at exit 0 (silent-wrong). Mask a
+                // constant amount to the low 5 bits (& 31): a no-op for in-range
+                // amounts and the same wrap that hardware and the HLSL/MSL backends apply,
+                // so the WGSL validates. (All glslpp WGSL ints are 32-bit, so the
+                // bit width — and thus the mask — is always 32/31.)
+                const rhs = if (constIntValue(module, inst.words[4])) |cv|
+                    (if (cv >= 32) try std.fmt.allocPrint(arena, "{d}u", .{cv & 31}) else rhs_raw)
+                else
+                    rhs_raw;
                 const op_str: []const u8 = if (inst.op == .ShiftLeftLogical) "<<" else ">>";
                 const shift_cast: []const u8 = if (std.mem.startsWith(u8, rt, "vec2")) "vec2<u32>" else if (std.mem.startsWith(u8, rt, "vec3")) "vec3<u32>" else if (std.mem.startsWith(u8, rt, "vec4")) "vec4<u32>" else "u32";
-                try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s} {s} {s}({s});\n", .{ result_name, rt, lhs, op_str, shift_cast, rhs_raw });
+                try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s} {s} {s}({s});\n", .{ result_name, rt, lhs, op_str, shift_cast, rhs });
             },
             .ShiftRightArithmetic => try emitBinOp(module, names, &inline_exprs, inst, ">>", w, arena, indent),
             .FNegate, .SNegate => {
@@ -7908,6 +7920,18 @@ fn f32ConstVal(module: *const ParsedModule, id: u32) ?f32 {
 fn isConstant(module: *const ParsedModule, id: u32) bool {
     const ci = common.getDef(module, id) orelse return false;
     return ci.op == .Constant;
+}
+
+/// Returns the value of a scalar integer OpConstant, else null. glslpp lowers
+/// every integer type to a 32-bit i32/u32 in WGSL, so the value lives in
+/// words[3] (a 64-bit constant would also use words[4], but those are
+/// honest-errored in the frontend before reaching this backend).
+fn constIntValue(module: *const ParsedModule, id: u32) ?u32 {
+    const ci = common.getDef(module, id) orelse return null;
+    if (ci.op != .Constant or ci.words.len < 4) return null;
+    const ti = common.getDef(module, ci.words[1]) orelse return null;
+    if (ti.op != .TypeInt) return null;
+    return ci.words[3];
 }
 
 fn isConstantZero(module: *const ParsedModule, id: u32) bool {
