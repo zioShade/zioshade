@@ -5656,7 +5656,10 @@ test "wgsl: signed arithmetic constant over-shift is masked + u32-cast (#170)" {
     ;
     const spirv = glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    // Patch the OpShiftRightLogical (194) glslpp emits to OpShiftRightArithmetic (195).
+    // The shader has exactly one shift; assert it so a future incidental shift
+    // can't make rewriteFirstOpcode patch the wrong instruction (silently testing
+    // nothing). Then patch that OpShiftRightLogical (194) to ShiftRightArithmetic (195).
+    try std.testing.expectEqual(@as(u32, 1), countSpirvOpcode(spirv, 194));
     const sar = try rewriteFirstOpcode(spirv, 194, 195);
     defer alloc.free(sar);
     const wgsl = glslpp.spirvToWGSL(alloc, sar, .{}) catch return error.SkipZigTest;
@@ -5683,4 +5686,32 @@ test "wgsl: vector constant-composite over-shift masks each component (#170)" {
     // 40&31=8, 33&31=1, 32&31=0, 5&31=5
     try assertContains(wgsl, "vec4<u32>(8u, 1u, 0u, 5u)");
     try nagaValidateOrSkip(wgsl, "vec-composite-overshift-masked");
+}
+
+// #170: shifts re-emitted in the switch/loop REPLAY path (emitSimpleInstruction)
+// went through the generic emitBinOp via getBinOpSymbol — neither masked nor
+// u32-cast — so a constant over-shift inside a switch-case body emitted
+// naga-rejected WGSL (`base >> 40u`). The replay path must delegate to emitShift
+// just like the main emit path. (A shift in a loop body lands in the MAIN path;
+// a switch-case body lands here.)
+test "wgsl: switch-case-body constant over-shift is masked (#170 replay path)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in int sel;
+        \\layout(location = 1) flat in uint base;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    uint r = 0u;
+        \\    switch (sel) {
+        \\        case 0: r = base >> 40u; break;   // const over-shift in a switch case
+        \\        case 1: r = base << 33u; break;
+        \\        default: r = base; break;
+        \\    }
+        \\    o = vec4(float(r));
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "u32(8u)"); // 40 & 31 = 8
+    try assertContains(wgsl, "u32(1u)"); // 33 & 31 = 1
+    try nagaValidateOrSkip(wgsl, "switch-case-overshift-masked");
 }

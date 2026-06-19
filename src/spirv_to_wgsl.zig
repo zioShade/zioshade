@@ -8423,6 +8423,14 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             // (otherwise the generic fallback below leaks the opcode name as a
             // value, e.g. `let v = SelectionMerge();`, which naga rejects).
         },
+        // #170: shifts must go through emitShift here too, not the generic
+        // emitBinOp the `else` arm reaches via getBinOpSymbol — otherwise a
+        // constant over-shift re-emitted in a switch-case body (or any other
+        // replay) is unmasked + un-u32-cast = naga-rejected (silent-wrong), the
+        // same gap the main emit path fixes. (ShiftRightArithmetic isn't in
+        // getBinOpSymbol at all, so it used to fail loud here.)
+        .ShiftLeftLogical => try emitShift(module, names, inline_exprs, inst, "<<", w, arena, indent),
+        .ShiftRightLogical, .ShiftRightArithmetic => try emitShift(module, names, inline_exprs, inst, ">>", w, arena, indent),
         else => {
             // For all other instructions, try emitCall/emitBinOp patterns
             // Comparison ops
