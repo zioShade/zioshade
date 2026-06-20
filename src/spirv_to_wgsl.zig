@@ -692,6 +692,15 @@ fn isStructType(module: *const ParsedModule, type_id: u32) bool {
     return false;
 }
 
+fn isMatrixType(module: *const ParsedModule, type_id: u32) bool {
+    const ti = common.getDef(module, type_id);
+    if (ti) |inst| {
+        if (inst.op == .TypeMatrix) return true;
+        if (inst.op == .TypePointer and inst.words.len > 3) return isMatrixType(module, inst.words[3]);
+    }
+    return false;
+}
+
 /// True when `image_type_id` resolves to an OpTypeImage flagged as a depth
 /// (comparison) image — the Depth operand (word[4]) equals 1. GLSL's
 /// `sampler2DShadow` and friends lower to such images. WGSL requires these to
@@ -6422,6 +6431,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // `Point(uv.x, uv.y)` collapsed to `Point(uv)` (passing a vec2 to a
                 // 2-scalar struct) — naga-invalid. Force the per-field general case.
                 const is_struct_result = isStructType(module, inst.words[1]);
+                // A MATRIX result has no single-argument constructor: `mat3(v,v,v)`
+                // must stay `mat3x3f(v, v, v)`, not collapse to the naga-rejected cast
+                // `mat3x3f(v)`. The broadcast/extract-collapse simplifications below are
+                // only valid for vector results, so exclude matrices like structs.
+                const is_matrix_result = isMatrixType(module, inst.words[1]);
                 // Check if all components are the same (for scalar broadcast simplification)
                 var all_same = true;
                 var first_comp: ?[]const u8 = null;
@@ -6434,7 +6448,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         break;
                     }
                 }
-                if (!is_struct_result and all_same and num_comps > 1 and first_comp != null) {
+                if (!is_struct_result and !is_matrix_result and all_same and num_comps > 1 and first_comp != null) {
                     try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, first_comp.? });
                 } else {
                     // Check for leading sequential extracts from the same source
@@ -6471,7 +6485,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             }
                         }
                     }
-                    if (lead_count >= 2 and lead_source != null and !src_is_struct and !is_struct_result) {
+                    if (lead_count >= 2 and lead_source != null and !src_is_struct and !is_struct_result and !is_matrix_result) {
                         // Emit with leading source aggregated
                         var parts = std.ArrayList(u8).initCapacity(arena, 128) catch return;
                         defer parts.deinit(arena);

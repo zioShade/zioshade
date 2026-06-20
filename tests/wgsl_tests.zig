@@ -5729,3 +5729,41 @@ test "wgsl: std430 push-constant block with a sub-16 array member honest-errors 
     const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "stride") != null);
 }
+
+// #170: OpCompositeConstruct's "all operands identical" broadcast simplification
+// (`vec3(x,x,x)` → `vec3f(x)`) is a valid scalar SPLAT for a VECTOR result, but a
+// MATRIX has no single-argument constructor — `mat3(v,v,v)` collapsed to the
+// naga-rejected cast `mat3x3f(v)` ("cannot cast a vec3<f32> to a mat3x3<f32>") at
+// exit 0 = silent-wrong. A matrix built from identical columns must keep every
+// column argument. (Partially-distinct columns already took the general path.)
+test "wgsl: matrix from identical columns keeps every column arg (#170)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { mat3 m = mat3(v, v, v); o = vec4(m * vec3(1.0), 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "mat3x3f(v, v, v)"); // all three columns, not mat3x3f(v)
+    try nagaValidateOrSkip(wgsl, "matrix-identical-columns");
+}
+
+// #170: a matrix rebuilt from another matrix's COLUMNS (`mat2(m[0], m[1])`) — the
+// columns are CompositeExtracts — previously hit the leading-extract-collapse path
+// (a vector-only simplification) and emitted the matrix-swizzle `mat2x2f(m.xy)`,
+// which naga rejects (a swizzle is not valid on a matrix) = silent-wrong. Matrix
+// results must keep per-column args: `mat2x2f(m[0], m[1])`.
+test "wgsl: matrix rebuilt from another matrix's columns keeps per-column args (#170)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in vec2 a;
+        \\layout(location = 1) in vec2 b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { mat2 m = mat2(a, b); mat2 n = mat2(m[0], m[1]); o = vec4(n * vec2(1.0), 0.0, 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    // The rebuilt matrix keeps per-column index args (`mNxN(m[0], m[1])`), not a
+    // matrix-swizzle collapse. naga validation is the real silent-wrong guard.
+    try assertContains(wgsl, "[0], ");
+    try nagaValidateOrSkip(wgsl, "matrix-from-matrix-columns");
+}
