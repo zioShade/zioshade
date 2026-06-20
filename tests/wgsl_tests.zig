@@ -145,6 +145,28 @@ fn truncateLastOperand(words: []const u32, opcode: u16) ![]u32 {
     return error.OpcodeNotFound;
 }
 
+/// Return a copy of `words` whose FIRST instruction with opcode `from_op` has its
+/// opcode rewritten to `to_op` (same word count, operands untouched). glslpp's
+/// frontend always lowers GLSL `>>` to OpShiftRightLogical even for signed
+/// operands (codegen.zig), so OpShiftRightArithmetic never appears in its own
+/// output — the only way to reach the backend's arithmetic-shift arm is hand-fed
+/// or external SPIR-V (e.g. spirv-cross's bitcast_sar fixture). This rewrite
+/// synthesizes that input from a logical shift. Caller frees the result.
+fn rewriteFirstOpcode(words: []const u32, from_op: u16, to_op: u16) ![]u32 {
+    var pos: usize = 5;
+    while (pos < words.len) {
+        const wc: usize = words[pos] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(words[pos] & 0xFFFF)) == from_op) {
+            const out = try alloc.dupe(u32, words);
+            out[pos] = (@as(u32, @intCast(wc)) << 16) | @as(u32, to_op);
+            return out;
+        }
+        pos += wc;
+    }
+    return error.OpcodeNotFound;
+}
+
 // Validate WGSL with naga — the external WebGPU validator. The whole point of
 // the "silent-wrong" class of bugs is that glslpp emits text that LOOKS fine
 // (exit 0) but a real validator rejects, so string assertions alone can pass
@@ -5611,4 +5633,85 @@ test "wgsl: constant shift amount >= 32 is masked so naga accepts it (#170)" {
     defer alloc.free(wgsl);
     try assertContains(wgsl, "u32(31u)"); // 63 & 31 = 31
     try nagaValidateOrSkip(wgsl, "const-overshift-masked");
+}
+
+// #170: OpShiftRightArithmetic (signed `>>`) routed through the generic emitBinOp,
+// which applied NEITHER the u32 amount cast the logical-shift arm emits NOR the
+// constant over-shift mask. naga then rejects the const over-shift (creation error)
+// — and even an in-range signed shift would be rejected for the i32-typed amount
+// (`>>` needs a u32/vecN<u32> shift count). The arithmetic-shift arm must mask +
+// u32-cast exactly like the logical arms. glslpp's frontend never emits opcode 195
+// (it lowers every `>>` to ShiftRightLogical), so synthesize it by rewriting the
+// logical-shift opcode in a real glslpp module — the path external SPIR-V hits.
+test "wgsl: signed arithmetic constant over-shift is masked + u32-cast (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    int state = int(uv.x * 64.0);   // runtime, so the shift is not folded
+        \\    int r = state >> 40;             // const over-shift by 40 on a 32-bit signed int
+        \\    o = vec4(float(r));
+        \\}
+    ;
+    const spirv = glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    // The shader has exactly one shift; assert it so a future incidental shift
+    // can't make rewriteFirstOpcode patch the wrong instruction (silently testing
+    // nothing). Then patch that OpShiftRightLogical (194) to ShiftRightArithmetic (195).
+    try std.testing.expectEqual(@as(u32, 1), countSpirvOpcode(spirv, 194));
+    const sar = try rewriteFirstOpcode(spirv, 194, 195);
+    defer alloc.free(sar);
+    const wgsl = glslpp.spirvToWGSL(alloc, sar, .{}) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "u32(8u)"); // 40 & 31 = 8
+    try nagaValidateOrSkip(wgsl, "signed-const-overshift-masked");
+}
+
+// #170: a VECTOR base shifted by a constant COMPOSITE amount (`uvec4 >> uvec4(40u,…)`).
+// constIntValue returns null for an OpConstantComposite, so the amount escaped the
+// scalar over-shift mask and naga rejects the per-component const over-shift just like
+// the scalar case. Each component must be masked & 31.
+test "wgsl: vector constant-composite over-shift masks each component (#170)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in uvec4 a;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    uvec4 r = a >> uvec4(40u, 33u, 32u, 5u);  // const composite over-shift, runtime base
+        \\    o = vec4(float(r.x));
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    // 40&31=8, 33&31=1, 32&31=0, 5&31=5
+    try assertContains(wgsl, "vec4<u32>(8u, 1u, 0u, 5u)");
+    try nagaValidateOrSkip(wgsl, "vec-composite-overshift-masked");
+}
+
+// #170: shifts re-emitted in the switch/loop REPLAY path (emitSimpleInstruction)
+// went through the generic emitBinOp via getBinOpSymbol — neither masked nor
+// u32-cast — so a constant over-shift inside a switch-case body emitted
+// naga-rejected WGSL (`base >> 40u`). The replay path must delegate to emitShift
+// just like the main emit path. (A shift in a loop body lands in the MAIN path;
+// a switch-case body lands here.)
+test "wgsl: switch-case-body constant over-shift is masked (#170 replay path)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in int sel;
+        \\layout(location = 1) flat in uint base;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    uint r = 0u;
+        \\    switch (sel) {
+        \\        case 0: r = base >> 40u; break;   // const over-shift in a switch case
+        \\        case 1: r = base << 33u; break;
+        \\        default: r = base; break;
+        \\    }
+        \\    o = vec4(float(r));
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "u32(8u)"); // 40 & 31 = 8
+    try assertContains(wgsl, "u32(1u)"); // 33 & 31 = 1
+    try nagaValidateOrSkip(wgsl, "switch-case-overshift-masked");
 }
