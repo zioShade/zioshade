@@ -6653,34 +6653,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .FDiv, .SDiv, .UDiv => try emitBinOp(module, names, &inline_exprs, inst, "/", w, arena, indent),
             .FMod => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
             .UMod, .SRem, .SMod, .FRem => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
-            .ShiftLeftLogical, .ShiftRightLogical => {
-                // WGSL requires the shift AMOUNT to be u32-typed with the SAME
-                // vector dimension as the base: `vecN<T> << vecN<u32>` (a scalar
-                // `u32(...)` on a vec2 amount is rejected — "cannot cast a
-                // vec2<u32> to a u32"). Derive the coercion type from the result
-                // (= base) type.
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const result_name = names.get(inst.words[2]) orelse "v";
-                const lhs_raw = resolveOperandExpr(module, names, &inline_exprs, inst.words[3], arena, 0);
-                const rhs_raw = resolveOperandExpr(module, names, &inline_exprs, inst.words[4], arena, 0);
-                const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
-                // GLSL/SPIR-V leave a shift by >= the operand bit width undefined
-                // (glslang emits e.g. `state >> 63u` on a 32-bit uint, rule30.frag),
-                // but WGSL makes a CONSTANT over-shift a shader-creation error — naga
-                // rejects the faithful translation at exit 0 (silent-wrong). Mask a
-                // constant amount to the low 5 bits (& 31): a no-op for in-range
-                // amounts and the same wrap that hardware and the HLSL/MSL backends apply,
-                // so the WGSL validates. (All glslpp WGSL ints are 32-bit, so the
-                // bit width — and thus the mask — is always 32/31.)
-                const rhs = if (constIntValue(module, inst.words[4])) |cv|
-                    (if (cv >= 32) try std.fmt.allocPrint(arena, "{d}u", .{cv & 31}) else rhs_raw)
-                else
-                    rhs_raw;
-                const op_str: []const u8 = if (inst.op == .ShiftLeftLogical) "<<" else ">>";
-                const shift_cast: []const u8 = if (std.mem.startsWith(u8, rt, "vec2")) "vec2<u32>" else if (std.mem.startsWith(u8, rt, "vec3")) "vec3<u32>" else if (std.mem.startsWith(u8, rt, "vec4")) "vec4<u32>" else "u32";
-                try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s} {s} {s}({s});\n", .{ result_name, rt, lhs, op_str, shift_cast, rhs });
-            },
-            .ShiftRightArithmetic => try emitBinOp(module, names, &inline_exprs, inst, ">>", w, arena, indent),
+            // All three shifts share emitShift, which applies the u32/vecN<u32>
+            // amount cast and the #170 constant over-shift mask. ShiftRightArithmetic
+            // (signed `>>`) used to route through the generic emitBinOp, which did
+            // neither — a signed const over-shift (or even an in-range signed shift,
+            // needing the u32 cast) was naga-rejected (silent-wrong).
+            .ShiftLeftLogical => try emitShift(module, names, &inline_exprs, inst, "<<", w, arena, indent),
+            .ShiftRightLogical, .ShiftRightArithmetic => try emitShift(module, names, &inline_exprs, inst, ">>", w, arena, indent),
             .FNegate, .SNegate => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 try writeInd(w, indent); try w.print("let {s}: {s} = -{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
@@ -8013,6 +7992,74 @@ fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
     try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
 }
 
+/// Emit a WGSL shift (`<<` / `>>`) for any of OpShiftLeftLogical,
+/// OpShiftRightLogical, OpShiftRightArithmetic. WGSL requires the shift AMOUNT to
+/// be u32-typed with the SAME vector dimension as the base (`vecN<T> << vecN<u32>`;
+/// a scalar `u32(...)` on a vec amount is rejected — "cannot cast a vec2<u32> to a
+/// u32"), so the amount is always cast/built as `shift_cast` derived from the
+/// result (= base) type. The over-shift mask is applied by shiftAmountExpr.
+fn emitShift(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, op_str: []const u8, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    const lhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, 0);
+    const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
+    const shift_cast: []const u8 = if (std.mem.startsWith(u8, rt, "vec2")) "vec2<u32>" else if (std.mem.startsWith(u8, rt, "vec3")) "vec3<u32>" else if (std.mem.startsWith(u8, rt, "vec4")) "vec4<u32>" else "u32";
+    const amount = try shiftAmountExpr(module, names, inline_exprs, inst.words[4], shift_cast, arena);
+    try writeIndentStatic(w, indent);
+    try w.print("let {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op_str, amount });
+}
+
+/// Build the shift-AMOUNT expression, applying the #170 constant over-shift mask
+/// (& 31). GLSL/SPIR-V leave a shift by >= the operand bit width undefined (glslang
+/// emits e.g. `state >> 63u` on a 32-bit uint, rule30.frag), but WGSL makes a
+/// CONSTANT over-shift a shader-creation error — naga rejects the faithful
+/// translation at exit 0 (silent-wrong). Masking to the low 5 bits is a no-op for
+/// in-range amounts and the same wrap hardware / the HLSL+MSL backends apply. All
+/// glslpp WGSL ints are 32-bit, so the mask is always & 31. The result is always
+/// cast/built as `shift_cast` (u32 / vecN<u32>) to match the base's dimension.
+/// Covers: scalar constants, constant-composite VECTOR amounts (mask each
+/// component — constIntValue is null for composites, so they escaped the scalar
+/// mask), and runtime amounts (cast unchanged).
+fn shiftAmountExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), amount_id: u32, shift_cast: []const u8, arena: std.mem.Allocator) ![]const u8 {
+    // Scalar integer constant: mask an over-shift to the low 5 bits.
+    if (constIntValue(module, amount_id)) |cv| {
+        if (cv >= 32) return std.fmt.allocPrint(arena, "{s}({d}u)", .{ shift_cast, cv & 31 });
+        const raw = resolveOperandExpr(module, names, inline_exprs, amount_id, arena, 0);
+        return std.fmt.allocPrint(arena, "{s}({s})", .{ shift_cast, raw });
+    }
+    // Constant-composite (vector) amount: if ANY component over-shifts, rebuild the
+    // amount as a masked vecN<u32> literal. Only rebuild when needed, so an in-range
+    // composite keeps its original emission.
+    if (common.getDef(module, amount_id)) |ci| {
+        if (ci.op == .ConstantComposite and ci.words.len > 3) {
+            const comps = ci.words[3..];
+            var all_const = true;
+            var any_over = false;
+            for (comps) |cid| {
+                if (constIntValue(module, cid)) |cv| {
+                    if (cv >= 32) any_over = true;
+                } else {
+                    all_const = false;
+                    break;
+                }
+            }
+            if (all_const and any_over) {
+                var buf = try std.ArrayList(u8).initCapacity(arena, 64);
+                try buf.print(arena, "{s}(", .{shift_cast});
+                for (comps, 0..) |cid, i| {
+                    if (i > 0) try buf.appendSlice(arena, ", ");
+                    try buf.print(arena, "{d}u", .{constIntValue(module, cid).? & 31});
+                }
+                try buf.appendSlice(arena, ")");
+                return buf.toOwnedSlice(arena);
+            }
+        }
+    }
+    // Runtime amount (or in-range composite): cast unchanged to the base's dimension.
+    const raw = resolveOperandExpr(module, names, inline_exprs, amount_id, arena, 0);
+    return std.fmt.allocPrint(arena, "{s}({s})", .{ shift_cast, raw });
+}
+
 fn isCompoundExpr(s: []const u8) bool {
     var depth: usize = 0;
     var i: usize = 0;
@@ -8376,6 +8423,14 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             // (otherwise the generic fallback below leaks the opcode name as a
             // value, e.g. `let v = SelectionMerge();`, which naga rejects).
         },
+        // #170: shifts must go through emitShift here too, not the generic
+        // emitBinOp the `else` arm reaches via getBinOpSymbol — otherwise a
+        // constant over-shift re-emitted in a switch-case body (or any other
+        // replay) is unmasked + un-u32-cast = naga-rejected (silent-wrong), the
+        // same gap the main emit path fixes. (ShiftRightArithmetic isn't in
+        // getBinOpSymbol at all, so it used to fail loud here.)
+        .ShiftLeftLogical => try emitShift(module, names, inline_exprs, inst, "<<", w, arena, indent),
+        .ShiftRightLogical, .ShiftRightArithmetic => try emitShift(module, names, inline_exprs, inst, ">>", w, arena, indent),
         else => {
             // For all other instructions, try emitCall/emitBinOp patterns
             // Comparison ops
