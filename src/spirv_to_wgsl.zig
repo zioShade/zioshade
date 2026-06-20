@@ -2498,6 +2498,31 @@ fn collectWrappedUniformMembersForStruct(module: *const ParsedModule, struct_typ
     }
 }
 
+/// True if a UNIFORM (non-SSBO) block struct has a single-level array member
+/// whose ArrayStride is a KNOWN value that is not a multiple of 16. WGSL's
+/// uniform address space requires every array element stride to be a multiple of
+/// 16. std430 / scalar-block-layout uniform and push-constant blocks pack arrays
+/// TIGHTLY (`float Arr[4]` → stride 4; `vec2 v[2]` → stride 8), and glslpp cannot
+/// widen them to vec4 without reading WRONG DATA from the host (it packs elements
+/// at 0,4,8,12 — not 0,16,32,48; this is exactly why collectWrappedUniformMembers-
+/// ForStruct only wraps stride-16 members). Such a block has no faithful core-WGSL
+/// uniform form, so emitting it as `var<uniform>` is naga-rejected at exit 0 =
+/// silent-wrong (#170). Detect it so the caller can honest-error instead.
+/// Stride-16 (std140) array members are widened and validate — `% 16 == 0` skips
+/// them; SSBOs (storage space tolerates the tight layout) are excluded by the
+/// caller's `!cb.is_ssbo` filter. (tests/spirv-cross/push-constant.flatten.vert.)
+fn uniformBlockHasUnrepresentableSub16Array(module: *const ParsedModule, struct_type_id: u32) bool {
+    const sdef = getDef(module, struct_type_id) orelse return false;
+    if (sdef.op != .TypeStruct or sdef.words.len <= 2) return false;
+    for (sdef.words[2..]) |mt_id| {
+        const md = getDef(module, mt_id) orelse continue;
+        if (md.op != .TypeArray and md.op != .TypeRuntimeArray) continue;
+        const stride = arrayTypeStride(module, mt_id) orelse continue;
+        if (stride % 16 != 0) return true;
+    }
+    return false;
+}
+
 /// Resolve the value type of an ID by tracing its defining instruction.
 fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
     const inst = common.getDef(module, id) orelse return null;
@@ -3327,6 +3352,15 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         var struct_id = cb.type_id;
         if (getDef(&module, struct_id)) |pi| {
             if (pi.op == .TypePointer and pi.words.len > 3) struct_id = pi.words[3];
+        }
+        // #170: a uniform/push-constant block with a sub-16-stride array member
+        // (std430/scalar layout, e.g. `float Arr[4]`) is unrepresentable in core
+        // WGSL uniform space — it can't be widened without reading wrong data and
+        // emitting it as `var<uniform>` is naga-rejected ("array stride N not a
+        // multiple of 16") at exit 0 = silent-wrong. Honest-error instead.
+        if (uniformBlockHasUnrepresentableSub16Array(&module, struct_id)) {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "std430/scalar-layout uniform or push-constant block has a sub-16-byte array stride that WGSL uniform space cannot represent (it requires a multiple of 16)", .{}) catch null;
+            return error.UnsupportedOp;
         }
         collectWrappedUniformMembersForStruct(&module, struct_id, &wrapped_uniform_members) catch {};
     }
