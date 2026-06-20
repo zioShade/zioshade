@@ -3199,23 +3199,21 @@ test "wgsl: A2 SSBO scalar array member NOT wrapped (uniform-only gate)" {
 //
 // On `main` this same shader emitted `array<f32,4>` (stride 4) which naga
 // REJECTS loudly ("array stride 4 is not a multiple of the required alignment
-// 16") — an HONEST failure. The fix gates the wrap on ArrayStride==16 so the
-// scalar-layout case falls through to the honest (naga-rejected) path instead
-// of being silently wrapped wrong.
+// 16"). The A2 fix gated the wrap on ArrayStride==16 so the scalar-layout case
+// is NOT silently widened to wrong data. But emitting the naga-rejected
+// `array<f32,4>` at exit 0 is ITSELF the #170 silent-wrong the sweep targets
+// ("naga REJECT = a divergence to fix; honest-unsupported = acceptable"). So the
+// scalar-layout / std430 UNIFORM case now HONEST-ERRORS instead of falling
+// through to naga-rejected output (uniformBlockHasUnrepresentableSub16Array).
 // ---------------------------------------------------------------------------
 
-test "wgsl: A2 scalar-block-layout uniform NOT silently wrapped (#170 review)" {
+test "wgsl: A2 scalar-block-layout uniform honest-errors, not silently wrapped (#170)" {
     // The MAJOR silent-wrong guard. The source SPIR-V has ArrayStride 4 (verified
     // out-of-band via spirv-dis: `OpDecorate %_arr_float_uint_4 ArrayStride 4`),
-    // so wrapping to `array<vec4<f32>>` + `.x` would read the wrong host bytes.
-    //
-    // RED (pre-fix): emits `arr: array<vec4<f32>, 4>` + `u.arr[u.n].x` — accepted
-    //   by naga but reads bytes 0,16,32,48 instead of 0,4,8,12 = SILENT-WRONG.
-    // GREEN (post-fix): the member is NOT recorded for wrapping (stride != 16), so
-    //   it falls through to the honest `array<f32, 4>` path which naga REJECTS
-    //   loudly (matching main). We assert the absence of the vec4-wrap — proving
-    //   we did not silent-wrong it. This case is intentionally honest-rejected by
-    //   naga (like main), so it is NOT naga-validated as passing here.
+    // so wrapping to `array<vec4<f32>>` + `.x` would read the wrong host bytes,
+    // and emitting `array<f32,4>` (stride 4) in uniform space is naga-rejected.
+    // Neither is representable → honest-error (the wrap was never recorded since
+    // stride != 16; the unrepresentable block is now caught before emission).
     const source: [:0]const u8 =
         \\#version 450
         \\#extension GL_EXT_scalar_block_layout : require
@@ -3225,13 +3223,9 @@ test "wgsl: A2 scalar-block-layout uniform NOT silently wrapped (#170 review)" {
     ;
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
-    defer alloc.free(wgsl);
-    // The stride-4 array member must NOT be silently widened to vec4.
-    try assertNotContains(wgsl, "array<vec4<f32>, 4>");
-    try assertNotContains(wgsl, "u.arr[u.n].x");
-    // It falls through to the honest (naga-rejected) plain-f32 array.
-    try assertContains(wgsl, "array<f32, 4>");
+    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "stride") != null);
 }
 
 test "wgsl: A2 std140 uniform still wraps at ArrayStride 16 (#170 review regression)" {
@@ -5714,4 +5708,24 @@ test "wgsl: switch-case-body constant over-shift is masked (#170 replay path)" {
     try assertContains(wgsl, "u32(8u)"); // 40 & 31 = 8
     try assertContains(wgsl, "u32(1u)"); // 33 & 31 = 1
     try nagaValidateOrSkip(wgsl, "switch-case-overshift-masked");
+}
+
+// #170: a std430 (or scalar-layout) push-constant / uniform block with a sub-16
+// array member packs the array TIGHTLY (`float Arr[4]` → ArrayStride 4). WGSL's
+// uniform address space requires every array element stride to be a multiple of
+// 16, and glslpp cannot widen the array to vec4 without reading WRONG DATA from
+// the host (the host packs at 0,4,8,12 not 0,16,32,48). So the block emitted as
+// `var<uniform>` is naga-rejected ("array stride 4 is not a multiple of 16") at
+// exit 0 = silent-wrong (tests/spirv-cross/push-constant.flatten.vert). It is
+// genuinely unrepresentable in core WGSL uniform space → honest-error instead.
+test "wgsl: std430 push-constant block with a sub-16 array member honest-errors (#170)" {
+    try std.testing.expectError(error.UnsupportedOp, compileToWgsl(
+        \\#version 450
+        \\layout(push_constant, std430) uniform PC { float Arr[4]; } pc;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(pc.Arr[2]); }
+    ));
+    // Pin the error to THIS guard (not some other UnsupportedOp path).
+    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    try std.testing.expect(std.mem.indexOf(u8, detail, "stride") != null);
 }
