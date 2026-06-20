@@ -3860,7 +3860,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     var func_idx_map = std.AutoHashMap(u32, usize).init(arena);
     for (module.instructions, 0..) |inst, i| {
         if (inst.op == .Function and inst.words.len > 2) {
-            func_ids.appendAssumeCapacity(inst.words[2]);
+            // append (not appendAssumeCapacity): a module with more than the initial
+            // capacity of functions (entry + >8 helpers) would otherwise overflow the
+            // assumed capacity and panic. Grow instead. (#170 no-panic.)
+            try func_ids.append(arena, inst.words[2]);
             func_idx_map.put(inst.words[2], i) catch {};
         }
     }
@@ -5038,7 +5041,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const pred_id = scan_inst.words[pi + 1];
                         const gop = sel_phis.getOrPut(ml) catch continue;
                         if (!gop.found_existing) gop.value_ptr.* = std.ArrayList(SelPhi).initCapacity(arena, 2) catch continue;
-                        gop.value_ptr.appendAssumeCapacity(.{ .result_id = scan_inst.words[2], .value_id = val_id, .pred_label = pred_id });
+                        // append (not appendAssumeCapacity): a merge label accumulates one
+                        // entry per (value,predecessor) pair across ALL phis at that merge —
+                        // 3 phis × 2 predecessors = 6 entries (phi3_vars.frag), and a switch
+                        // phi has one pair per case — both exceed the initial capacity of 2,
+                        // which previously overflowed the assumed-capacity append → panic.
+                        gop.value_ptr.append(arena, .{ .result_id = scan_inst.words[2], .value_id = val_id, .pred_label = pred_id }) catch continue;
                     }
                 }
             }
@@ -5901,7 +5909,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         phi_group_open = true;
                     }
                     if (inst.words.len >= 7) {
-                        phi_updates.appendAssumeCapacity(.{ .result_id = inst.words[2], .value_id = update_value_id });
+                        // append (not appendAssumeCapacity): phi_updates accumulates one
+                        // entry per loop-header phi across ALL loops in the function, so a
+                        // function with more loop-header phis than the initial capacity
+                        // (e.g. several loops each carrying multiple variables) would
+                        // otherwise overflow and panic — the loop-merge twin of the
+                        // selection-merge phi overflow. Grow instead. (#170 no-panic.)
+                        try phi_updates.append(arena, .{ .result_id = inst.words[2], .value_id = update_value_id });
                     }
                     // Check if LoopMerge follows (within the next 30 instructions)
                     // Don't stop at Labels — loop header may have Labels between Phi and LoopMerge
