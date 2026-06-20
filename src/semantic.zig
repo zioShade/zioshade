@@ -8467,10 +8467,22 @@ const Analyzer = struct {
                     return .{ .ty = element_ty, .id = ptr_id, .is_ptr = true };
                 }
 
-                // Vector dynamic indexing
+                // Vector dynamic indexing.
+                // OpVectorExtractDynamic requires a vector VALUE, not a pointer.
+                // When the base is a pointer-to-vector — e.g. the inner `m[i]` of
+                // `m[i][j]` lowers to an OpAccessChain producing a Function-storage
+                // pointer to a column — load the column value first. Feeding the
+                // raw pointer straight into VectorExtractDynamic produced invalid
+                // SPIR-V (spirv-val: "Expected Vector type to be OpTypeVector"),
+                // and after DCE dropped the dead column pointer it left a dangling
+                // ID reference. (#170)
+                const vec_value_id = if (base_tid.is_ptr)
+                    try self.emitLoadCached(base_tid.id, base_tid.ty)
+                else
+                    base_tid.id;
                 const result_id = self.allocId();
                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                operands[0] = .{ .id = base_tid.id };
+                operands[0] = .{ .id = vec_value_id };
                 operands[1] = .{ .id = index_tid.id };
 
                 try self.instructions.append(self.alloc, .{

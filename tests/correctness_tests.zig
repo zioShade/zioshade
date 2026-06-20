@@ -659,3 +659,89 @@ test "frontend: separate sampler2DShadow with textureLod emits explicit-lod dept
     defer alloc.free(spv);
     try std.testing.expect(spirvHasOpcode(spv, 90)); // OpImageSampleDrefExplicitLod
 }
+
+// =============================================================================
+// #170: dynamic double-index into a LOCAL matrix must emit valid SPIR-V.
+// Repro: `mat3 m = mat3(a,b,c); o = vec4(m[i][j]);` with i,j dynamic.
+// The inner `m[i]` lowers to an OpAccessChain (pointer-to-column); the outer
+// `[j]` previously fed that POINTER straight into OpVectorExtractDynamic, whose
+// vector operand must be a vector VALUE — so the frontend emitted invalid
+// SPIR-V (spirv-val: "Expected Vector type to be OpTypeVector"; after DCE the
+// dead column pointer left a dangling-ID reference). The column value must be
+// LOADED before the dynamic component extract. This is a frontend bug, so a
+// valid SPIR-V module is the fix for ALL backends.
+// =============================================================================
+
+/// Resolve spirv-val and run it on `spv`. Skips when the tool is unavailable
+/// (mirrors the resolveVulkanTool/SkipZigTest pattern used across the suite).
+fn spirvValOrSkip(spv: []const u32) !void {
+    const alloc = std.testing.allocator;
+    const tool = glslpp.compat.resolveVulkanTool(alloc, "spirv-val") catch return error.SkipZigTest;
+    defer alloc.free(tool);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        const f = try tmp.dir.createFile("m.spv", .{});
+        defer f.close();
+        try f.writeAll(std.mem.sliceAsBytes(spv));
+    }
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const spv_path = try tmp.dir.realpath("m.spv", &path_buf);
+
+    const r = std.process.Child.run(.{ .allocator = alloc, .argv = &.{ tool, spv_path } }) catch return error.SkipZigTest;
+    defer alloc.free(r.stdout);
+    defer alloc.free(r.stderr);
+    if (!(r.term == .Exited and r.term.Exited == 0)) {
+        std.debug.print("spirv-val rejected the module:\n{s}\n{s}\n", .{ r.stdout, r.stderr });
+        return error.TestSpirvValFailed;
+    }
+}
+
+const dyn_double_index_src =
+    \\#version 450
+    \\layout(location=0) in vec3 a; layout(location=1) in vec3 b; layout(location=2) in vec3 c;
+    \\layout(location=3) flat in int i; layout(location=4) flat in int j;
+    \\layout(location=0) out vec4 o;
+    \\void main(){ mat3 m = mat3(a, b, c); o = vec4(m[i][j]); }
+;
+
+test "frontend #170: dynamic m[i][j] on a local matrix emits valid SPIR-V (opt)" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc, dyn_double_index_src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try spirvValOrSkip(spv);
+}
+
+test "frontend #170: dynamic m[i][j] on a local matrix emits valid SPIR-V (no-opt)" {
+    // Guards the lowering itself, independent of the optimizer pipeline: the
+    // unoptimized module must already be valid (it was not — VectorExtractDynamic
+    // on an OpAccessChain pointer).
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRVNoOpt(alloc, dyn_double_index_src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try spirvValOrSkip(spv);
+}
+
+test "frontend #170: dynamic m[i][j] cross-compiles to all four backends" {
+    // A frontend fix produces valid SPIR-V, which every backend then accepts.
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc, dyn_double_index_src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    const wgsl = try glslpp.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(wgsl.len > 0);
+
+    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{});
+    defer alloc.free(hlsl);
+    try std.testing.expect(hlsl.len > 0);
+
+    const msl = try glslpp.spirvToMSL(alloc, spv, .{});
+    defer alloc.free(msl);
+    try std.testing.expect(msl.len > 0);
+
+    const glsl = try glslpp.spirvToGLSL(alloc, spv, .{});
+    defer alloc.free(glsl);
+    try std.testing.expect(glsl.len > 0);
+}
