@@ -5767,3 +5767,67 @@ test "wgsl: matrix rebuilt from another matrix's columns keeps per-column args (
     try assertContains(wgsl, "[0], ");
     try nagaValidateOrSkip(wgsl, "matrix-from-matrix-columns");
 }
+
+// #170 (no-panic): selection-merge phis are collected into a per-merge-label list
+// pre-sized to capacity 2, but a single merge accumulates one entry per
+// (value,predecessor) pair across ALL phis at that label — an if/else assigning
+// three variables yields 3 phis × 2 predecessors = 6 entries, and a multi-case
+// switch yields a phi pair per case. The old `appendAssumeCapacity` overflowed
+// the capacity-2 list and PANICKED ("reached unreachable code") on these common
+// shapes (phi3_vars/phi4_types/switch_var/switch_8case/... in the corpus). The
+// collector must grow the list. This shader (3 phis at one merge) reproduces it.
+test "wgsl: multi-variable if/else merge does not overflow the phi list (#170 no-panic)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float a, b, c;
+        \\    if (t < 0.5) { a = 1.0; b = 2.0; c = 3.0; } else { a = 4.0; b = 5.0; c = 6.0; }
+        \\    o = vec4(a, b, c, 1.0);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "phi-merge-no-overflow");
+}
+
+// #170 (no-panic): the loop-merge twin of the above. Loop-header phi updates are
+// collected into one list across ALL loops in the function, pre-sized to capacity
+// 8; four loops each carrying three variables = 12 entries overflowed the assumed
+// capacity and panicked. The collector must grow.
+test "wgsl: many loop-carried phis across loops do not overflow the phi-update list (#170 no-panic)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in int n;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float a = 0.0, b = 0.0, c = 0.0;
+        \\    for (int i = 0; i < n; i++) { a += 1.0; b += 2.0; c += 3.0; }
+        \\    for (int i = 0; i < n; i++) { a += 1.0; b += 2.0; c += 3.0; }
+        \\    for (int i = 0; i < n; i++) { a += 1.0; b += 2.0; c += 3.0; }
+        \\    for (int i = 0; i < n; i++) { a += 1.0; b += 2.0; c += 3.0; }
+        \\    o = vec4(a, b, c, 1.0);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "loop-phi-no-overflow");
+}
+
+// #170 (no-panic): the function-id list was pre-sized to capacity 8; a module with
+// more than 8 functions (entry + >8 helpers) overflowed the assumed capacity and
+// panicked. The collector must grow.
+test "wgsl: a module with more than 8 functions does not overflow the func-id list (#170 no-panic)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 o;
+        \\float f1(float x){return x+1.0;} float f2(float x){return x+2.0;}
+        \\float f3(float x){return x+3.0;} float f4(float x){return x+4.0;}
+        \\float f5(float x){return x+5.0;} float f6(float x){return x+6.0;}
+        \\float f7(float x){return x+7.0;} float f8(float x){return x+8.0;}
+        \\float f9(float x){return x+9.0;} float f10(float x){return x+10.0;}
+        \\void main(){ o = vec4(f1(t)+f2(t)+f3(t)+f4(t)+f5(t)+f6(t)+f7(t)+f8(t)+f9(t)+f10(t)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "many-functions-no-overflow");
+}
