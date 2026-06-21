@@ -1119,42 +1119,53 @@ const Parser = struct {
                 self.recordErrorLoc();
                 return error.UnexpectedToken;
             };
-            const member_name = self.current();
-            if (member_name.tag != .identifier) {
-                self.recordErrorLoc();
-                return error.UnexpectedToken;
-            }
-            _ = self.advance();
-            // Check for array size suffix: vec2 a[1] (supports multi-dim: vec2 a[2][3])
-            var member_ty_final = member_ty;
-            var member_arr_dims: std.ArrayListUnmanaged(u32) = .empty;
-            defer member_arr_dims.deinit(self.alloc);
-            while (self.current().tag == .l_bracket) {
+            // Multi-declarator support: `vec3 a, b;` (and `vec3 a[2], b;`) declares
+            // several members sharing the base type, each with its own array suffix.
+            // GLSL allows this; reading only the first name then requiring `;` made
+            // the `, b` mis-parse and dropped every member after the first.
+            while (true) {
+                const member_name = self.current();
+                if (member_name.tag != .identifier) {
+                    self.recordErrorLoc();
+                    return error.UnexpectedToken;
+                }
                 _ = self.advance();
-                const size_tok = self.current();
-                var arr_size: u32 = 0;
-                if (size_tok.tag == .int_literal) {
-                    arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                // Check for array size suffix: vec2 a[1] (supports multi-dim: vec2 a[2][3])
+                var member_ty_final = member_ty;
+                var member_arr_dims: std.ArrayListUnmanaged(u32) = .empty;
+                defer member_arr_dims.deinit(self.alloc);
+                while (self.current().tag == .l_bracket) {
                     _ = self.advance();
+                    const size_tok = self.current();
+                    var arr_size: u32 = 0;
+                    if (size_tok.tag == .int_literal) {
+                        arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                        _ = self.advance();
+                    }
+                    _ = self.expect(.r_bracket) catch break;
+                    try member_arr_dims.append(self.alloc, arr_size);
                 }
-                _ = self.expect(.r_bracket) catch break;
-                try member_arr_dims.append(self.alloc, arr_size);
-            }
-            if (member_arr_dims.items.len > 0) {
-                var i: usize = member_arr_dims.items.len;
-                while (i > 0) {
-                    i -= 1;
-                    const arr_base = try self.createType(member_ty_final);
-                    member_ty_final = .{ .array = .{ .base = arr_base, .size = member_arr_dims.items[i] } };
+                if (member_arr_dims.items.len > 0) {
+                    var i: usize = member_arr_dims.items.len;
+                    while (i > 0) {
+                        i -= 1;
+                        const arr_base = try self.createType(member_ty_final);
+                        member_ty_final = .{ .array = .{ .base = arr_base, .size = member_arr_dims.items[i] } };
+                    }
                 }
+                try members.append(self.alloc, .{
+                    .name = self.text(member_name),
+                    .ty = member_ty_final,
+                    .layout = member_layout,
+                    .qualifier = member_qual,
+                });
+                if (self.current().tag == .comma) {
+                    _ = self.advance();
+                    continue;
+                }
+                break;
             }
             _ = try self.expect(.semicolon);
-            try members.append(self.alloc, .{
-                .name = self.text(member_name),
-                .ty = member_ty_final,
-                .layout = member_layout,
-                .qualifier = member_qual,
-            });
         }
         _ = try self.expect(.r_brace);
         _ = try self.expect(.semicolon);
@@ -1181,46 +1192,56 @@ const Parser = struct {
                 self.recordErrorLoc();
                 return error.UnexpectedToken;
             };
-            const member_name = self.current();
-            if (member_name.tag != .identifier) {
-                self.recordErrorLoc();
-                return error.UnexpectedToken;
-            }
-            _ = self.advance();
-            // Check for array size suffix: vec2 a[1] (supports multi-dim: vec2 a[2][3])
-            var member_ty_final = member_ty;
-            var member_arr_dims: std.ArrayListUnmanaged(u32) = .empty;
-            defer member_arr_dims.deinit(self.alloc);
-            var member_arr_size_name: ?[]const u8 = null;
-            while (self.current().tag == .l_bracket) {
+            // Multi-declarator support: `vec3 a, b;` (and `float a[2], b;`) declares
+            // several block members sharing the base type, each with its own array
+            // suffix — same rule as struct members (parseStructDecl).
+            while (true) {
+                const member_name = self.current();
+                if (member_name.tag != .identifier) {
+                    self.recordErrorLoc();
+                    return error.UnexpectedToken;
+                }
                 _ = self.advance();
-                const size_tok = self.current();
-                var arr_size: u32 = 0;
-                if (size_tok.tag == .int_literal) {
-                    arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                // Check for array size suffix: vec2 a[1] (supports multi-dim: vec2 a[2][3])
+                var member_ty_final = member_ty;
+                var member_arr_dims: std.ArrayListUnmanaged(u32) = .empty;
+                defer member_arr_dims.deinit(self.alloc);
+                var member_arr_size_name: ?[]const u8 = null;
+                while (self.current().tag == .l_bracket) {
                     _ = self.advance();
-                } else if (size_tok.tag == .identifier) {
-                    member_arr_size_name = self.text(size_tok);
+                    const size_tok = self.current();
+                    var arr_size: u32 = 0;
+                    if (size_tok.tag == .int_literal) {
+                        arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                        _ = self.advance();
+                    } else if (size_tok.tag == .identifier) {
+                        member_arr_size_name = self.text(size_tok);
+                        _ = self.advance();
+                    }
+                    _ = self.expect(.r_bracket) catch break;
+                    try member_arr_dims.append(self.alloc, arr_size);
+                }
+                if (member_arr_dims.items.len > 0) {
+                    var i: usize = member_arr_dims.items.len;
+                    while (i > 0) {
+                        i -= 1;
+                        const arr_base = try self.createType(member_ty_final);
+                        member_ty_final = .{ .array = .{ .base = arr_base, .size = member_arr_dims.items[i], .size_name = member_arr_size_name } };
+                    }
+                }
+                try members.append(self.alloc, .{
+                    .name = self.text(member_name),
+                    .ty = member_ty_final,
+                    .layout = member_layout,
+                    .qualifier = member_qual,
+                });
+                if (self.current().tag == .comma) {
                     _ = self.advance();
+                    continue;
                 }
-                _ = self.expect(.r_bracket) catch break;
-                try member_arr_dims.append(self.alloc, arr_size);
-            }
-            if (member_arr_dims.items.len > 0) {
-                var i: usize = member_arr_dims.items.len;
-                while (i > 0) {
-                    i -= 1;
-                    const arr_base = try self.createType(member_ty_final);
-                    member_ty_final = .{ .array = .{ .base = arr_base, .size = member_arr_dims.items[i], .size_name = member_arr_size_name } };
-                }
+                break;
             }
             _ = try self.expect(.semicolon);
-            try members.append(self.alloc, .{
-                .name = self.text(member_name),
-                .ty = member_ty_final,
-                .layout = member_layout,
-                .qualifier = member_qual,
-            });
         }
         _ = try self.expect(.r_brace);
         // Consume optional instance name: } instance_name[N];
