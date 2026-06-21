@@ -2284,7 +2284,7 @@ fn collectAtomicVars(module: *const ParsedModule, out: *std.AutoHashMap(u32, voi
 /// expected → naga surfaces a TYPE error. That is honest-loud (caught by naga),
 /// not silent-wrong, so it is left for a follow-up; only indexed element reads
 /// (`u.arr[i]` → `.x`/`.xy`) are lowered correctly today.
-fn collectWrappedUniformMembersForStruct(module: *const ParsedModule, struct_type_id: u32, out: *WrappedUniformMemberMap) !void {
+fn collectWrappedUniformMembersForStruct(module: *const ParsedModule, struct_type_id: u32, is_push_constant: bool, out: *WrappedUniformMemberMap) !void {
     const sdef = getDef(module, struct_type_id) orelse return;
     if (sdef.op != .TypeStruct or sdef.words.len <= 2) return;
     for (sdef.words[2..], 0..) |mt_id, mi| {
@@ -2306,7 +2306,19 @@ fn collectWrappedUniformMembersForStruct(module: *const ParsedModule, struct_typ
         // unwrapped `array<base,N>` emission, which naga rejects loudly (honest),
         // matching `main`'s behavior. (SSBOs are already excluded by the caller's
         // `!cb.is_ssbo` filter; this guards scalar/std430 UNIFORM blocks.)
-        if (arrayTypeStride(module, mt_id) != 16) continue;
+        //
+        // PUSH-CONSTANT EXCEPTION (#170): glslpp's own frontend emits NO
+        // ArrayStride decoration on push-constant block arrays (a regular uniform
+        // block carries ArrayStride 16; a push-constant block carries none), so
+        // `arrayTypeStride` returns null and the gate above would skip widening →
+        // `array<f32,N>` (stride 4) → naga rejects (silent-wrong-shaped). But a
+        // push-constant block has NO WGSL address space and is lowered to
+        // `var<uniform>`, and WGSL's uniform space MANDATES a 16-byte array stride
+        // — there is no representable tight-packed form. So for push constants the
+        // widened vec4 layout is the ONLY valid lowering (and matches std140, the
+        // host layout glslang assigns). Bypass the stride gate here; the
+        // non-push-constant path is byte-identical.
+        if (!is_push_constant and arrayTypeStride(module, mt_id) != 16) continue;
         const elem_id = md.words[2];
         const ed = getDef(module, elem_id) orelse continue;
         // If the element is itself an array, it is a multi-dim array → defer.
@@ -2942,7 +2954,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     // Collect cbuffers and textures
-    var cbuffers = std.ArrayList(struct { name: []const u8, type_id: u32, binding: u32, is_ssbo: bool, result_id: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var cbuffers = std.ArrayList(struct { name: []const u8, type_id: u32, binding: u32, is_ssbo: bool, result_id: u32, is_push_constant: bool = false }).initCapacity(arena, 4) catch return error.OutOfMemory;
     // `access` is the WGSL storage-texture access mode (read / write /
     // read_write) resolved from the variable's NonWritable/NonReadable
     // decorations; it is only consulted when `is_storage` is true.
@@ -2991,7 +3003,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 // Mirroring the .Uniform arm reuses all downstream machinery (struct
                 // forward-decls, name-collision rename, `push.value0` access chains).
                 const name = names.get(result_id) orelse "push";
-                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = 0, .is_ssbo = false, .result_id = result_id });
+                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = 0, .is_ssbo = false, .result_id = result_id, .is_push_constant = true });
             },
             .UniformConstant => {
                 const pointee_inst = getDef(&module, pointee_type) orelse continue;
@@ -3151,7 +3163,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         if (getDef(&module, struct_id)) |pi| {
             if (pi.op == .TypePointer and pi.words.len > 3) struct_id = pi.words[3];
         }
-        collectWrappedUniformMembersForStruct(&module, struct_id, &wrapped_uniform_members) catch {};
+        collectWrappedUniformMembersForStruct(&module, struct_id, cb.is_push_constant, &wrapped_uniform_members) catch {};
     }
     // Empty wrap-map for NON-uniform struct emission (local/function/workgroup
     // structs are not in uniform space, so their array members are never wrapped).

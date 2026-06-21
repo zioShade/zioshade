@@ -3140,6 +3140,33 @@ test "wgsl: A2 SSBO scalar array member NOT wrapped (uniform-only gate)" {
     try nagaValidateOrSkip(wgsl, "A2-ssbo-scalar-array");
 }
 
+test "wgsl: A2 push_constant scalar array member wrapped as array<vec4>+.x (#170)" {
+    // RED (before fix): a push_constant block is lowered to a WGSL var<uniform>,
+    // but glslpp's OWN frontend emits NO ArrayStride decoration for push-constant
+    // arrays (unlike a regular uniform block, which carries ArrayStride 16). The
+    // sub-16 array-member widening gate keyed on ArrayStride==16 therefore skips
+    // it, emitting `ubo: array<f32, 4>` (stride 4) → naga REJECTS: "array stride 4
+    // is not a multiple of the required alignment 16". WGSL's uniform address
+    // space mandates a 16-byte array stride, so the only representable lowering is
+    // to widen the element to vec4 and swizzle on access. (Mirrors the spirv-cross
+    // baseline reject push-constant-as-ubo.push-ubo.vk.frag.)
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(push_constant, std140) uniform UBO { float ubo[4]; };
+        \\layout(location = 0) out float FragColor;
+        \\void main() { FragColor = ubo[1]; }
+    ;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The scalar-element array member is widened to vec4<f32>.
+    try assertContains(wgsl, "array<vec4<f32>, 4>");
+    // Access site swizzles the widened element back to a scalar.
+    try assertContains(wgsl, ".x");
+    try nagaValidateOrSkip(wgsl, "A2-push-constant-scalar-array");
+}
+
 // ---------------------------------------------------------------------------
 // #170 review — wrap must gate on ArrayStride == 16, NOT just !is_ssbo.
 //
