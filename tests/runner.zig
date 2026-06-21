@@ -34,7 +34,9 @@ const KNOWN_UNSUPPORTED = [_][]const u8{
     // image-query.desktop.frag was unsupported only because samplerCubeArray /
     // imageCubeArray were mis-compiled (#183); it now compiles + spirv-vals.
     "tests/spirv-cross/int64.desktop.comp",
-    "tests/spirv-cross/ray_sphere_test.frag",
+    // ray_sphere_test.frag was unsupported only because multi-declarator struct
+    // members (`struct Ray { vec3 o, d; }`) were mis-parsed; it now compiles +
+    // spirv-vals (the struct/uniform-block parser handles comma-separated names).
     "tests/spirv-cross/shader-clock.frag",
     "tests/spirv-cross/shader_ballot.comp",
     "tests/spirv-cross/struct-material.frag",
