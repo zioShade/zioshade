@@ -1329,7 +1329,10 @@ const Parser = struct {
             const type_name = self.text(self.current());
             if (self.struct_names.contains(type_name)) {
                 const third = self.peek2().tag;
-                if (third == .eq or third == .semicolon or third == .l_bracket) {
+                // `,` covers a multi-declarator local of a struct type (`S a, b;`);
+                // without it the second name was dropped (parseLocalVarDecl handles
+                // the comma loop). `=`/`;`/`[` are the single-declarator shapes.
+                if (third == .eq or third == .semicolon or third == .l_bracket or third == .comma) {
                     return self.parseLocalVarDecl();
                 }
             }
