@@ -5845,3 +5845,35 @@ test "wgsl: an unresolved #include honest-errors instead of being silently skipp
         \\void main() { o = vec4(1.0); }
     , .{ .stage = .fragment }));
 }
+
+// #170: a multi-declarator STRUCT member (`struct Ray { vec3 o, d; };` — two names
+// in one declaration) is valid GLSL (glslang accepts it; tests/spirv-cross/
+// ray_sphere_test.frag uses it), but glslpp's struct parser read only the first
+// name and then required a `;`, so the `, d` tripped it and the whole struct was
+// mis-parsed → a downstream InvalidAssignment/TypeMismatch on a valid shader.
+// Each comma-separated declarator must register its own member (with its own
+// optional array suffix).
+test "wgsl: multi-declarator struct member registers every name (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\struct Ray { vec3 oo, dd; };
+        \\layout(location = 0) in vec3 c;
+        \\layout(location = 0) out vec4 fc;
+        \\void main() { Ray r; r.oo = c; r.dd = c * 2.0; fc = vec4(r.oo - r.dd, 1.0); }
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "multi-decl-struct-member");
+}
+
+// #170: the same multi-declarator support is needed for UNIFORM BLOCK members
+// (`uniform U { vec2 a, b; };`), which share the parser path's single-name limit.
+test "wgsl: multi-declarator uniform block member registers every name (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(binding = 0, std140) uniform U { vec4 a, b; } u;
+        \\layout(location = 0) out vec4 fc;
+        \\void main() { fc = u.a + u.b; }
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "multi-decl-ubo-member");
+}
