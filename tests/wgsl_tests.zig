@@ -5877,3 +5877,19 @@ test "wgsl: multi-declarator uniform block member registers every name (#170)" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "multi-decl-ubo-member");
 }
+
+// #170: a multi-declarator LOCAL of a user STRUCT type without initializers
+// (`S a, b;`) was mis-routed in parseStatement — the struct-decl dispatch only
+// recognized a name followed by `=`, `;`, or `[`, not `,`, so the second name
+// was dropped (UndeclaredIdentifier on `b`) on valid GLSL (glslang accepts it).
+// Built-in-typed multi-declarator locals (`float a, b;`) already worked.
+test "wgsl: multi-declarator local of a struct type registers every name (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\struct S { float x; };
+        \\layout(location = 0) out vec4 o;
+        \\void main() { S a, b, c; a.x = 1.0; b.x = 2.0; c.x = 3.0; o = vec4(a.x, b.x, c.x, 1.0); }
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "multi-decl-struct-local");
+}
