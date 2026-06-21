@@ -28,6 +28,12 @@ pub const Preprocessor = struct {
     source_file_path: []const u8 = "",
     // Stored include file contents (to keep slices alive)
     included_sources: std.ArrayListUnmanaged([:0]const u8) = .empty,
+    // Set when an `#include` could not be resolved. The caller honest-errors on
+    // this (instead of compiling the include-less source at exit 0 = #170
+    // silent-wrong); recorded rather than thrown so it survives the best-effort
+    // `pp.process(...) catch tokens` fallback used for other recoverable
+    // preprocessor errors.
+    unresolved_include: bool = false,
 
     pub fn init(alloc: std.mem.Allocator) Preprocessor {
         return .{
@@ -165,7 +171,13 @@ pub const Preprocessor = struct {
         // Resolve the file and read it
         const resolved_source = self.resolveInclude(path, is_system) catch |err| switch (err) {
             error.FileNotFound => {
-                // Include file not found \u2014 skip silently
+                // Include file not found: record it so the caller honest-errors,
+                // instead of silently dropping the include's declarations and
+                // compiling the rest at exit 0 (a #170 silent-wrong \u2014 the include's
+                // symbols then resolve to garbage / UndeclaredIdentifier downstream).
+                // glslangValidator/glslc also hard-error here. Recorded (not thrown)
+                // so it survives the caller's best-effort `process(...) catch tokens`.
+                self.unresolved_include = true;
                 return;
             },
             else => return err,
