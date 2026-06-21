@@ -5831,3 +5831,17 @@ test "wgsl: a module with more than 8 functions does not overflow the func-id li
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "many-functions-no-overflow");
 }
+
+// #170 (no silent-wrong): an unresolved `#include` was silently skipped (the
+// preprocessor swallowed error.FileNotFound and continued at exit 0), so a shader
+// referencing the missing file's symbols compiled to WRONG output (the include's
+// declarations just vanished). A missing include must honest-error, like
+// glslangValidator/glslc, not be silently dropped.
+test "wgsl: an unresolved #include honest-errors instead of being silently skipped (#170)" {
+    try std.testing.expectError(error.PreprocessFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\#include "this_file_does_not_exist_zzz.glsl"
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(1.0); }
+    , .{ .stage = .fragment }));
+}

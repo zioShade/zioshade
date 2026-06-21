@@ -55,6 +55,7 @@ pub const Error = error{
 /// Set by `compileToSPIRV` on error. Access via `last_compile_detail`.
 pub const CompileDetail = enum {
     lex_failed,
+    preprocess_failed,
     parse_failed,
     semantic_failed,
     codegen_failed,
@@ -346,6 +347,13 @@ pub fn compileToSPIRV(
 
     const pp_tokens = pp.process(actual_source, tokens) catch tokens;
     defer if (pp_tokens.ptr != tokens.ptr) alloc.free(pp_tokens);
+    // An unresolved #include is an honest error, not a silent skip (#170): the
+    // `catch tokens` above swallows recoverable preprocessor errors, but a missing
+    // include drops real declarations and must not compile at exit 0.
+    if (pp.unresolved_include) {
+        last_compile_detail = .preprocess_failed;
+        return error.PreprocessFailed;
+    }
 
     var root_node = parser.parse(alloc, actual_source, pp_tokens) catch {
         last_compile_detail = .parse_failed;
@@ -513,6 +521,11 @@ pub fn compileToSPIRVNoOpt(
     defer pp.deinit();
     const pp_tokens = pp.process(source, tokens) catch tokens;
     defer if (pp_tokens.ptr != tokens.ptr) alloc.free(pp_tokens);
+    // An unresolved #include is an honest error, not a silent skip (#170).
+    if (pp.unresolved_include) {
+        last_compile_detail = .preprocess_failed;
+        return error.PreprocessFailed;
+    }
 
     var root_node = parser.parse(alloc, source, pp_tokens) catch {
         last_compile_detail = .parse_failed;
@@ -580,6 +593,11 @@ pub fn compileToSPIRVStrict(
     defer pp.deinit();
     const pp_tokens = pp.process(source, tokens) catch tokens;
     defer if (pp_tokens.ptr != tokens.ptr) alloc.free(pp_tokens);
+    // An unresolved #include is an honest error, not a silent skip (#170).
+    if (pp.unresolved_include) {
+        last_compile_detail = .preprocess_failed;
+        return error.PreprocessFailed;
+    }
 
     var root_node = parser.parse(alloc, source, pp_tokens) catch {
         last_compile_detail = .parse_failed;
