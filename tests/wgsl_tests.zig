@@ -5893,3 +5893,39 @@ test "wgsl: multi-declarator local of a struct type registers every name (#170)"
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "multi-decl-struct-local");
 }
+
+// #170: an unsized local array with a sized initializer (`float a[] = float[](1,
+// 2, 3, 4);`) is valid GLSL — glslang infers the length from the initializer.
+// glslpp left the declared type unsized (size 0) so it mismatched the size-4
+// initializer (TypeMismatch) on a valid shader. Infer the length from the init.
+test "wgsl: unsized local array infers its length from the initializer (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float a[] = float[](1.0, 2.0, 3.0, 4.0);
+        \\    o = vec4(a[0], a[1], a[2], a[3]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "array<f32, 4>"); // length inferred as 4
+    try nagaValidateOrSkip(wgsl, "unsized-array-infer-length");
+}
+
+// #170: the SIZED counterpart hit the same array-extract→swizzle silent-wrong —
+// `float a[4] = float[](...); vec4(a[0],a[1],a[2],a[3])` emitted `vec4f(a.xyzw)`
+// (a swizzle on an array, naga-rejected) at exit 0. The elements must stay
+// per-index, not collapse to a swizzle.
+test "wgsl: vecN from array elements stays per-index, not an array swizzle (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float a[4] = float[](1.0, 2.0, 3.0, 4.0);
+        \\    o = vec4(a[0], a[1], a[2], a[3]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try assertNotContains(wgsl, ".xyzw"); // no swizzle on an array
+    try nagaValidateOrSkip(wgsl, "array-elements-no-swizzle");
+}

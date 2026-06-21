@@ -5434,18 +5434,19 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
                 // Only a VECTOR source has a swizzle form to collapse into. A struct
                 // source (e.g. the {result,carry} struct of OpIAddCarry/OpISubBorrow)
-                // must NOT have its member extracts marked dead here — the emit path's
-                // matching `src_is_struct` guard keeps them as separate args, so
-                // dropping them would leave those args referencing undefined names. (#170)
-                var src_is_struct = false;
+                // or an ARRAY source (`a[0], a[1], …`) must NOT have its element
+                // extracts marked dead here — the emit path's matching
+                // `src_is_aggregate` guard keeps them as separate args, so dropping
+                // them would leave those args referencing undefined names. (#170)
+                var src_is_aggregate = false;
                 if (lead_source) |ls| {
                     if (resolveTypeOf(module, ls)) |st| {
                         if (getDef(module, st)) |sd2| {
-                            if (sd2.op == .TypeStruct) src_is_struct = true;
+                            if (sd2.op == .TypeStruct or sd2.op == .TypeArray or sd2.op == .TypeRuntimeArray) src_is_aggregate = true;
                         }
                     }
                 }
-                if (lead_count >= 2 and lead_source != null and !src_is_struct) {
+                if (lead_count >= 2 and lead_source != null and !src_is_aggregate) {
                     // Mark the leading CompositeExtract results as dead
                     // ONLY if they're not used elsewhere (single use absorbed by swizzle)
                     for (scan_inst.words[3..], 0..) |comp_id, ci| {
@@ -6488,18 +6489,22 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             break;
                         }
                     }
-                    // Check if source is a struct — struct extracts shouldn't use swizzle notation
-                    var src_is_struct = false;
+                    // Only a VECTOR source may be collapsed to swizzle notation
+                    // (`v.x, v.y` → `v.xy`). A struct or ARRAY source has no swizzle —
+                    // `arr[0], arr[1], …` must stay element accesses, not `arr.xyzw`
+                    // (naga rejects a swizzle on an array; `float a[4]` fed to
+                    // `vec4(a[0],a[1],a[2],a[3])` was silently emitted as `a.xyzw`).
+                    var src_is_aggregate = false;
                     if (lead_source) |ls| {
                         const src_type_for_swizzle = resolveTypeOf(module, ls);
                         if (src_type_for_swizzle) |st| {
                             const st_def2 = getDef(module, st);
                             if (st_def2) |sd3| {
-                                if (sd3.op == .TypeStruct) src_is_struct = true;
+                                if (sd3.op == .TypeStruct or sd3.op == .TypeArray or sd3.op == .TypeRuntimeArray) src_is_aggregate = true;
                             }
                         }
                     }
-                    if (lead_count >= 2 and lead_source != null and !src_is_struct and !is_struct_result and !is_matrix_result) {
+                    if (lead_count >= 2 and lead_source != null and !src_is_aggregate and !is_struct_result and !is_matrix_result) {
                         // Emit with leading source aggregated
                         var parts = std.ArrayList(u8).initCapacity(arena, 128) catch return;
                         defer parts.deinit(arena);

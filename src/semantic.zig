@@ -2851,6 +2851,16 @@ const Analyzer = struct {
                         const loaded_id = try self.emitLoadCached(init.id, init.ty);
                         init = .{ .ty = init.ty, .id = loaded_id };
                     }
+                    // Infer an unsized local array's length from its initializer
+                    // (`float a[] = float[](1,2,3,4)` → a is float[4]). glslang does
+                    // this; without it the size-0 declared type mismatches the sized
+                    // initializer (TypeMismatch on a valid shader). Keep the declared
+                    // element type; only the length is adopted.
+                    if (ty == .array and ty.array.size == 0 and ty.array.size_name == null and
+                        init.ty == .array and init.ty.array.size > 0)
+                    {
+                        ty = .{ .array = .{ .base = ty.array.base, .size = init.ty.array.size } };
+                    }
                     if (!self.typesCompatible(ty, init.ty)) {
                         last_error_ctx = "type-mismatch";
                         return error.TypeMismatch;
