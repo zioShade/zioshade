@@ -5929,3 +5929,39 @@ test "wgsl: vecN from array elements stays per-index, not an array swizzle (#170
     try assertNotContains(wgsl, ".xyzw"); // no swizzle on an array
     try nagaValidateOrSkip(wgsl, "array-elements-no-swizzle");
 }
+
+// #170: a vector constructor that TRUNCATES a larger vector (`vec3(aVec4)` →
+// take the first 3 components) is valid GLSL, but glslpp had no `arg_n > n` case
+// in the single-arg vector constructor — the vec4 fell into the scalar-splat
+// path, emitting `composite_construct %float %vec4` (invalid SPIR-V) + splat, so
+// every backend produced `vec3(x,x,x)` and naga rejected the WGSL. The first n
+// components must be taken.
+test "wgsl: vector constructor truncates a larger vector, not splat (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { vec3 b = vec3(v); vec2 c = vec2(v); o = vec4(b.xy + c, b.z, 1.0); }
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "vector-ctor-truncate");
+}
+
+// #170: cross-element-type truncation must convert per component — `ivec2(vec4)`
+// (float→int) and `bvec3(vec4)` (float→bool via `!= 0`, since there is no
+// to-bool conversion tag). The bool case previously built a bvec from float
+// operands = invalid SPIR-V.
+test "wgsl: cross-type vector truncation converts each component (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    ivec2 i = ivec2(v);
+        \\    bvec3 b = bvec3(v);
+        \\    o = vec4(float(i.x), b.x ? 1.0 : 0.0, b.y ? 0.5 : 0.0, b.z ? 0.25 : 0.0);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "cross-type-vector-truncate");
+}
