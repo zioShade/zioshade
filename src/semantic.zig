@@ -7694,29 +7694,73 @@ const Analyzer = struct {
                     const src_ty = arg_tids.items[0].ty;
                     const src_id = arg_tids.items[0].id;
                     const dst_cols = result_ty.numColumns();
+                    const src_cols = src_ty.numColumns();
                     const dst_col_type = result_ty.columnType();
                     const src_col_type = src_ty.columnType();
                     const dst_col_n = dst_col_type.numComponents();
                     const src_col_n = src_col_type.numComponents();
-                    // Extract first dst_cols columns from source matrix
+                    // Build dst_cols result columns. Shrink/equal columns (i < src_cols
+                    // and dst_col_n <= src_col_n) reuse the source column directly
+                    // (shuffle-shrunk if narrower). EXPANSION — a column the source
+                    // doesn't have (i >= src_cols), or a column longer than the source's
+                    // (dst_col_n > src_col_n) — is filled from the IDENTITY per GLSL:
+                    // `mat4(mat3)` puts the mat3 in the top-left and fills the rest with
+                    // 1 on the diagonal, 0 elsewhere. (Extracting a non-existent column
+                    // or using a too-short column was invalid SPIR-V.)
+                    const elem_ty = dst_col_type.elementType();
                     const col_ids = try self.alloc.alloc(u32, dst_cols);
                     for (0..dst_cols) |i| {
-                        const extract_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-        extract_ops[0] = .{ .id = src_id };
-        extract_ops[1] = .{ .literal_int = @intCast(i) };
-        const extracted_col_id = try self.emitPureOp(.composite_extract, extract_ops, src_col_type);
-                        // If column sizes differ, shrink via vector_shuffle
-                        if (dst_col_n < src_col_n) {
-                            const shuffle_ops = try self.alloc.alloc(ir.Instruction.Operand, 2 + dst_col_n);
-                            shuffle_ops[0] = .{ .id = extracted_col_id };
-                            shuffle_ops[1] = .{ .id = extracted_col_id };
-                            for (0..dst_col_n) |j| {
-                                shuffle_ops[2 + j] = .{ .literal_int = @intCast(j) };
+                        if (i < src_cols and dst_col_n <= src_col_n) {
+                            const extract_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            extract_ops[0] = .{ .id = src_id };
+                            extract_ops[1] = .{ .literal_int = @intCast(i) };
+                            const extracted_col_id = try self.emitPureOp(.composite_extract, extract_ops, src_col_type);
+                            if (dst_col_n < src_col_n) {
+                                const shuffle_ops = try self.alloc.alloc(ir.Instruction.Operand, 2 + dst_col_n);
+                                shuffle_ops[0] = .{ .id = extracted_col_id };
+                                shuffle_ops[1] = .{ .id = extracted_col_id };
+                                for (0..dst_col_n) |j| {
+                                    shuffle_ops[2 + j] = .{ .literal_int = @intCast(j) };
+                                }
+                                col_ids[i] = try self.emitPureOp(.vector_shuffle, shuffle_ops, dst_col_type);
+                            } else {
+                                col_ids[i] = extracted_col_id;
                             }
-                            const shuffle_id = try self.emitPureOp(.vector_shuffle, shuffle_ops, dst_col_type);
-                            col_ids[i] = shuffle_id;
                         } else {
-                            col_ids[i] = extracted_col_id;
+                            // Expanded column: per-component, source where it exists,
+                            // identity (i==j ? 1 : 0) for the padding. Extract the source
+                            // column once (a vector), then its components — a two-index
+                            // composite_extract is not applied component-wise by the
+                            // backend, so split it into column- then element-extract.
+                            const one_id = try self.getConstFloat(1.0);
+                            const zero_id = try self.getConstFloat(0.0);
+                            var src_col_vec: ?u32 = null;
+                            if (i < src_cols) {
+                                const cex = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                cex[0] = .{ .id = src_id };
+                                cex[1] = .{ .literal_int = @intCast(i) };
+                                src_col_vec = try self.emitPureOp(.composite_extract, cex, src_col_type);
+                            }
+                            const comp_ops = try self.alloc.alloc(ir.Instruction.Operand, dst_col_n);
+                            for (0..dst_col_n) |j| {
+                                if (src_col_vec != null and j < src_col_n) {
+                                    const jex = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                    jex[0] = .{ .id = src_col_vec.? };
+                                    jex[1] = .{ .literal_int = @intCast(j) };
+                                    comp_ops[j] = .{ .id = try self.emitPureOp(.composite_extract, jex, elem_ty) };
+                                } else {
+                                    comp_ops[j] = .{ .id = if (i == j) one_id else zero_id };
+                                }
+                            }
+                            const col_id = self.allocId();
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .composite_construct,
+                                .result_type = null,
+                                .result_id = col_id,
+                                .operands = comp_ops,
+                                .ty = dst_col_type,
+                            });
+                            col_ids[i] = col_id;
                         }
                     }
                     // Build the result matrix from extracted columns
