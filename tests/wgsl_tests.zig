@@ -5965,3 +5965,25 @@ test "wgsl: cross-type vector truncation converts each component (#170)" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "cross-type-vector-truncate");
 }
+
+// #170: matrix EXPANSION — `mat4(aMat3)` places the mat3 in the top-left and
+// fills the rest from the identity (valid GLSL). glslpp's matrix-from-matrix
+// path only handled shrink/equal; for expansion it extracted a source column
+// that doesn't exist (`OpCompositeExtract ... 3` from a 3-column matrix) and
+// used too-short columns — invalid SPIR-V on a valid shader. (Shrink
+// `mat3(mat4)` already worked and must stay working.)
+test "wgsl: matrix expansion mat4(mat3) fills from identity, not OOB (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat3 m = mat3(a, a.yzx, a.zxy);
+        \\    mat4 n = mat4(m);      // expand: top-left = m, rest = identity
+        \\    mat3 s = mat3(n);      // shrink back (regression guard)
+        \\    o = vec4(n[3] + vec4(s[0], 1.0));
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "matrix-expand-mat4-from-mat3");
+}
