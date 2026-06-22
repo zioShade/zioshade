@@ -7462,6 +7462,68 @@ const Analyzer = struct {
                         return .{ .ty = result_ty, .id = result_id };
                     }
 
+                    // Handle longer-vector to shorter-vector: vec3(vec4) → take the
+                    // first n components (truncation). GLSL allows this; without a case
+                    // here the single vector arg fell into the scalar-splat path below,
+                    // which emitted `composite_construct %float %vec4` (invalid SPIR-V)
+                    // then splatted that to every component — wrong on all backends.
+                    if (arg_ty.isVector() and arg_n > n) {
+                        const trunc_scalar: ast.Type = switch (result_ty) {
+                            .vec2, .vec3, .vec4 => .float,
+                            .ivec2, .ivec3, .ivec4 => .int,
+                            .uvec2, .uvec3, .uvec4 => .uint,
+                            .bvec2, .bvec3, .bvec4 => .bool,
+                            .i8vec2, .i8vec3, .i8vec4 => .int8,
+                            .u8vec2, .u8vec3, .u8vec4 => .uint8,
+                            .i16vec2, .i16vec3, .i16vec4 => .int16,
+                            .u16vec2, .u16vec3, .u16vec4 => .uint16,
+                            .f16vec2, .f16vec3, .f16vec4 => .float16,
+                            else => .float,
+                        };
+                        const src_scalar = arg_ty.elementType();
+                        const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, n);
+                        for (0..n) |i| {
+                            const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            ext_ops[0] = .{ .id = arg_tids.items[0].id };
+                            ext_ops[1] = .{ .literal_int = @intCast(i) };
+                            var comp_id = try self.emitPureOp(.composite_extract, ext_ops, src_scalar);
+                            // Convert the extracted scalar if the element type differs
+                            // (`ivec2(vec4)` → truncate then float→int per component).
+                            if (!std.meta.eql(src_scalar, trunc_scalar)) {
+                                const src_is_float = src_scalar == .float or src_scalar == .double or src_scalar == .float16;
+                                if (trunc_scalar == .bool) {
+                                    // numeric → bool component is `(x != 0)`, mirroring the
+                                    // same-size bvecN(numericVecN) path; getConversionTag has
+                                    // no to==.bool mapping (it would otherwise build a
+                                    // bvec from numeric operands = invalid SPIR-V).
+                                    const zero_id: u32 = if (src_is_float) try self.getConstFloat(0.0) else try self.getConstInt(0, src_scalar);
+                                    const cmp_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                    cmp_ops[0] = .{ .id = comp_id };
+                                    cmp_ops[1] = .{ .id = zero_id };
+                                    comp_id = try self.emitPureOp(if (src_is_float) .compare_fneq else .compare_neq, cmp_ops, .bool);
+                                } else if (self.getConversionTag(trunc_scalar, src_scalar)) |tag| {
+                                    const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                    conv_ops[0] = .{ .id = comp_id };
+                                    comp_id = try self.emitPureOp(tag, conv_ops, trunc_scalar);
+                                } else {
+                                    // No conversion for this element pair — fail loud rather
+                                    // than emit a type-mismatched composite (silent-wrong).
+                                    last_error_ctx = "type-mismatch";
+                                    return error.TypeMismatch;
+                                }
+                            }
+                            cc_ops[i] = .{ .id = comp_id };
+                        }
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .composite_construct,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = cc_ops,
+                            .ty = result_ty,
+                        });
+                        return .{ .ty = result_ty, .id = result_id };
+                    }
+
                     // Convert scalar type if needed (e.g., vec4(int_val) → convert int→float first)
                     var splat_id = arg_tids.items[0].id;
                     const splat_ty = arg_ty;
