@@ -7904,8 +7904,18 @@ const Analyzer = struct {
                     return .{ .ty = result_ty, .id = result_id };
                 }
 
-                // Matrix construction from individual scalars: mat2x3(a,b,c,d,e,f) → construct column vectors then matrix
-                if (result_ty.isMatrix() and arg_tids.items.len > 1 and arg_tids.items[0].ty.isScalar()) {
+                // Matrix construction from individual scalars: mat2x3(a,b,c,d,e,f) → construct column vectors then matrix.
+                // Requires ALL args to be scalars — a mix like mat2(float, vec3) fills
+                // column-major too but must regroup at the component level (handled by the
+                // column-major fill branch further below); feeding a vector arg here would
+                // place it whole as a single column component = invalid SPIR-V.
+                const all_args_scalar = blk: {
+                    for (arg_tids.items) |t| {
+                        if (!t.ty.isScalar()) break :blk false;
+                    }
+                    break :blk true;
+                };
+                if (result_ty.isMatrix() and arg_tids.items.len > 1 and all_args_scalar) {
                     const col_type = result_ty.columnType();
                     const num_cols = result_ty.numColumns();
                     const col_n = col_type.numComponents();
@@ -7968,6 +7978,106 @@ const Analyzer = struct {
                     _ = self.tryUpgradeToConstantComposite();
                     self.alloc.free(col_ids);
                     return .{ .ty = result_ty, .id = result_id };
+                }
+
+                // Matrix construction that fills column-major from a mix of scalars and
+                // vectors straddling column boundaries (e.g. mat2(vec4), mat2(vec3, float),
+                // mat3(vec2, vec4, vec3)). The single-scalar (diagonal), single-matrix
+                // (copy/resize) and all-scalar forms are handled above; the generic
+                // OpCompositeConstruct path below only yields valid columns when each arg is
+                // ALREADY exactly one column. When a vector arg spans more or fewer rows than
+                // a column, that path would feed a wrong-width constituent to the matrix
+                // constructor — invalid SPIR-V (spirv-val: "Constituent count does not match
+                // matrix column count") that surfaces as naga rejecting `mat2x2f(vec4f(…))`.
+                // Rebuild proper column vectors from the flattened component run instead.
+                if (result_ty.isMatrix()) {
+                    const col_type = result_ty.columnType();
+                    const num_cols = result_ty.numColumns();
+                    const col_n = col_type.numComponents();
+                    const elem_ty = col_type.elementType();
+                    // The generic path already builds valid columns iff every arg is a vector
+                    // of exactly col_n components and there are exactly num_cols of them — leave
+                    // that working shape untouched (no extra extract/reconstruct ops).
+                    var args_are_columns = arg_tids.items.len == num_cols and num_cols != 0;
+                    if (args_are_columns) {
+                        for (arg_tids.items) |t| {
+                            if (!t.ty.isVector() or t.ty.numComponents() != col_n) {
+                                args_are_columns = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (!args_are_columns and num_cols != 0 and col_n != 0) {
+                        // Flatten every arg into a run of scalar components, converting each to
+                        // the matrix element type (GLSL matrices are float/double).
+                        var comps = std.ArrayListUnmanaged(u32).empty;
+                        defer comps.deinit(self.alloc);
+                        for (arg_tids.items) |tid| {
+                            if (tid.ty.isVector()) {
+                                const n = tid.ty.numComponents();
+                                const arg_elem = tid.ty.elementType();
+                                for (0..n) |ci| {
+                                    const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                                    ext_ops[0] = .{ .id = tid.id };
+                                    ext_ops[1] = .{ .literal_int = @intCast(ci) };
+                                    var comp_id = try self.emitPureOp(.composite_extract, ext_ops, arg_elem);
+                                    if (!std.meta.eql(arg_elem, elem_ty)) {
+                                        if (self.getConversionTag(elem_ty, arg_elem)) |cvtag| {
+                                            const cops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                            cops[0] = .{ .id = comp_id };
+                                            comp_id = try self.emitPureOp(cvtag, cops, elem_ty);
+                                        }
+                                    }
+                                    comps.append(self.alloc, comp_id) catch return error.OutOfMemory;
+                                }
+                            } else {
+                                var comp_id = tid.id;
+                                if (!std.meta.eql(tid.ty, elem_ty)) {
+                                    if (self.getConversionTag(elem_ty, tid.ty)) |cvtag| {
+                                        const cops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                        cops[0] = .{ .id = comp_id };
+                                        comp_id = try self.emitPureOp(cvtag, cops, elem_ty);
+                                    }
+                                }
+                                comps.append(self.alloc, comp_id) catch return error.OutOfMemory;
+                            }
+                        }
+                        // Regroup only when the run exactly fills the matrix. Valid GLSL always
+                        // does; otherwise fall through rather than emit a malformed column.
+                        if (comps.items.len == num_cols * col_n) {
+                            const col_ids = try self.alloc.alloc(u32, num_cols);
+                            defer self.alloc.free(col_ids);
+                            for (0..num_cols) |col| {
+                                const vec_ops = try self.alloc.alloc(ir.Instruction.Operand, col_n);
+                                for (0..col_n) |row| {
+                                    vec_ops[row] = .{ .id = comps.items[col * col_n + row] };
+                                }
+                                const vec_id = self.allocId();
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .composite_construct,
+                                    .result_type = null,
+                                    .result_id = vec_id,
+                                    .operands = vec_ops,
+                                    .ty = col_type,
+                                });
+                                // Fold the column when all its components are constant so a
+                                // const matrix (and any enclosing const array) can fold too.
+                                _ = self.tryUpgradeToConstantComposite();
+                                col_ids[col] = vec_id;
+                            }
+                            const mat_ops = try self.alloc.alloc(ir.Instruction.Operand, num_cols);
+                            for (col_ids, 0..) |cid, i| mat_ops[i] = .{ .id = cid };
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .composite_construct,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = mat_ops,
+                                .ty = result_ty,
+                            });
+                            _ = self.tryUpgradeToConstantComposite();
+                            return .{ .ty = result_ty, .id = result_id };
+                        }
+                    }
                 }
 
                 // Convert arguments to match result component type if needed
