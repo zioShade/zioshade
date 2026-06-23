@@ -6146,3 +6146,94 @@ test "wgsl: matrix from one vector per column is unchanged (#170)" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "mat2-from-two-vec2");
 }
+
+// #170: GLSL `==` / `!=` on an AGGREGATE (struct, array, matrix) compares
+// structurally and returns a scalar bool. glslpp emitted OpIEqual/OpFOrdEqual
+// directly on the struct/array/matrix operand — invalid SPIR-V (spirv-val:
+// "Expected operands to be scalar or vector int/float") and naga-rejected WGSL
+// ("Incompatible operands: Equal(Struct {...})"). Lower to a tree of per-leaf
+// comparisons reduced with `&&`; the AND reduction (`&&`) must appear.
+test "wgsl: struct equality lowers to per-member compares, not a struct == (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\struct S { float a; float b; };
+        \\void main() {
+        \\    S x = S(1.0, 2.0);
+        \\    S y = S(1.0, 3.0);
+        \\    o = (x == y) ? vec4(1.0) : vec4(0.0);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "&&"); // AND-reduced per-member compares, not a struct ==
+    try nagaValidateOrSkip(wgsl, "struct-equality");
+}
+
+// #170: array `==` is the same class — per-element compare + AND-reduce.
+test "wgsl: array equality lowers to per-element compares (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float a[3] = float[](1.0, 2.0, 3.0);
+        \\    float b[3] = float[](1.0, 2.0, 4.0);
+        \\    o = (a == b) ? vec4(1.0) : vec4(0.0);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "array-equality");
+}
+
+// #170: `!=` is the logical negation of structural `==`, and the recursion must
+// descend through a VECTOR member (vec2 → componentwise compare + all()).
+test "wgsl: struct inequality with a vector member negates the equality (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in vec2 t;
+        \\layout(location = 0) out vec4 o;
+        \\struct S { vec2 p; float c; };
+        \\void main() {
+        \\    S x = S(t, 2.0);
+        \\    S y = S(vec2(1.0), 3.0);
+        \\    o = (x != y) ? vec4(1.0) : vec4(0.0);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "struct-inequality-vec-member");
+}
+
+// #170: the lowering recurses through ARBITRARY nesting — a struct holding
+// another struct (with a vector) and an array must compare every leaf.
+test "wgsl: nested struct/array equality recurses to every leaf (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in vec2 t;
+        \\layout(location = 0) out vec4 o;
+        \\struct Inner { vec2 p; };
+        \\struct Outer { Inner i; float arr[2]; };
+        \\void main() {
+        \\    Outer x = Outer(Inner(t), float[](1.0, 2.0));
+        \\    Outer y = Outer(Inner(vec2(1.0)), float[](1.0, 3.0));
+        \\    o = (x == y) ? vec4(1.0) : vec4(0.0);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "nested-struct-array-equality");
+}
+
+// #170: matrices compare componentwise too (mat == mat was OpFOrdEqual on a
+// matrix = invalid SPIR-V). Lower per-column (each column a vec compare + all).
+test "wgsl: matrix equality lowers per-column, not a matrix == (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 a = mat2(t);
+        \\    mat2 b = mat2(1.0);
+        \\    o = (a == b) ? vec4(1.0) : vec4(0.0);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "matrix-equality");
+}

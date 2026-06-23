@@ -1164,6 +1164,134 @@ const Analyzer = struct {
         return result_id;
     }
 
+    /// Extract component/member/element `index` from an aggregate VALUE `composite_id`
+    /// as a value of type `ty` (OpCompositeExtract with a literal index).
+    fn emitExtractValue(self: *Analyzer, composite_id: u32, index: u32, ty: ast.Type) !u32 {
+        const ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+        ops[0] = .{ .id = composite_id };
+        ops[1] = .{ .literal_int = index };
+        return try self.emitPureOp(.composite_extract, ops, ty);
+    }
+
+    /// AND-accumulate a bool id into a running conjunction: returns `b` when `acc`
+    /// is null (first term), else `acc && b`.
+    fn andBoolAcc(self: *Analyzer, acc: ?u32, b: u32) !u32 {
+        const a = acc orelse return b;
+        const ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+        ops[0] = .{ .id = a };
+        ops[1] = .{ .id = b };
+        return try self.emitPureOp(.logical_and, ops, .bool);
+    }
+
+    /// Lower a GLSL `==` between two values of an AGGREGATE type (struct, array,
+    /// matrix, or a bool vector) to a tree of per-leaf comparisons reduced with
+    /// logical AND — returning a single `bool` SSA id that is true iff every leaf
+    /// is equal. SPIR-V has NO equality op on struct/array/matrix types and OpIEqual
+    /// is invalid on bools, so emitting a direct compare yields invalid SPIR-V
+    /// (spirv-val rejects) and naga-rejected WGSL (`Incompatible operands: Equal`).
+    /// GLSL `a != b` on aggregates is exactly `!(a == b)`, so callers negate this
+    /// result for `!=`. Recurses into nested structs/arrays/matrices.
+    fn emitAggregateEqual(self: *Analyzer, ty: ast.Type, left_id: u32, right_id: u32) error{ InvalidAssignment, OutOfMemory, RedeclaredIdentifier, SemanticFailed, TypeMismatch, UndeclaredIdentifier }!u32 {
+        // Leaf scalar → a single comparison to bool.
+        if (ty.isScalar()) {
+            if (ty == .bool) {
+                // No OpLogicalEqual IR tag exists; build the biconditional from
+                // logical primitives:  (a == b)  ≡  (¬a ∨ b) ∧ (a ∨ ¬b).
+                const na_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                na_ops[0] = .{ .id = left_id };
+                const na = try self.emitPureOp(.logical_not, na_ops, .bool);
+                const nb_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                nb_ops[0] = .{ .id = right_id };
+                const nb = try self.emitPureOp(.logical_not, nb_ops, .bool);
+                const t1_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                t1_ops[0] = .{ .id = na };
+                t1_ops[1] = .{ .id = right_id };
+                const t1 = try self.emitPureOp(.logical_or, t1_ops, .bool);
+                const t2_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                t2_ops[0] = .{ .id = left_id };
+                t2_ops[1] = .{ .id = nb };
+                const t2 = try self.emitPureOp(.logical_or, t2_ops, .bool);
+                const r_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                r_ops[0] = .{ .id = t1 };
+                r_ops[1] = .{ .id = t2 };
+                return try self.emitPureOp(.logical_and, r_ops, .bool);
+            }
+            const is_float = ty == .float or ty == .double or ty == .float16;
+            const ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+            ops[0] = .{ .id = left_id };
+            ops[1] = .{ .id = right_id };
+            return try self.emitPureOp(if (is_float) .compare_feq else .compare_eq, ops, .bool);
+        }
+        // Leaf vector.
+        if (ty.isVector()) {
+            const elem = ty.elementType();
+            const n = ty.numComponents();
+            // bool vectors can't use OpIEqual — reduce componentwise via the scalar
+            // bool path (rare, but keeps the lowering hole-free).
+            if (elem == .bool) {
+                var acc: ?u32 = null;
+                var i: u32 = 0;
+                while (i < n) : (i += 1) {
+                    const le = try self.emitExtractValue(left_id, i, .bool);
+                    const re = try self.emitExtractValue(right_id, i, .bool);
+                    acc = try self.andBoolAcc(acc, try self.emitAggregateEqual(.bool, le, re));
+                }
+                return acc orelse error.SemanticFailed;
+            }
+            // Numeric vector → componentwise compare (bvec) then OpAll → bool.
+            const is_float = elem == .float or elem == .double or elem == .float16;
+            const bvec: ast.Type = switch (n) {
+                2 => .bvec2,
+                3 => .bvec3,
+                4 => .bvec4,
+                else => .bool,
+            };
+            const cmp_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+            cmp_ops[0] = .{ .id = left_id };
+            cmp_ops[1] = .{ .id = right_id };
+            const cmp = try self.emitPureOp(if (is_float) .compare_feq else .compare_eq, cmp_ops, bvec);
+            const all_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+            all_ops[0] = .{ .id = cmp };
+            return try self.emitPureOp(.all, all_ops, .bool);
+        }
+        // Struct → AND of per-member equality.
+        if (ty == .named) {
+            const td = self.types.get(ty.named) orelse return error.SemanticFailed;
+            var acc: ?u32 = null;
+            for (td.members, 0..) |m, i| {
+                const le = try self.emitExtractValue(left_id, @intCast(i), m.ty);
+                const re = try self.emitExtractValue(right_id, @intCast(i), m.ty);
+                acc = try self.andBoolAcc(acc, try self.emitAggregateEqual(m.ty, le, re));
+            }
+            return acc orelse error.SemanticFailed;
+        }
+        // Array → AND of per-element equality.
+        if (ty == .array) {
+            const elem = ty.array.base.*;
+            var acc: ?u32 = null;
+            var i: u32 = 0;
+            while (i < ty.array.size) : (i += 1) {
+                const le = try self.emitExtractValue(left_id, i, elem);
+                const re = try self.emitExtractValue(right_id, i, elem);
+                acc = try self.andBoolAcc(acc, try self.emitAggregateEqual(elem, le, re));
+            }
+            return acc orelse error.SemanticFailed;
+        }
+        // Matrix → AND of per-column vector equality.
+        if (ty.isMatrix()) {
+            const col = ty.columnType();
+            var acc: ?u32 = null;
+            var i: u32 = 0;
+            while (i < ty.numColumns()) : (i += 1) {
+                const le = try self.emitExtractValue(left_id, i, col);
+                const re = try self.emitExtractValue(right_id, i, col);
+                acc = try self.andBoolAcc(acc, try self.emitAggregateEqual(col, le, re));
+            }
+            return acc orelse error.SemanticFailed;
+        }
+        return error.SemanticFailed;
+    }
+
     /// Invalidate cached loads of `ptr_id` and its base variable after a memory
     /// mutation that is NOT a plain store (e.g. an atomic RMW). Unlike emitStore,
     /// this performs NO store-to-load forwarding: the new memory value is not a
@@ -4115,6 +4243,24 @@ const Analyzer = struct {
                     }
                 }
                 const op = node.data.op orelse .add;
+
+                // GLSL `==` / `!=` on an AGGREGATE (struct, array, or matrix) compares
+                // structurally and returns a scalar bool. SPIR-V has no equality op on
+                // these types, so a direct OpIEqual/OpFOrdEqual is invalid (spirv-val
+                // rejects) and the WGSL is naga-rejected. Lower to a tree of per-leaf
+                // comparisons reduced with AND; `!=` is the logical negation of `==`.
+                // (Vectors keep the scalar/vector compare+all/any path below.)
+                if ((op == .eq or op == .neq) and
+                    (left.ty == .named or left.ty == .array or left.ty.isMatrix()))
+                {
+                    const eq_id = try self.emitAggregateEqual(left.ty, left.id, right.id);
+                    if (op == .eq) return .{ .ty = .bool, .id = eq_id };
+                    const not_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                    not_ops[0] = .{ .id = eq_id };
+                    const neq_id = try self.emitPureOp(.logical_not, not_ops, .bool);
+                    return .{ .ty = .bool, .id = neq_id };
+                }
+
                 if (result_ty.isVector()) {
                     if (left.ty.isScalar() and !right.ty.isScalar()) {
                         // Check if we can use vector-scalar op instead of splat
