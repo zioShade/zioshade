@@ -701,6 +701,15 @@ fn isMatrixType(module: *const ParsedModule, type_id: u32) bool {
     return false;
 }
 
+fn isArrayType(module: *const ParsedModule, type_id: u32) bool {
+    const ti = common.getDef(module, type_id);
+    if (ti) |inst| {
+        if (inst.op == .TypeArray or inst.op == .TypeRuntimeArray) return true;
+        if (inst.op == .TypePointer and inst.words.len > 3) return isArrayType(module, inst.words[3]);
+    }
+    return false;
+}
+
 /// True when `image_type_id` resolves to an OpTypeImage flagged as a depth
 /// (comparison) image — the Depth operand (word[4]) equals 1. GLSL's
 /// `sampler2DShadow` and friends lower to such images. WGSL requires these to
@@ -6776,9 +6785,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const cond = names.get(inst.words[3]) orelse "c";
                 const true_val = names.get(inst.words[4]) orelse "t";
                 const false_val = names.get(inst.words[5]) orelse "f";
-                // WGSL select() only works with scalars and vectors, not structs
+                // WGSL select() only works with scalars and vectors — a struct or
+                // ARRAY result has no select() form and must lower to var + if/else
+                // (naga: "unexpected argument type for select" on `array<f32,N>`).
                 if (std.mem.startsWith(u8, rt, "struct") or std.mem.containsAtLeast(u8, rt, 1, "Struct") or
-                    (inst.words.len > 1 and isStructType(module, inst.words[1])))
+                    std.mem.startsWith(u8, rt, "array") or
+                    (inst.words.len > 1 and (isStructType(module, inst.words[1]) or isArrayType(module, inst.words[1]))))
                 {
                     try writeInd(w, indent); try w.print("var {s}: {s};\n", .{ result_name, rt });
                     try writeInd(w, indent); try w.print("if ({s}) {{\n", .{cond});
@@ -8386,8 +8398,21 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             const cond = names.get(inst.words[3]) orelse "c";
             const true_val = names.get(inst.words[4]) orelse "t";
             const false_val = names.get(inst.words[5]) orelse "f";
-            try writeIndentStatic(w, indent);
-            try w.print("let {s}: {s} = select({s}, {s}, {s});\n", .{ result_name, rt, false_val, true_val, cond });
+            // A struct/array result has no select() form — lower to var + if/else
+            // (same as the main emit path).
+            if (std.mem.startsWith(u8, rt, "struct") or std.mem.startsWith(u8, rt, "array") or
+                isStructType(module, inst.words[1]) or isArrayType(module, inst.words[1]))
+            {
+                try writeIndentStatic(w, indent); try w.print("var {s}: {s};\n", .{ result_name, rt });
+                try writeIndentStatic(w, indent); try w.print("if ({s}) {{\n", .{cond});
+                try writeIndentStatic(w, indent + 1); try w.print("{s} = {s};\n", .{ result_name, true_val });
+                try writeIndentStatic(w, indent); try w.writeAll("} else {\n");
+                try writeIndentStatic(w, indent + 1); try w.print("{s} = {s};\n", .{ result_name, false_val });
+                try writeIndentStatic(w, indent); try w.writeAll("}\n");
+            } else {
+                try writeIndentStatic(w, indent);
+                try w.print("let {s}: {s} = select({s}, {s}, {s});\n", .{ result_name, rt, false_val, true_val, cond });
+            }
         },
         .Bitcast => {
             const rt = try wgslType(module, inst.words[1], names, arena);
