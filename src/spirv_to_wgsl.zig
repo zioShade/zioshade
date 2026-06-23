@@ -3491,6 +3491,32 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 }
             }
         }
+        // A struct used only as an SSA VALUE (no OpVariable) — e.g. `S s = S(1.0,
+        // 2.0);` constant-folds to an OpCompositeConstruct whose result type is the
+        // struct — is otherwise never collected, so `S` was referenced but never
+        // declared (naga "no definition in scope"). Collect the struct (and its
+        // nested structs) from the result type of value-producing ops.
+        switch (inst.op) {
+            .CompositeConstruct, .CompositeExtract, .Load, .FunctionCall, .Phi, .Select, .CopyObject, .ConstantComposite, .SpecConstantComposite => {
+                if (inst.words.len >= 2) {
+                    var tid = inst.words[1];
+                    while (getDef(&module, tid)) |ti| {
+                        if (ti.op == .TypePointer and ti.words.len > 3) {
+                            tid = ti.words[3];
+                        } else if ((ti.op == .TypeArray or ti.op == .TypeRuntimeArray) and ti.words.len > 2) {
+                            tid = ti.words[2];
+                        } else break;
+                    }
+                    const ti = getDef(&module, tid);
+                    if (ti != null and ti.?.op == .TypeStruct and local_structs.get(tid) == null) {
+                        local_structs.put(tid, {}) catch {};
+                        try emitStructForwardDecls(&module, &names, tid, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members, &uniform_offset_structs);
+                        try emitOneStructForwardDecl(&module, &names, tid, w, arena, &emitted_structs, &emitted_names, &atomic_fields, &no_wrapped_members, &uniform_offset_structs);
+                    }
+                }
+            },
+            else => {},
+        }
     }
 
     // Deduplicate bindings: auto-assign sequential bindings when multiple uniforms collide.
