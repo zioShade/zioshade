@@ -5987,3 +5987,48 @@ test "wgsl: matrix expansion mat4(mat3) fills from identity, not OOB (#170)" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "matrix-expand-mat4-from-mat3");
 }
+
+// #170: GLSL applies implicit scalar conversion when a non-literal argument's type
+// differs from the parameter's (`f(intVar)` to a float param) and when a returned
+// value differs from the function's return type (`return intVar` from a float fn).
+// glslpp passed/returned the int id unconverted → an FMul/composite on an int
+// operand = invalid SPIR-V on a valid shader (int literals already folded).
+test "wgsl: implicit int->float at a function argument is converted (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\float f(float x) { return x + 1.0; }
+        \\layout(location = 0) flat in int n;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(f(n)); }
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "implicit-conv-arg");
+}
+
+test "wgsl: implicit int->float at a function return is converted (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\float g(int a) { return a; }
+        \\layout(location = 0) flat in int n;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(g(n)); }
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "implicit-conv-return");
+}
+
+// #170: GLSL also implicitly converts VECTORS at a call boundary (`f(ivec3)` to a
+// `vec3` param — glslang accepts it). Routing the arg/return conversion through
+// getConversionTag (not a scalar-only ladder) covers these too, so an unconverted
+// ivec is never passed to a vec param.
+test "wgsl: implicit ivec->vec at a function argument is converted (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\float f(vec3 x) { return x.x + x.y + x.z; }
+        \\layout(location = 0) flat in ivec3 n;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(f(n)); }
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "implicit-conv-vec-arg");
+}
