@@ -6032,3 +6032,23 @@ test "wgsl: implicit ivec->vec at a function argument is converted (#170)" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "implicit-conv-vec-arg");
 }
+
+// #170: a ternary whose arms are ARRAYS (`cond ? arrA : arrB`) lowers to OpSelect
+// on an array (valid SPIR-V), but the WGSL backend emitted `select(arrA, arrB,
+// cond)` — WGSL's select() rejects aggregates (naga "unexpected argument type for
+// select"). The struct case already lowered to a `var` + if/else; arrays must too.
+test "wgsl: ternary selecting between arrays lowers to if/else, not select() (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in int i;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float a[2] = float[](1.0, 2.0);
+        \\    float b[2] = float[](3.0, 4.0);
+        \\    o = vec4((i > 0 ? a : b)[i % 2]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try assertNotContains(wgsl, "select(array"); // no select() on an array
+    try nagaValidateOrSkip(wgsl, "ternary-array-select");
+}
