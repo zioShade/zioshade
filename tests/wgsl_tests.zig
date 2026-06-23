@@ -6089,3 +6089,60 @@ test "wgsl: nested local-only structs emit inner before outer (#170)" {
     try std.testing.expect(inner < outer); // inner declared first
     try nagaValidateOrSkip(wgsl, "nested-local-struct-order");
 }
+
+// #170: GLSL builds a matrix column-major from a flat run of scalar/vector
+// components — `mat2(vec4(...))` fills column 0 with (x,y) and column 1 with
+// (z,w). glslpp passed the single vec4 straight into the matrix constructor, so
+// it emitted `OpConstantComposite %mat2 %vec4` — ONE constituent where mat2 needs
+// TWO v2 columns = invalid SPIR-V (spirv-val: "Constituent count does not match
+// matrix column count"), and the WGSL came out as `mat2x2f(vec4f(...))` which
+// naga rejects ("cannot cast a vec4 to a mat2x2"). A mat2 column is a vec2, so
+// the broken `mat2x2f(vec4` shape must never appear.
+test "wgsl: matrix from a single oversized vector fills columns, not a cast (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 m = mat2(vec4(1.0, 2.0, 3.0, 4.0));
+        \\    o = vec4(m[0], m[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try assertNotContains(wgsl, "mat2x2f(vec4"); // a mat2 column is a vec2, never a vec4
+    try nagaValidateOrSkip(wgsl, "mat2-from-vec4");
+}
+
+// #170: the same column-major fill must regroup a MIX of scalars and vectors that
+// straddle column boundaries — `mat2(vec3, float)` provides (x,y) | (z, f). The
+// generic path passed the vec3 and the float as two constituents (vec3 is not a
+// valid mat2 column = invalid SPIR-V).
+test "wgsl: matrix from mixed scalar/vector args regroups into columns (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 m = mat2(a, a.x);   // (a.x,a.y) | (a.z, a.x)
+        \\    o = vec4(m[0], m[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "mat2-from-vec3-scalar");
+}
+
+// #170 regression guard: the already-working one-vector-per-column form
+// (`mat2(vec2, vec2)`) must keep building the matrix straight from its column
+// args — the new regroup branch must not disturb it.
+test "wgsl: matrix from one vector per column is unchanged (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in vec2 a;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 m = mat2(a, a.yx);
+        \\    o = vec4(m[0], m[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "mat2-from-two-vec2");
+}
