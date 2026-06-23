@@ -6052,3 +6052,40 @@ test "wgsl: ternary selecting between arrays lowers to if/else, not select() (#1
     try assertNotContains(wgsl, "select(array"); // no select() on an array
     try nagaValidateOrSkip(wgsl, "ternary-array-select");
 }
+
+// #170: a struct used ONLY as a local value (constant-folded to an
+// OpCompositeConstruct with no OpVariable — `S a = S(1.0, 2.0); S b = a;`) had its
+// `struct S {…}` definition omitted from the WGSL: the local-struct collection
+// pass only scanned OpVariable result types, missing SSA struct values. naga then
+// rejected "no definition in scope for `S`". Structs in uniforms/params/returns
+// were already emitted; this covers the local-value case.
+test "wgsl: a struct used only as a local value emits its definition (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\struct S { float x; float y; };
+        \\layout(location = 0) flat in int i;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { S a = S(1.0, 2.0); S b = a; o = vec4(b.x, b.y, 0.0, 1.0); }
+    );
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "struct S");
+    try nagaValidateOrSkip(wgsl, "struct-local-value-decl");
+}
+
+// #170: NESTED local-only structs must be emitted in dependency order (inner
+// before outer) so naga sees `Inner` declared before `Outer { i: Inner }`.
+test "wgsl: nested local-only structs emit inner before outer (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\struct Inner { vec2 p; };
+        \\struct Outer { Inner i; float w; };
+        \\layout(location = 0) in vec2 t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { Outer x = Outer(Inner(t), 3.0); o = vec4(x.i.p, x.w, 1.0); }
+    );
+    defer alloc.free(wgsl);
+    const inner = std.mem.indexOf(u8, wgsl, "struct Inner") orelse return error.InnerMissing;
+    const outer = std.mem.indexOf(u8, wgsl, "struct Outer") orelse return error.OuterMissing;
+    try std.testing.expect(inner < outer); // inner declared first
+    try nagaValidateOrSkip(wgsl, "nested-local-struct-order");
+}
