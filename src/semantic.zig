@@ -523,6 +523,7 @@ const Analyzer = struct {
     tolerate_errors: bool = false,
     stage: ?@import("root.zig").Stage = null,
     has_returned: bool = false, // Dead code suppression after return
+    current_return_type: ast.Type = .void, // return type of the function being analyzed (for `return` value conversion)
     if_insert_points: std.ArrayListUnmanaged(usize) = .empty, // stack of instruction indices before each if's SelectionMerge
     next_id: u32 = 1,
     // Constant dedup: (type_tag << 32 | value_bits) -> ir_id
@@ -2514,6 +2515,7 @@ const Analyzer = struct {
 
     fn analyzeFunction(self: *Analyzer, node: ast.Node) !void {
         self.has_returned = false;
+        self.current_return_type = node.data.ty orelse .void;
         self.in_entry_block = true;
         self.cache_globals = true;
         self.access_chain_cache.clearRetainingCapacity();
@@ -3342,6 +3344,19 @@ const Analyzer = struct {
                     if (val.is_ptr) {
                         const ld = try self.emitLoadCached(val.id, val.ty);
                         val = .{ .ty = val.ty, .id = ld };
+                    }
+                    // Apply GLSL implicit scalar conversion when the returned value's
+                    // type differs from the function's return type (`float g(){ return
+                    // 2; }`, `float g(int a){ return a; }`). Without it an int id was
+                    // returned from a float function → an int constituent in a float
+                    // composite at the call site = invalid SPIR-V.
+                    const rt = self.current_return_type;
+                    if (!std.meta.eql(val.ty, rt) and rt != .void) {
+                        if (self.getConversionTag(rt, val.ty)) |cvtag| {
+                            const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            conv_ops[0] = .{ .id = val.id };
+                            val = .{ .ty = rt, .id = try self.emitPureOp(cvtag, conv_ops, rt) };
+                        }
                     }
                     const ret_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
                     ret_operands[0] = .{ .id = val.id };
@@ -4957,6 +4972,7 @@ const Analyzer = struct {
                 // Resolve function overloads
                 var resolved_sym = sym_raw;
                 var resolved_mutable_params: []const bool = &[_]bool{};
+                var resolved_param_types: []const ast.Type = &[_]ast.Type{};
                 if (sym_raw != null and sym_raw.?.kind == .func) {
                     if (self.overloads.get(node.data.name)) |overload_list| {
                         // Try to match argument types against overload parameter types
@@ -4972,6 +4988,7 @@ const Analyzer = struct {
                             if (match) {
                                 resolved_sym = .{ .kind = .func, .ty = overload.return_type, .ir_id = overload.ir_id };
                                 resolved_mutable_params = overload.param_is_mutable;
+                                resolved_param_types = overload.param_types;
                                 break;
                             }
                         }
@@ -7147,7 +7164,27 @@ const Analyzer = struct {
                             const ptr_tid = try self.analyzeLValue(node.data.children[i]);
                             operands[i + 1] = .{ .id = ptr_tid.id };
                         } else {
-                            operands[i + 1] = .{ .id = tid.id };
+                            // Apply GLSL implicit scalar conversion when a non-literal
+                            // argument's type differs from the parameter's (`f(intVar)`
+                            // to a `float` param). Without it the int id was passed to a
+                            // float param → an FMul/composite on an int operand inside the
+                            // callee = invalid SPIR-V. (Literals already fold to the param
+                            // type; out/inout pointers must NOT be converted.)
+                            var arg_id = tid.id;
+                            if (i < resolved_param_types.len) {
+                                const pt = resolved_param_types[i];
+                                // getConversionTag covers the scalar (int/uint/float),
+                                // narrow-int, and vector conversions typesCompatible may
+                                // have matched — returns null for non-convertible pairs.
+                                if (!std.meta.eql(tid.ty, pt)) {
+                                    if (self.getConversionTag(pt, tid.ty)) |cvtag| {
+                                        const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                        conv_ops[0] = .{ .id = tid.id };
+                                        arg_id = try self.emitPureOp(cvtag, conv_ops, pt);
+                                    }
+                                }
+                            }
+                            operands[i + 1] = .{ .id = arg_id };
                         }
                     }
                     try self.instructions.append(self.alloc, .{
