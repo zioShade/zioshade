@@ -629,6 +629,33 @@ pub const Preprocessor = struct {
         return args.toOwnedSlice(self.alloc);
     }
 
+    /// Macro-expand a token slice into a freshly-allocated token list (caller owns
+    /// the result). Used to pre-expand a function-like macro's argument before it
+    /// is substituted into the body, per C preprocessor semantics — a macro call
+    /// used as an argument (`ADD(SQ(t), 1.0)`) must have `SQ(t)` expanded first.
+    /// Temporarily redirects `self.output` into a scratch list, then restores it.
+    fn expandTokens(self: *Preprocessor, tokens: []const lexer.Token) error{ OutOfMemory, NoSpaceLeft }![]lexer.Token {
+        const saved = self.output;
+        self.output = .empty;
+        errdefer {
+            self.output.deinit(self.alloc);
+            self.output = saved;
+        }
+        var idx: usize = 0;
+        while (idx < tokens.len) {
+            const tok = tokens[idx];
+            if (tok.tag == .identifier) {
+                try self.expandMacro(tokens, &idx, tok);
+            } else {
+                try self.output.append(self.alloc, tok);
+                idx += 1;
+            }
+        }
+        const result = try self.output.toOwnedSlice(self.alloc);
+        self.output = saved;
+        return result;
+    }
+
     fn substituteAndExpand(self: *Preprocessor, func_macro: Macro, args: [][]lexer.Token) !void {
         const f = func_macro.function;
         var i: usize = 0;
@@ -704,9 +731,14 @@ pub const Preprocessor = struct {
                 var found = false;
                 for (f.params, 0..) |param, idx| {
                     if (std.mem.eql(u8, param_name, param)) {
-                        // Emit argument tokens
+                        // Emit argument tokens, macro-expanded first (C semantics):
+                        // a macro call used as an argument is expanded before it is
+                        // substituted into the body. (The #/## operands take the raw
+                        // arg via the stringify/paste paths above, not this one.)
                         if (idx < args.len) {
-                            for (args[idx]) |arg_tok| {
+                            const expanded = try self.expandTokens(args[idx]);
+                            defer self.alloc.free(expanded);
+                            for (expanded) |arg_tok| {
                                 try self.output.append(self.alloc, arg_tok);
                             }
                         }
