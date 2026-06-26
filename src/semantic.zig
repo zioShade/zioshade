@@ -4728,6 +4728,79 @@ const Analyzer = struct {
                                 }
                             }
                         }
+                    } else if ((base_node.tag == .index_access or base_node.tag == .member_access) and
+                        isMultiSwizzleName(lhs.data.name))
+                    {
+                        // Multi-component swizzle write where the base is an addressable
+                        // lvalue that is NOT a bare identifier (`a[i].yz = …`, `s.v.xy = …`).
+                        // The identifier path above uses lookup + materializeSSA; here we
+                        // take a pointer to the base vector via analyzeLValue and shuffle the
+                        // new values in. (The compound `a[i].yz += …` form already works via
+                        // the swizzle_ca path.)
+                        const base_ptr = try self.analyzeLValue(base_node);
+                        // analyzeLValue returns an access-chain POINTER for both index and
+                        // member access; the index_access arm happens not to set `is_ptr`,
+                        // so key on the vector type, not the flag (base_ptr.id is the pointer).
+                        if (base_ptr.ty.isVector()) {
+                            const base_ty = base_ptr.ty;
+                            const swizzle_name = lhs.data.name;
+                            var value = try self.analyzeExpression(node.data.children[1]);
+                            if (value.is_ptr) {
+                                const loaded_id = try self.emitLoadCached(value.id, value.ty);
+                                value = .{ .ty = value.ty, .id = loaded_id };
+                            }
+                            // GLSL implicitly converts the RHS to the lvalue element type
+                            // before the shuffle (same as the identifier path).
+                            const base_elem = base_ty.elementType();
+                            if (value.ty.isVector() and !std.meta.eql(value.ty.elementType(), base_elem)) {
+                                const target_vec: ast.Type = switch (value.ty.numComponents()) {
+                                    2 => base_elem.toVec2(),
+                                    3 => base_elem.toVec3(),
+                                    4 => base_elem.toVec4(),
+                                    else => value.ty,
+                                };
+                                if (!std.meta.eql(target_vec, value.ty)) {
+                                    if (self.getConversionTag(target_vec, value.ty)) |cvtag| {
+                                        const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                        conv_ops[0] = .{ .id = value.id };
+                                        value = .{ .ty = target_vec, .id = try self.emitPureOp(cvtag, conv_ops, target_vec) };
+                                    }
+                                }
+                            }
+                            const load_id = try self.emitLoadCached(base_ptr.id, base_ty);
+                            const n = base_ty.numComponents();
+                            const swizzle_len = swizzle_name.len;
+                            const shuffle_ops = try self.alloc.alloc(ir.Instruction.Operand, 2 + n);
+                            shuffle_ops[0] = .{ .id = load_id };
+                            shuffle_ops[1] = .{ .id = value.id };
+                            for (0..n) |i| {
+                                var found = false;
+                                for (0..swizzle_len) |j| {
+                                    if (self.swizzleIndex(swizzle_name[j]) == i) {
+                                        shuffle_ops[2 + i] = .{ .literal_int = @intCast(n + j) };
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (!found) shuffle_ops[2 + i] = .{ .literal_int = @intCast(i) };
+                            }
+                            const shuffle_id = try self.emitPureOp(.vector_shuffle, shuffle_ops, base_ty);
+                            const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            store_ops[0] = .{ .id = base_ptr.id };
+                            store_ops[1] = .{ .id = shuffle_id };
+                            _ = self.load_cache.remove(base_ptr.id);
+                            _ = self.global_load_cache.remove(base_ptr.id);
+                            self.invalidateAliasingChains(base_ptr.id);
+                            self.load_cache.put(self.alloc, base_ptr.id, shuffle_id) catch {};
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .store,
+                                .result_type = null,
+                                .result_id = null,
+                                .operands = store_ops,
+                                .ty = .void,
+                            });
+                            return .{ .ty = base_ty, .id = shuffle_id };
+                        }
                     }
                 }
 
@@ -9630,6 +9703,22 @@ const Analyzer = struct {
             'w', 'a' => 3,
             else => 0,
         };
+    }
+
+    /// True when `name` is a real multi-component vector swizzle (2–4 chars, all
+    /// from the xyzw/rgba component sets). Used to distinguish `a[i].xy` (a
+    /// swizzle write) from `gl_MeshPerVertexEXT[i].gl_Position` (a member name on
+    /// a simplified vec4 builtin) — swizzleIndex maps unknown chars to 0, so an
+    /// arbitrary member name would otherwise be mis-read as a garbage swizzle.
+    fn isMultiSwizzleName(name: []const u8) bool {
+        if (name.len < 2 or name.len > 4) return false;
+        for (name) |ch| {
+            switch (ch) {
+                'x', 'y', 'z', 'w', 'r', 'g', 'b', 'a' => {},
+                else => return false,
+            }
+        }
+        return true;
     }
 };
 
