@@ -624,6 +624,27 @@ test "F1: int64_t yields a named honest unsupported error" {
     try std.testing.expect(std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "int64") != null or std.mem.indexOf(u8, inner, "64") != null);
 }
 
+// F1 (#170): a 64-bit type on an IO/uniform GLOBAL declaration (here `in dvec3`)
+// must honest-error like the local-var path — NOT fall through to an empty
+// OpTypeStruct. Before the fix, `in dvec3 dpos` modeled the input as a member-less
+// struct, and `vec3(dpos)` then emitted `OpCompositeConstruct %float <struct>` =
+// INVALID SPIR-V at rc=0 (spirv-val: "Expected Result Type to be a composite type";
+// naga: "cannot cast a v1 to a f32") — a silent-wrong. glslang accepts the GLSL,
+// so glslpp must honest-error rather than mis-compile.
+test "F1: dvec3 input variable yields a named honest error (not invalid SPIR-V)" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(location=0) in dvec3 dpos;
+        \\void main() { vec3 p = vec3(dpos); gl_Position = vec4(p, 1.0); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .vertex }));
+    const ctx = glslpp.lastErrorCtx() orelse "";
+    const inner = glslpp.lastErrorInner() orelse "";
+    const names_it = std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "dvec") != null or std.mem.indexOf(u8, inner, "64") != null;
+    try std.testing.expect(names_it);
+}
+
 // Re-applied from main #45 / #42 follow-up during reconciliation.
 
 test "strict: imageSize/textureSize result dims match operand rank (no false-positive)" {
