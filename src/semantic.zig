@@ -2380,9 +2380,13 @@ const Analyzer = struct {
                 // For global `const` array declarations with an initializer, record the
                 // AST initializer node so constStoreSource() can evaluate it lazily
                 // (during function analysis) to obtain the constant-composite id for
-                // textureGatherOffsets ConstOffsets validation.
+                // textureGatherOffsets ConstOffsets validation. Scalar int/uint const
+                // globals are recorded too so evalConstInt can fold a name used as an
+                // array size (`const int N = 3; float a[N];`) or switch-case label. The
+                // init pass only assigns an initializer to a matching Private global and
+                // skips anything else, so recording extra scalars is harmless.
                 if (node.data.qualifier != null and node.data.qualifier.?.is_const and
-                    ty == .array and node.data.children.len > 0)
+                    (ty == .array or ty == .int or ty == .uint) and node.data.children.len > 0)
                 {
                     self.global_const_ast_inits.put(self.alloc, ir_id, node.data.children[0]) catch {};
                 }
@@ -3931,6 +3935,16 @@ const Analyzer = struct {
     }
 
     fn evalConstInt(self: *Analyzer, node: ast.Node) Error!i64 {
+        return self.evalConstIntDepth(node, 0);
+    }
+
+    fn evalConstIntDepth(self: *Analyzer, node: ast.Node, depth: u32) Error!i64 {
+        // Guard against a self- or mutually-referential const initializer
+        // (`const int N = N;`, `const int A = B; const int B = A;`) recursing
+        // forever and overflowing the stack. glslang rejects circular const
+        // initializers with an honest error; fail loud rather than crash. The
+        // bound is far above any legitimate transitive-const chain.
+        if (depth > 64) return error.SemanticFailed;
         switch (node.tag) {
             .int_literal => {
                 return @intCast(node.data.int_val);
@@ -3939,7 +3953,20 @@ const Analyzer = struct {
                 return @intCast(node.data.int_val);
             },
             .group => {
-                if (node.data.children.len == 1) return self.evalConstInt(node.data.children[0]);
+                if (node.data.children.len == 1) return self.evalConstIntDepth(node.data.children[0], depth + 1);
+                return error.SemanticFailed;
+            },
+            .identifier => {
+                // A const-qualified integer global (`const int N = 3;`) folds to its
+                // initializer's constant value. Used for array sizes (`a[N]`) and
+                // switch-case labels (`case N:`).
+                if (self.lookup(node.data.name)) |sym| {
+                    if (sym.is_const) {
+                        if (self.global_const_ast_inits.get(sym.ir_id)) |init_node| {
+                            return self.evalConstIntDepth(init_node, depth + 1);
+                        }
+                    }
+                }
                 return error.SemanticFailed;
             },
             else => return error.SemanticFailed,
@@ -3947,17 +3974,33 @@ const Analyzer = struct {
     }
 
     /// Fold a compile-time constant array-size expression stored as source text.
-    /// Currently handles gl_WorkGroupSize.x/y/z → local_size_x/y/z.
-    /// Returns null when the expression is not a recognized constant.
+    /// Handles gl_WorkGroupSize.x/y/z → local_size_x/y/z, plain integer literals,
+    /// and a const-qualified integer global used as the size (`const int N = 3;
+    /// a[N]`). Returns null when the expression is not a recognized constant.
     fn resolveSizeExpr(self: *Analyzer, expr: []const u8) ?u32 {
-        const ls = self.local_size orelse return null;
         // Trim surrounding whitespace for robustness.
         const s = std.mem.trim(u8, expr, " \t\r\n");
-        if (std.mem.eql(u8, s, "gl_WorkGroupSize.x")) return ls.x;
-        if (std.mem.eql(u8, s, "gl_WorkGroupSize.y")) return ls.y;
-        if (std.mem.eql(u8, s, "gl_WorkGroupSize.z")) return ls.z;
-        // Try plain integer literal in text form (e.g. produced by simple constant)
+        // gl_WorkGroupSize.* is only meaningful with a compute local_size.
+        if (self.local_size) |ls| {
+            if (std.mem.eql(u8, s, "gl_WorkGroupSize.x")) return ls.x;
+            if (std.mem.eql(u8, s, "gl_WorkGroupSize.y")) return ls.y;
+            if (std.mem.eql(u8, s, "gl_WorkGroupSize.z")) return ls.z;
+        }
+        // Try plain integer literal in text form (e.g. produced by simple constant).
         if (std.fmt.parseInt(u32, s, 10)) |v| return v else |_| {}
+        // A const-qualified integer global used as the size: look the name up and
+        // fold its initializer (`const int N = 3; float a[N];`). lookup returns null
+        // for any non-identifier text, so a complex size expression simply yields
+        // null here (honest error) rather than a wrong size.
+        if (self.lookup(s)) |sym| {
+            if (sym.is_const) {
+                if (self.global_const_ast_inits.get(sym.ir_id)) |init_node| {
+                    if (self.evalConstInt(init_node)) |v| {
+                        if (v > 0) return @intCast(v);
+                    } else |_| {}
+                }
+            }
+        }
         return null;
     }
 
