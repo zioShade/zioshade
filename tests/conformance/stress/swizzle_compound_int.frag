@@ -18,7 +18,7 @@ void main() {
     a.zw += ss;     // scalar splat then OpIAdd
 
     uvec4 b = uvec4(16u);
-    b.xy /= su;     // OpUDiv, not OpFDiv
+    b.xy /= su;     // OpSDiv (project convention), not OpFDiv
     b.zw -= su;     // OpISub, not OpFSub
 
     o = vec4(a) + vec4(b);
