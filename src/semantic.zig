@@ -5000,10 +5000,46 @@ const Analyzer = struct {
                     value_id = conv_id;
                     value_ty = target.ty;
                 }
+                // Matrix `*=` / `/=` scalar: every component is scaled by the scalar.
+                // SPIR-V has OpMatrixTimesScalar but no whole-matrix OpFMul/OpFDiv, so
+                // the generic path's `.fmul`/`.fdiv` on the matrix operand is invalid
+                // SPIR-V (and the WGSL `mat / f32` is naga-rejected). Convert the scalar
+                // to float and use mat_scalar_mul; `/=` multiplies by the reciprocal,
+                // matching glslang's `mat * (1.0/s)` lowering. (Component-wise `+=`/`-=`
+                // scalar need a different splat-to-matrix lowering — not handled here.)
+                var matrix_scalar_scale = false;
+                if (target.ty.isMatrix() and value_ty.isScalar() and
+                    (node.data.op == .mul_assign or node.data.op == .div_assign))
+                {
+                    if (value_ty != .float) {
+                        if (self.getConversionTag(.float, value_ty)) |cvtag| {
+                            const c_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            c_ops[0] = .{ .id = value_id };
+                            value_id = try self.emitPureOp(cvtag, c_ops, .float);
+                            value_ty = .float;
+                        }
+                    }
+                    // Only take the OpMatrixTimesScalar path when the scalar is genuinely
+                    // float. An unconvertible scalar (double/float16 — whose matrix ops
+                    // glslpp does not yet support) would otherwise feed a mismatched
+                    // component type into OpMatrixTimesScalar; leave it to the generic
+                    // path rather than emit a differently-invalid op.
+                    if (value_ty == .float) {
+                        if (node.data.op == .div_assign) {
+                            const one_id = try self.getConstFloat(1.0);
+                            const r_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            r_ops[0] = .{ .id = one_id };
+                            r_ops[1] = .{ .id = value_id };
+                            value_id = try self.emitPureOp(.fdiv, r_ops, .float);
+                        }
+                        matrix_scalar_scale = true;
+                    }
+                }
+
                 // Compute result
                 const result_ty_2 = target.ty;
                 const is_float = result_ty_2 == .float or result_ty_2 == .double or result_ty_2.isFloatVector() or result_ty_2.isMatrix();
-                const op_tag: ir.Instruction.Tag = switch (node.data.op orelse .add) {
+                const op_tag: ir.Instruction.Tag = if (matrix_scalar_scale) .mat_scalar_mul else switch (node.data.op orelse .add) {
                     .add_assign => if (is_float) .fadd else .add,
                     .sub_assign => if (is_float) .fsub else .sub,
                     .mul_assign => blk: {

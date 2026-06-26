@@ -6298,3 +6298,39 @@ test "wgsl: multi-component swizzle compound-assign converts a cross-type scalar
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "swizzle-compound-cross-type-scalar");
 }
+
+// #170: a matrix `*=`/`/=` scalar scales every component. SPIR-V has
+// OpMatrixTimesScalar but no whole-matrix OpFMul/OpFDiv, yet the compound-assign
+// path emitted `.fmul`/`.fdiv` on the matrix operand = invalid SPIR-V ("Expected
+// floating scalar or vector type"). `/=` additionally produced naga-rejected WGSL
+// (a `mat2x2 / f32` expression). Lower via OpMatrixTimesScalar, with `/=` using
+// the reciprocal (matching glslang's `mat * (1.0/s)`).
+test "wgsl: matrix divide-assign by a scalar lowers via reciprocal scale (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 m = mat2(4.0);
+        \\    m /= t;
+        \\    o = vec4(m[0], m[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "matrix-div-assign-scalar");
+}
+
+test "wgsl: matrix multiply-assign by an int scalar converts then scales (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in int n;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 m = mat2(1.0);
+        \\    m *= n;          // int → float, then OpMatrixTimesScalar
+        \\    o = vec4(m[0], m[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "matrix-mul-assign-int-scalar");
+}
