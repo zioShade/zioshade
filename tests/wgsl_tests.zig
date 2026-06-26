@@ -6259,3 +6259,42 @@ test "wgsl: multi-component swizzle write converts a cross-type RHS (#170)" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "swizzle-write-cross-type");
 }
+
+// #170: the same implicit conversion is needed at a multi-component swizzle
+// COMPOUND assignment — `v.xy += ivec2(...)` converts the ivec2 to vec2 before
+// the add. glslpp applied the float op (fadd) directly to the unconverted ivec2
+// operand = invalid SPIR-V ("Expected arithmetic operands to be of Result Type").
+// Sibling of the plain swizzle-write conversion fix.
+test "wgsl: multi-component swizzle compound-assign converts a cross-type vector RHS (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in ivec2 n;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec4 v = vec4(1.0);
+        \\    v.xy += n;       // ivec2 → vec2 before the add
+        \\    o = v;
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "swizzle-compound-cross-type-vec");
+}
+
+// #170: scalar cross-type RHS to a swizzle compound-assign (`v.xy += intScalar`)
+// splat-broadcasts to the swizzle width — the scalar must be converted to the
+// element type first, else the splat builds a vec2 from int constituents
+// (spirv-val: "Expected Constituents to be scalar ... of Result Type").
+test "wgsl: multi-component swizzle compound-assign converts a cross-type scalar RHS (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in int n;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec4 v = vec4(1.0);
+        \\    v.xy += n;       // int → float, then splat to vec2
+        \\    o = v;
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "swizzle-compound-cross-type-scalar");
+}
