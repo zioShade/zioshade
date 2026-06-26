@@ -4840,12 +4840,21 @@ const Analyzer = struct {
                                     }
 
                                     // 4. Apply the compound operation
+                                    // Pick float vs integer op tags by the swizzle's element
+                                    // type — an integer/uint-base swizzle (`ivec.xy += ivec2`)
+                                    // must use OpIAdd/OpIMul/etc., not the float ops, or spirv-val
+                                    // rejects ("Expected floating scalar or vector type"). Signed
+                                    // vs unsigned division/etc. is resolved from the result type in
+                                    // codegen, so `.div` covers both (mirrors the plain compound-
+                                    // assign path above). vec_scalar_mul stays float-only — it is
+                                    // only reached when skip_splat_for_mul (a float vector) is set.
+                                    const sw_is_float = swizzled_ty.isFloatVector();
                                     const op_tag: ir.Instruction.Tag = switch (assign_op) {
-                                        .add_assign => .fadd,
-                                        .sub_assign => .fsub,
-                                        .mul_assign => if (skip_splat_for_mul) .vec_scalar_mul else .fmul,
-                                        .div_assign => .fdiv,
-                                        else => .fmul, // fallback
+                                        .add_assign => if (sw_is_float) .fadd else .add,
+                                        .sub_assign => if (sw_is_float) .fsub else .sub,
+                                        .mul_assign => if (skip_splat_for_mul) .vec_scalar_mul else if (sw_is_float) .fmul else .mul,
+                                        .div_assign => if (sw_is_float) .fdiv else .div,
+                                        else => if (sw_is_float) .fmul else .mul, // fallback
                                     };
                                     const result_id = self.allocId();
                                     const op_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
