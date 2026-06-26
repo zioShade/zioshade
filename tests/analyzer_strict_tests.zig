@@ -645,6 +645,45 @@ test "F1: dvec3 input variable yields a named honest error (not invalid SPIR-V)"
     try std.testing.expect(names_it);
 }
 
+// F1 (#170): a 64-bit type on a uniform/SSBO BLOCK MEMBER must honest-error like
+// the scalar IO-global and local-var paths — NOT fall through to a member-less
+// OpTypeStruct. Before the fix, `uniform U { double d; }` modeled member `d` as
+// an empty struct, and `OpTypeStruct %_struct %_struct` + a load produced INVALID
+// SPIR-V at rc=0 (spirv-val: "Expected Result Type to be a composite type"). This
+// is the block-member counterpart of the IO-global fix (a different switch arm).
+test "F1: double uniform-block member yields a named honest error (not invalid SPIR-V)" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(std140, binding = 0) uniform U { double d; dvec3 v; } u;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(float(u.d)); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    const ctx = glslpp.lastErrorCtx() orelse "";
+    const inner = glslpp.lastErrorInner() orelse "";
+    const names_it = std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "double") != null or std.mem.indexOf(u8, inner, "dvec") != null or std.mem.indexOf(u8, inner, "64") != null;
+    try std.testing.expect(names_it);
+}
+
+// F1 (#170): same guard reaches an ARRAY-typed 64-bit block member (`double a[]`
+// in an SSBO) — the member type is `.array` whose base is the 64-bit type, so the
+// guard must unwrap array bases. Before the fix this emitted rc=0 WGSL that naga
+// rejects ("Type 'v1' is invalid").
+test "F1: double-array SSBO member yields a named honest error" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { double vals[]; };
+        \\void main() { vals[0] = vals[1]; }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute }));
+    const inner = glslpp.lastErrorInner() orelse "";
+    const ctx = glslpp.lastErrorCtx() orelse "";
+    try std.testing.expect(std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "double") != null or std.mem.indexOf(u8, inner, "64") != null);
+}
+
 // Re-applied from main #45 / #42 follow-up during reconciliation.
 
 test "strict: imageSize/textureSize result dims match operand rank (no false-positive)" {

@@ -2439,6 +2439,23 @@ const Analyzer = struct {
             },
             .uniform_block => {
                 const name = node.data.name;
+                // #170: an unsupported 64-bit type (double/dvecN/int64_t/...) on a
+                // block MEMBER otherwise falls through to a member-less OpTypeStruct
+                // and emits invalid SPIR-V at rc=0 (e.g. `uniform U { double d; }`
+                // → `OpTypeStruct %empty %empty` + a load = spirv-val/naga reject) =
+                // silent-wrong. Honest-error here, mirroring the local var_decl and
+                // IO-global guards. Unwrap array bases so `double a[]` is caught too.
+                for (node.data.members) |member| {
+                    var leaf = member.ty;
+                    while (leaf == .array) leaf = leaf.array.base.*;
+                    if (is64BitType(leaf)) |type_name| {
+                        last_error_ctx = "unsupported-64bit-type";
+                        last_error_inner = type_name;
+                        last_error_line = node.loc.line;
+                        last_error_column = node.loc.column;
+                        return error.SemanticFailed;
+                    }
+                }
                 const qual = node.data.qualifier orelse ast.Qualifier{ .is_uniform = true };
                 // Determine storage class from qualifier and layout
                 const has_push_constant = if (node.data.layout) |l| l.push_constant else false;
