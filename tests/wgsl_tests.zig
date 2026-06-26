@@ -6470,3 +6470,44 @@ test "wgsl: matrix minus-assign an int scalar converts then splats (#170)" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "matrix-minus-assign-int-scalar");
 }
+
+// #170: a multi-component swizzle WRITE whose base is an addressable lvalue that
+// is NOT a bare identifier (`a[i].yz = ...` on an array element, `s.v.xy = ...` on
+// a struct member) is valid GLSL, but glslpp's plain swizzle-write path only
+// handled bare-identifier bases — anything else fell through to a generic lvalue
+// assignment that cannot address a multi-component swizzle (error.InvalidAssignment),
+// wrongly rejecting valid GLSL. Take a pointer to the base vector via analyzeLValue
+// and shuffle the new values in (the compound `a[i].yz += ...` form already worked).
+test "wgsl: multi-component swizzle write on an array element is accepted (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in vec2 t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec3 a[2];
+        \\    a[0] = vec3(t, 1.0);
+        \\    a[1] = vec3(0.0);
+        \\    a[0].yz = t;     // swizzle write on an array-element vector
+        \\    o = vec4(a[0], a[1].x);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "swizzle-write-array-element");
+}
+
+test "wgsl: multi-component swizzle write on a struct member is accepted (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in vec2 t;
+        \\layout(location = 0) out vec4 o;
+        \\struct S { vec3 v; };
+        \\void main() {
+        \\    S s;
+        \\    s.v = vec3(1.0);
+        \\    s.v.xy = t;      // swizzle write on a struct-member vector
+        \\    o = vec4(s.v, 1.0);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "swizzle-write-struct-member");
+}
