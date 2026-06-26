@@ -6586,3 +6586,27 @@ test "wgsl: a constant arithmetic expression as an array size is resolved (#170)
     try assertContains(wgsl, "array<f32, 4>"); // N + 1 resolved to 4
     try nagaValidateOrSkip(wgsl, "const-expr-array-size");
 }
+
+// #170: an array-size expression that STARTS with an integer literal (`a[2 * N]`)
+// was mis-parsed: the parser's dimension scan took the int-literal fast-path on
+// the leading `2`, set the size to 2, then choked on `*` — the declaration broke
+// and a later use raised UndeclaredIdentifier (valid GLSL wrongly rejected). The
+// fast-path now only fires for a pure `[literal]` (next token is `]`); a
+// literal-led expression falls to the const-expression fold (here size 6).
+test "wgsl: an array size expression starting with a literal is resolved (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in int i;
+        \\layout(location = 0) out vec4 o;
+        \\const int N = 3;
+        \\void main() {
+        \\    float a[2 * N];          // size 6
+        \\    a[0] = 1.0;
+        \\    a[5] = 2.0;
+        \\    o = vec4(a[i % (2 * N)], a[(i + 1) % (2 * N)], 0.0, 1.0);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "array<f32, 6>"); // 2 * N resolved to 6, not mis-parsed as 2
+    try nagaValidateOrSkip(wgsl, "literal-led-array-size");
+}

@@ -1041,7 +1041,10 @@ const Parser = struct {
             _ = self.advance();
             const size_tok = self.current();
             var arr_size: u32 = 0;
-            if (size_tok.tag == .int_literal) {
+            if (size_tok.tag == .int_literal and self.peek().tag == .r_bracket) {
+                // Pure `[literal]` only — a literal-LED expression (`[2 * N]`) must
+                // fall to the expression-text path below, not be truncated to its
+                // leading literal.
                 arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
                 _ = self.advance();
                 _ = self.expect(.r_bracket) catch break;
@@ -1458,7 +1461,10 @@ const Parser = struct {
             _ = self.advance();
             const size_tok = self.current();
             var arr_size: u32 = 0;
-            if (size_tok.tag == .int_literal) {
+            if (size_tok.tag == .int_literal and self.peek().tag == .r_bracket) {
+                // Pure `[literal]` only — a literal-LED expression (`[2 * N]`) must
+                // fall to the expression-text path below, not be truncated to its
+                // leading literal.
                 arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
                 _ = self.advance();
                 _ = self.expect(.r_bracket) catch break;
