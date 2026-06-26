@@ -6663,3 +6663,26 @@ test "wgsl: an object macro whose body is another macro is rescanned (#170)" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "object-macro-rescan");
 }
+
+// #170: a function-like macro's replacement list must also be RESCANNED for
+// further macros — `#define WRAP(z) ADD(z, 1.0)` expands to `ADD(t, 1.0)`, and
+// that `ADD(...)` must then expand too. glslpp emitted the substituted body raw,
+// so the body's `ADD` call reached the parser undefined, wrongly rejecting valid
+// GLSL. (The object-macro body rescan and argument pre-expansion landed earlier;
+// this completes the rescan for the function-macro body.)
+test "wgsl: a function macro whose body calls another macro is rescanned (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\#define ADD(a, b) ((a) + (b))
+        \\#define SQ(x) ((x) * (x))
+        \\#define WRAP(z) ADD(SQ(z), 1.0)
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float r = WRAP(t);   // -> ADD(SQ(t), 1.0) -> ((((t)*(t))) + (1.0))
+        \\    o = vec4(r);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "function-macro-body-rescan");
+}
