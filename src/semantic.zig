@@ -3935,6 +3935,16 @@ const Analyzer = struct {
     }
 
     fn evalConstInt(self: *Analyzer, node: ast.Node) Error!i64 {
+        return self.evalConstIntDepth(node, 0);
+    }
+
+    fn evalConstIntDepth(self: *Analyzer, node: ast.Node, depth: u32) Error!i64 {
+        // Guard against a self- or mutually-referential const initializer
+        // (`const int N = N;`, `const int A = B; const int B = A;`) recursing
+        // forever and overflowing the stack. glslang rejects circular const
+        // initializers with an honest error; fail loud rather than crash. The
+        // bound is far above any legitimate transitive-const chain.
+        if (depth > 64) return error.SemanticFailed;
         switch (node.tag) {
             .int_literal => {
                 return @intCast(node.data.int_val);
@@ -3943,7 +3953,7 @@ const Analyzer = struct {
                 return @intCast(node.data.int_val);
             },
             .group => {
-                if (node.data.children.len == 1) return self.evalConstInt(node.data.children[0]);
+                if (node.data.children.len == 1) return self.evalConstIntDepth(node.data.children[0], depth + 1);
                 return error.SemanticFailed;
             },
             .identifier => {
@@ -3953,7 +3963,7 @@ const Analyzer = struct {
                 if (self.lookup(node.data.name)) |sym| {
                     if (sym.is_const) {
                         if (self.global_const_ast_inits.get(sym.ir_id)) |init_node| {
-                            return self.evalConstInt(init_node);
+                            return self.evalConstIntDepth(init_node, depth + 1);
                         }
                     }
                 }

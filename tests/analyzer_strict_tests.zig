@@ -298,6 +298,26 @@ test "strict: a const-int-sized local array folds the const to its size (#170)" 
     _ = spirv;
 }
 
+test "strict: a self-referential const initializer honest-errors, not stack-overflow (#170)" {
+    // `const int N = N;` (and mutual cycles) used as an array size must fail loud,
+    // not recurse forever folding the const into itself. The evalConstInt const-
+    // global resolution is depth-guarded so a circular initializer yields an honest
+    // SemanticFailed instead of crashing the compiler.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\const int N = N;
+        \\layout(set = 0, binding = 0) buffer B { int v[]; };
+        \\void main() {
+        \\    int a[N];
+        \\    a[0] = 3;
+        \\    v[0] = a[0];
+        \\}
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
+}
+
 test "strict: not(bvec) / any(bvec) / all(bvec) builtins are accepted (vec_compare fixture)" {
     // RED: currently fails with ctx=not inner=func_call because `not` is not registered
     // as a GLSL builtin. any/all are registered but not(bvec) → OpLogicalNot is missing.
