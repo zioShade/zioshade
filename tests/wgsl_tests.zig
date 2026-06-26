@@ -6632,3 +6632,34 @@ test "wgsl: a function-like macro call used as a macro argument is expanded (#17
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "nested-function-macro-arg");
 }
+
+// #170: an object-like macro whose body is itself a macro (`#define A B` /
+// `#define B 5.0`, or `#define SQT SQ(2.0)`) must have its replacement RESCANNED
+// for further macros — the C preprocessor re-expands the result. glslpp emitted
+// the object-macro body raw, so `A` reached the parser as the undefined identifier
+// `B` (and `SQT` as a call to undefined `SQ`), wrongly rejecting valid GLSL. Also,
+// `#define H (W/2)` (a SPACE before the `(`) is an object macro whose body is
+// `(W/2)`, not a function-like macro — it was misclassified as function-like (so a
+// bare `H` was never expanded) because the parser keyed on the `(` token without
+// checking adjacency. These macro-chain forms are extremely common.
+test "wgsl: an object macro whose body is another macro is rescanned (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\#define A B
+        \\#define B 5.0
+        \\#define SQ(x) ((x) * (x))
+        \\#define SQT SQ(2.0)
+        \\#define W 800
+        \\#define H (W / 2)
+        \\#define AREA (W * H)
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float x = A;        // A -> B -> 5.0
+        \\    float y = SQT;      // SQT -> SQ(2.0) -> ((2.0)*(2.0))
+        \\    float z = float(AREA); // AREA -> (W*H) -> (800*(800/2))  (spaced-paren object macros)
+        \\    o = vec4(x, y, z, 1.0);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "object-macro-rescan");
+}

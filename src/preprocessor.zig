@@ -410,8 +410,14 @@ pub const Preprocessor = struct {
         const name = try self.alloc.dupe(u8, self.getTokenText(name_tok));
         index.* += 1;
 
-        // Check for function-like macro
-        if (index.* < tokens.len and tokens[index.*].tag == .l_paren) {
+        // Check for function-like macro. The `(` must IMMEDIATELY follow the macro
+        // name with no intervening whitespace — `#define F(x) …` is function-like,
+        // but `#define F (x) …` (space) is an OBJECT macro whose body is `(x) …`
+        // (C/GLSL preprocessor rule). Keying only on the token tag misclassified the
+        // spaced form as function-like, so a bare `F` (no call) was never expanded.
+        if (index.* < tokens.len and tokens[index.*].tag == .l_paren and
+            tokens[index.*].start == name_tok.start + name_tok.len)
+        {
             index.* += 1; // skip '('
 
             var params = std.ArrayListUnmanaged([]const u8).empty;
@@ -563,7 +569,14 @@ pub const Preprocessor = struct {
         switch (macro) {
             .object => |body| {
                 index.* += 1;
-                for (body) |tok| {
+                // Rescan the replacement list for further macros (C semantics):
+                // `#define A B` / `#define B 5` must expand `A` all the way to `5`,
+                // and `#define SQT SQ(2.0)` must expand the inner function macro.
+                // This macro is on `self.expanding`, so a self-referential body
+                // (`#define X (X+1)`) stops re-expanding X — no infinite loop.
+                const expanded = try self.expandTokens(body);
+                defer self.alloc.free(expanded);
+                for (expanded) |tok| {
                     try self.output.append(self.alloc, tok);
                 }
             },
