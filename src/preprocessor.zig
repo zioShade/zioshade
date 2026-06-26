@@ -601,9 +601,30 @@ pub const Preprocessor = struct {
                     self.alloc.free(args);
                 }
 
-                // Substitute and expand
+                // Substitute (with argument pre-expansion) into a scratch list, then
+                // RESCAN the result for further macros (C semantics) — the macro body
+                // may itself contain macro calls (`#define WRAP(z) ADD(z, 1.0)`). This
+                // macro is on self.expanding, so a body that re-invokes it stops — no
+                // infinite loop.
                 const func_macro = Macro{ .function = f };
-                try self.substituteAndExpand(func_macro, args);
+                const saved_out = self.output;
+                self.output = .empty;
+                const substituted = blk: {
+                    errdefer {
+                        self.output.deinit(self.alloc);
+                        self.output = saved_out;
+                    }
+                    try self.substituteAndExpand(func_macro, args);
+                    const s = try self.output.toOwnedSlice(self.alloc);
+                    self.output = saved_out;
+                    break :blk s;
+                };
+                defer self.alloc.free(substituted);
+                const rescanned = try self.expandTokens(substituted);
+                defer self.alloc.free(rescanned);
+                for (rescanned) |tok| {
+                    try self.output.append(self.alloc, tok);
+                }
 
                 // Skip past closing ')'
                 index.* += 1;
