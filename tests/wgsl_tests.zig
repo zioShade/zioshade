@@ -6511,3 +6511,25 @@ test "wgsl: multi-component swizzle write on a struct member is accepted (#170)"
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "swizzle-write-struct-member");
 }
+
+// #170: the GLSL comma operator `(a, b)` evaluates a then b and yields b's value.
+// The semantic layer already handled `comma_op`, but the parser only parsed it in
+// for-loop clauses — a parenthesized comma expression elsewhere
+// (`float b = (a = t, a + 1.0);`) parsed only the first operand, so the `)` was
+// never reached and the whole declaration broke (`b` never registered →
+// UndeclaredIdentifier), wrongly rejecting valid GLSL. Parse a full comma
+// expression inside parentheses.
+test "wgsl: comma operator in an initializer yields the last operand (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float a = 1.0;
+        \\    float b = (a = t, a + 1.0);   // b = t + 1.0
+        \\    o = vec4(b);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "comma-operator-initializer");
+}
