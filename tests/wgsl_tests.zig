@@ -6435,3 +6435,38 @@ test "wgsl: matrix plus an int scalar converts then splats (#170)" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "matrix-plus-int-scalar");
 }
+
+// #170: compound `mat += scalar` / `mat -= scalar` apply the scalar to every
+// component (valid GLSL), but SPIR-V has no matrix OpFAdd/OpFSub with a scalar
+// operand — glslpp emitted those on a (matrix, scalar) pair = invalid SPIR-V and
+// naga-rejected WGSL. The compound analog of the binary `mat ± scalar` splat:
+// splat the scalar into a matrix and reuse the column-wise matrix-matrix add/sub.
+test "wgsl: matrix plus-assign a scalar splats and adds component-wise (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 m = mat2(2.0);
+        \\    m += t;
+        \\    o = vec4(m[0], m[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "matrix-plus-assign-scalar");
+}
+
+test "wgsl: matrix minus-assign an int scalar converts then splats (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in int n;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 m = mat2(2.0);
+        \\    m -= n;          // int → float, splat, column-wise sub
+        \\    o = vec4(m[0], m[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "matrix-minus-assign-int-scalar");
+}
