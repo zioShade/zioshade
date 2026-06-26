@@ -2156,6 +2156,22 @@ const Analyzer = struct {
                 }
                 // Skip creating a global for standalone layout qualifiers (e.g. layout(local_size_x=1) in;)
                 if (node.data.name.len > 0) {
+                // #170: 64-bit types (double/dvecN/dmatN/int64_t/...) are not modeled.
+                // On an IO/uniform/module GLOBAL declaration they otherwise fall through
+                // to a member-less OpTypeStruct, and any use (e.g. `in dvec3 p` then
+                // `vec3(p)`) emits invalid SPIR-V at rc=0 (spirv-val rejects; naga
+                // rejects) = silent-wrong. Honest-error here, mirroring the local
+                // var_decl path (analyzeNode .var_decl) and matching glslpp's stance
+                // that 64-bit types are unsupported (WGSL has no f64/i64 either).
+                if (node.data.ty) |gty| {
+                    if (is64BitType(gty)) |type_name| {
+                        last_error_ctx = "unsupported-64bit-type";
+                        last_error_inner = type_name;
+                        last_error_line = node.loc.line;
+                        last_error_column = node.loc.column;
+                        return error.SemanticFailed;
+                    }
+                }
                 // Check for specialization constant: layout(constant_id = N) const int X = val;
                 if (node.data.qualifier != null and node.data.qualifier.?.is_const) {
                     if (node.data.layout) |layout| {
