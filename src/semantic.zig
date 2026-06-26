@@ -4021,6 +4021,21 @@ const Analyzer = struct {
         // const-global name (`N`), constant arithmetic (`N + 1`, `2 * K`), etc.
         // evalConstInt resolves const-global identifiers against their recorded
         // initializers; the scratch arena frees the re-parsed subtree immediately.
+        //
+        // Save/restore the error-context threadlocals around the scratch re-parse:
+        // a failed parseExprText would otherwise leave a stale (snippet-relative)
+        // error line/column that a later genuine error's `== 0` guard would keep,
+        // mis-reporting that error's location.
+        const saved_ctx = last_error_ctx;
+        const saved_inner = last_error_inner;
+        const saved_line = last_error_line;
+        const saved_col = last_error_column;
+        defer {
+            last_error_ctx = saved_ctx;
+            last_error_inner = saved_inner;
+            last_error_line = saved_line;
+            last_error_column = saved_col;
+        }
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
         if (parser.parseExprText(arena.allocator(), s)) |expr_node| {
