@@ -6610,3 +6610,25 @@ test "wgsl: an array size expression starting with a literal is resolved (#170)"
     try assertContains(wgsl, "array<f32, 6>"); // 2 * N resolved to 6, not mis-parsed as 2
     try nagaValidateOrSkip(wgsl, "literal-led-array-size");
 }
+
+// #170: the C preprocessor expands a function-like macro's arguments BEFORE
+// substituting them, so a macro call used as an argument (`ADD(SQ(t), 1.0)`)
+// expands the inner `SQ(t)` first. glslpp substituted argument tokens raw, so the
+// nested `SQ(t)` was left unexpanded and reached the parser as a call to an
+// undefined `SQ` (UndeclaredIdentifier) — valid GLSL wrongly rejected. A single
+// (non-nested) function macro already worked.
+test "wgsl: a function-like macro call used as a macro argument is expanded (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\#define SQ(x) ((x) * (x))
+        \\#define ADD(a, b) ((a) + (b))
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float r = ADD(SQ(t), SQ(t + 1.0));   // both SQ(...) must expand first
+        \\    o = vec4(r);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "nested-function-macro-arg");
+}
