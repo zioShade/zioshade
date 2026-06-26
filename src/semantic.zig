@@ -4346,6 +4346,46 @@ const Analyzer = struct {
                     }
                 }
 
+                // Component-wise `mat + scalar` / `mat - scalar` / `scalar - mat` /
+                // `scalar / mat`: GLSL applies the scalar to every matrix component, but
+                // SPIR-V has no matrix OpFAdd/OpFSub/OpFDiv with a scalar operand — those
+                // on a (matrix, scalar) pair are invalid SPIR-V. Splat the scalar into a
+                // matrix of the result type so the existing column-wise matrix-matrix
+                // lowering applies. (`*` is excluded: `mat * scalar` is OpMatrixTimesScalar
+                // and `mat / scalar` returns early via the reciprocal scale above; only
+                // +, -, and `scalar / mat` reach here with a matrix result + scalar side.)
+                if (result_ty.isMatrix() and (op == .add or op == .sub or op == .div) and
+                    (left.ty.isScalar() or right.ty.isScalar()))
+                {
+                    const scalar_on_left = left.ty.isScalar();
+                    const scalar_id0 = if (scalar_on_left) left_id else right_id;
+                    const scalar_ty0 = if (scalar_on_left) left.ty else right.ty;
+                    var sid = scalar_id0;
+                    var ok = scalar_ty0 == .float;
+                    if (!ok) {
+                        if (self.getConversionTag(.float, scalar_ty0)) |cvtag| {
+                            const c_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            c_ops[0] = .{ .id = sid };
+                            sid = try self.emitPureOp(cvtag, c_ops, .float);
+                            ok = true;
+                        }
+                    }
+                    if (ok) {
+                        // Build one column vector with every component = the scalar, then
+                        // a matrix from that column repeated across all columns.
+                        const col_ty = result_ty.columnType();
+                        const col_n = col_ty.numComponents();
+                        const ncol = result_ty.numColumns();
+                        const colv_ops = try self.alloc.alloc(ir.Instruction.Operand, col_n);
+                        for (0..col_n) |i| colv_ops[i] = .{ .id = sid };
+                        const col_id = try self.emitPureOp(.composite_construct, colv_ops, col_ty);
+                        const mat_ops = try self.alloc.alloc(ir.Instruction.Operand, ncol);
+                        for (0..ncol) |i| mat_ops[i] = .{ .id = col_id };
+                        const mat_id = try self.emitPureOp(.composite_construct, mat_ops, result_ty);
+                        if (scalar_on_left) left_id = mat_id else right_id = mat_id;
+                    }
+                }
+
                 const is_float = result_ty == .float or result_ty == .double or result_ty == .vec2 or result_ty == .vec3 or result_ty == .vec4 or result_ty.isMatrix();
 
 
