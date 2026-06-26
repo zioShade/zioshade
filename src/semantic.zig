@@ -5110,6 +5110,39 @@ const Analyzer = struct {
                     }
                 }
 
+                // Component-wise `mat += scalar` / `mat -= scalar`: GLSL applies the
+                // scalar to every component. SPIR-V has no matrix OpFAdd/OpFSub with a
+                // scalar operand, so splat the scalar into a matrix of the target type and
+                // reuse the column-wise matrix-matrix lowering. (`*=`/`/=` scalar use
+                // OpMatrixTimesScalar above; this is the additive analog, mirroring the
+                // binary `mat ± scalar` splat.)
+                if (target.ty.isMatrix() and value_ty.isScalar() and
+                    (node.data.op == .add_assign or node.data.op == .sub_assign))
+                {
+                    var sid = value_id;
+                    var ok = value_ty == .float;
+                    if (!ok) {
+                        if (self.getConversionTag(.float, value_ty)) |cvtag| {
+                            const c_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            c_ops[0] = .{ .id = sid };
+                            sid = try self.emitPureOp(cvtag, c_ops, .float);
+                            ok = true;
+                        }
+                    }
+                    if (ok) {
+                        const col_ty = target.ty.columnType();
+                        const col_n = col_ty.numComponents();
+                        const ncol = target.ty.numColumns();
+                        const colv_ops = try self.alloc.alloc(ir.Instruction.Operand, col_n);
+                        for (0..col_n) |i| colv_ops[i] = .{ .id = sid };
+                        const col_id = try self.emitPureOp(.composite_construct, colv_ops, col_ty);
+                        const mat_ops = try self.alloc.alloc(ir.Instruction.Operand, ncol);
+                        for (0..ncol) |i| mat_ops[i] = .{ .id = col_id };
+                        value_id = try self.emitPureOp(.composite_construct, mat_ops, target.ty);
+                        value_ty = target.ty;
+                    }
+                }
+
                 // Compute result
                 const result_ty_2 = target.ty;
                 const is_float = result_ty_2 == .float or result_ty_2 == .double or result_ty_2.isFloatVector() or result_ty_2.isMatrix();
