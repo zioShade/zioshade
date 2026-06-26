@@ -3969,14 +3969,43 @@ const Analyzer = struct {
                 }
                 return error.SemanticFailed;
             },
+            .binary_op => {
+                // Constant arithmetic in a size/label expression (`a[N + 1]`,
+                // `a[2 * K]`). Overflow-safe (std.math.*) so a pathological const
+                // expression honest-errors instead of panicking.
+                if (node.data.children.len < 2) return error.SemanticFailed;
+                const op = node.data.op orelse return error.SemanticFailed;
+                const l = try self.evalConstIntDepth(node.data.children[0], depth + 1);
+                const r = try self.evalConstIntDepth(node.data.children[1], depth + 1);
+                return switch (op) {
+                    .add => std.math.add(i64, l, r) catch return error.SemanticFailed,
+                    .sub => std.math.sub(i64, l, r) catch return error.SemanticFailed,
+                    .mul => std.math.mul(i64, l, r) catch return error.SemanticFailed,
+                    .div => if (r == 0) return error.SemanticFailed else std.math.divTrunc(i64, l, r) catch return error.SemanticFailed,
+                    .mod => if (r == 0) return error.SemanticFailed else std.math.rem(i64, l, r) catch return error.SemanticFailed,
+                    else => return error.SemanticFailed,
+                };
+            },
+            .unary_op => {
+                // Constant unary minus/plus in a size expression (rare but valid in
+                // a sub-expression, e.g. `a[N - (-1)]`).
+                if (node.data.children.len < 1) return error.SemanticFailed;
+                const v = try self.evalConstIntDepth(node.data.children[0], depth + 1);
+                return switch (node.data.op orelse .add) {
+                    .sub => std.math.negate(v) catch return error.SemanticFailed,
+                    .add => v,
+                    else => return error.SemanticFailed,
+                };
+            },
             else => return error.SemanticFailed,
         }
     }
 
     /// Fold a compile-time constant array-size expression stored as source text.
     /// Handles gl_WorkGroupSize.x/y/z → local_size_x/y/z, plain integer literals,
-    /// and a const-qualified integer global used as the size (`const int N = 3;
-    /// a[N]`). Returns null when the expression is not a recognized constant.
+    /// a const-qualified integer global (`const int N = 3; a[N]`), and constant
+    /// arithmetic over those (`a[N + 1]`, `a[2 * K]`). Returns null when the
+    /// expression is not a recognized compile-time-constant integer.
     fn resolveSizeExpr(self: *Analyzer, expr: []const u8) ?u32 {
         // Trim surrounding whitespace for robustness.
         const s = std.mem.trim(u8, expr, " \t\r\n");
@@ -3986,20 +4015,20 @@ const Analyzer = struct {
             if (std.mem.eql(u8, s, "gl_WorkGroupSize.y")) return ls.y;
             if (std.mem.eql(u8, s, "gl_WorkGroupSize.z")) return ls.z;
         }
-        // Try plain integer literal in text form (e.g. produced by simple constant).
+        // Try plain integer literal in text form (fast path).
         if (std.fmt.parseInt(u32, s, 10)) |v| return v else |_| {}
-        // A const-qualified integer global used as the size: look the name up and
-        // fold its initializer (`const int N = 3; float a[N];`). lookup returns null
-        // for any non-identifier text, so a complex size expression simply yields
-        // null here (honest error) rather than a wrong size.
-        if (self.lookup(s)) |sym| {
-            if (sym.is_const) {
-                if (self.global_const_ast_inits.get(sym.ir_id)) |init_node| {
-                    if (self.evalConstInt(init_node)) |v| {
-                        if (v > 0) return @intCast(v);
-                    } else |_| {}
-                }
-            }
+        // Otherwise re-parse the size text into an expression AST and fold it: a
+        // const-global name (`N`), constant arithmetic (`N + 1`, `2 * K`), etc.
+        // evalConstInt resolves const-global identifiers against their recorded
+        // initializers; the scratch arena frees the re-parsed subtree immediately.
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        if (parser.parseExprText(arena.allocator(), s)) |expr_node| {
+            if (self.evalConstInt(expr_node)) |v| {
+                // Reject non-positive and out-of-u32-range sizes (the latter also
+                // avoids an @intCast panic on a huge const expression).
+                if (v > 0 and v <= std.math.maxInt(u32)) return @intCast(v);
+            } else |_| {}
         }
         return null;
     }
