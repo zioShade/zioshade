@@ -5019,14 +5019,21 @@ const Analyzer = struct {
                             value_ty = .float;
                         }
                     }
-                    if (node.data.op == .div_assign) {
-                        const one_id = try self.getConstFloat(1.0);
-                        const r_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                        r_ops[0] = .{ .id = one_id };
-                        r_ops[1] = .{ .id = value_id };
-                        value_id = try self.emitPureOp(.fdiv, r_ops, .float);
+                    // Only take the OpMatrixTimesScalar path when the scalar is genuinely
+                    // float. An unconvertible scalar (double/float16 — whose matrix ops
+                    // glslpp does not yet support) would otherwise feed a mismatched
+                    // component type into OpMatrixTimesScalar; leave it to the generic
+                    // path rather than emit a differently-invalid op.
+                    if (value_ty == .float) {
+                        if (node.data.op == .div_assign) {
+                            const one_id = try self.getConstFloat(1.0);
+                            const r_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                            r_ops[0] = .{ .id = one_id };
+                            r_ops[1] = .{ .id = value_id };
+                            value_id = try self.emitPureOp(.fdiv, r_ops, .float);
+                        }
+                        matrix_scalar_scale = true;
                     }
-                    matrix_scalar_scale = true;
                 }
 
                 // Compute result
