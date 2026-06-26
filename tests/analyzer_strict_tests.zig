@@ -704,6 +704,29 @@ test "F1: double-array SSBO member yields a named honest error" {
     try std.testing.expect(std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "double") != null or std.mem.indexOf(u8, inner, "64") != null);
 }
 
+// F1 (#170): a 64-bit type on a plain (non-block) STRUCT MEMBER must honest-error
+// too. `struct Mat { double ior; ... }; uniform Mat m;` modeled the member as a
+// member-less OpTypeStruct, so the struct type became malformed and any access
+// (m.ior) emitted INVALID SPIR-V at rc=0 (spirv-val: "Expected Result Type to be
+// a composite type"; naga: "cannot cast a v0 to a f32"). Honest-error at the
+// struct definition (catches every use: global/local/param). glslang accepts the
+// GLSL, so glslpp must honest-error rather than mis-compile. Unwrap array bases so
+// a `double a[2]` member is caught too.
+test "F1: double struct member yields a named honest error (not invalid SPIR-V)" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\struct Mat { double ior; vec3 albedo; };
+        \\uniform Mat m;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(m.albedo, float(m.ior)); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    const ctx = glslpp.lastErrorCtx() orelse "";
+    const inner = glslpp.lastErrorInner() orelse "";
+    try std.testing.expect(std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "double") != null or std.mem.indexOf(u8, inner, "64") != null);
+}
+
 // Re-applied from main #45 / #42 follow-up during reconciliation.
 
 test "strict: imageSize/textureSize result dims match operand rank (no false-positive)" {

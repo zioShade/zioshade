@@ -123,6 +123,20 @@ fn is64BitType(ty: ast.Type) ?[]const u8 {
     return null;
 }
 
+/// Returns the 64-bit type name of the first struct member (unwrapping array
+/// bases) whose type is an unsupported 64-bit GLSL type, or null. A struct with
+/// such a member otherwise builds a malformed OpTypeStruct (the member resolves to
+/// a member-less struct), and any access emits invalid SPIR-V at rc=0 — so the
+/// struct definition honest-errors instead (#170). Mirrors the var/IO/block guards.
+fn struct64BitMember(members: []const ast.StructMember) ?[]const u8 {
+    for (members) |member| {
+        var leaf = member.ty;
+        while (leaf == .array) leaf = leaf.array.base.*;
+        if (is64BitType(leaf)) |type_name| return type_name;
+    }
+    return null;
+}
+
 pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
     return analyzeWithOptions(alloc, root, .{});
 }
@@ -2613,6 +2627,17 @@ const Analyzer = struct {
             },
             .struct_decl => {
                 const name = node.data.name;
+                // #170: a 64-bit member (double/dvecN/int64_t/... incl. arrays of
+                // them) makes the struct type malformed (member-less OpTypeStruct) →
+                // any access emits invalid SPIR-V at rc=0. Honest-error here, where
+                // the struct is defined, so every use is covered.
+                if (struct64BitMember(node.data.members)) |type_name| {
+                    last_error_ctx = "unsupported-64bit-type";
+                    last_error_inner = type_name;
+                    last_error_line = node.loc.line;
+                    last_error_column = node.loc.column;
+                    return error.SemanticFailed;
+                }
                 const existing = self.types.getPtr(name);
                 if (existing != null) {
                     // Inner struct redeclaration — for correctness, we'd need per-scope types.
@@ -3608,6 +3633,15 @@ const Analyzer = struct {
             .struct_decl => {
                 // Inner struct declaration inside function body
                 const name = node.data.name;
+                // #170: 64-bit member → malformed struct → invalid SPIR-V on use.
+                // Honest-error (mirrors the top-level struct_decl guard).
+                if (struct64BitMember(node.data.members)) |type_name| {
+                    last_error_ctx = "unsupported-64bit-type";
+                    last_error_inner = type_name;
+                    last_error_line = node.loc.line;
+                    last_error_column = node.loc.column;
+                    return error.SemanticFailed;
+                }
                 const existing = self.types.getPtr(name);
                 if (existing != null) {
                     // Redefinition: merge new members into existing type
