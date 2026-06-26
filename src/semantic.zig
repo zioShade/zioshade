@@ -2163,8 +2163,12 @@ const Analyzer = struct {
                 // rejects) = silent-wrong. Honest-error here, mirroring the local
                 // var_decl path (analyzeNode .var_decl) and matching glslpp's stance
                 // that 64-bit types are unsupported (WGSL has no f64/i64 either).
+                // Unwrap array bases so `uniform double K[2]` / `const double[]` are
+                // caught too (the type is `.array` whose base is the 64-bit type).
                 if (node.data.ty) |gty| {
-                    if (is64BitType(gty)) |type_name| {
+                    var leaf = gty;
+                    while (leaf == .array) leaf = leaf.array.base.*;
+                    if (is64BitType(leaf)) |type_name| {
                         last_error_ctx = "unsupported-64bit-type";
                         last_error_inner = type_name;
                         last_error_line = node.loc.line;

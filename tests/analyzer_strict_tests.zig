@@ -645,6 +645,26 @@ test "F1: dvec3 input variable yields a named honest error (not invalid SPIR-V)"
     try std.testing.expect(names_it);
 }
 
+// F1 (#170): a 64-bit ARRAY global (`uniform double K[2]`) must honest-error too —
+// the IO/global guard checks node.data.ty, which here is `.array` whose base is
+// the 64-bit type, so the guard must unwrap array bases (like the block-member
+// guard). Before the fix this fell through to a member-less OpTypeStruct element
+// and emitted INVALID SPIR-V at rc=0 (spirv-val: "Expected Result Type to be a
+// composite type"; naga rejects).
+test "F1: double-array global yields a named honest error (not invalid SPIR-V)" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\uniform double K[2];
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = vec4(float(K[0])); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    const ctx = glslpp.lastErrorCtx() orelse "";
+    const inner = glslpp.lastErrorInner() orelse "";
+    try std.testing.expect(std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "double") != null or std.mem.indexOf(u8, inner, "64") != null);
+}
+
 // F1 (#170): a 64-bit type on a uniform/SSBO BLOCK MEMBER must honest-error like
 // the scalar IO-global and local-var paths — NOT fall through to a member-less
 // OpTypeStruct. Before the fix, `uniform U { double d; }` modeled member `d` as
