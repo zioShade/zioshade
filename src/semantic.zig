@@ -4261,6 +4261,40 @@ const Analyzer = struct {
                     return .{ .ty = .bool, .id = neq_id };
                 }
 
+                // GLSL `mat / scalar` divides every component by the scalar. SPIR-V has
+                // no whole-matrix OpFDiv (and no matrix-by-scalar divide), so the generic
+                // `.fdiv` on the matrix operand is invalid SPIR-V (and the WGSL `mat / f32`
+                // is naga-rejected). Lower as `mat * (1.0/scalar)` via OpMatrixTimesScalar
+                // — exactly glslang's lowering, and the binary analog of the `mat /= scalar`
+                // compound fix. (`mat * scalar` already uses .mat_scalar_mul below;
+                // `scalar / mat` is component-wise and not handled here.)
+                if (op == .div and left.ty.isMatrix() and right.ty.isScalar()) {
+                    var scalar_id = right_id;
+                    var scalar_is_float = right.ty == .float;
+                    if (!scalar_is_float) {
+                        if (self.getConversionTag(.float, right.ty)) |cvtag| {
+                            const c_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                            c_ops[0] = .{ .id = scalar_id };
+                            scalar_id = try self.emitPureOp(cvtag, c_ops, .float);
+                            scalar_is_float = true;
+                        }
+                    }
+                    // Only commit to the reciprocal lowering when the scalar is float —
+                    // an unconvertible double/float16 (incomplete support) falls through.
+                    if (scalar_is_float) {
+                        const one_id = try self.getConstFloat(1.0);
+                        const recip_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        recip_ops[0] = .{ .id = one_id };
+                        recip_ops[1] = .{ .id = scalar_id };
+                        const recip_id = try self.emitPureOp(.fdiv, recip_ops, .float);
+                        const m_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        m_ops[0] = .{ .id = left_id };
+                        m_ops[1] = .{ .id = recip_id };
+                        const r_id = try self.emitPureOp(.mat_scalar_mul, m_ops, left.ty);
+                        return .{ .ty = left.ty, .id = r_id };
+                    }
+                }
+
                 if (result_ty.isVector()) {
                     if (left.ty.isScalar() and !right.ty.isScalar()) {
                         // Check if we can use vector-scalar op instead of splat

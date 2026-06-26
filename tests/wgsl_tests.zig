@@ -6334,3 +6334,38 @@ test "wgsl: matrix multiply-assign by an int scalar converts then scales (#170)"
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "matrix-mul-assign-int-scalar");
 }
+
+// #170: binary `mat / scalar` divides every component by the scalar, but SPIR-V
+// has no matrix OpFDiv — glslpp emitted OpFDiv on the matrix operand = invalid
+// SPIR-V ("Expected floating scalar or vector type") and naga-rejected WGSL
+// (`mat2x2 / f32`). Lower as `mat * (1.0/scalar)` via OpMatrixTimesScalar (the
+// binary analog of the `mat /= scalar` compound fix; glslang lowers it the same).
+test "wgsl: binary matrix divided by a scalar lowers via reciprocal scale (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 b = mat2(4.0);
+        \\    mat2 d = b / t;
+        \\    o = vec4(d[0], d[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "binary-matrix-div-scalar");
+}
+
+test "wgsl: binary matrix divided by an int scalar converts then scales (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in int n;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 b = mat2(8.0);
+        \\    mat2 d = b / n;   // int → float reciprocal, then OpMatrixTimesScalar
+        \\    o = vec4(d[0], d[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "binary-matrix-div-int-scalar");
+}
