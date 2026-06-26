@@ -9,6 +9,25 @@ pub const Error = error{
     UnexpectedToken,
 };
 
+/// Parse a standalone GLSL expression from source `text` into an AST node.
+/// `alloc` is used for ALL allocations (lexing, nodes, heap children/types) —
+/// pass an arena so the whole subtree frees in a single deinit. Returns null on
+/// any lex/parse failure. Used by the array-size resolver to fold a constant
+/// expression dimension such as `a[N + 1]` (the parser stores such a dimension
+/// as source text, not an AST).
+pub fn parseExprText(alloc: std.mem.Allocator, text: []const u8) ?ast.Node {
+    const src = alloc.dupeZ(u8, text) catch return null;
+    const tokens = lexer.tokenize(alloc, src) catch return null;
+    var p = Parser{
+        .alloc = alloc,
+        .source = src,
+        .tokens = tokens,
+        .pos = 0,
+        .struct_names = .{},
+    };
+    return p.parseExpression() catch return null;
+}
+
 pub fn parse(alloc: std.mem.Allocator, source: [:0]const u8, tokens: []const lexer.Token) Error!ast.Root {
     // Clear the error-context threadlocals so a stale message from a previous
     // compile (e.g. this parse's nested-function detail) can never bleed into a
