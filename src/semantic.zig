@@ -4573,6 +4573,31 @@ const Analyzer = struct {
                                         value = .{ .ty = value.ty, .id = loaded_id };
                                     }
 
+                                    // GLSL implicitly converts the RHS to the lvalue type. The
+                                    // shuffle below merges the RHS vector into `base_ty` (a vector
+                                    // of `base_elem`), so the RHS components must already be
+                                    // base_elem — feeding e.g. an ivec2 into a float vector's
+                                    // OpVectorShuffle mixes int and float components = invalid
+                                    // SPIR-V. Convert when the element types differ. (The
+                                    // single-component path `v.x = n` already converts.)
+                                    const base_elem = base_ty.elementType();
+                                    if (value.ty.isVector() and !std.meta.eql(value.ty.elementType(), base_elem)) {
+                                        const target_vec: ast.Type = switch (value.ty.numComponents()) {
+                                            2 => base_elem.toVec2(),
+                                            3 => base_elem.toVec3(),
+                                            4 => base_elem.toVec4(),
+                                            else => value.ty,
+                                        };
+                                        if (!std.meta.eql(target_vec, value.ty)) {
+                                            if (self.getConversionTag(target_vec, value.ty)) |cvtag| {
+                                                const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                                conv_ops[0] = .{ .id = value.id };
+                                                const conv_id = try self.emitPureOp(cvtag, conv_ops, target_vec);
+                                                value = .{ .ty = target_vec, .id = conv_id };
+                                            }
+                                        }
+                                    }
+
                                     // Materialize SSA variable if needed for swizzle write
                                     _ = self.materializeSSA(base_node.data.name);
                                     // Re-lookup to get updated ir_id after materialization

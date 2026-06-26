@@ -6237,3 +6237,25 @@ test "wgsl: matrix equality lowers per-column, not a matrix == (#170)" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "matrix-equality");
 }
+
+// #170: GLSL implicitly converts the RHS to the lvalue type at a MULTI-component
+// swizzle write — `v.xy = ivec2(...)` converts the ivec2 to vec2 before storing.
+// glslpp fed the unconverted ivec2 straight into the OpVectorShuffle that merges
+// it with the float vector `v`, mixing int and float components = invalid SPIR-V
+// (spirv-val: "The Component Type of Vector 2 must be the same as ResultType") and
+// naga-rejected WGSL. The single-component path (`v.x = intVar`) already converted;
+// the multi-component path did not.
+test "wgsl: multi-component swizzle write converts a cross-type RHS (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in ivec2 n;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec4 v = vec4(0.0);
+        \\    v.xy = n;        // ivec2 → vec2 implicit conversion before the shuffle
+        \\    o = v;
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "swizzle-write-cross-type");
+}
