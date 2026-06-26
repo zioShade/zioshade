@@ -2187,7 +2187,12 @@ const Parser = struct {
             },
             .l_paren => {
                 _ = self.advance();
-                const expr = try self.parseExpression();
+                // A parenthesized expression may use the GLSL comma operator
+                // (`(a = t, a + 1.0)` evaluates left-to-right, yields the last).
+                // parseCommaExpression returns the inner expression unchanged when
+                // there is no comma, so plain grouping is unaffected. The semantic
+                // layer already handles comma_op (returns the last operand's value).
+                const expr = try self.parseCommaExpression();
                 _ = self.expect(.r_paren) catch {};
                 return .{
                     .tag = .group,
