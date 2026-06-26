@@ -6702,3 +6702,39 @@ test "wgsl: an array fragment output honest-errors instead of emitting array IO 
     ;
     try std.testing.expectError(error.UnsupportedOp, compileToWgsl(src));
 }
+
+// #170: synthetic preprocessor tokens (## paste, __LINE__, __VERSION__, stringify)
+// carry source offsets past the original source into the preprocessor's
+// synthetic-text buffer, but the parser read token text by offset from the
+// ORIGINAL source — so `CAT(p, os)` (## paste) reached the parser as the first
+// bytes of the source ("#v…" from "#version"), and __LINE__ as a non-numeric
+// int_literal. The parser now reads an extended source (original + synthetic
+// buffer); the error-context threadlocals are stabilized so they don't dangle.
+test "wgsl: the ## token-paste operator concatenates into a usable identifier (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\#define CAT(a, b) a ## b
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float pos = 3.0;
+        \\    float r = CAT(p, os);   // pasted identifier `pos`
+        \\    o = vec4(r);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "token-paste");
+}
+
+test "wgsl: __LINE__ and __VERSION__ expand to usable integer literals (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    int ln = __LINE__;
+        \\    int ver = __VERSION__;
+        \\    o = vec4(float(ln), float(ver), 0.0, 1.0);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "line-version-macros");
+}
