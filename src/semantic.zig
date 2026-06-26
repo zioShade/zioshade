@@ -17,6 +17,35 @@ pub threadlocal var last_error_inner: []const u8 = "";
 pub threadlocal var last_error_line: u32 = 0;
 pub threadlocal var last_error_column: u32 = 0;
 
+/// Stable backing storage for the error-context strings. `last_error_ctx` /
+/// `last_error_inner` are usually slices into the source the parser read. When
+/// that source is a transient buffer the compiler allocates and frees on return
+/// (e.g. the preprocessor-extended source carrying ## paste / __LINE__ text), the
+/// slices would dangle for a caller that reads them AFTER the compile returns.
+/// `stabilizeErrorContext()` copies the current strings here and re-points the
+/// threadlocals, making them safe to read past the source's lifetime.
+threadlocal var stable_ctx_buf: [256]u8 = undefined;
+threadlocal var stable_inner_buf: [256]u8 = undefined;
+
+/// Copy the error-context strings into stable threadlocal storage. Call on the
+/// error-return path of a compile function before any transient parser source is
+/// freed. Idempotent and self-copy-safe (skips strings already in the buffers).
+pub fn stabilizeErrorContext() void {
+    if (last_error_ctx.len > 0 and last_error_ctx.ptr != &stable_ctx_buf) {
+        // Truncate to the buffer rather than skip: a string longer than the buffer
+        // would otherwise stay pointing into the transient source and dangle. A
+        // clipped-but-valid label is strictly better than a use-after-free.
+        const n = @min(last_error_ctx.len, stable_ctx_buf.len);
+        @memcpy(stable_ctx_buf[0..n], last_error_ctx[0..n]);
+        last_error_ctx = stable_ctx_buf[0..n];
+    }
+    if (last_error_inner.len > 0 and last_error_inner.ptr != &stable_inner_buf) {
+        const n = @min(last_error_inner.len, stable_inner_buf.len);
+        @memcpy(stable_inner_buf[0..n], last_error_inner[0..n]);
+        last_error_inner = stable_inner_buf[0..n];
+    }
+}
+
 /// When non-null, tolerate-mode statement errors are recorded here as
 /// structured (message, line, column) snapshots DURING analysis (while the
 /// AST is still alive). `compileToSPIRVWithDiagnostics` sets this; the plain
