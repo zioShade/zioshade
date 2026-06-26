@@ -4893,7 +4893,11 @@ const Codegen = struct {
                 try self.emitWord(self.operandId(resolved, 1)); // matrix (was right)
                 try self.emitWord(self.operandId(resolved, 0)); // scalar (was left)
             },
-            .fdiv => try self.emitBinOp(spirv.Op.FDiv, resolved),
+            // Route through emitFloatBinOp so a matrix result decomposes into
+            // per-column OpFDiv (SPIR-V has no matrix OpFDiv) — fixes `mat / mat`
+            // and the splat-based `mat ± scalar` / `scalar / mat` lowerings.
+            // Non-matrix types delegate straight to emitBinOp (unchanged).
+            .fdiv => try self.emitFloatBinOp(spirv.Op.FDiv, resolved),
             .neg => try self.emitUnaryOp(spirv.Op.SNegate, resolved),
             .fneg => try self.emitUnaryOp(spirv.Op.FNegate, resolved),
             .not_op => try self.emitUnaryOp(spirv.Op.LogicalNot, resolved),
@@ -6266,7 +6270,7 @@ const Codegen = struct {
         try self.emitWord(op2);
     }
 
-    /// Emit floating-point binary op (FAdd, FSub). For matrix types, decomposes
+    /// Emit floating-point binary op (FAdd, FSub, FDiv). For matrix types, decomposes
     /// into per-column vector operations since SPIR-V doesn't support matrix arithmetic directly.
     fn emitFloatBinOp(self: *Codegen, op: spirv.Op, inst: ir.Instruction) !void {
         if (!inst.ty.isMatrix()) {
