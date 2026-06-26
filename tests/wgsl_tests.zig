@@ -6686,3 +6686,19 @@ test "wgsl: a function macro whose body calls another macro is rescanned (#170)"
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "function-macro-body-rescan");
 }
+
+// #170: an array fragment output (`layout(location=0) out vec4 col[2]` — MRT via
+// an array) was emitted as `-> @location(0) array<vec4f, 2>`, which naga rejects
+// ("array type cannot be used for entry point outputs") — a silent-wrong at exit 0.
+// WGSL has no array stage IO (it would need per-element @location struct members,
+// not yet reconstructed here), so honest-error instead of emitting naga-rejected
+// WGSL — matching the existing array-input / array-member-output guards.
+test "wgsl: an array fragment output honest-errors instead of emitting array IO (#170)" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 col[2];
+        \\void main() { col[0] = vec4(uv, 0.0, 1.0); col[1] = vec4(1.0 - uv, 0.0, 1.0); }
+    ;
+    try std.testing.expectError(error.UnsupportedOp, compileToWgsl(src));
+}

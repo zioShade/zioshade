@@ -4569,6 +4569,18 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             if (ptr_inst) |pi| {
                 if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = ov;
             } else actual_type = ov;
+            // An array fragment output (`out vec4 col[N]` — MRT via an array) must NOT
+            // be emitted as `-> @location(0) array<…>`: naga rejects array stage IO
+            // ("Only numeric scalars and vectors are allowed"). WGSL needs per-element
+            // @location struct members, which this single-output path does not
+            // reconstruct, so honest-error rather than emit naga-rejected WGSL — the
+            // return-type symmetry of the array-input / array-member-output guards (#170).
+            if (getDef(&module, actual_type)) |at_def| {
+                if (at_def.op == .TypeArray or at_def.op == .TypeRuntimeArray) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL stage IO must be a scalar/vector: array fragment output (MRT via `out vec4 col[N]`) is not supported — use separate `out` variables", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
+            }
             const type_name = try wgslType(&module, actual_type, &names, arena);
             try w.print(") -> @location(0) {s} {{\n", .{type_name});
         }
