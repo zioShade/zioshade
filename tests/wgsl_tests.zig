@@ -6560,3 +6560,29 @@ test "wgsl: a const-int global used as an array size is resolved (#170)" {
     try assertContains(wgsl, "array<f32, 3>"); // size resolved to 3
     try nagaValidateOrSkip(wgsl, "const-global-array-size");
 }
+
+// #170: a constant arithmetic expression as an array size (`const int N = 3;
+// float a[N + 1];`) is valid GLSL. The array-size resolver folded literals and
+// bare const-global names, but not arithmetic — the parser stores such a
+// dimension as source text, so resolving it needs re-parsing the text and
+// folding the const expression. `a[N + 1]` failed (SemanticFailed); now it
+// resolves to 4.
+test "wgsl: a constant arithmetic expression as an array size is resolved (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in int i;
+        \\layout(location = 0) out vec4 o;
+        \\const int N = 3;
+        \\void main() {
+        \\    float a[N + 1];          // size 4
+        \\    a[0] = 1.0;
+        \\    a[1] = 2.0;
+        \\    a[2] = 3.0;
+        \\    a[3] = 4.0;
+        \\    o = vec4(a[i], a[(i + 1) % (N + 1)], 0.0, 1.0);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "array<f32, 4>"); // N + 1 resolved to 4
+    try nagaValidateOrSkip(wgsl, "const-expr-array-size");
+}
