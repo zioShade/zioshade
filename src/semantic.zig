@@ -4783,6 +4783,41 @@ const Analyzer = struct {
                                         value = .{ .ty = value.ty, .id = loaded_id };
                                     }
 
+                                    // 3a. GLSL implicitly converts the RHS to the lvalue element
+                                    // type. The op below uses the float arithmetic tags (fadd/
+                                    // fmul/…) and the scalar splat builds a `swizzled_ty` vector,
+                                    // so an int/uint RHS (vector OR scalar) must be converted to
+                                    // the swizzle's element type first — otherwise the op mixes
+                                    // int operands into a float op, or the splat builds a float
+                                    // vector from int constituents = invalid SPIR-V. (Same gap as
+                                    // the plain swizzle write.)
+                                    const sw_elem = swizzled_ty.elementType();
+                                    if (value.ty.isVector()) {
+                                        if (!std.meta.eql(value.ty.elementType(), sw_elem)) {
+                                            const target_vec: ast.Type = switch (value.ty.numComponents()) {
+                                                2 => sw_elem.toVec2(),
+                                                3 => sw_elem.toVec3(),
+                                                4 => sw_elem.toVec4(),
+                                                else => value.ty,
+                                            };
+                                            if (!std.meta.eql(target_vec, value.ty)) {
+                                                if (self.getConversionTag(target_vec, value.ty)) |cvtag| {
+                                                    const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                                    conv_ops[0] = .{ .id = value.id };
+                                                    const conv_id = try self.emitPureOp(cvtag, conv_ops, target_vec);
+                                                    value = .{ .ty = target_vec, .id = conv_id };
+                                                }
+                                            }
+                                        }
+                                    } else if (value.ty.isScalar() and !std.meta.eql(value.ty, sw_elem)) {
+                                        if (self.getConversionTag(sw_elem, value.ty)) |cvtag| {
+                                            const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                            conv_ops[0] = .{ .id = value.id };
+                                            const conv_id = try self.emitPureOp(cvtag, conv_ops, sw_elem);
+                                            value = .{ .ty = sw_elem, .id = conv_id };
+                                        }
+                                    }
+
                                     // 3b. Determine operation before splat decision
                                     const assign_op = node.data.op orelse .mul_assign;
 
