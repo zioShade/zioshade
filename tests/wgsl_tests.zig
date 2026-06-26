@@ -6369,3 +6369,69 @@ test "wgsl: binary matrix divided by an int scalar converts then scales (#170)" 
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "binary-matrix-div-int-scalar");
 }
+
+// #170: component-wise `mat + scalar` / `mat - scalar` / `scalar - mat` / `scalar
+// / mat` apply the scalar to every matrix component (valid GLSL), but SPIR-V has
+// no matrix OpFAdd/OpFSub/OpFDiv with a scalar operand — glslpp emitted those on a
+// (matrix, scalar) pair = invalid SPIR-V and naga-rejected WGSL. Splat the scalar
+// into a matrix and reuse the column-wise matrix-matrix op. (`mat * scalar` and
+// `mat / scalar` are the OpMatrixTimesScalar family, handled separately.)
+test "wgsl: matrix plus a scalar splats and adds component-wise (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 m = mat2(2.0);
+        \\    mat2 r = m + t;
+        \\    o = vec4(r[0], r[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "matrix-plus-scalar");
+}
+
+test "wgsl: scalar minus a matrix splats and subtracts component-wise (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 m = mat2(2.0);
+        \\    mat2 r = t - m;     // splat t into a matrix, then mat - mat
+        \\    o = vec4(r[0], r[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "scalar-minus-matrix");
+}
+
+test "wgsl: scalar divided by a matrix splats and divides component-wise (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 m = mat2(2.0);
+        \\    mat2 r = t / m;     // splat t, then mat / mat (column-wise OpFDiv)
+        \\    o = vec4(r[0], r[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "scalar-div-matrix");
+}
+
+test "wgsl: matrix plus an int scalar converts then splats (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in int n;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    mat2 m = mat2(2.0);
+        \\    mat2 r = m + n;     // int → float, splat, column-wise add
+        \\    o = vec4(r[0], r[1]);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "matrix-plus-int-scalar");
+}
