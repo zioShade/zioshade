@@ -274,11 +274,12 @@ test "strict: multi-dim spec-const-sized local array is an honest error (not sil
     try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
 }
 
-test "strict: const-int-sized local array is an honest error (not an invalid runtime array)" {
-    // `const int M = 4; int a[M];` — glslpp does not fold a plain `const int` name
-    // to its literal, so it cannot emit a valid sized array. Keeping the size_name
-    // would make codegen emit a Function-storage OpTypeRuntimeArray, which is
-    // invalid Vulkan SPIR-V (VUID-04680). Fail loud instead of emitting it.
+test "strict: a const-int-sized local array folds the const to its size (#170)" {
+    // `const int M = 4; int a[M];` — glslpp now folds a plain `const int` global
+    // name to its initializer's value, so the local array gets a concrete size 4
+    // and compiles to valid SPIR-V (no Function-storage OpTypeRuntimeArray). This
+    // is valid GLSL that was previously honest-errored; the array-size resolver now
+    // resolves const-global names (not just literals / gl_WorkGroupSize).
     const alloc = std.testing.allocator;
     const src =
         \\#version 450
@@ -287,6 +288,29 @@ test "strict: const-int-sized local array is an honest error (not an invalid run
         \\layout(set = 0, binding = 0) buffer B { int v[]; };
         \\void main() {
         \\    int a[M];
+        \\    a[0] = 3;
+        \\    v[0] = a[0];
+        \\}
+    ;
+    // Strict mode fails loud on any false-positive; a clean return means the
+    // const-int-sized array resolved and compiled without one.
+    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    _ = spirv;
+}
+
+test "strict: a self-referential const initializer honest-errors, not stack-overflow (#170)" {
+    // `const int N = N;` (and mutual cycles) used as an array size must fail loud,
+    // not recurse forever folding the const into itself. The evalConstInt const-
+    // global resolution is depth-guarded so a circular initializer yields an honest
+    // SemanticFailed instead of crashing the compiler.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\const int N = N;
+        \\layout(set = 0, binding = 0) buffer B { int v[]; };
+        \\void main() {
+        \\    int a[N];
         \\    a[0] = 3;
         \\    v[0] = a[0];
         \\}

@@ -6533,3 +6533,30 @@ test "wgsl: comma operator in an initializer yields the last operand (#170)" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "comma-operator-initializer");
 }
+
+// #170: a const-qualified integer global used as an array size (`const int N = 3;
+// float a[N];`) is valid, common GLSL, but glslpp's array-size resolver only
+// handled integer literals and gl_WorkGroupSize (and early-returned for any
+// non-compute stage that has no local_size) — a const-global name failed with
+// SemanticFailed, wrongly rejecting valid GLSL. Resolve the name to its const
+// global and fold its initializer.
+test "wgsl: a const-int global used as an array size is resolved (#170)" {
+    // A dynamic index keeps the array materialized (constant indices fold it
+    // away), so the resolved size `3` is observable in the emitted type.
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) flat in int i;
+        \\layout(location = 0) out vec4 o;
+        \\const int N = 3;
+        \\void main() {
+        \\    float a[N];
+        \\    a[0] = 1.0;
+        \\    a[1] = 2.0;
+        \\    a[2] = 3.0;
+        \\    o = vec4(a[i], a[(i + 1) % N], 0.0, 1.0);
+        \\}
+    );
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "array<f32, 3>"); // size resolved to 3
+    try nagaValidateOrSkip(wgsl, "const-global-array-size");
+}
