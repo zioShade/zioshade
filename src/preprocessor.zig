@@ -8,6 +8,13 @@ pub const Preprocessor = struct {
     if_stack: std.ArrayListUnmanaged(IfState),
     output: std.ArrayListUnmanaged(lexer.Token),
     source: [:0]const u8 = "",
+    /// Length of the TOP-LEVEL source passed to process(). `source` is swapped to
+    /// the included file's text during #include processing, so synthetic-token
+    /// offsets (start = top_source_len + extra_strings offset) and getTokenText's
+    /// synthetic threshold must key off this FIXED base — not `source.len`, which
+    /// changes mid-run — so an offset stays valid in the parserSource() buffer
+    /// (top-level source ++ extra_strings).
+    top_source_len: usize = 0,
     version: u32 = 430,
     is_essl: bool = false,
     expanding: std.ArrayListUnmanaged([]const u8),
@@ -98,12 +105,48 @@ pub const Preprocessor = struct {
     }
 
     fn getTokenText(self: *const Preprocessor, tok: lexer.Token) []const u8 {
-        if (tok.start >= self.source.len) {
-            // Synthetic token — text is in extra_strings
-            const start = tok.start - self.source.len;
+        if (tok.start >= self.top_source_len) {
+            // Synthetic token — text is in extra_strings. Keyed off top_source_len
+            // (the FIXED top-level source length), NOT self.source.len, which is
+            // swapped to the included file's length during #include processing — so
+            // a synthetic offset stays valid even when produced inside an include.
+            const start = tok.start - self.top_source_len;
             return self.extra_strings.items[start..][0..tok.len];
         }
         return self.source[tok.start..tok.start + tok.len];
+    }
+
+    /// Append `text` to extra_strings and return the synthetic `start` offset for a
+    /// token whose text is `text`. getTokenText reads it back (start >= source.len),
+    /// and parserSource() appends extra_strings to the source the parser reads, so
+    /// the same offset resolves downstream. Used by every synthetic-token producer
+    /// (## paste, # stringify, __LINE__, __VERSION__) so the generated text is
+    /// addressable instead of pointing into the original source at offset 0.
+    fn internText(self: *Preprocessor, text: []const u8) !u32 {
+        const off = self.extra_strings.items.len;
+        try self.extra_strings.appendSlice(self.alloc, text);
+        // Key off top_source_len (FIXED), not self.source.len (swapped during
+        // #include) — so the offset resolves in parserSource()'s buffer
+        // (top-level source ++ extra_strings) and can never exceed its length
+        // (no OOB) regardless of include nesting/size.
+        return @intCast(self.top_source_len + off);
+    }
+
+    /// The source string the PARSER should read: the original source with the
+    /// synthetic-text buffer appended, so a synthetic token's `start`
+    /// (= top_source_len + offset) resolves to `parser_source[start..]`. `original`
+    /// MUST be the same top-level source passed to process() (so original.len ==
+    /// top_source_len and the offsets line up). Returns the
+    /// original unchanged when no synthetic text was produced. The caller owns the
+    /// returned buffer when it differs from `original` (free it after the AST — which
+    /// holds slices into it — is no longer used, and after the error context is read
+    /// / stabilized).
+    pub fn parserSource(self: *Preprocessor, original: [:0]const u8, alloc: std.mem.Allocator) ![:0]const u8 {
+        if (self.extra_strings.items.len == 0) return original;
+        const buf = try alloc.allocSentinel(u8, original.len + self.extra_strings.items.len, 0);
+        @memcpy(buf[0..original.len], original);
+        @memcpy(buf[original.len..], self.extra_strings.items);
+        return buf;
     }
 
     fn skipToEndOfLine(self: *Preprocessor, tokens: []const lexer.Token, index: *usize) void {
@@ -509,10 +552,11 @@ pub const Preprocessor = struct {
             const line_num = identifier_tok.loc.line;
             var buf: [20]u8 = undefined;
             const line_str = try std.fmt.bufPrintZ(&buf, "{}", .{line_num});
+            const ls_start = try self.internText(line_str);
             try self.output.append(self.alloc, .{
                 .tag = .int_literal,
                 .loc = identifier_tok.loc,
-                .start = 0,
+                .start = ls_start,
                 .len = @intCast(line_str.len),
             });
             return;
@@ -534,10 +578,11 @@ pub const Preprocessor = struct {
             index.* += 1;
             var buf: [20]u8 = undefined;
             const ver_str = try std.fmt.bufPrintZ(&buf, "{}", .{self.version});
+            const vs_start = try self.internText(ver_str);
             try self.output.append(self.alloc, .{
                 .tag = .int_literal,
                 .loc = identifier_tok.loc,
-                .start = 0,
+                .start = vs_start,
                 .len = @intCast(ver_str.len),
             });
             return;
@@ -704,13 +749,16 @@ pub const Preprocessor = struct {
                 const right_tok = f.body[i + 2];
                 var right_buf: [256]u8 = undefined;
                 const right_text = self.resolveParamText(f.params, args, right_tok, &right_buf);
-                // Concatenate and emit as identifier
+                // Concatenate and emit as identifier, with the pasted text interned
+                // so getTokenText / the parser source resolve it (a start of 0 would
+                // instead read the first bytes of the source).
                 const pasted = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ left_text, right_text });
                 defer self.alloc.free(pasted);
+                const pasted_start = try self.internText(pasted);
                 try self.output.append(self.alloc, .{
                     .tag = .identifier,
                     .loc = tok.loc,
-                    .start = 0,
+                    .start = pasted_start,
                     .len = @intCast(pasted.len),
                 });
                 i += 3;
@@ -738,13 +786,14 @@ pub const Preprocessor = struct {
                                     len += arg_text.len;
                                 }
                                 buf[len] = '"'; len += 1;
-                                // Store in extra_strings so getTokenText works
-                                const str_start = self.extra_strings.items.len;
-                                try self.extra_strings.appendSlice(self.alloc, buf[0..len]);
+                                // Intern so getTokenText AND the parser resolve it
+                                // (offset keyed off top_source_len, not the swapped
+                                // self.source.len — correct inside #include too).
+                                const str_off = try self.internText(buf[0..len]);
                                 try self.output.append(self.alloc, .{
                                     .tag = .string_literal,
                                     .loc = tok.loc,
-                                    .start = @intCast(self.source.len + str_start),
+                                    .start = str_off,
                                     .len = @intCast(len),
                                 });
                             }
@@ -879,6 +928,10 @@ pub const Preprocessor = struct {
 
     pub fn process(self: *Preprocessor, source: [:0]const u8, tokens: []const lexer.Token) ![]const lexer.Token {
         self.source = source;
+        // Record the FIXED top-level source length before any #include swaps
+        // self.source. internText/getTokenText key synthetic-token offsets off this
+        // so they resolve in parserSource()'s buffer (top-level source ++ extra).
+        self.top_source_len = source.len;
         self.output.clearRetainingCapacity();
         self.if_stack.clearRetainingCapacity();
 

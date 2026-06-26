@@ -355,13 +355,23 @@ pub fn compileToSPIRV(
         return error.PreprocessFailed;
     }
 
-    var root_node = parser.parse(alloc, actual_source, pp_tokens) catch {
+    // The parser reads token text by offset from the source; synthetic preprocessor
+    // tokens (## paste, # stringify, __LINE__, __VERSION__) carry offsets past the
+    // original source into the synthetic-text buffer, so the parser must read the
+    // extended source. Returns actual_source unchanged when no synthetic text exists.
+    const parse_source = pp.parserSource(actual_source, alloc) catch actual_source;
+    defer if (parse_source.ptr != actual_source.ptr) alloc.free(parse_source);
+
+    var root_node = parser.parse(alloc, parse_source, pp_tokens) catch {
+        // Error context may slice into parse_source (freed on return) — stabilize.
+        semantic.stabilizeErrorContext();
         last_compile_detail = .parse_failed;
         return error.ParseFailed;
     };
     defer parser.freeTree(alloc, &root_node);
 
     var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = true, .fail_on_recorded_errors = true, .stage = options.stage }) catch {
+        semantic.stabilizeErrorContext();
         last_compile_detail = .semantic_failed;
         return error.SemanticFailed;
     };
@@ -394,6 +404,7 @@ pub fn compileToSPIRV(
     };
     const default_layout: codegen.LayoutKind = if (pp.has_ext_scalar_block_layout) .scalar else .std140;
     return codegen.generate(alloc, &module, stage, spirv_ver, pp.version, pp.is_essl, default_layout) catch {
+        semantic.stabilizeErrorContext();
         last_compile_detail = .codegen_failed;
         return error.CodegenFailed;
     };
@@ -527,13 +538,22 @@ pub fn compileToSPIRVNoOpt(
         return error.PreprocessFailed;
     }
 
-    var root_node = parser.parse(alloc, source, pp_tokens) catch {
+    // Read the extended source so synthetic preprocessor tokens (## paste, # stringify,
+    // __LINE__, __VERSION__), whose offsets point past the original source into the
+    // synthetic-text buffer, resolve. Returns source unchanged when none were produced.
+    const parse_source = pp.parserSource(source, alloc) catch source;
+    defer if (parse_source.ptr != source.ptr) alloc.free(parse_source);
+
+    var root_node = parser.parse(alloc, parse_source, pp_tokens) catch {
+        // Error context may slice into parse_source (freed on return) — stabilize.
+        semantic.stabilizeErrorContext();
         last_compile_detail = .parse_failed;
         return error.ParseFailed;
     };
     defer parser.freeTree(alloc, &root_node);
 
     var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = true, .fail_on_recorded_errors = true, .stage = options.stage }) catch {
+        semantic.stabilizeErrorContext();
         last_compile_detail = .semantic_failed;
         return error.SemanticFailed;
     };
@@ -566,6 +586,7 @@ pub fn compileToSPIRVNoOpt(
     };
     const default_layout: codegen.LayoutKind = if (pp.has_ext_scalar_block_layout) .scalar else .std140;
     return codegen.generateNoOpt(alloc, &module, stage, spirv_ver, pp.version, pp.is_essl, default_layout) catch {
+        semantic.stabilizeErrorContext();
         last_compile_detail = .codegen_failed;
         return error.CodegenFailed;
     };
@@ -599,13 +620,22 @@ pub fn compileToSPIRVStrict(
         return error.PreprocessFailed;
     }
 
-    var root_node = parser.parse(alloc, source, pp_tokens) catch {
+    // Read the extended source so synthetic preprocessor tokens (## paste, # stringify,
+    // __LINE__, __VERSION__), whose offsets point past the original source into the
+    // synthetic-text buffer, resolve. Returns source unchanged when none were produced.
+    const parse_source = pp.parserSource(source, alloc) catch source;
+    defer if (parse_source.ptr != source.ptr) alloc.free(parse_source);
+
+    var root_node = parser.parse(alloc, parse_source, pp_tokens) catch {
+        // Error context may slice into parse_source (freed on return) — stabilize.
+        semantic.stabilizeErrorContext();
         last_compile_detail = .parse_failed;
         return error.ParseFailed;
     };
     defer parser.freeTree(alloc, &root_node);
 
     var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = false, .stage = options.stage }) catch {
+        semantic.stabilizeErrorContext();
         last_compile_detail = .semantic_failed;
         return error.SemanticFailed;
     };
