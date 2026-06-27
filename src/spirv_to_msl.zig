@@ -4790,8 +4790,12 @@ fn emitInstruction(
             // word[7]). MSL's `tex.gather(...)` takes no per-texel offset array,
             // so emitting a plain `.gather` here would SILENTLY DROP the offsets
             // (silent-wrong). Fail loudly instead; per-texel emulation (4 offset
-            // gathers) is a follow-up.
-            if (inst.words.len > 6 and (inst.words[6] & 0x20) != 0) {
+            // gathers) is a follow-up. Likewise textureGatherOffset's single
+            // ConstOffset (0x8) and any runtime Offset (0x10): the emit below
+            // carries no offset (the arrayed path hardcodes int2(0)), so
+            // honest-error on every offset-bearing operand (0x38 =
+            // ConstOffset|Offset|ConstOffsets) rather than silent-drop.
+            if (inst.words.len > 6 and (inst.words[6] & 0x38) != 0) {
                 return error.UnsupportedImageOperands;
             }
             // MSL: tex.gather(samp, coord, component)

@@ -840,9 +840,10 @@ test "wgsl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent
 // argument — `textureGather(component, t, s, coords, offset)` — so the offset
 // must be emitted. Dropping it (the previous behavior) silently gathers the
 // WRONG texels (silent-wrong): the call type-checks and naga accepts it, but the
-// sampled neighborhood is shifted. glslpp's own frontend rejects
-// `textureGatherOffset`, so this is compiled through glslang (external SPIR-V),
-// mirroring the boolean-logic / uaddCarry #170 fixes. (#170)
+// sampled neighborhood is shifted. glslpp's frontend now compiles
+// `textureGatherOffset` directly (the builtin is registered and lowered to
+// OpImageGather + ConstOffset), so this exercises the FULL glslpp pipeline
+// frontend→WGSL end-to-end. (#170)
 test "wgsl: textureGatherOffset (single ConstOffset) keeps the offset, not a silent plain gather" {
     const source: [:0]const u8 =
         \\#version 450
@@ -852,7 +853,7 @@ test "wgsl: textureGatherOffset (single ConstOffset) keeps the offset, not a sil
         \\  o = textureGatherOffset(s, vec2(0.5), ivec2(3, 4), 1);
         \\}
     ;
-    const spirv = compileToSpirv("gather_offset", source) catch return error.SkipZigTest;
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
 
     const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
@@ -883,7 +884,8 @@ test "wgsl: textureGatherOffset on sampler2DArray keeps offset after array_index
         \\  o = textureGatherOffset(s, vUV, ivec2(3, 4), 1);
         \\}
     ;
-    const spirv = compileToSpirv("gather_offset_arr", source) catch return error.SkipZigTest;
+    // glslpp's frontend now compiles textureGatherOffset directly (full pipeline).
+    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
 
     const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
