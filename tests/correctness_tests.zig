@@ -660,6 +660,39 @@ test "frontend: separate sampler2DShadow with textureLod emits explicit-lod dept
     try std.testing.expect(spirvHasOpcode(spv, 90)); // OpImageSampleDrefExplicitLod
 }
 
+// #170: textureProjLod (projective sample with an EXPLICIT lod) was wrongly
+// rejected (honest-error) — it was missing from isTextureBuiltin. It IS faithfully
+// representable: OpImageSampleProjExplicitLod with the Lod image operand. Emitting
+// the implicit-lod proj op (image_sample_proj) would silently sample the wrong mip.
+test "frontend: textureProjLod emits OpImageSampleProjExplicitLod with a Lod operand" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjLod(tex, c, 1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 92)); // OpImageSampleProjExplicitLod
+    // Must NOT degrade to the implicit-lod proj op (would drop the explicit LOD).
+    try std.testing.expect(!spirvHasOpcode(spv, 91)); // OpImageSampleProjImplicitLod
+}
+
+// #170: the SHADOW form (textureProjLod(sampler2DShadow, …)) has no lowering yet —
+// routing it to a NON-proj dref tag would drop the projection (silent-wrong), so it
+// must honest-error rather than mis-compile.
+test "frontend: textureProjLod on a shadow sampler honest-errors (no silent-wrong)" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow sh;
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out float o;
+        \\void main(){ o = textureProjLod(sh, c, 1.0); }
+    , .{ .stage = .fragment }));
+}
+
 // #170: textureOffset(sampler2DShadow, coord, const ivec offset) — the 3-arg form
 // (no bias) — emitted INVALID SPIR-V at rc=0. It routes to OpImageSampleDrefImplicitLod,
 // whose 3-operand codegen path assumes a FLOAT Bias operand (it can't tell the
