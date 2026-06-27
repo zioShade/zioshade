@@ -2308,6 +2308,26 @@ test "T31.4: textureProj maps to Sample with divided coord" {
     try assertContains(hlsl, "discard");
 }
 
+// #170: textureProjLod → SampleLevel with the perspective divide. The divisor is
+// the coord's LAST component — .z for a vec3 coord (float3 has no .w; hardcoding
+// .w was an out-of-range swizzle = invalid HLSL).
+test "T31.5: textureProjLod(sampler2D, vec3) divides by .z (not .w) + SampleLevel" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec3 c;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = textureProjLod(tex, c, 1.0); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "SampleLevel");
+    try assertContains(hlsl, ".xy / ");
+    try assertContains(hlsl, ".z");
+    // Must not emit the out-of-range .w swizzle for the vec3 coord.
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "c.w") == null);
+}
+
 test "T31.5: textureGather maps to Gather" {
     const source =
         \\#version 430

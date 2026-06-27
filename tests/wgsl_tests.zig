@@ -2856,6 +2856,42 @@ test "wgsl: textureProj(sampler3D, vec4) lowers to coord.xyz / coord.w" {
     try nagaValidateOrSkip(wgsl, "textureProj-3d-vec4");
 }
 
+// #170: textureProjLod (projective sample + EXPLICIT lod) was wrongly rejected
+// (honest-error) even though WGSL CAN represent it: perspective-divide the coord
+// then textureSampleLevel(t, s, coord/divisor, lod). The frontend now emits
+// OpImageSampleProjExplicitLod with the Lod operand; the WGSL backend lowers it.
+test "wgsl: textureProjLod(sampler2D, vec4) lowers to textureSampleLevel(coord.xy / .w, lod)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjLod(tex, vec4(gl_FragCoord.xy, 0.0, 1.0), 2.0); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(");
+    try assertContains(wgsl, ".xy / ");
+    try assertContains(wgsl, ".w");
+    try nagaValidateOrSkip(wgsl, "textureProjLod-2d-vec4");
+}
+
+test "wgsl: textureProjLod(sampler2D, vec3) divides by the LAST component (.z)" {
+    // The vec3 form's divisor is the LAST component (.z), not .w — same
+    // dimension-aware rule as textureProj.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjLod(tex, vec3(gl_FragCoord.xy, 1.0), 1.0); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(");
+    try assertContains(wgsl, ".xy / ");
+    try assertContains(wgsl, ".z");
+    try nagaValidateOrSkip(wgsl, "textureProjLod-2d-vec3");
+}
+
 test "wgsl: projective shadow (sampler2DShadow) lowers to a projective compare" {
     // Projective depth-compare HAS a faithful lowering: textureProj divides both
     // the coordinate and the depth reference by the coordinate's last component,

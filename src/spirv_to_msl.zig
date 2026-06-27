@@ -93,6 +93,17 @@ fn typeRank(m: *const ParsedModule, type_id: u32) u32 {
     return 1;
 }
 
+/// The perspective-divide component for a projective coordinate VALUE: the
+/// coordinate's LAST component. textureProj(sampler2D, vec3) divides .xy by .z;
+/// the vec4 form divides by .w. Hardcoding `.w` produced an out-of-range swizzle
+/// (float3 has no .w) for the vec3 form = invalid MSL. Resolves the coord value's
+/// result type (`words[1]`) and reads its component count. (#170)
+fn projDivisorSwizzle(m: *const ParsedModule, coord_value_id: u32) []const u8 {
+    const vdef = getDef(m, coord_value_id) orelse return ".w";
+    if (vdef.words.len < 2) return ".w";
+    return if (typeRank(m, vdef.words[1]) == 3) ".z" else ".w";
+}
+
 /// True when the image VALUE `id` resolves to an Arrayed OpTypeImage (2D array,
 /// cube array, 2DMS array). Used to choose `get_array_size()` (layer count) vs
 /// `get_depth()` (volume depth) for the third component of an image-size query.
@@ -4711,40 +4722,45 @@ fn emitInstruction(
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
-            // Projected sample: divide xy by w
-            try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}.w);\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord});
+            // Projected sample: divide xy by the coord's last component (.z/.w)
+            const dvs = projDivisorSwizzle(m, inst.words[4]);
+            try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs});
         },
         .ImageSampleProjDrefImplicitLod => {
-            // Projected shadow: divide xy by w, compare depth
+            // Projected shadow: divide xy by the coord's last component, compare depth
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}.w, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dref});
+            const dvs = projDivisorSwizzle(m, inst.words[4]);
+            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}{s}, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, dref});
         },
         .ImageSampleProjDrefExplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}.w, {s}, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dref});
+            const dvs = projDivisorSwizzle(m, inst.words[4]);
+            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}{s}, {s}, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, dref});
         },
         .ImageSampleProjExplicitLod => {
-            // Projected explicit LOD: sample with manual projection + lod
+            // Projected explicit LOD: sample with manual projection + lod. Divisor
+            // is the coord's last component (.z for vec3, .w for vec4) — not always .w.
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
+            const dvs = projDivisorSwizzle(m, inst.words[4]);
             if (inst.words.len > 5) {
                 const mask = inst.words[5];
                 var off: usize = 6;
                 if (mask & 0x1 != 0) off += 1;
                 if (mask & 0x2 != 0 and off < inst.words.len) {
-                    try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}.w, level({s}));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, names.get(inst.words[off]) orelse "0"});
+                    try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, level({s}));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, names.get(inst.words[off]) orelse "0"});
                 } else {
-                    try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}.w, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord});
+                    try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs});
                 }
             } else {
-                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}.w, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord});
+                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs});
             }
         },
         .ImageSampleExplicitLod => {

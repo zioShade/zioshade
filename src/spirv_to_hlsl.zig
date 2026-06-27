@@ -4143,27 +4143,40 @@ fn emitInstruction(
             });
         },
         .ImageSampleProjExplicitLod => {
-            // Projected explicit LOD: SampleLevel with manual projection
+            // Projected explicit LOD: SampleLevel with manual projection. The
+            // perspective divisor is the coordinate's LAST component — .z for a
+            // vec3 coord, .w for vec4 — NOT always .w (hardcoding .w produced an
+            // out-of-range swizzle for the vec3 form). (#170)
             const rt = try hlslType(module, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";
             const parts = splitPair(si);
+            const coord_type = getTypeOf(module, inst.words[4]);
+            const last_swizzle: []const u8 = if (coord_type) |ct| blk: {
+                const ct_inst = getDef(module, ct);
+                if (ct_inst) |ci| {
+                    if (ci.op == .TypeVector and ci.words.len > 3) {
+                        break :blk switch (ci.words[3]) { 3 => ".z", 4 => ".w", else => ".z" };
+                    }
+                }
+                break :blk ".z";
+            } else ".z";
             if (inst.words.len > 5) {
                 const mask = inst.words[5];
                 var off: usize = 6;
                 if (mask & 0x1 != 0) off += 1;
                 if (mask & 0x2 != 0 and off < inst.words.len) {
-                    try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}.w, {s});\n", .{
-                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, names.get(inst.words[off]) orelse "0",
+                    try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}{s}, {s});\n", .{
+                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, names.get(inst.words[off]) orelse "0",
                     });
                 } else {
-                    try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}.w, 0);\n", .{
-                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord,
+                    try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}{s}, 0);\n", .{
+                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle,
                     });
                 }
             } else {
-                try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}.w, 0);\n", .{
-                    rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord,
+                try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}{s}, 0);\n", .{
+                    rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle,
                 });
             }
         },
