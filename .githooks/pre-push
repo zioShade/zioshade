@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Team pre-push hook: run CI locally before pushing, via polyglot-local
+# (faithful GitHub Actions execution of ci.yml — complements `just ci`).
+# Enable once per clone:  just hooks   (sets core.hooksPath=.githooks)
+# Bypass a single push:   git push --no-verify
+set -uo pipefail
+
+if ! command -v polyglot-local >/dev/null 2>&1; then
+  echo "pre-push: polyglot-local not installed; skipping local CI (install it to gate pushes)." >&2
+  exit 0
+fi
+
+root="$(git rev-parse --show-toplevel)"
+wf="$root/.github/workflows/ci.yml"
+[ -f "$wf" ] || exit 0
+
+echo "pre-push: running CI locally (polyglot-local)…  bypass with: git push --no-verify" >&2
+polyglot-local run --workflow "$wf" --repo "$root" --event push
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo "pre-push: local CI failed (exit $status) — push blocked. Bypass: git push --no-verify" >&2
+  exit 1
+fi

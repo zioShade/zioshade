@@ -243,3 +243,13 @@ Dual-licensed under either of
 at your option.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion shall be dual-licensed as above without additional terms.
+
+## Local CI (pre-push)
+
+Run this repo's CI **locally before each push** with [polyglot-local](https://github.com/deblasis/polyglot.tech) — a self-hosted, `act`-free GitHub Actions runner that executes `ci.yml` faithfully (the Linux matrix legs run locally; macOS/Windows legs offload). Catches failures before they spend GitHub Actions minutes.
+
+```sh
+just hooks   # one-time: enable the committed pre-push hook
+```
+
+No-ops if `polyglot-local` isn't installed; bypass a single push with `git push --no-verify`.

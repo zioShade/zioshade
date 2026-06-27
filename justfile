@@ -175,3 +175,8 @@ check-zig:
 summary:
     @echo "Unit tests:" && {{zig}} build test --summary all 2>&1 | grep "passed\|failed\|leaked" | head -1
     @echo "HLSL tests:" && {{zig}} build test-hlsl --summary all 2>&1 | grep "passed" | head -1
+
+# enable the committed pre-push hook (faithful local CI before push, via polyglot-local)
+hooks:
+    git config core.hooksPath .githooks
+    @echo "core.hooksPath -> .githooks (needs 'polyglot-local' on PATH; bypass a push with --no-verify)"
