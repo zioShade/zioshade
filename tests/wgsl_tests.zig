@@ -1554,8 +1554,10 @@ test "wgsl: an opcode the Op enum doesn't name fails loud, not a @tagName panic 
 // {result, carry|borrow} struct that is consumed only by OpCompositeExtract. They
 // have no struct-returning WGSL builtin, but each member IS representable: member 0
 // is the wrapping add/sub (WGSL u32 arithmetic wraps, matching SPIR-V), member 1 is
-// the carry/borrow recovered with `select`. glslpp's own frontend rejects these, so
-// glslang is the oracle. Previously honest-errored (error.UnsupportedOp).
+// the carry/borrow recovered with `select`. These feed glslang's struct-result
+// SPIR-V (OpIAddCarry) to exercise the WGSL BACK-END's struct-member recovery —
+// glslpp's own frontend now EMULATES these with core ops (add + ULessThan + select)
+// rather than emitting OpIAddCarry, covered by the full-pipeline test below.
 test "wgsl: scalar uaddCarry lowers to a naga-valid select idiom (#170)" {
     const spirv = try compileToSpirv("uaddcarry_scalar",
         \\#version 450
@@ -1631,6 +1633,23 @@ test "wgsl: vector usubBorrow lowers componentwise (naga-valid) (#170)" {
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "select(") != null);
     try nagaValidateOrSkip(wgsl, "usubborrow-vec");
+}
+
+// #170: the FULL glslpp pipeline (frontend emulation → WGSL) for uaddCarry, with
+// the carry written DIRECTLY to an SSBO member out-parameter (`b.c`, not a temp).
+// Exercises analyzeLValue-on-SSBO-member for the store, the core-op emulation
+// (add + ULessThan + select), and naga validity end-to-end.
+test "wgsl: uaddCarry full pipeline with SSBO-member out-param is naga-valid (#170)" {
+    const wgsl = compileCompToWgsl(
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(std430, binding = 0) buffer B { uint a, b, s, c; };
+        \\void main() { s = uaddCarry(a, b, c); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "select(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, " + ") != null);
+    try nagaValidateOrSkip(wgsl, "uaddcarry-ssbo-fullpipe");
 }
 
 test "wgsl: unmapped input built-in (gl_PointCoord) errors honestly" {

@@ -7593,6 +7593,61 @@ const Analyzer = struct {
                             return .{ .ty = result_ty, .id = result_id };
                         }
                         return .{ .ty = result_ty, .id = result_id };
+                    } else if (std.mem.eql(u8, node.data.name, "uaddCarry") or std.mem.eql(u8, node.data.name, "usubBorrow")) {
+                        // #170: extended-arithmetic add/sub-with-carry, emulated with
+                        // core ops (no struct-result OpIAddCarry/OpISubBorrow infra):
+                        //   uaddCarry(a, b, out carry): sum = a + b (wraps);
+                        //     carry = (sum < a) ? 1u : 0u  (unsigned compare detects
+                        //     the 2^32 overflow); store carry; RETURN sum.
+                        //   usubBorrow(a, b, out borrow): diff = a - b (wraps);
+                        //     borrow = (a < b) ? 1u : 0u; store borrow; RETURN diff.
+                        // Component-wise for uint AND uvecN (all ops are vector-aware).
+                        const is_add = std.mem.eql(u8, node.data.name, "uaddCarry");
+                        if (arg_tids.items.len < 3) {
+                            last_error_ctx = "extended-arith-missing-out-param";
+                            last_error_inner = node.data.name;
+                            last_error_line = node.loc.line;
+                            last_error_column = node.loc.column;
+                            return error.SemanticFailed;
+                        }
+                        const uty = arg_tids.items[0].ty; // uint / uvecN
+                        const a_id = arg_tids.items[0].id;
+                        const b_id = arg_tids.items[1].id;
+                        const bvec_ty: ast.Type = switch (uty.numComponents()) {
+                            2 => .bvec2,
+                            3 => .bvec3,
+                            4 => .bvec4,
+                            else => .bool,
+                        };
+                        // res = a (+|-) b. emitPureOp takes ownership of the operand
+                        // slice (frees it on a cache hit), so each must be heap-alloc'd.
+                        const res_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        res_ops[0] = .{ .id = a_id };
+                        res_ops[1] = .{ .id = b_id };
+                        const res_id = try self.emitPureOp(if (is_add) .add else .sub, res_ops, uty);
+                        // cmp: uaddCarry → (sum < a); usubBorrow → (a < b). UNSIGNED.
+                        const cmp_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        cmp_ops[0] = .{ .id = if (is_add) res_id else a_id };
+                        cmp_ops[1] = .{ .id = if (is_add) a_id else b_id };
+                        const cmp_id = try self.emitPureOp(.compare_ult, cmp_ops, bvec_ty);
+                        // carry/borrow = bool→uint (0 or 1), component-wise.
+                        const flag_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                        flag_ops[0] = .{ .id = cmp_id };
+                        const flag_id = try self.emitPureOp(.bool_to_uint, flag_ops, uty);
+                        // Store the carry/borrow to the out-parameter (arg 2, an lvalue).
+                        const out_lv = try self.analyzeLValue(node.data.children[2]);
+                        try self.emitStore(out_lv.id, flag_id);
+                        return .{ .ty = uty, .id = res_id };
+                    } else if (std.mem.eql(u8, node.data.name, "umulExtended") or std.mem.eql(u8, node.data.name, "imulExtended")) {
+                        // #170: the 64-bit product (msb,lsb out-params) needs 32x32→64
+                        // arithmetic glslpp cannot yet model (no 64-bit ints / struct-
+                        // result OpU/SMulExtended). Honest-error with a clear message
+                        // rather than the misleading "UndeclaredIdentifier".
+                        last_error_ctx = "extended-arith-mul-unsupported";
+                        last_error_inner = node.data.name;
+                        last_error_line = node.loc.line;
+                        last_error_column = node.loc.column;
+                        return error.SemanticFailed;
                     } else if (std.mem.eql(u8, node.data.name, "modf") or std.mem.eql(u8, node.data.name, "frexp")) {
                         // modf(x, ptr) → GLSL.std.450 Modf (#35): returns fractional, stores int via ptr
                         // frexp(x, ptr) → GLSL.std.450 Frexp (#51): returns mantissa, stores exp via ptr
@@ -9770,6 +9825,10 @@ const Analyzer = struct {
             "bitCount",
             "bitfieldReverse",
             "bitfieldInsert", "bitfieldExtract",
+            // Extended arithmetic (GL_ARB_gpu_shader5). uaddCarry/usubBorrow are
+            // emulated with core ops; umul/imulExtended need a 64-bit product and
+            // honest-error.
+            "uaddCarry", "usubBorrow", "umulExtended", "imulExtended",
             "imageSize", "imageLoad", "imageStore", "textureSize",
             "textureSamples", "imageSamples", "textureOffset", "textureLodOffset", "texelFetchOffset", "textureGrad", "textureGather", "textureGatherOffset", "textureGatherOffsets",
             "textureGradOffset", "textureProjLod", "textureProjGrad",
