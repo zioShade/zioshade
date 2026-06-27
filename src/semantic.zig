@@ -148,6 +148,17 @@ fn isUnsignedIntType(ty: ast.Type) bool {
     };
 }
 
+/// True for a SIGNED integer scalar/vector type. A right-shift `>>` of a signed
+/// operand is ARITHMETIC (sign-extending, OpShiftRightArithmetic); shifting an
+/// unsigned operand is LOGICAL (zero-fill). Emitting the logical shift for a
+/// signed value gives wrong results for negatives. (#170)
+fn isSignedIntType(ty: ast.Type) bool {
+    return switch (ty) {
+        .int, .ivec2, .ivec3, .ivec4, .int8, .int16, .i8vec2, .i8vec3, .i8vec4, .i16vec2, .i16vec3, .i16vec4 => true,
+        else => false,
+    };
+}
+
 pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
     return analyzeWithOptions(alloc, root, .{});
 }
@@ -4604,7 +4615,10 @@ const Analyzer = struct {
                         if (left.ty == .float and right.ty.isMatrix()) break :blk .scalar_mat_mul;
                         break :blk if (is_float) .fmul else .mul;
                     },
-                    .div => if (is_float) .fdiv else .div,
+                    // Unsigned integer division is OpUDiv (signed .div = OpSDiv gives
+                    // wrong quotients for operands >= 2^31). GLSL promotes mixed
+                    // int/uint to unsigned, so use is_ucmp (either operand unsigned).
+                    .div => if (is_float) .fdiv else if (is_ucmp) .udiv else .div,
                     .mod => blk: {
                         if (is_float) break :blk .fmod;
                         // Check if unsigned int type
@@ -4628,7 +4642,10 @@ const Analyzer = struct {
                     .bit_or => .bit_or,
                     .bit_xor => .bit_xor,
                     .lshift => .shift_left,
-                    .rshift => .shift_right,
+                    // `>>` is ARITHMETIC for a signed left operand (sign-extend),
+                    // LOGICAL for unsigned (zero-fill). Signedness is the VALUE being
+                    // shifted (left.ty), not the shift amount. Default logical.
+                    .rshift => if (isSignedIntType(left.ty)) .shift_right_arith else .shift_right,
                     else => .add,
                 };
 
