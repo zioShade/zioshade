@@ -159,6 +159,27 @@ fn isSignedIntType(ty: ast.Type) bool {
     };
 }
 
+/// The unsigned integer type of the same dimension/width (int→uint, ivecN→uvecN,
+/// and identity for an already-unsigned type). Used to promote a mixed int/uint
+/// min/max/clamp to UNSIGNED (GLSL's int→uint promotion). (#170)
+fn unsignedOf(ty: ast.Type) ast.Type {
+    return switch (ty) {
+        .int, .uint => .uint,
+        .ivec2, .uvec2 => .uvec2,
+        .ivec3, .uvec3 => .uvec3,
+        .ivec4, .uvec4 => .uvec4,
+        .int8, .uint8 => .uint8,
+        .int16, .uint16 => .uint16,
+        .i8vec2, .u8vec2 => .u8vec2,
+        .i8vec3, .u8vec3 => .u8vec3,
+        .i8vec4, .u8vec4 => .u8vec4,
+        .i16vec2, .u16vec2 => .u16vec2,
+        .i16vec3, .u16vec3 => .u16vec3,
+        .i16vec4, .u16vec4 => .u16vec4,
+        else => ty,
+    };
+}
+
 pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
     return analyzeWithOptions(alloc, root, .{});
 }
@@ -7740,6 +7761,67 @@ const Analyzer = struct {
                         // Cache for dedup
                         self.pure_op_cache.put(self.alloc, bc_key, result_id) catch {};
                         return .{ .ty = bitcast_ty, .id = result_id };
+                    } else if ((std.mem.eql(u8, node.data.name, "min") or std.mem.eql(u8, node.data.name, "max") or std.mem.eql(u8, node.data.name, "clamp")) and mixed_blk: {
+                        // Fires ONLY for a min/max/clamp with BOTH a signed and an
+                        // unsigned integer operand (pure-int and pure-uint go through
+                        // the generic path, which already picks S*/U* correctly).
+                        var any_u = false;
+                        var any_s = false;
+                        for (arg_tids.items) |t| {
+                            if (isUnsignedIntType(t.ty)) any_u = true;
+                            if (isSignedIntType(t.ty)) any_s = true;
+                        }
+                        break :mixed_blk any_u and any_s;
+                    }) {
+                        // #170: GLSL promotes a mixed int/uint min/max/clamp to
+                        // UNSIGNED, but result_ty defaulted to the first arg's type
+                        // (often int) → SMin/SMax/SClamp emitted with a uint operand.
+                        // That is valid SPIR-V but the WGSL back-end then emits
+                        // `max(i32, u32)` which naga REJECTS ("inconsistent type") —
+                        // a silent-wrong. Bitcast the signed operands to unsigned, use
+                        // the U-variant, and type the result unsigned (matching glslang).
+                        // The result dimension comes from the first arg (the genType;
+                        // GLSL lists min/max/clamp with the wide operand first).
+                        const uty = unsignedOf(arg_tids.items[0].ty);
+                        // (1) Reinterpret each SIGNED operand as its unsigned form.
+                        for (arg_tids.items) |*t| {
+                            if (isSignedIntType(t.ty)) {
+                                const ut = unsignedOf(t.ty);
+                                const bc_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                bc_ops[0] = .{ .id = t.id };
+                                const bc_id = try self.emitPureOp(.bitcast, bc_ops, ut);
+                                t.* = .{ .id = bc_id, .ty = ut };
+                            }
+                        }
+                        // (2) Splat SCALAR operands up to the vector dimension —
+                        // clamp(uvecN, uint, uint) / max(uvecN, uint) broadcast the
+                        // scalar edge, and GLSL.std.450 U{Min,Max,Clamp} require ALL
+                        // operands to share the result type (else invalid SPIR-V).
+                        if (uty.isVector()) {
+                            const ncomp = uty.numComponents();
+                            for (arg_tids.items) |*t| {
+                                if (!t.ty.isVector()) {
+                                    const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, ncomp);
+                                    for (cc_ops) |*op| op.* = .{ .id = t.id };
+                                    const vid = try self.emitPureOp(.composite_construct, cc_ops, uty);
+                                    t.* = .{ .id = vid, .ty = uty };
+                                }
+                            }
+                        }
+                        const u_glsl_id: u32 = if (std.mem.eql(u8, node.data.name, "min")) 38 // UMin
+                            else if (std.mem.eql(u8, node.data.name, "max")) 41 // UMax
+                            else 44; // UClamp
+                        const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
+                        operands[0] = .{ .literal_int = u_glsl_id };
+                        for (arg_tids.items, 1..) |t, i| operands[i] = .{ .id = t.id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .ext_inst,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = operands,
+                            .ty = uty,
+                        });
+                        return .{ .ty = uty, .id = result_id };
                     } else {
                         // Honest-error guard for the whole class of recognized-but-
                         // unlowerable builtins. A name reaches this generic

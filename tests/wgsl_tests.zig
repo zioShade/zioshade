@@ -1652,6 +1652,44 @@ test "wgsl: uaddCarry full pipeline with SSBO-member out-param is naga-valid (#1
     try nagaValidateOrSkip(wgsl, "uaddcarry-ssbo-fullpipe");
 }
 
+// #170: a mixed int/uint `max` (and min/clamp) previously emitted WGSL
+// `max(i32, u32)` — naga REJECTS it ("inconsistent type passed as argument #2").
+// GLSL promotes to unsigned, so the signed operand must be bitcast and the result
+// is unsigned: `max(bitcast<u32>(si), ui)`, which naga accepts.
+test "wgsl: mixed int/uint max is naga-valid (was an inconsistent-type reject) (#170)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(location=0) flat in int si;
+        \\layout(location=1) flat in uint ui;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(float(max(si, ui)), float(min(si, ui)), float(clamp(si, 0u, ui)), 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "mixed-int-uint-minmax");
+}
+
+// #170: a VECTOR-primary mixed-sign min/max/clamp with SCALAR edges
+// (`clamp(uvec3, int, int)`, `max(ivec2, uint)`) must promote BOTH the signedness
+// (bitcast) AND the scalar edges to the vector dimension — emitting a U-variant
+// with mismatched scalar/vector operands would be invalid SPIR-V. naga rejects any
+// malformed result, so passing validation confirms both promotions happened.
+test "wgsl: vector mixed-sign min/max/clamp with scalar edges is naga-valid (#170)" {
+    const wgsl = compileToWgsl(
+        \\#version 450
+        \\layout(location=0) flat in ivec3 iv;
+        \\layout(location=1) flat in uvec3 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\    uvec3 a = clamp(uv, 2, 9);          // uvecN x, scalar int edges
+        \\    uvec3 b = max(iv, 3u);              // ivecN x, scalar uint edge
+        \\    ivec3 c = min(iv, uvec3(5u));       // ivecN x, uvecN edge
+        \\    o = vec4(float(a.x + b.y) + float(c.z), 0.0, 0.0, 1.0);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "vector-mixed-sign-minmax-scalar-edges");
+}
+
 test "wgsl: unmapped input built-in (gl_PointCoord) errors honestly" {
     // gl_PointCoord has no WGSL @builtin. It must fail loud — previously it hit
     // an `else => \"position\"` fallback that fabricated a bogus
