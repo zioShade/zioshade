@@ -7105,12 +7105,25 @@ const Analyzer = struct {
                                 last_error_column = node.loc.column;
                                 return error.SemanticFailed;
                             }
+                            // textureProjLod (projective sample + explicit LOD) is
+                            // its own non-shadow op; the shadow variant
+                            // (OpImageSampleProjDrefExplicitLod) is not lowered — fail
+                            // loud rather than route to a NON-proj dref tag (which
+                            // would drop the projection = silent-wrong).
+                            const is_proj_lod = std.mem.eql(u8, node.data.name, "textureProjLod");
+                            if (is_proj_lod and is_shadow_sample) {
+                                last_error_ctx = "textureProjLod-shadow-unsupported";
+                                last_error_inner = "textureProjLod-shadow-unsupported";
+                                last_error_line = node.loc.line;
+                                last_error_column = node.loc.column;
+                                return error.SemanticFailed;
+                            }
                             // Shadow samplers use Dref instructions that return float
                             const tag: ir.Instruction.Tag = if (is_shadow_sample) (
                                 if (is_explicit_lod) .image_sample_dref_explicit_lod
                                 else if (is_proj) .image_sample_dref_proj
                                 else .image_sample_dref
-                            ) else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else if (is_tex_offset) .image_sample_offset else .image_sample;
+                            ) else if (is_proj_lod) .image_sample_proj_explicit_lod else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else if (is_tex_offset) .image_sample_offset else .image_sample;
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                             for (arg_tids.items, 0..) |tid, i| {
                                 operands[i] = .{ .id = tid.id };
@@ -9963,6 +9976,7 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "textureLod") or
             std.mem.eql(u8, name, "textureLodOffset") or
             std.mem.eql(u8, name, "textureProj") or
+            std.mem.eql(u8, name, "textureProjLod") or
             std.mem.eql(u8, name, "texelFetch") or
             std.mem.eql(u8, name, "texelFetchOffset") or
             std.mem.eql(u8, name, "textureOffset") or
@@ -11031,8 +11045,11 @@ test "semantic: tolerate mode continues past first statement error" {
 // correctly lowered to OpImageGather + ConstOffsets (see the gap/builtin-reg
 // tests). Its lowering is verified there; the remaining siblings stay guarded.
 
-test "semantic: textureProjLod errors instead of emitting malformed OpExtInst" {
-    // Still-unlowerable sibling of the former textureGatherOffsets bug class.
+test "semantic: textureProjLod lowers to image_sample_proj_explicit_lod (#170)" {
+    // textureProjLod IS faithfully representable: a projective sample with an
+    // explicit LOD → OpImageSampleProjExplicitLod. It used to honest-error (it was
+    // missing from isTextureBuiltin); now it must lower to the proj-explicit-lod
+    // op — NOT the implicit-lod proj op (which would silently drop the LOD).
     const source =
         \\#version 450
         \\layout(binding=0) uniform sampler2D s;
@@ -11043,8 +11060,16 @@ test "semantic: textureProjLod errors instead of emitting malformed OpExtInst" {
     defer testing.allocator.free(tokens);
     var root = try parser.parse(testing.allocator, source, tokens);
     defer parser.freeTree(testing.allocator, &root);
-    const result = analyze(testing.allocator, &root);
-    try testing.expectError(error.SemanticFailed, result);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+    var found = false;
+    for (module.functions) |func| {
+        for (func.body) |inst| {
+            try testing.expect(inst.tag != .image_sample_proj); // must not drop the LOD
+            if (inst.tag == .image_sample_proj_explicit_lod) found = true;
+        }
+    }
+    try testing.expect(found);
 }
 
 test "semantic: tolerate mode never emits a defaulted GLSL.std.450 ext_inst for an unlowerable builtin" {
@@ -11055,12 +11080,13 @@ test "semantic: tolerate mode never emits a defaulted GLSL.std.450 ext_inst for 
     // statement must be SKIPPED entirely, so NO `.ext_inst` instruction may
     // appear in the body. (A correct GLSL.std.450 call like sin() would still
     // emit one — this shader contains no such call, so any `.ext_inst` is the
-    // bug.) Uses textureProjLod, which is still unlowerable.
+    // bug.) Uses textureProjGrad, which is still unlowerable (textureProjLod is
+    // now lowered, so it no longer exercises the unlowerable-builtin path).
     const source =
         \\#version 450
         \\layout(binding=0) uniform sampler2D s;
         \\layout(location=0) out vec4 o;
-        \\void main(){ o = textureProjLod(s, vec3(0.5), 0.0); }
+        \\void main(){ o = textureProjGrad(s, vec3(0.5), vec2(0.0), vec2(0.0)); }
     ;
     const tokens = try lexer.tokenize(testing.allocator, source);
     defer testing.allocator.free(tokens);

@@ -317,6 +317,11 @@ pub const Instruction = struct {
         image_sample_explicit_lod,
         image_sample_grad,
         image_sample_proj,
+        // textureProjLod: projective sample with an EXPLICIT LOD →
+        // OpImageSampleProjExplicitLod with the Lod image operand. Operands:
+        // [sampled_image, coord, lod]. (image_sample_proj is implicit-LOD and
+        // would silently sample the wrong mip for textureProjLod.)
+        image_sample_proj_explicit_lod,
         image_sample_dref,
         image_sample_dref_explicit_lod,
         image_sample_dref_proj,

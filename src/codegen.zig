@@ -5407,6 +5407,22 @@ const Codegen = struct {
                 try self.emitWord(sampled_image_id);
                 try self.emitWord(coord_id);
             },
+            .image_sample_proj_explicit_lod => {
+                // textureProjLod → OpImageSampleProjExplicitLod with the Lod image
+                // operand (bit 1). Operands: [sampled_image, coord, lod].
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const lod_id = self.operandId(resolved, 2);
+                try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageSampleProjExplicitLod)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(2); // Image Operands Mask: Lod (bit 1)
+                try self.emitWord(lod_id);
+            },
             .image_sample_dref => {
                 // OpImageSampleDrefImplicitLod: result_type(float), result, sampled_image, coordinate_without_dref, Dref
                 // GLSL coord has Dref as last component; SPIR-V needs it separate
