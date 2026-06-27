@@ -392,6 +392,13 @@ pub const Instruction = struct {
         compare_gt,
         compare_lte,
         compare_gte,
+        // Unsigned integer relational ops → OpU{Less,Greater}Than[Equal]. GLSL
+        // comparisons / lessThan-family builtins on uint/uvecN MUST use these;
+        // the signed compare_lt/gt/... give wrong results for values >= 2^31.
+        compare_ult,
+        compare_ugt,
+        compare_ulte,
+        compare_ugte,
         compare_feq,
         compare_fneq,
         compare_flt,
