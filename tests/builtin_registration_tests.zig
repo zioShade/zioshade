@@ -796,3 +796,59 @@ test "textureGatherOffsets: valid const offsets still lowers to OpImageGather+Co
     try std.testing.expect(countOpcode(spv, OP_CONSTANT_COMPOSITE) >= 1);
     try std.testing.expect(hasCapability(spv, CAP_IMAGE_GATHER_EXTENDED));
 }
+
+// #170: uaddCarry/usubBorrow (GL_ARB_gpu_shader5) were wrongly rejected
+// ("UndeclaredIdentifier"). They now compile, emulated with core ops (no struct-
+// result OpIAddCarry infra): sum=a+b; carry=(sum<a)?1u:0u via OpIAdd(128) +
+// OpULessThan(176) + OpSelect(169), stored to the out-param. Works scalar + uvecN.
+const OP_IADD: u32 = 128;
+const OP_ISUB: u32 = 130;
+const OP_ULESSTHAN: u32 = 176;
+const OP_SELECT: u32 = 169;
+test "uaddCarry: emulated with IAdd + ULessThan + Select (no longer rejected); scalar + vector" {
+    for ([_][:0]const u8{
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430,binding=0) buffer B { uint a, b, s, c; };
+        \\void main(){ uint cc; s = uaddCarry(a, b, cc); c = cc; }
+        ,
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430,binding=0) buffer B { uvec4 a, b, s, c; };
+        \\void main(){ uvec4 cc; s = uaddCarry(a, b, cc); c = cc; }
+    }) |src| {
+        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute });
+        defer alloc.free(spv);
+        try std.testing.expect(countOpcode(spv, OP_IADD) >= 1); // sum = a + b
+        try std.testing.expect(countOpcode(spv, OP_ULESSTHAN) >= 1); // carry = sum < a (unsigned)
+        try std.testing.expect(countOpcode(spv, OP_SELECT) >= 1); // bool → 1u/0u
+    }
+}
+
+test "usubBorrow: emulated with ISub + ULessThan + Select" {
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430,binding=0) buffer B { uint a, b, d, bo; };
+        \\void main(){ uint bb; d = usubBorrow(a, b, bb); bo = bb; }
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    try std.testing.expect(countOpcode(spv, OP_ISUB) >= 1); // diff = a - b
+    try std.testing.expect(countOpcode(spv, OP_ULESSTHAN) >= 1); // borrow = a < b
+    try std.testing.expect(countOpcode(spv, OP_SELECT) >= 1);
+}
+
+test "umulExtended/imulExtended honest-error (64-bit product unsupported) — not a misleading UndeclaredIdentifier" {
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430,binding=0) buffer B { uint a, b, hi, lo; };
+        \\void main(){ umulExtended(a, b, hi, lo); }
+    , .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430,binding=0) buffer B { int a, b, hi, lo; };
+        \\void main(){ imulExtended(a, b, hi, lo); }
+    , .{ .stage = .compute }));
+}

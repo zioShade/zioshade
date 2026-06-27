@@ -4918,18 +4918,38 @@ const Codegen = struct {
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const cond_id = self.operandId(resolved, 0);
-                const one_id: u32 = switch (resolved.tag) {
+                const one_s: u32 = switch (resolved.tag) {
                     .bool_to_float => try self.emitFloatConstant(1.0),
                     .bool_to_int => try self.emitSignedIntConstant(1),
                     .bool_to_uint => try self.emitIntConstant(1),
                     else => return,
                 };
-                const zero_id: u32 = switch (resolved.tag) {
+                const zero_s: u32 = switch (resolved.tag) {
                     .bool_to_float => try self.emitFloatConstant(0.0),
                     .bool_to_int => try self.emitSignedIntConstant(0),
                     .bool_to_uint => try self.emitIntConstant(0),
                     else => return,
                 };
+                // For a VECTOR result (bvecN → vecN), OpSelect with a vector
+                // condition REQUIRES vector object operands — splatting the scalar
+                // 1/0 with a vector cond is invalid SPIR-V. Build vecN(1)/vecN(0)
+                // with OpCompositeConstruct (a function-body value, valid as a
+                // Select operand). Scalar results pass the scalar constants through.
+                const ncomp = resolved.ty.numComponents();
+                var one_id = one_s;
+                var zero_id = zero_s;
+                if (ncomp > 1) {
+                    one_id = self.allocId();
+                    try self.emitWord(spirv.encodeInstructionHeader(@intCast(3 + ncomp), @intFromEnum(spirv.Op.CompositeConstruct)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(one_id);
+                    for (0..ncomp) |_| try self.emitWord(one_s);
+                    zero_id = self.allocId();
+                    try self.emitWord(spirv.encodeInstructionHeader(@intCast(3 + ncomp), @intFromEnum(spirv.Op.CompositeConstruct)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(zero_id);
+                    for (0..ncomp) |_| try self.emitWord(zero_s);
+                }
                 try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.Select)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
