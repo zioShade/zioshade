@@ -4654,13 +4654,20 @@ fn emitInstruction(
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
+            // A Bias image operand (mask bit 0, value at words[6]) → MSL `bias(b)`.
+            // GLSL's LOD bias is fragment-only; dropping it samples the wrong mip
+            // level (silent-wrong, #170).
+            var bias_suffix: []const u8 = "";
+            if (inst.words.len > 6 and (inst.words[5] & 0x1) != 0) {
+                bias_suffix = try std.fmt.allocPrint(alloc, ", bias({s})", .{names.get(inst.words[6]) orelse "0.0"});
+            }
             // MSL: tex.sample(samp, coord). Arrayed textures pass the array layer
             // as a SEPARATE argument (coord.xy, uint(rint(coord.z)) for 2d_array).
             if (imageValueIsArrayed(m, inst.words[3])) {
                 const args = try mslArrayedSampleArgs(alloc, coord, imageValueDim(m, inst.words[3]));
-                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, args});
+                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}{s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, args, bias_suffix});
             } else {
-                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord});
+                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}{s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, bias_suffix});
             }
         },
         // OpImageQueryLod (textureQueryLod): SampledImage, Coordinate → result vec2.

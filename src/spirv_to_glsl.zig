@@ -2734,7 +2734,15 @@ fn emitInstruction(
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
-            try w.print("    {s} {s} = texture({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
+            // A Bias image operand (mask bit 0, value at words[6]) is the GLSL LOD
+            // bias — `texture(s, coord, bias)`. Dropping it samples the wrong mip
+            // level (silent-wrong). Only ConstOffset (bit 3) may also appear here;
+            // any other operand bit has no plain-texture form → carry just the bias.
+            if (inst.words.len > 6 and (inst.words[5] & 0x1) != 0) {
+                try w.print("    {s} {s} = texture({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[6]) orelse "0.0" });
+            } else {
+                try w.print("    {s} {s} = texture({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
+            }
         },
         .ImageSampleDrefImplicitLod => {
             // Shadow texture: texture(sampler2DShadow, vec3(uv, depth))
