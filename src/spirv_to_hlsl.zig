@@ -4026,9 +4026,18 @@ fn emitInstruction(
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";
             const parts = splitPair(si);
-            try w.print("    {s} {s} = {s}.Sample({s}, {s});\n", .{
-                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord,
-            });
+            // A Bias image operand (mask bit 0, value at words[6]) → HLSL
+            // `.SampleBias(sampler, coord, bias)`. Dropping it samples the wrong mip
+            // level (silent-wrong, #170).
+            if (inst.words.len > 6 and (inst.words[5] & 0x1) != 0) {
+                try w.print("    {s} {s} = {s}.SampleBias({s}, {s}, {s});\n", .{
+                    rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, names.get(inst.words[6]) orelse "0.0",
+                });
+            } else {
+                try w.print("    {s} {s} = {s}.Sample({s}, {s});\n", .{
+                    rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord,
+                });
+            }
         },
         // OpImageQueryLod (textureQueryLod): SampledImage, Coordinate → result vec2.
         // HLSL Texture.CalculateLevelOfDetail(sampler, coord) returns the clamped LOD as a
