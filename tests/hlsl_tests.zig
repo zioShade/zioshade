@@ -4603,7 +4603,10 @@ test "T116.1: sampler2D with bias (SampleBias)" {
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "float4");
+    // #170: the LOD bias must reach `.SampleBias(sampler, coord, bias)` — it was
+    // previously DROPPED in the frontend (plain `.Sample`), sampling the wrong mip.
+    try assertContains(hlsl, "SampleBias");
+    try assertContains(hlsl, "0.5");
 }
 
 test "T117.1: float to uint conversion" {
