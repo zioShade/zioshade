@@ -328,6 +328,14 @@ pub const Instruction = struct {
         // image_gather codegen byte-identical and lets the cross-compile
         // backends honest-error on the unrepresentable per-texel offsets.
         image_gather_offsets,
+        // textureGatherOffset (singular): like image_gather but carries a SINGLE
+        // constant ivec2 offset, emitted as the ConstOffset image operand (mask
+        // 0x8). Fixed operand layout: [sampled_image, coord, component, offset]
+        // (component always present, defaulted to const int 0 when GLSL omits it).
+        // GLSL requires the offset to be a compile-time constant, so it folds to an
+        // OpConstantComposite usable as ConstOffset. The WGSL backend carries it
+        // into textureGather's trailing offset arg; GLSL/HLSL/MSL honest-error.
+        image_gather_offset,
         image_dref_gather,
         image_fetch,
         image_fetch_ms,
