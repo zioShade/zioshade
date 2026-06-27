@@ -7027,6 +7027,27 @@ const Analyzer = struct {
                                     return error.SemanticFailed;
                                 }
                             }
+                            // #170: textureOffset(sampler2DShadow, coord, const ivec
+                            // offset) — the 3-arg form (no bias) — routes to
+                            // image_sample_dref, whose 3-operand codegen path assumes a
+                            // FLOAT Bias operand (it cannot tell the ivec2 offset apart
+                            // from a `texture(shadow, coord, bias)` bias by arg count
+                            // alone). Emitting the offset there produced INVALID SPIR-V
+                            // (spirv-val: "Expected Image Operand Bias to be a 32-bit
+                            // float scalar") at rc=0 = silent-wrong. Honest-error until
+                            // the dref-ConstOffset lowering lands (the 4-arg
+                            // offset+bias form @codegen image_sample_dref already emits
+                            // Bias|ConstOffset correctly, and shadow textureLodOffset
+                            // works via the Lod-disambiguated explicit-lod path — both
+                            // unaffected). WGSL's textureSampleCompare can carry a const
+                            // offset, so a full lowering is a tracked follow-up. (#170)
+                            if (is_shadow_sample and std.mem.eql(u8, node.data.name, "textureOffset") and arg_tids.items.len == 3) {
+                                last_error_ctx = "shadow-textureOffset-unsupported";
+                                last_error_inner = "shadow-textureOffset-unsupported";
+                                last_error_line = node.loc.line;
+                                last_error_column = node.loc.column;
+                                return error.SemanticFailed;
+                            }
                             // Shadow samplers use Dref instructions that return float
                             const tag: ir.Instruction.Tag = if (is_shadow_sample) (
                                 if (is_explicit_lod) .image_sample_dref_explicit_lod

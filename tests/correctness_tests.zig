@@ -660,6 +660,54 @@ test "frontend: separate sampler2DShadow with textureLod emits explicit-lod dept
     try std.testing.expect(spirvHasOpcode(spv, 90)); // OpImageSampleDrefExplicitLod
 }
 
+// #170: textureOffset(sampler2DShadow, coord, const ivec offset) — the 3-arg form
+// (no bias) — emitted INVALID SPIR-V at rc=0. It routes to OpImageSampleDrefImplicitLod,
+// whose 3-operand codegen path assumes a FLOAT Bias operand (it can't tell the
+// ivec2 offset apart from `texture(shadow, coord, bias)` by arg count), so it
+// emitted the ivec2 as a Bias → spirv-val: "Expected Image Operand Bias to be a
+// 32-bit float scalar". glslang accepts the GLSL, so it must honest-error rather
+// than mis-compile (a full dref-ConstOffset lowering is a follow-up).
+test "frontend: 3-arg shadow textureOffset honest-errors (was invalid SPIR-V), siblings still compile" {
+    const alloc = std.testing.allocator;
+    // The broken case → honest error (not invalid SPIR-V).
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow sh;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(textureOffset(sh, vec3(uv, 0.5), ivec2(1))); }
+    , .{ .stage = .fragment }));
+
+    // Siblings that DO lower correctly must keep working (no over-rejection):
+    //   texture(shadow, coord, bias) — float Bias, valid.
+    //   textureLodOffset(shadow, ...) — Lod-disambiguated explicit-lod ConstOffset.
+    //   textureOffset(shadow, coord, offset, bias) — 4-arg Bias|ConstOffset.
+    const ok_srcs = [_][:0]const u8{
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow sh;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(texture(sh, vec3(uv, 0.5), 0.1)); }
+        ,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow sh;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(textureLodOffset(sh, vec3(uv, 0.5), 0.0, ivec2(1))); }
+        ,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow sh;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(textureOffset(sh, vec3(uv, 0.5), ivec2(1), 0.1)); }
+    };
+    for (ok_srcs) |src| {
+        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        defer alloc.free(spv);
+        try std.testing.expect(spirvHasOpcode(spv, 89) or spirvHasOpcode(spv, 90)); // a Dref sample op
+    }
+}
+
 // =============================================================================
 // #170: dynamic double-index into a LOCAL matrix must emit valid SPIR-V.
 // Repro: `mat3 m = mat3(a,b,c); o = vec4(m[i][j]);` with i,j dynamic.
