@@ -764,6 +764,27 @@ test "frontend: unsigned comparisons emit OpU* (not signed) — operator + built
     }
 }
 
+// #170: a MIXED int/uint min/max/clamp promotes to UNSIGNED (GLSL int→uint rule).
+// glslpp defaulted the result type to the first arg (int) → SMax/SMin/SClamp
+// emitted with a uint operand. That is valid SPIR-V, but the WGSL back-end then
+// emits `max(i32, u32)` which naga REJECTS ("inconsistent type") = silent-wrong.
+// The signed operand must be bitcast to unsigned and the U-variant used.
+// OpBitcast = 124.
+test "frontend: mixed int/uint max bitcasts the signed operand to unsigned (no SMax)" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) flat in int si;
+        \\layout(location=1) flat in uint ui;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(float(max(si, ui))); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // The signed operand is reinterpreted as unsigned via OpBitcast (124) before
+    // the unsigned ext-inst max — glslpp did NOT emit this before the fix.
+    try std.testing.expect(spirvHasOpcode(spv, 124));
+}
+
 // #170: signedness of integer DIVISION and RIGHT-SHIFT (same valid-but-wrong class
 // as the unsigned-comparison fix — passes spirv-val + naga but computes wrong
 // values). `uint / uint` must be OpUDiv (134) not OpSDiv (135); `int >> n` must be
