@@ -2848,7 +2848,11 @@ fn emitInstruction(
             // out of scope for this round-trip backend; emitting a plain
             // textureGather would SILENTLY DROP the offsets (silent-wrong). Fail
             // loudly instead; textureGatherOffsets round-trip is a follow-up.
-            if (inst.words.len > 6 and (inst.words[6] & 0x20) != 0) {
+            // Likewise textureGatherOffset's single ConstOffset (0x8) and any
+            // runtime Offset (0x10): this plain textureGather emit carries no
+            // offset, so honest-error on every offset-bearing operand bit
+            // (0x38 = ConstOffset|Offset|ConstOffsets) rather than silent-drop.
+            if (inst.words.len > 6 and (inst.words[6] & 0x38) != 0) {
                 return error.UnsupportedImageOperands;
             }
             const rtt = try glslType(m, inst.words[1], names, alloc);

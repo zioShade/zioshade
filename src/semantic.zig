@@ -6868,6 +6868,71 @@ const Analyzer = struct {
                                 self.uses_image_gather_extended = true;
                                 return .{ .ty = result_ty, .id = result_id };
                             }
+                            // textureGatherOffset (singular) → OpImageGather with the
+                            // ConstOffset image operand (mask 0x8). Args:
+                            //   [sampler, coord, offset(ivec2)[, component]].
+                            // The offset MUST be a compile-time constant (SPIR-V
+                            // ConstOffset requires it; WGSL's textureGather offset is
+                            // const-only too) — a non-const offset honest-errors rather
+                            // than emitting invalid SPIR-V or a runtime-Offset form no
+                            // back-end here carries. Component is ALWAYS emitted
+                            // (defaulting to const int 0). The shadow variant is not
+                            // lowered (mirrors textureGatherOffsets) — fail loud.
+                            if (std.mem.eql(u8, node.data.name, "textureGatherOffset")) {
+                                if (is_shadow_sample) {
+                                    last_error_ctx = "textureGatherOffset-shadow-unsupported";
+                                    last_error_inner = "textureGatherOffset-shadow-unsupported";
+                                    last_error_line = node.loc.line;
+                                    last_error_column = node.loc.column;
+                                    return error.SemanticFailed;
+                                }
+                                if (arg_tids.items.len < 3) {
+                                    last_error_ctx = "textureGatherOffset-missing-offset";
+                                    last_error_inner = "textureGatherOffset-missing-offset";
+                                    last_error_line = node.loc.line;
+                                    last_error_column = node.loc.column;
+                                    return error.SemanticFailed;
+                                }
+                                // Offset (arg 2) must be an OpConstantComposite.
+                                if (!self.isConstantId(arg_tids.items[2].id)) {
+                                    last_error_ctx = "textureGatherOffset-offset-not-constant";
+                                    last_error_inner = "textureGatherOffset-offset-not-constant";
+                                    last_error_line = node.loc.line;
+                                    last_error_column = node.loc.column;
+                                    return error.SemanticFailed;
+                                }
+                                // Optional component (arg 3) — GLSL requires an integral
+                                // constant; SPIR-V's Component must be a 32-bit int.
+                                var component_id: u32 = undefined;
+                                if (arg_tids.items.len >= 4) {
+                                    const comp_ty = arg_tids.items[3].ty;
+                                    if (comp_ty != .int and comp_ty != .uint) {
+                                        last_error_ctx = "textureGatherOffset-component-not-integral";
+                                        last_error_inner = "textureGatherOffset-component-not-integral";
+                                        last_error_line = node.loc.line;
+                                        last_error_column = node.loc.column;
+                                        return error.SemanticFailed;
+                                    }
+                                    component_id = arg_tids.items[3].id;
+                                } else {
+                                    component_id = try self.getConstInt(0, .int);
+                                }
+                                // Fixed IR operand layout: [sampled_image, coord,
+                                // component, offset] (mirrors image_gather_offsets).
+                                const operands = try self.alloc.alloc(ir.Instruction.Operand, 4);
+                                operands[0] = .{ .id = arg_tids.items[0].id };
+                                operands[1] = .{ .id = arg_tids.items[1].id };
+                                operands[2] = .{ .id = component_id };
+                                operands[3] = .{ .id = arg_tids.items[2].id };
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .image_gather_offset,
+                                    .result_type = null,
+                                    .result_id = result_id,
+                                    .operands = operands,
+                                    .ty = result_ty, // vec4
+                                });
+                                return .{ .ty = result_ty, .id = result_id };
+                            }
                             // textureGather has its own IR tags
                             const is_gather = std.mem.eql(u8, node.data.name, "textureGather");
                             if (is_gather) {
@@ -9645,7 +9710,7 @@ const Analyzer = struct {
             "bitfieldReverse",
             "bitfieldInsert", "bitfieldExtract",
             "imageSize", "imageLoad", "imageStore", "textureSize",
-            "textureSamples", "imageSamples", "textureOffset", "textureLodOffset", "texelFetchOffset", "textureGrad", "textureGather", "textureGatherOffsets",
+            "textureSamples", "imageSamples", "textureOffset", "textureLodOffset", "texelFetchOffset", "textureGrad", "textureGather", "textureGatherOffset", "textureGatherOffsets",
             "textureGradOffset", "textureProjLod", "textureProjGrad",
             // Barrier/memory builtins (void, special handling)
             "barrier", "memoryBarrier", "memoryBarrierShared",
@@ -9701,6 +9766,7 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "textureOffset") or
             std.mem.eql(u8, name, "textureGrad") or
             std.mem.eql(u8, name, "textureGather") or
+            std.mem.eql(u8, name, "textureGatherOffset") or
             std.mem.eql(u8, name, "textureGatherOffsets");
     }
 
@@ -9767,6 +9833,7 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "textureOffset") or
             std.mem.eql(u8, name, "textureGrad") or
             std.mem.eql(u8, name, "textureGather") or
+            std.mem.eql(u8, name, "textureGatherOffset") or
             std.mem.eql(u8, name, "textureGatherOffsets") or
             std.mem.eql(u8, name, "texelFetchOffset") or
             std.mem.eql(u8, name, "textureProjLod") or
