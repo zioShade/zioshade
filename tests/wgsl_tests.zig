@@ -5636,9 +5636,10 @@ test "wgsl: constant shift amount >= 32 is masked so naga accepts it (#170)" {
 // constant over-shift mask. naga then rejects the const over-shift (creation error)
 // — and even an in-range signed shift would be rejected for the i32-typed amount
 // (`>>` needs a u32/vecN<u32> shift count). The arithmetic-shift arm must mask +
-// u32-cast exactly like the logical arms. glslpp's frontend never emits opcode 195
-// (it lowers every `>>` to ShiftRightLogical), so synthesize it by rewriting the
-// logical-shift opcode in a real glslpp module — the path external SPIR-V hits.
+// u32-cast exactly like the logical arms. As of the signedness fix glslpp's
+// frontend now emits OpShiftRightArithmetic (195) DIRECTLY for a signed `>>` (it
+// previously lowered every `>>` to ShiftRightLogical) — so this exercises the full
+// frontend→WGSL path with no opcode rewrite.
 test "wgsl: signed arithmetic constant over-shift is masked + u32-cast (#170)" {
     const source: [:0]const u8 =
         \\#version 450
@@ -5652,13 +5653,11 @@ test "wgsl: signed arithmetic constant over-shift is masked + u32-cast (#170)" {
     ;
     const spirv = glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    // The shader has exactly one shift; assert it so a future incidental shift
-    // can't make rewriteFirstOpcode patch the wrong instruction (silently testing
-    // nothing). Then patch that OpShiftRightLogical (194) to ShiftRightArithmetic (195).
-    try std.testing.expectEqual(@as(u32, 1), countSpirvOpcode(spirv, 194));
-    const sar = try rewriteFirstOpcode(spirv, 194, 195);
-    defer alloc.free(sar);
-    const wgsl = glslpp.spirvToWGSL(alloc, sar, .{}) catch return error.SkipZigTest;
+    // The signedness fix lowers a signed `>>` to OpShiftRightArithmetic (195)
+    // directly — assert exactly one, and NO logical shift (194) for this signed op.
+    try std.testing.expectEqual(@as(u32, 1), countSpirvOpcode(spirv, 195));
+    try std.testing.expectEqual(@as(u32, 0), countSpirvOpcode(spirv, 194));
+    const wgsl = glslpp.spirvToWGSL(alloc, spirv, .{}) catch return error.SkipZigTest;
     defer alloc.free(wgsl);
     try assertContains(wgsl, "u32(8u)"); // 40 & 31 = 8
     try nagaValidateOrSkip(wgsl, "signed-const-overshift-masked");

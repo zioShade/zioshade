@@ -764,6 +764,45 @@ test "frontend: unsigned comparisons emit OpU* (not signed) — operator + built
     }
 }
 
+// #170: signedness of integer DIVISION and RIGHT-SHIFT (same valid-but-wrong class
+// as the unsigned-comparison fix — passes spirv-val + naga but computes wrong
+// values). `uint / uint` must be OpUDiv (134) not OpSDiv (135); `int >> n` must be
+// OpShiftRightArithmetic (195, sign-extend) not OpShiftRightLogical (194, which
+// zero-fills and corrupts negatives). glslang is the oracle for both.
+test "frontend: unsigned division uses OpUDiv; signed right-shift uses arithmetic shift" {
+    const alloc = std.testing.allocator;
+    // uint/uint → UDiv; uint>>n stays logical (correct for unsigned).
+    {
+        const spv = try glslpp.compileToSPIRV(alloc,
+            \\#version 450
+            \\layout(location=0) flat in uvec2 a;
+            \\layout(location=1) flat in uvec2 b;
+            \\layout(location=0) out vec4 o;
+            \\void main(){ o = vec4(vec2(a / b), vec2(a >> b)); }
+        , .{ .stage = .fragment });
+        defer alloc.free(spv);
+        try std.testing.expect(spirvHasOpcode(spv, 134)); // UDiv
+        try std.testing.expect(!spirvHasOpcode(spv, 135)); // not SDiv
+        try std.testing.expect(spirvHasOpcode(spv, 194)); // ShiftRightLogical (uint >>)
+        try std.testing.expect(!spirvHasOpcode(spv, 195)); // not arithmetic for unsigned
+    }
+    // int/int → SDiv (no over-correction); int>>n → arithmetic (sign-extend).
+    {
+        const spv = try glslpp.compileToSPIRV(alloc,
+            \\#version 450
+            \\layout(location=0) flat in ivec2 a;
+            \\layout(location=1) flat in ivec2 b;
+            \\layout(location=0) out vec4 o;
+            \\void main(){ o = vec4(vec2(a / b), vec2(a >> 1)); }
+        , .{ .stage = .fragment });
+        defer alloc.free(spv);
+        try std.testing.expect(spirvHasOpcode(spv, 135)); // SDiv for signed
+        try std.testing.expect(!spirvHasOpcode(spv, 134)); // not UDiv
+        try std.testing.expect(spirvHasOpcode(spv, 195)); // ShiftRightArithmetic (int >>)
+        try std.testing.expect(!spirvHasOpcode(spv, 194)); // not logical for signed
+    }
+}
+
 // =============================================================================
 // #170: dynamic double-index into a LOCAL matrix must emit valid SPIR-V.
 // Repro: `mat3 m = mat3(a,b,c); o = vec4(m[i][j]);` with i,j dynamic.

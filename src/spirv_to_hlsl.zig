@@ -3658,7 +3658,10 @@ fn emitInstruction(
         },
         .UMod, .SRem, .SMod, .FRem => try emitBinOp(module, names, inst, "%", w, alloc),
         .ShiftLeftLogical => try emitBinOp(module, names, inst, "<<", w, alloc),
-        .ShiftRightLogical => try emitBinOp(module, names, inst, ">>", w, alloc),
+        // HLSL `>>` is arithmetic for signed operands and logical for unsigned (it
+        // keys off the lhs type), so both SPIR-V shift-right ops map to `>>`; the
+        // operand's HLSL type (int vs uint) selects the right behavior.
+        .ShiftRightLogical, .ShiftRightArithmetic => try emitBinOp(module, names, inst, ">>", w, alloc),
 
         .FNegate, .SNegate => {
             const rt = try hlslType(module, inst.words[1], names, alloc);

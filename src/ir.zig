@@ -257,6 +257,7 @@ pub const Instruction = struct {
         sub,
         mul,
         div,
+        udiv, // OpUDiv — unsigned integer division (div is signed OpSDiv)
         rem,
         umod,
         fadd,
@@ -418,7 +419,8 @@ pub const Instruction = struct {
         bit_field_s_extract,
         bit_field_u_extract,
         shift_left,
-        shift_right,
+        shift_right, // OpShiftRightLogical — for UNSIGNED operands (zero-fill)
+        shift_right_arith, // OpShiftRightArithmetic — for SIGNED operands (sign-extend)
         ext_inst,
         select,
         function_call,
