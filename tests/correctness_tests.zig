@@ -708,6 +708,62 @@ test "frontend: 3-arg shadow textureOffset honest-errors (was invalid SPIR-V), s
     }
 }
 
+// #170: UNSIGNED relational comparisons (uint/uvecN `<` `>` `<=` `>=`, and the
+// lessThan/greaterThan-family builtins) were lowered to the SIGNED SPIR-V ops
+// (OpSLessThan etc.) — a SILENT-WRONG: valid SPIR-V that spirv-val/naga accept,
+// but WRONG results for operands >= 2^31 (signed sees them as negative). glslang
+// emits OpULessThan/OpUGreaterThan/... Must use the unsigned ops.
+// SPIR-V opcodes: ULessThan=176 SLessThan=177; UGreaterThan=172 SGreaterThan=173;
+// ULessThanEqual=178 SLessThanEqual=179; UGreaterThanEqual=174 SGreaterThanEqual=175.
+test "frontend: unsigned comparisons emit OpU* (not signed) — operator + builtin forms" {
+    const alloc = std.testing.allocator;
+    // Operator form on uvec.
+    {
+        const spv = try glslpp.compileToSPIRV(alloc,
+            \\#version 450
+            \\layout(location=0) flat in uvec2 a;
+            \\layout(location=1) flat in uvec2 b;
+            \\layout(location=0) out vec4 o;
+            \\void main(){ o = (a.x < b.x) ? vec4(greaterThan(a,b), lessThanEqual(a,b)) : vec4(0); }
+        , .{ .stage = .fragment });
+        defer alloc.free(spv);
+        try std.testing.expect(spirvHasOpcode(spv, 176)); // ULessThan (operator a.x<b.x)
+        try std.testing.expect(spirvHasOpcode(spv, 172)); // UGreaterThan (greaterThan builtin)
+        try std.testing.expect(spirvHasOpcode(spv, 178)); // ULessThanEqual (lessThanEqual builtin)
+        // The SIGNED forms must NOT appear for these unsigned operands.
+        try std.testing.expect(!spirvHasOpcode(spv, 177)); // no SLessThan
+        try std.testing.expect(!spirvHasOpcode(spv, 173)); // no SGreaterThan
+        try std.testing.expect(!spirvHasOpcode(spv, 179)); // no SLessThanEqual
+    }
+    // SIGNED operands still emit the signed ops (no over-correction / regression).
+    {
+        const spv = try glslpp.compileToSPIRV(alloc,
+            \\#version 450
+            \\layout(location=0) flat in ivec2 a;
+            \\layout(location=1) flat in ivec2 b;
+            \\layout(location=0) out vec4 o;
+            \\void main(){ o = (a.x < b.x) ? vec4(1) : vec4(0); }
+        , .{ .stage = .fragment });
+        defer alloc.free(spv);
+        try std.testing.expect(spirvHasOpcode(spv, 177)); // SLessThan for int operands
+        try std.testing.expect(!spirvHasOpcode(spv, 176)); // not ULessThan
+    }
+    // MIXED int/uint: GLSL promotes to UNSIGNED (the int is bitcast to uint), so
+    // `int < uint` must also use OpULessThan — selection checks BOTH operands.
+    {
+        const spv = try glslpp.compileToSPIRV(alloc,
+            \\#version 450
+            \\layout(location=0) flat in int si;
+            \\layout(location=1) flat in uint ui;
+            \\layout(location=0) out vec4 o;
+            \\void main(){ o = (si < ui) ? vec4(1) : vec4(0); }
+        , .{ .stage = .fragment });
+        defer alloc.free(spv);
+        try std.testing.expect(spirvHasOpcode(spv, 176)); // ULessThan (promoted to unsigned)
+        try std.testing.expect(!spirvHasOpcode(spv, 177)); // not SLessThan
+    }
+}
+
 // =============================================================================
 // #170: dynamic double-index into a LOCAL matrix must emit valid SPIR-V.
 // Repro: `mat3 m = mat3(a,b,c); o = vec4(m[i][j]);` with i,j dynamic.

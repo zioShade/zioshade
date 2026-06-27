@@ -137,6 +137,17 @@ fn struct64BitMember(members: []const ast.StructMember) ?[]const u8 {
     return null;
 }
 
+/// True for an unsigned integer scalar/vector type. GLSL relational ops and the
+/// lessThan/greaterThan-family builtins on these MUST lower to the UNSIGNED SPIR-V
+/// comparisons (OpU{Less,Greater}Than[Equal]); the signed forms give wrong results
+/// for operands >= 2^31. (#170)
+fn isUnsignedIntType(ty: ast.Type) bool {
+    return switch (ty) {
+        .uint, .uvec2, .uvec3, .uvec4, .uint8, .uint16, .u8vec2, .u8vec3, .u8vec4, .u16vec2, .u16vec3, .u16vec4 => true,
+        else => false,
+    };
+}
+
 pub fn analyze(alloc: std.mem.Allocator, root: *ast.Root) Error!ir.Module {
     return analyzeWithOptions(alloc, root, .{});
 }
@@ -4574,6 +4585,9 @@ const Analyzer = struct {
                 }
 
                 const is_float = result_ty == .float or result_ty == .double or result_ty == .vec2 or result_ty == .vec3 or result_ty == .vec4 or result_ty.isMatrix();
+                // Unsigned relational comparison iff EITHER operand is unsigned
+                // (GLSL promotes a mixed int/uint comparison to unsigned).
+                const is_ucmp = isUnsignedIntType(left.ty) or isUnsignedIntType(right.ty);
 
 
                 const tag: ir.Instruction.Tag = switch (op) {
@@ -4599,10 +4613,15 @@ const Analyzer = struct {
                     },
                     .eq => if (is_float) .compare_feq else .compare_eq,
                     .neq => if (is_float) .compare_fneq else .compare_neq,
-                    .lt => if (is_float) .compare_flt else .compare_lt,
-                    .gt => if (is_float) .compare_fgt else .compare_gt,
-                    .lte => if (is_float) .compare_flte else .compare_lte,
-                    .gte => if (is_float) .compare_fgte else .compare_gte,
+                    // Relational ops pick UNSIGNED SPIR-V comparisons for uint/uvecN
+                    // operands (signedness is the OPERAND type, not the bool result).
+                    // GLSL promotes a mixed `int`⊕`uint` comparison to UNSIGNED (the
+                    // signed operand is bitcast to uint), so check BOTH operands —
+                    // `int < uint` must use OpULessThan too, not just `uint < int`.
+                    .lt => if (is_float) .compare_flt else if (is_ucmp) .compare_ult else .compare_lt,
+                    .gt => if (is_float) .compare_fgt else if (is_ucmp) .compare_ugt else .compare_gt,
+                    .lte => if (is_float) .compare_flte else if (is_ucmp) .compare_ulte else .compare_lte,
+                    .gte => if (is_float) .compare_fgte else if (is_ucmp) .compare_ugte else .compare_gte,
                     .logical_and => .logical_and,
                     .logical_or => .logical_or,
                     .bit_and => .bit_and,
@@ -7304,14 +7323,18 @@ const Analyzer = struct {
                         if (arg_tids.items.len >= 2) {
                             const left_ty = arg_tids.items[0].ty;
                             const is_float = left_ty == .float or left_ty == .vec2 or left_ty == .vec3 or left_ty == .vec4;
+                            // uvecN comparisons need the UNSIGNED SPIR-V ops (signed
+                            // forms are wrong for components >= 2^31). eq/neq are
+                            // sign-agnostic (IEqual/INotEqual) so they stay as-is.
+                            const is_u = isUnsignedIntType(left_ty);
                             const tag: ir.Instruction.Tag = if (std.mem.eql(u8, node.data.name, "lessThan"))
-                                if (is_float) .compare_flt else .compare_lt
+                                if (is_float) .compare_flt else if (is_u) .compare_ult else .compare_lt
                             else if (std.mem.eql(u8, node.data.name, "greaterThan"))
-                                if (is_float) .compare_fgt else .compare_gt
+                                if (is_float) .compare_fgt else if (is_u) .compare_ugt else .compare_gt
                             else if (std.mem.eql(u8, node.data.name, "lessThanEqual"))
-                                if (is_float) .compare_flte else .compare_lte
+                                if (is_float) .compare_flte else if (is_u) .compare_ulte else .compare_lte
                             else if (std.mem.eql(u8, node.data.name, "greaterThanEqual"))
-                                if (is_float) .compare_fgte else .compare_gte
+                                if (is_float) .compare_fgte else if (is_u) .compare_ugte else .compare_gte
                             else if (std.mem.eql(u8, node.data.name, "equal"))
                                 if (is_float) .compare_feq else .compare_eq
                             else
