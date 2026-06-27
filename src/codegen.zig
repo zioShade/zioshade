@@ -5528,6 +5528,29 @@ const Codegen = struct {
                 try self.emitWord(0x20); // Image Operand mask: ConstOffsets (bit 5)
                 try self.emitWord(offsets_id);
             },
+            .image_gather_offset => {
+                // textureGatherOffset (singular) → OpImageGather with the ConstOffset
+                // image operand (mask bit 0x8), matching glslang -V:
+                //   OpImageGather %v4float %si %coord %Component ConstOffset %offset
+                // Fixed IR operand layout from semantic:
+                //   [sampled_image, coord, component, offset].
+                // Same word count as the offsets form (8): the ConstOffset mask word
+                // + the single constant ivec2 offset id, appended after Component.
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const component_id = self.operandId(resolved, 2);
+                const offset_id = self.operandId(resolved, 3);
+                try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageGather)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(component_id);
+                try self.emitWord(0x8); // Image Operand mask: ConstOffset (bit 3)
+                try self.emitWord(offset_id);
+            },
             .image_dref_gather => {
                 // OpImageDrefGather: result_type(vec4), result, sampled_image, coordinate, dref
                 // GLSL: textureGather(sampler, coord.xy, dref) — dref is separate arg

@@ -4236,8 +4236,13 @@ fn emitInstruction(
             // word[7]). HLSL's `.Gather*` intrinsics take no per-texel offset
             // array, so emitting a plain `.GatherGreen` here would SILENTLY DROP
             // the offsets (silent-wrong). Fail loudly instead; per-texel
-            // emulation (4 offset gathers) is a follow-up.
-            if (inst.words.len > 6 and (inst.words[6] & 0x20) != 0) {
+            // emulation (4 offset gathers) is a follow-up. Likewise
+            // textureGatherOffset's single ConstOffset (0x8) and any runtime
+            // Offset (0x10): this plain `.Gather*` emit carries no offset arg, so
+            // honest-error on every offset-bearing operand (0x38 =
+            // ConstOffset|Offset|ConstOffsets) rather than silent-drop. (HLSL
+            // .Gather* DO accept a const offset arg; carrying it is a follow-up.)
+            if (inst.words.len > 6 and (inst.words[6] & 0x38) != 0) {
                 return error.UnsupportedImageOperands;
             }
             const rt = try hlslType(module, inst.words[1], names, alloc);

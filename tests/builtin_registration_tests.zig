@@ -433,6 +433,7 @@ const OP_CONSTANT: u32 = 43;
 const OP_CONSTANT_COMPOSITE: u32 = 44;
 const CAP_IMAGE_GATHER_EXTENDED: u32 = 25;
 const CONST_OFFSETS_MASK: u32 = 0x20;
+const CONST_OFFSET_MASK: u32 = 0x8;
 
 /// Return the full word slice (header included) of the first instruction with
 /// the given opcode, or null. Lets a test inspect the trailing image-operands.
@@ -607,6 +608,72 @@ test "textureGather (non-offset) stays a plain 6-word OpImageGather, no regressi
     try std.testing.expectEqual(@as(usize, 6), gi.len);
     // No ImageGatherExtended capability forced for a plain gather.
     try std.testing.expect(!hasCapability(spv, CAP_IMAGE_GATHER_EXTENDED));
+}
+
+test "textureGatherOffset (singular): OpImageGather carries ConstOffset (0x8) + offset id + explicit component" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGatherOffset(s, uv, ivec2(1,1), 2); }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(spv, OP_IMAGE_GATHER));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(spv, OP_IMAGE_DREF_GATHER));
+
+    // Instruction shape: [hdr|rt|res|si|coord|component|mask|offset] = 8 words.
+    const gi = firstInst(spv, OP_IMAGE_GATHER) orelse return error.NoGather;
+    try std.testing.expectEqual(@as(usize, 8), gi.len);
+    try std.testing.expectEqual(CONST_OFFSET_MASK, gi[6]); // ConstOffset (0x8), not ConstOffsets
+    try std.testing.expect(gi[7] != 0); // the single ivec2 offset id
+
+    // Component is the explicit `2`.
+    try std.testing.expectEqual(@as(?u32, 2), constValue(spv, gi[5]));
+
+    // The trailing offset id references an OpConstantComposite (ivec2(1,1)).
+    try std.testing.expect(countOpcode(spv, OP_CONSTANT_COMPOSITE) >= 1);
+
+    // A single constant ConstOffset does NOT require ImageGatherExtended (that
+    // capability gates the runtime Offset / ConstOffsets array forms) — matches
+    // glslang, and keeps the plain-gather capability profile.
+    try std.testing.expect(!hasCapability(spv, CAP_IMAGE_GATHER_EXTENDED));
+}
+
+test "textureGatherOffset (singular): omitted component defaults to const int 0 (Component always emitted)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGatherOffset(s, uv, ivec2(1,0)); }
+    ;
+    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(spv, OP_IMAGE_GATHER));
+    const gi = firstInst(spv, OP_IMAGE_GATHER) orelse return error.NoGather;
+    try std.testing.expectEqual(@as(usize, 8), gi.len);
+    try std.testing.expectEqual(CONST_OFFSET_MASK, gi[6]);
+    // Component operand present and equal to const int 0.
+    try std.testing.expectEqual(@as(?u32, 0), constValue(spv, gi[5]));
+}
+
+test "textureGatherOffset (singular): NON-const offset is an honest error (not invalid SPIR-V)" {
+    // SPIR-V ConstOffset requires a compile-time constant; a runtime offset has no
+    // ConstOffset form (and WGSL's textureGather offset is const-only). Honest-error
+    // rather than emit invalid SPIR-V or silently drop the offset.
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=1) flat in int k;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGatherOffset(s, uv, ivec2(k, k)); }
+    ;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
 }
 
 test "textureGatherOffsets: NON-const offsets array is an honest error (not silent-drop)" {
