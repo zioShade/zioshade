@@ -4672,22 +4672,23 @@ test "wgsl: textureGrad (OpImageSampleExplicitLod Grad) -> textureSampleGrad (#1
     try nagaValidateOrSkip(wgsl, "tex-grad");
 }
 
-// #170: OpImageSampleImplicitLod with a `Bias` image operand (GLSL texture(s, uv, bias)
-// — an LOD-bias sample) was lowered to a plain `textureSample(s, sampler, uv)`, SILENTLY
-// DROPPING the bias = silent-wrong. WGSL spells biased sampling `textureSampleBias(t, s,
-// coord, bias)` (fragment-only). The bias value (here 1.5) must survive into the output.
+// #170: GLSL `texture(s, uv, bias)` (an LOD-bias sample) was SILENTLY DROPPING the
+// bias — glslpp's frontend emitted OpImageSampleImplicitLod WITHOUT the Bias image
+// operand, so the WGSL was a plain `textureSample(s, sampler, uv)` that samples the
+// wrong mip level. The frontend now emits the Bias operand and the WGSL back-end
+// spells it `textureSampleBias(t, s, coord, bias)` (fragment-only) — exercised here
+// through the FULL glslpp pipeline (frontend→WGSL), with the bias value (1.5) surviving.
 test "wgsl: texture(s, uv, bias) (OpImageSampleImplicitLod Bias) -> textureSampleBias (#170)" {
-    const spirv = compileToSpirv("tex_bias",
+    const wgsl = compileToWgsl(
         \\#version 450
         \\layout(binding = 0) uniform sampler2D s;
         \\layout(location = 0) in vec2 uv;
         \\layout(location = 0) out vec4 o;
         \\void main() { o = texture(s, uv, 1.5); }
     ) catch return error.SkipZigTest;
-    defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleBias(");
+    try assertContains(wgsl, "1.5");
     try nagaValidateOrSkip(wgsl, "tex-bias");
 }
 

@@ -5280,6 +5280,18 @@ const Codegen = struct {
                     try self.emitWord(coord_id);
                     try self.emitWord(2); // Image Operands Mask: Lod
                     try self.emitWord(zero_id);
+                } else if (resolved.operands.len > 2) {
+                    // texture(sampler, coord, bias) → the Bias image operand (bit 0).
+                    // GLSL's LOD bias is fragment-only; dropping operand[2] sampled at
+                    // the wrong mip level while reporting success (silent-wrong, #170).
+                    const bias_id = self.operandId(resolved, 2);
+                    try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageSampleImplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(1); // Image Operands Mask: Bias (bit 0)
+                    try self.emitWord(bias_id);
                 } else {
                     try self.emitWord(spirv.encodeInstructionHeader(5, @intFromEnum(spirv.Op.ImageSampleImplicitLod)));
                     try self.emitWord(result_type_id);
