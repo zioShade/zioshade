@@ -5385,15 +5385,32 @@ const Codegen = struct {
                 const coord_id = self.operandId(resolved, 1);
                 const dx_id = self.operandId(resolved, 2);
                 const dy_id = self.operandId(resolved, 3);
-                // textureGrad: sampler, coord, dx, dy → Grad
-                try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleExplicitLod)));
-                try self.emitWord(result_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(sampled_image_id);
-                try self.emitWord(coord_id);
-                try self.emitWord(4); // Image Operands Mask: Grad (bit 2)
-                try self.emitWord(dx_id);
-                try self.emitWord(dy_id);
+                // textureGrad: sampler, coord, dx, dy → Grad. textureGradOffset adds
+                // a 5th operand (const ivec offset) → Grad|ConstOffset; the offset
+                // word must follow BOTH gradients (image-operand bit order). Dropping
+                // it (the plain Grad path) would silently ignore the offset.
+                const has_offset = resolved.operands.len > 4;
+                if (has_offset) {
+                    const offset_id = self.operandId(resolved, 4);
+                    try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.ImageSampleExplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(4 | 8); // Image Operands Mask: Grad (bit 2) | ConstOffset (bit 3)
+                    try self.emitWord(dx_id);
+                    try self.emitWord(dy_id);
+                    try self.emitWord(offset_id);
+                } else {
+                    try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleExplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(4); // Image Operands Mask: Grad (bit 2)
+                    try self.emitWord(dx_id);
+                    try self.emitWord(dy_id);
+                }
             },
             .image_sample_proj => {
                 const result_type_id = resolved.result_type orelse return;

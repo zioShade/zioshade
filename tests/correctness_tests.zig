@@ -693,6 +693,77 @@ test "frontend: textureProjLod on a shadow sampler honest-errors (no silent-wron
     , .{ .stage = .fragment }));
 }
 
+// #170: textureGradOffset was wrongly rejected (honest-error) — missing from
+// isTextureBuiltin. It IS faithfully representable: OpImageSampleExplicitLod with
+// the Grad|ConstOffset image operands (mask 0xC). It shares image_sample_grad's
+// codegen, which now appends the ConstOffset word after both gradients. The result
+// must be VALID SPIR-V (the offset word in image-operand bit order).
+test "frontend: textureGradOffset emits valid OpImageSampleExplicitLod (Grad|ConstOffset)" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGradOffset(s, uv, vec2(0.1), vec2(0.2), ivec2(1, -1)); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 88)); // OpImageSampleExplicitLod
+    try spirvValOrSkip(spv); // the Grad|ConstOffset encoding must be well-formed
+}
+
+// #170: shadow GRADIENT sampling has no lowering. textureGrad/textureGradOffset on
+// a sampler2DShadow is valid GLSL but routes to OpImageSampleDrefExplicitLod, whose
+// codegen reads the FIRST gradient (a vec2) as the float Lod operand → invalid
+// SPIR-V ("Expected Image Operand Lod to be a 32-bit float scalar"). Must honest-
+// error, not mis-compile. (Covers a pre-existing shadow-textureGrad hole too.)
+test "frontend: shadow textureGrad / textureGradOffset honest-error (were invalid SPIR-V)" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow s;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out float o;
+        \\void main(){ o = textureGrad(s, c, vec2(0.1), vec2(0.2)); }
+    , .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow s;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out float o;
+        \\void main(){ o = textureGradOffset(s, c, vec2(0.1), vec2(0.2), ivec2(1, 0)); }
+    , .{ .stage = .fragment }));
+}
+
+// #170: the const offset MUST be compile-time constant (becomes a ConstOffset image
+// operand). A dynamic offset cannot be a ConstOffset → honest-error, not invalid SPIR-V.
+test "frontend: textureGradOffset with a non-constant offset honest-errors" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=1) flat in ivec2 dyn;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGradOffset(s, uv, vec2(0.1), vec2(0.2), dyn); }
+    , .{ .stage = .fragment }));
+}
+
+// #170: a ConstOffset image operand is illegal on a Cube image (SPIR-V) and GLSL
+// has no cube *Offset overload (glslang: "no matching overloaded function found").
+// glslpp must honest-error, not emit invalid SPIR-V ("ConstOffset cannot be used
+// with Cube Image 'Dim'"). Guards the offset gate for all offset sample builtins.
+test "frontend: textureGradOffset on a cube sampler honest-errors (not invalid SPIR-V)" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform samplerCube s;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGradOffset(s, c, vec3(0.1), vec3(0.2), ivec2(1, 0)); }
+    , .{ .stage = .fragment }));
+}
+
 // #170: textureOffset(sampler2DShadow, coord, const ivec offset) — the 3-arg form
 // (no bias) — emitted INVALID SPIR-V at rc=0. It routes to OpImageSampleDrefImplicitLod,
 // whose 3-operand codegen path assumes a FLOAT Bias operand (it can't tell the

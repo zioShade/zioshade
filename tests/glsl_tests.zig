@@ -2334,3 +2334,20 @@ test "T-dowhile.funord: do-while body-cf + float `!=` (OpFUnordNotEqual) -> nati
     try assertContains(glsl, "!=");
     try assertContains(glsl, "continue;");
 }
+
+// #170: textureGradOffset → GLSL native textureGradOffset(s, c, ddx, ddy, offset).
+// The frontend now lowers it (Grad|ConstOffset); the backend must spell the offset
+// form, not a plain textureGrad (which would drop the offset = silent-wrong).
+test "glsl: textureGradOffset keeps the const offset (#170)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGradOffset(s, c, vec2(0.1), vec2(0.2), ivec2(1, -1)); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "textureGradOffset(");
+    try assertContains(glsl, "ivec2(1, -1)");
+}

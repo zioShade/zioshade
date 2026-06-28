@@ -7045,21 +7045,16 @@ const Analyzer = struct {
                             // the wrong texels). The WGSL back-end carries this offset
                             // into textureSample(t, s, coord, offset). (#170)
                             //
-                            // Scope note: the OTHER *Offset sample builtins are left
-                            // as honest-errors, NOT lowered, because that is the
-                            // #170-compliant status quo across ALL back-ends.
-                            // textureGradOffset and textureProjOffset are both absent
-                            // from isTextureBuiltin, so they already fail loud
-                            // (textureGradOffset → "builtin-not-lowerable" via the
-                            // GLSL.std.450 path; textureProjOffset → unrecognized
-                            // identifier). Lowering them here would feed every
-                            // back-end one shared SPIR-V — and the HLSL/MSL sample
-                            // emitters silently DROP the ConstOffset (e.g. HLSL
-                            // .SampleGrad omits the offset arg), turning today's
-                            // honest-error into a NEW silent-wrong. textureOffset is
-                            // safe only because its offset was ALREADY dropped pre-fix
-                            // in those back-ends (status quo, no regression); WGSL is
-                            // the one back-end that now carries it.
+                            // Scope note: textureGradOffset IS now lowered — it routes
+                            // through is_grad to image_sample_grad, whose codegen emits
+                            // Grad|ConstOffset when the 5th (offset) operand is present,
+                            // and ALL FOUR back-ends now carry the offset (WGSL
+                            // textureSampleGrad 6th arg, GLSL textureGradOffset, HLSL
+                            // .SampleGrad 5th arg, MSL sample(..., offset)). Its const
+                            // offset is the offset_arg_idx=4 case below. textureProjOffset
+                            // is still left as an honest-error (unrecognized identifier):
+                            // WGSL has no projective sampler builtin, and the manual
+                            // perspective-divide path cannot carry a ConstOffset.
                             const is_tex_offset = !is_shadow_sample and std.mem.eql(u8, node.data.name, "textureOffset");
                             // The ConstOffset operand MUST be an OpConstantComposite
                             // (SPIR-V requires it constant). For ivec2(1,0) the arg
@@ -7073,12 +7068,28 @@ const Analyzer = struct {
                                 2
                             else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureLodOffset"))
                                 3
+                            else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureGradOffset"))
+                                // textureGradOffset(s, coord, dPdx, dPdy, const ivec offset):
+                                // the offset is arg 4, carried as a ConstOffset alongside
+                                // the Grad operand (mask Grad|ConstOffset). (#170)
+                                4
                             else
                                 null;
                             if (offset_arg_idx) |oi| {
                                 if (oi >= arg_tids.items.len or !self.isConstantId(arg_tids.items[oi].id)) {
                                     last_error_ctx = "texture-offset-not-constant";
                                     last_error_inner = "texture-offset-not-constant";
+                                    last_error_line = node.loc.line;
+                                    last_error_column = node.loc.column;
+                                    return error.SemanticFailed;
+                                }
+                                // A ConstOffset image operand is illegal on a Cube-dim
+                                // image (SPIR-V) and has no GLSL overload — honest-error
+                                // rather than emit invalid SPIR-V ("Image Operand
+                                // ConstOffset cannot be used with Cube Image 'Dim'"). (#170)
+                                if (arg_tids.items.len > 0 and self.isCubeSamplerType(arg_tids.items[0].ty)) {
+                                    last_error_ctx = "texture-offset-on-cube-unsupported";
+                                    last_error_inner = "texture-offset-on-cube-unsupported";
                                     last_error_line = node.loc.line;
                                     last_error_column = node.loc.column;
                                     return error.SemanticFailed;
@@ -7114,6 +7125,21 @@ const Analyzer = struct {
                             if (is_proj_lod and is_shadow_sample) {
                                 last_error_ctx = "textureProjLod-shadow-unsupported";
                                 last_error_inner = "textureProjLod-shadow-unsupported";
+                                last_error_line = node.loc.line;
+                                last_error_column = node.loc.column;
+                                return error.SemanticFailed;
+                            }
+                            // Shadow GRADIENT sampling (textureGrad/textureGradOffset on
+                            // a sampler2DShadow) has no lowering: is_grad ⇒ is_explicit_lod,
+                            // so the shadow branch below would route it to
+                            // image_sample_dref_explicit_lod, whose codegen reads
+                            // operand[2] (here dPdx, a vec2) as the float Lod operand →
+                            // INVALID SPIR-V ("Expected Image Operand Lod to be a 32-bit
+                            // float scalar"). Fail loud rather than mis-compile. (WGSL's
+                            // compare-sample builtins can't carry gradients anyway.) (#170)
+                            if (is_grad and is_shadow_sample) {
+                                last_error_ctx = "shadow-textureGrad-unsupported";
+                                last_error_inner = "shadow-textureGrad-unsupported";
                                 last_error_line = node.loc.line;
                                 last_error_column = node.loc.column;
                                 return error.SemanticFailed;
@@ -9981,6 +10007,7 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "texelFetchOffset") or
             std.mem.eql(u8, name, "textureOffset") or
             std.mem.eql(u8, name, "textureGrad") or
+            std.mem.eql(u8, name, "textureGradOffset") or
             std.mem.eql(u8, name, "textureGather") or
             std.mem.eql(u8, name, "textureGatherOffset") or
             std.mem.eql(u8, name, "textureGatherOffsets");
@@ -10037,6 +10064,17 @@ const Analyzer = struct {
     fn isShadowSamplerType(self: *Analyzer, ty: ast.Type) bool {
         _ = self;
         return ty == .sampler2d_shadow or ty == .sampler_cube_shadow or ty == .sampler2d_array_shadow or ty == .sampler1d_shadow or ty == .sampler_cube_array_shadow;
+    }
+
+    // SPIR-V forbids the ConstOffset image operand on a Cube-dim image, and GLSL
+    // has no *Offset overloads for cube samplers. Used to honest-error offset
+    // sample builtins on a cube sampler rather than emit invalid SPIR-V. (#170)
+    fn isCubeSamplerType(self: *Analyzer, ty: ast.Type) bool {
+        _ = self;
+        return ty == .sampler_cube or ty == .isampler_cube or ty == .usampler_cube or
+            ty == .sampler_cube_shadow or
+            ty == .sampler_cube_array or ty == .isampler_cube_array or ty == .usampler_cube_array or
+            ty == .sampler_cube_array_shadow;
     }
 
     fn isImageSampleBuiltin(self: *Analyzer, name: []const u8) bool {

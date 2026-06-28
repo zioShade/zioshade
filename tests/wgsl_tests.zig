@@ -4776,9 +4776,9 @@ test "wgsl: Bias with a truncated ConstOffset operand is an honest error (#170)"
 // #170: OpImageSampleExplicitLod with BOTH Grad (0x4) and ConstOffset (0x8) — GLSL
 // textureGradOffset(s, uv, ddx, ddy, offset). The constant offset must reach the
 // textureSampleGrad call as a trailing argument (after ddx, ddy); dropping it is
-// silent-wrong. Guards the happy path of the Grad-arm offset suffix. (glslpp's own
-// frontend rejects textureGradOffset — see the honest-error test below — so this
-// drives the external-SPIR-V backend arm via glslang.)
+// silent-wrong. Guards the happy path of the Grad-arm offset suffix. This drives
+// the parsed-external-SPIR-V backend arm via glslang as an independent oracle;
+// glslpp's OWN frontend lowering of textureGradOffset is covered separately above.
 test "wgsl: textureGradOffset keeps the const offset, backend arm (#170)" {
     const spirv = compileToSpirv("tex_grad_offset",
         \\#version 450
@@ -4953,23 +4953,44 @@ test "wgsl: textureLodOffset with a non-constant offset honest-errors (#170)" {
 }
 
 // #170: textureGradOffset is deliberately NOT lowered by glslpp's frontend (it
-// is absent from isTextureBuiltin, so it honest-errors via "builtin-not-
-// lowerable"). It IS representable in WGSL — textureSampleGrad(t, s, coord, ddx,
-// ddy, offset) — but the frontend emits ONE shared SPIR-V to all back-ends, and
-// the HLSL/MSL sample emitters silently DROP the ConstOffset (HLSL .SampleGrad
-// omits the offset arg). Lowering it here would convert today's honest-error into
-// a NEW silent-wrong on those back-ends. Honest-error is the #170-compliant
-// choice until every back-end carries the offset. (Contrast textureOffset, whose
-// offset was already dropped pre-fix on HLSL/MSL — no regression there.)
-test "wgsl: textureGradOffset honest-errors via the frontend (not silent-wrong) (#170)" {
+// is now in isTextureBuiltin and lowers faithfully). It IS representable in WGSL —
+// textureSampleGrad(t, s, coord, ddx, ddy, offset). The frontend emits ONE shared
+// SPIR-V (OpImageSampleExplicitLod with Grad|ConstOffset) to all back-ends; this
+// was previously honest-errored because the HLSL/MSL/GLSL sample emitters silently
+// DROPPED the ConstOffset — the prior comment said to flip it "until every
+// back-end carries the offset". That condition is now met: all four back-ends emit
+// the trailing offset (WGSL textureSampleGrad 6th arg, GLSL textureGradOffset, HLSL
+// .SampleGrad 5th arg, MSL sample(..., offset)), so the honest-error is replaced by
+// the faithful lowering. The const offset must survive into the WGSL output.
+test "wgsl: textureGradOffset lowers to textureSampleGrad with the const offset (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureGradOffset(s, uv, vec2(0.1), vec2(0.2), ivec2(1, 0)); }
+    );
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleGrad(");
+    // The offset is the trailing 6th argument; its presence proves it survived.
+    try assertContains(wgsl, ", vec2<i32>(1, 0))");
+    try nagaValidateOrSkip(wgsl, "tex-grad-offset-frontend");
+}
+
+// #170: the const offset of textureGradOffset MUST be a compile-time constant (it
+// becomes a SPIR-V ConstOffset image operand). A non-constant offset cannot be a
+// ConstOffset, so the frontend honest-errors rather than emit invalid SPIR-V —
+// mirroring textureOffset / textureLodOffset.
+test "wgsl: textureGradOffset with a non-constant offset honest-errors (#170)" {
     try std.testing.expectError(
         error.SemanticFailed,
         glslpp.compileToSPIRV(alloc,
             \\#version 450
             \\layout(binding = 0) uniform sampler2D s;
             \\layout(location = 0) in vec2 uv;
-            \\layout(location = 0) out vec4 o;
-            \\void main() { o = textureGradOffset(s, uv, vec2(0.1), vec2(0.2), ivec2(1, 0)); }
+            \\layout(location = 0) flat in ivec2 dyn_off;
+            \\layout(location = 1) out vec4 o;
+            \\void main() { o = textureGradOffset(s, uv, vec2(0.1), vec2(0.2), dyn_off); }
         , .{ .stage = .fragment }),
     );
 }

@@ -14655,3 +14655,19 @@ test "T-arrlen.2: multi-member SSBO .length() honest-errors in HLSL (#296)" {
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
 }
+
+// #170: textureGradOffset → HLSL SampleGrad(sampler, coord, ddx, ddy, offset). The
+// offset is SampleGrad's 5th argument; dropping it samples the un-offset texels.
+test "T31.6: textureGradOffset keeps the const offset as SampleGrad 5th arg (#170)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGradOffset(s, c, vec2(0.1), vec2(0.2), ivec2(1, -1)); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "SampleGrad(");
+    try assertContains(hlsl, "int2(1, -1)");
+}

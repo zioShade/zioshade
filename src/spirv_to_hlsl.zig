@@ -4200,9 +4200,18 @@ fn emitInstruction(
                     // Grad operands (dx, dy)
                     const dx = names.get(inst.words[off]) orelse "0";
                     const dy = names.get(inst.words[off + 1]) orelse "0";
-                    try w.print("    {s} {s} = {s}.SampleGrad({s}, {s}, {s}, {s});\n", .{
-                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, dx, dy,
-                    });
+                    // Grad|ConstOffset (textureGradOffset): HLSL SampleGrad takes the
+                    // offset as a 5th argument. Dropping it would silently sample the
+                    // un-offset texels.
+                    if (mask & 0x8 != 0 and off + 2 < inst.words.len) {
+                        try w.print("    {s} {s} = {s}.SampleGrad({s}, {s}, {s}, {s}, {s});\n", .{
+                            rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, dx, dy, names.get(inst.words[off + 2]) orelse "int2(0)",
+                        });
+                    } else {
+                        try w.print("    {s} {s} = {s}.SampleGrad({s}, {s}, {s}, {s});\n", .{
+                            rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, dx, dy,
+                        });
+                    }
                 } else {
                     // Fallback: Sample with lod=0
                     try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}, 0);\n", .{
