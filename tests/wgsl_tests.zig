@@ -1526,10 +1526,11 @@ test "wgsl: bvec equal/notEqual (vector OpLogicalEqual/NotEqual) lower component
 // crash. The honest-error fallback formatted the op via `@tagName(inst.op)`, which
 // PANICS ("invalid enum value") on a non-exhaustive enum value with no matching
 // field, so the process aborted on perfectly valid glslang SPIR-V instead of
-// reporting the honest error. `umulExtended` needs a u64 intermediate that core
-// WGSL lacks, so unlike uaddCarry/usubBorrow it stays a (loud) honest error — and
-// it is still a tag-less opcode, so it exercises the same `@tagName`-panic path.
-// glslpp's own frontend rejects `umulExtended`, so glslang is the oracle. (#170)
+// reporting the honest error. NOTE: glslpp's own frontend now EMULATES umulExtended
+// with core u32 ops (16-bit-limb mulhi) and never emits the struct-result
+// OpUMulExtended, so opcode 151 only appears in EXTERNAL (glslang) SPIR-V — which is
+// exactly why glslang is the oracle here, and 151 is still a tag-less opcode that
+// exercises the same `@tagName`-panic path the WGSL backend must survive. (#170)
 test "wgsl: an opcode the Op enum doesn't name fails loud, not a @tagName panic (#170)" {
     const spirv = try compileToSpirv("umulextended_honest",
         \\#version 450
@@ -1548,6 +1549,35 @@ test "wgsl: an opcode the Op enum doesn't name fails loud, not a @tagName panic 
     // than crash trying to look up a non-existent enum tag name.
     const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "151") != null);
+}
+
+// #170: scalar umulExtended/imulExtended are now lowered (frontend emulation, 16-bit-
+// limb multiply-high in core u32 ops) and produce naga-valid WGSL. The emitted WGSL
+// was traced 1:1 against the offline-verified algorithm (the high word uses the
+// limb masks/shifts; the signed form adds the `0u - (v >> 31)` sign-mask correction
+// and bitcasts the int out-params).
+test "wgsl: scalar umulExtended/imulExtended are emulated and naga-valid (#170)" {
+    const u_wgsl = try compileCompToWgsl(
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430,binding=0) buffer B { uint a, b, hi, lo; };
+        \\void main(){ umulExtended(a, b, hi, lo); }
+    );
+    defer alloc.free(u_wgsl);
+    try assertContains(u_wgsl, "& 65535u"); // 16-bit limb mask
+    try assertContains(u_wgsl, ">> u32(16u)"); // limb shift
+    try nagaValidateOrSkip(u_wgsl, "umulExtended-scalar");
+
+    const i_wgsl = try compileCompToWgsl(
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430,binding=0) buffer B { int a, b, hi, lo; };
+        \\void main(){ imulExtended(a, b, hi, lo); }
+    );
+    defer alloc.free(i_wgsl);
+    try assertContains(i_wgsl, ">> u32(31u)"); // sign-bit extraction for the correction
+    try assertContains(i_wgsl, "bitcast<i32>"); // int out-params
+    try nagaValidateOrSkip(i_wgsl, "imulExtended-scalar");
 }
 
 // #170: OpIAddCarry / OpISubBorrow (GLSL uaddCarry/usubBorrow) return a 2-member
