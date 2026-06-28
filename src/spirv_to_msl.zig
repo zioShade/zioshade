@@ -4750,12 +4750,23 @@ fn emitInstruction(
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dvs = projDivisorSwizzle(m, inst.words[4]);
+            // Only 2D projective sampling is faithfully lowered here: the .xy
+            // numerator and gradient2d constructor assume a 2D sampler. A 1D/3D
+            // projective sample would drop coordinate components (and use the wrong
+            // gradient rank) = silent-wrong — honest-error instead. (Cube is already
+            // frontend-guarded. WGSL lowers all dims; this is an MSL-only limit.) (#170)
+            if (imageValueDim(m, inst.words[3]) != 1) return error.CrossCompileUnsupported;
             if (inst.words.len > 5) {
                 const mask = inst.words[5];
                 var off: usize = 6;
                 if (mask & 0x1 != 0) off += 1;
                 if (mask & 0x2 != 0 and off < inst.words.len) {
                     try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, level({s}));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, names.get(inst.words[off]) orelse "0"});
+                } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
+                    // textureProjGrad: sample with the manual perspective divide and
+                    // explicit 2D gradients (gradient2d). Guaranteed 2D here — the
+                    // dim guard above honest-errors 1D/3D (cube is frontend-guarded).
+                    try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, gradient2d({s}, {s}));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, names.get(inst.words[off]) orelse "0", names.get(inst.words[off + 1]) orelse "0"});
                 } else {
                     try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs});
                 }

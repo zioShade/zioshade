@@ -311,6 +311,21 @@ fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
     return module.instructions[idx];
 }
 
+/// SPIR-V `Dim` (0=1D, 1=2D, 2=3D, 3=Cube) of the image behind a sampled-image
+/// VALUE id: resolve the value's result type and unwrap an OpTypeSampledImage.
+/// OpTypeImage layout: [op, result_id, sampled_type, DIM, ...]. Returns 1 (2D)
+/// when it cannot be resolved, matching the backend's 2D default.
+fn sampledImageDim(module: *const ParsedModule, image_value_id: u32) u32 {
+    const vdef = getDef(module, image_value_id) orelse return 1;
+    if (vdef.words.len < 2) return 1;
+    var tinst = getDef(module, vdef.words[1]) orelse return 1;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(module, tinst.words[2]) orelse return 1;
+    }
+    if (tinst.op != .TypeImage or tinst.words.len < 4) return 1;
+    return tinst.words[3];
+}
+
 fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(module, id) orelse return null;
     return switch (inst.op) {
@@ -4151,6 +4166,11 @@ fn emitInstruction(
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";
             const parts = splitPair(si);
+            // Only 2D projective sampling is faithfully lowered here: the .xy
+            // numerator assumes a 2D sampler. A 1D/3D projective sample would drop
+            // coordinate components = silent-wrong — honest-error instead. (Cube is
+            // frontend-guarded. WGSL lowers all dims; this is an HLSL-only limit.) (#170)
+            if (sampledImageDim(module, inst.words[3]) != 1) return error.UnsupportedImageOperands;
             const coord_type = getTypeOf(module, inst.words[4]);
             const last_swizzle: []const u8 = if (coord_type) |ct| blk: {
                 const ct_inst = getDef(module, ct);
@@ -4168,6 +4188,12 @@ fn emitInstruction(
                 if (mask & 0x2 != 0 and off < inst.words.len) {
                     try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}{s}, {s});\n", .{
                         rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, names.get(inst.words[off]) orelse "0",
+                    });
+                } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
+                    // textureProjGrad: SampleGrad with the manual perspective divide.
+                    // Gradients (explicit screen-space derivatives) pass through.
+                    try w.print("    {s} {s} = {s}.SampleGrad({s}, {s}.xy / {s}{s}, {s}, {s});\n", .{
+                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, names.get(inst.words[off]) orelse "0", names.get(inst.words[off + 1]) orelse "0",
                     });
                 } else {
                     try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}{s}, 0);\n", .{
