@@ -3911,3 +3911,17 @@ test "T-projgrad.msl3d: textureProjGrad(sampler3D) honest-errors in MSL (#170)" 
     ;
     try std.testing.expectError(error.CrossCompileUnsupported, compileToMsl(source));
 }
+
+// #170: plain textureProj(sampler3D) (proj-IMPLICIT-lod) is the same 2D-only limit
+// as the proj-explicit arm — the .xy numerator drops the r-coordinate. Honest-error
+// in MSL rather than silently sample a 2D location in a 3D texture.
+test "T-proj.msl3d: textureProj(sampler3D) honest-errors in MSL (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler3D s;
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProj(s, c); }
+    ;
+    try std.testing.expectError(error.CrossCompileUnsupported, compileToMsl(source));
+}
