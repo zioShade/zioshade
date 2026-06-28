@@ -4722,6 +4722,11 @@ fn emitInstruction(
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
+            // Only 2D projective sampling is faithfully lowered (the .xy numerator
+            // assumes 2D); textureProj(sampler3D) would drop the r-coordinate =
+            // silent-wrong — honest-error instead. (Cube is frontend-guarded; WGSL
+            // lowers all dims. Mirrors the proj-explicit-lod guard.) (#170)
+            if (imageValueDim(m, inst.words[3]) != 1) return error.CrossCompileUnsupported;
             // Projected sample: divide xy by the coord's last component (.z/.w)
             const dvs = projDivisorSwizzle(m, inst.words[4]);
             try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs});
