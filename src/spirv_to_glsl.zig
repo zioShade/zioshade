@@ -2793,7 +2793,16 @@ fn emitInstruction(
                 if (mask & 0x2 != 0 and off < inst.words.len) {
                     try w.print("    {s} {s} = textureLod({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[off]) orelse "0" });
                 } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
-                    try w.print("    {s} {s} = textureGrad({s}, {s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[off]) orelse "0", names.get(inst.words[off + 1]) orelse "0" });
+                    const dx = names.get(inst.words[off]) orelse "0";
+                    const dy = names.get(inst.words[off + 1]) orelse "0";
+                    // Grad|ConstOffset (textureGradOffset): the const offset follows
+                    // both gradients. Dropping it would silently emit a plain
+                    // textureGrad = wrong texels.
+                    if (mask & 0x8 != 0 and off + 2 < inst.words.len) {
+                        try w.print("    {s} {s} = textureGradOffset({s}, {s}, {s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dx, dy, names.get(inst.words[off + 2]) orelse "ivec2(0)" });
+                    } else {
+                        try w.print("    {s} {s} = textureGrad({s}, {s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dx, dy });
+                    }
                 } else {
                     try w.print("    {s} {s} = textureLod({s}, {s}, 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
                 }
