@@ -3811,3 +3811,52 @@ test "T-samplerarr.nested: nested sampler array honest-errors in MSL (#170)" {
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToMSL(alloc, spirv, .{}));
 }
+
+// #170: MSL ImageSampleExplicitLod IGNORED the Grad image operand (mask 0x4) —
+// it only handled Lod (0x2) and otherwise fell through to sample(..., level(0)).
+// So textureGrad dropped its gradients entirely and sampled LOD 0 = valid-but-
+// wrong (wrong mip). spirv-cross emits sample(..., gradient2d(dPdx, dPdy)).
+test "T-grad.msl: textureGrad carries gradient2d, not level(0) (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGrad(s, c, vec2(0.1), vec2(0.2)); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "gradient2d(");
+    try assertNotContains(msl, "level(0)");
+}
+
+// The MSL gradient constructor is DIMENSION-specific: gradient2d / gradient3d /
+// gradientcube. Emitting gradient2d for a sampler3D/samplerCube (whose gradients
+// are float3) is invalid MSL — so the Dim must drive the constructor choice.
+test "T-grad.msl3d: textureGrad(sampler3D) uses gradient3d (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler3D s;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGrad(s, c, vec3(0.1), vec3(0.2)); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "gradient3d(");
+    try assertNotContains(msl, "gradient2d(");
+}
+
+test "T-grad.mslcube: textureGrad(samplerCube) uses gradientcube (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform samplerCube s;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGrad(s, c, vec3(0.1), vec3(0.2)); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "gradientcube(");
+    try assertNotContains(msl, "gradient2d(");
+}
