@@ -4095,6 +4095,11 @@ fn emitInstruction(
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";
             const parts = splitPair(si);
+            // Only 2D projective sampling is faithfully lowered (the .xy numerator
+            // assumes 2D); textureProj(sampler3D) would drop the r-coordinate =
+            // silent-wrong — honest-error instead. (Cube is frontend-guarded; WGSL
+            // lowers all dims. Mirrors the proj-explicit-lod guard.) (#170)
+            if (sampledImageDim(module, inst.words[3]) != 1) return error.UnsupportedImageOperands;
             // Projected sample: divide xy by last component
             // Determine coordinate type to use correct swizzle (.z for vec3, .w for vec4)
             const coord_type = getTypeOf(module, inst.words[4]);
