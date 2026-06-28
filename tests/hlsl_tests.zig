@@ -14671,3 +14671,35 @@ test "T31.6: textureGradOffset keeps the const offset as SampleGrad 5th arg (#17
     try assertContains(hlsl, "SampleGrad(");
     try assertContains(hlsl, "int2(1, -1)");
 }
+
+// #170: textureProjGrad → HLSL SampleGrad with the manual perspective divide
+// (coord.xy / divisor) and the explicit gradients. vec3 coord → .z divisor.
+test "T31.7: textureProjGrad uses SampleGrad with the perspective divide (#170)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjGrad(s, c, vec2(0.1), vec2(0.2)); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "SampleGrad(");
+    try assertContains(hlsl, ".xy / ");
+    try assertContains(hlsl, ".z");
+}
+
+// #170: the HLSL proj-explicit arm faithfully lowers only 2D (the .xy numerator
+// assumes 2D). textureProjGrad/textureProjLod on a sampler3D would drop the
+// r-coordinate (2-component location into Texture3D.SampleGrad) — honest-error,
+// not silent-wrong. (WGSL lowers 3D proj correctly; this is an HLSL-only limit.)
+test "T31.8: textureProjGrad(sampler3D) honest-errors in HLSL (#170)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler3D s;
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjGrad(s, c, vec3(0.1), vec3(0.2)); }
+    ;
+    try std.testing.expectError(error.UnsupportedImageOperands, compileToHlsl(source));
+}

@@ -7716,8 +7716,22 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 };
                 try writeInd(w, indent);
                 if (inst.op == .ImageSampleProjExplicitLod) {
-                    const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-                    try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}{s} / {s}{s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, lod });
+                    // The explicit-LOD proj op carries EITHER a Lod (textureProjLod)
+                    // OR a Grad (textureProjGrad) image operand — branch on the mask
+                    // (words[5]) rather than assuming Lod. The gradients are explicit
+                    // screen-space derivatives, used as-is with the divided coord
+                    // (matches glslang, which passes them through unchanged).
+                    const mask = if (inst.words.len > 5) inst.words[5] else 0;
+                    if (mask & 0x4 != 0) {
+                        // Grad: dPdx = words[6], dPdy = words[7].
+                        if (inst.words.len <= 7) return error.UnsupportedImageOperands;
+                        const ddx = names.get(inst.words[6]) orelse "0";
+                        const ddy = names.get(inst.words[7]) orelse "0";
+                        try w.print("let {s}: {s} = textureSampleGrad({s}, {s}_sampler, {s}{s} / {s}{s}, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, ddx, ddy });
+                    } else {
+                        const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
+                        try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}{s} / {s}{s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, lod });
+                    }
                 } else {
                     try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s} / {s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp });
                 }

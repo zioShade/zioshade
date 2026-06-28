@@ -2811,7 +2811,8 @@ fn emitInstruction(
             }
         },
         .ImageSampleProjExplicitLod => {
-            // Projected explicit LOD: textureProjLod(sampler, coord, lod)
+            // Projected explicit LOD: textureProjLod (Lod) or textureProjGrad (Grad),
+            // distinguished by the image-operands mask. GLSL has native builtins for both.
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
@@ -2821,6 +2822,8 @@ fn emitInstruction(
                 if (mask & 0x1 != 0) off += 1;
                 if (mask & 0x2 != 0 and off < inst.words.len) {
                     try w.print("    {s} {s} = textureProjLod({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[off]) orelse "0" });
+                } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
+                    try w.print("    {s} {s} = textureProjGrad({s}, {s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[off]) orelse "0", names.get(inst.words[off + 1]) orelse "0" });
                 } else {
                     try w.print("    {s} {s} = textureProjLod({s}, {s}, 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
                 }

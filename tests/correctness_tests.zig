@@ -693,6 +693,69 @@ test "frontend: textureProjLod on a shadow sampler honest-errors (no silent-wron
     , .{ .stage = .fragment }));
 }
 
+// #170: textureProjGrad (projective sample with EXPLICIT gradients) was wrongly
+// rejected — missing from isTextureBuiltin. It IS representable:
+// OpImageSampleProjExplicitLod with the Grad image operand (shares the proj-
+// explicit-lod tag with textureProjLod, distinguished by operand count). Emitting
+// the Lod operand (or the implicit-lod proj op) would lose the gradients.
+test "frontend: textureProjGrad emits OpImageSampleProjExplicitLod with a Grad operand" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjGrad(tex, c, vec2(0.1), vec2(0.2)); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 92)); // OpImageSampleProjExplicitLod
+    try std.testing.expect(!spirvHasOpcode(spv, 91)); // not the implicit-lod proj op
+    try spirvValOrSkip(spv); // the Grad encoding must be well-formed
+}
+
+// #170: shadow textureProjGrad has no lowering (would route to a dref tag and read
+// a gradient vec2 as the float Lod operand → invalid SPIR-V). Honest-error.
+test "frontend: shadow textureProjGrad honest-errors (no invalid SPIR-V)" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow sh;
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out float o;
+        \\void main(){ o = textureProjGrad(sh, c, vec2(0.1), vec2(0.2)); }
+    , .{ .stage = .fragment }));
+}
+
+// #170: projective sampling is undefined for a CUBE image (SPIR-V requires Dim
+// 1D/2D/3D/Rect for OpImageSampleProj*; GLSL has no cube textureProj* overload).
+// glslpp emitted invalid SPIR-V; now honest-errors for the whole proj family.
+test "frontend: textureProj/ProjLod/ProjGrad on a cube sampler honest-error (were invalid SPIR-V)" {
+    const alloc = std.testing.allocator;
+    const srcs = [_][:0]const u8{
+        \\#version 450
+        \\layout(binding=0) uniform samplerCube s;
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProj(s, c); }
+        ,
+        \\#version 450
+        \\layout(binding=0) uniform samplerCube s;
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjLod(s, c, 1.0); }
+        ,
+        \\#version 450
+        \\layout(binding=0) uniform samplerCube s;
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjGrad(s, c, vec3(0.1), vec3(0.2)); }
+        ,
+    };
+    for (srcs) |src| {
+        try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    }
+}
+
 // #170: textureGradOffset was wrongly rejected (honest-error) — missing from
 // isTextureBuiltin. It IS faithfully representable: OpImageSampleExplicitLod with
 // the Grad|ConstOffset image operands (mask 0xC). It shares image_sample_grad's

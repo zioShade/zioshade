@@ -3877,3 +3877,37 @@ test "T-gradoff.msl: textureGradOffset carries the const offset (#170)" {
     try assertContains(msl, "gradient2d(");
     try assertContains(msl, "int2(1, -1)");
 }
+
+// #170: textureProjGrad → MSL sample(coord.xy / divisor, gradient2d(dPdx, dPdy)).
+// Shares OpImageSampleProjExplicitLod with textureProjLod; the arm must emit the
+// gradient form (not level()) for the Grad mask, with the vec3 .z divisor.
+test "T-projgrad.msl: textureProjGrad uses gradient2d with the .z divisor (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjGrad(s, c, vec2(0.1), vec2(0.2)); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "gradient2d(");
+    try assertContains(msl, ".xy / ");
+    try assertContains(msl, ".z");
+    try assertNotContains(msl, "level(");
+}
+
+// #170: the MSL proj-explicit arm faithfully lowers only 2D (the .xy numerator /
+// gradient2d assume 2D). textureProjGrad/textureProjLod on a sampler3D would drop
+// the r-coordinate and use the wrong gradient rank — honest-error, not silent-wrong.
+// (WGSL lowers 3D proj correctly; this is an MSL-only limit.)
+test "T-projgrad.msl3d: textureProjGrad(sampler3D) honest-errors in MSL (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler3D s;
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjGrad(s, c, vec3(0.1), vec3(0.2)); }
+    ;
+    try std.testing.expectError(error.CrossCompileUnsupported, compileToMsl(source));
+}
