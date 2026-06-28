@@ -4779,6 +4779,37 @@ fn emitInstruction(
                 if (mask & 0x1 != 0) off += 1;
                 if (mask & 0x2 != 0 and off < inst.words.len) {
                     try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}, level({s}));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, names.get(inst.words[off]) orelse "0"});
+                } else if (mask & 0x4 != 0) {
+                    // Grad (0x4): explicit gradients → MSL gradientNd(dPdx, dPdy).
+                    // This arm previously had NO Grad case, so textureGrad fell
+                    // through to level(0), DROPPING the gradients = wrong mip
+                    // (valid-but-wrong). dPdx=words[off], dPdy=words[off+1]; a
+                    // trailing ConstOffset (0x8) becomes the int2 offset arg.
+                    //
+                    // The gradient CONSTRUCTOR is dimension-specific: gradient2d /
+                    // gradient3d / gradientcube. gradient2d on a float3 (3D/cube)
+                    // gradient is invalid MSL — so pick by sampler Dim, and any
+                    // operand bit beyond Grad|ConstOffset (or a 1D/Rect/Buffer
+                    // sampler, which has no MSL mip-gradient sample) fails loud
+                    // rather than mis-compile. A Grad mask whose two gradient
+                    // operand words are missing (truncated/malformed SPIR-V) also
+                    // fails loud rather than silently downgrading to level(0). (#170)
+                    if (mask & ~@as(u32, 0x4 | 0x8) != 0) return error.CrossCompileUnsupported;
+                    if (off + 1 >= inst.words.len) return error.CrossCompileUnsupported;
+                    const grad_ctor: []const u8 = switch (imageValueDim(m, inst.words[3])) {
+                        1 => "gradient2d",
+                        2 => "gradient3d",
+                        3 => "gradientcube",
+                        else => return error.CrossCompileUnsupported,
+                    };
+                    const ddx = names.get(inst.words[off]) orelse "0";
+                    const ddy = names.get(inst.words[off + 1]) orelse "0";
+                    if (mask & 0x8 != 0) {
+                        if (off + 2 >= inst.words.len) return error.CrossCompileUnsupported;
+                        try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}, {s}({s}, {s}), {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, grad_ctor, ddx, ddy, names.get(inst.words[off + 2]) orelse "int2(0)"});
+                    } else {
+                        try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}, {s}({s}, {s}));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, grad_ctor, ddx, ddy});
+                    }
                 } else {
                     try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord});
                 }
