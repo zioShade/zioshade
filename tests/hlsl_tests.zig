@@ -14703,3 +14703,17 @@ test "T31.8: textureProjGrad(sampler3D) honest-errors in HLSL (#170)" {
     ;
     try std.testing.expectError(error.UnsupportedImageOperands, compileToHlsl(source));
 }
+
+// #170: plain textureProj(sampler3D) (proj-IMPLICIT-lod) is the same 2D-only limit
+// as the proj-explicit arm — the .xy numerator drops the r-coordinate. Honest-error
+// in HLSL rather than silently sample a 2D location in a 3D texture.
+test "T31.9: textureProj(sampler3D) honest-errors in HLSL (#170)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler3D s;
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProj(s, c); }
+    ;
+    try std.testing.expectError(error.UnsupportedImageOperands, compileToHlsl(source));
+}
