@@ -3860,3 +3860,20 @@ test "T-grad.mslcube: textureGrad(samplerCube) uses gradientcube (#170)" {
     try assertContains(msl, "gradientcube(");
     try assertNotContains(msl, "gradient2d(");
 }
+
+// #170: textureGradOffset → MSL sample(..., gradient2d(dPdx,dPdy), offset). The
+// trailing const offset (ConstOffset image operand) must survive; the old Grad arm
+// had no ConstOffset case (see #402) and would drop it.
+test "T-gradoff.msl: textureGradOffset carries the const offset (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec2 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGradOffset(s, c, vec2(0.1), vec2(0.2), ivec2(1, -1)); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "gradient2d(");
+    try assertContains(msl, "int2(1, -1)");
+}
