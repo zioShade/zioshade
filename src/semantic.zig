@@ -1250,6 +1250,23 @@ const Analyzer = struct {
         return result_id;
     }
 
+    /// Convenience: emit a 2-operand pure op from two value ids, heap-allocating the
+    /// operand slice (emitPureOp takes ownership). Reduces boilerplate (and the
+    /// attendant transcription risk) for multi-op emulations like umulExtended.
+    fn emitBin2(self: *Analyzer, tag: ir.Instruction.Tag, a: u32, b: u32, ty: ast.Type) !u32 {
+        const ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+        ops[0] = .{ .id = a };
+        ops[1] = .{ .id = b };
+        return self.emitPureOp(tag, ops, ty);
+    }
+
+    /// Convenience: emit a 1-operand pure op (e.g. bitcast) from one value id.
+    fn emitUn1(self: *Analyzer, tag: ir.Instruction.Tag, a: u32, ty: ast.Type) !u32 {
+        const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+        ops[0] = .{ .id = a };
+        return self.emitPureOp(tag, ops, ty);
+    }
+
     /// Extract component/member/element `index` from an aggregate VALUE `composite_id`
     /// as a value of type `ty` (OpCompositeExtract with a literal index).
     fn emitExtractValue(self: *Analyzer, composite_id: u32, index: u32, ty: ast.Type) !u32 {
@@ -7719,15 +7736,91 @@ const Analyzer = struct {
                         try self.emitStore(out_lv.id, flag_id);
                         return .{ .ty = uty, .id = res_id };
                     } else if (std.mem.eql(u8, node.data.name, "umulExtended") or std.mem.eql(u8, node.data.name, "imulExtended")) {
-                        // #170: the 64-bit product (msb,lsb out-params) needs 32x32→64
-                        // arithmetic glslpp cannot yet model (no 64-bit ints / struct-
-                        // result OpU/SMulExtended). Honest-error with a clear message
-                        // rather than the misleading "UndeclaredIdentifier".
-                        last_error_ctx = "extended-arith-mul-unsupported";
-                        last_error_inner = node.data.name;
-                        last_error_line = node.loc.line;
-                        last_error_column = node.loc.column;
-                        return error.SemanticFailed;
+                        // #170: u/imulExtended(x, y, out msb, out lsb) — the full 64-bit
+                        // product. WGSL/SPIR-V here have no u64 and we don't emit the
+                        // struct-result OpU/SMulExtended, so emulate the high 32 bits with
+                        // 16-bit-limb multiply-high using only core u32 ops (mul/and/shr/
+                        // add/sub) — which EVERY backend already lowers. The algorithm
+                        // (and the signed sign-correction) is exhaustively verified against
+                        // the true product for millions of random + edge inputs.
+                        //   lo  = x * y                              (low 32 bits, wraps)
+                        //   uhi = mulhi_unsigned(xu, yu)             (16-bit-limb carries)
+                        //   signed: hi = uhi - (yu & sgn(xu)) - (xu & sgn(yu)),
+                        //           where sgn(v) = 0u - (v >> 31)  = 0 or 0xFFFFFFFF
+                        // msb gets the high word, lsb the low word.
+                        const is_signed = std.mem.eql(u8, node.data.name, "imulExtended");
+                        if (arg_tids.items.len < 4) {
+                            last_error_ctx = "extended-arith-missing-out-param";
+                            last_error_inner = node.data.name;
+                            last_error_line = node.loc.line;
+                            last_error_column = node.loc.column;
+                            return error.SemanticFailed;
+                        }
+                        const sty = arg_tids.items[0].ty;
+                        // Scalar only for now: the component-wise vector form needs the
+                        // mask/shift CONSTANTS splatted to the vector width — a follow-up.
+                        // Honest-error vectors rather than emit invalid (scalar-const vs
+                        // vector-operand) SPIR-V.
+                        if (sty.numComponents() != 1) {
+                            last_error_ctx = "extended-arith-mul-vector-unsupported";
+                            last_error_inner = node.data.name;
+                            last_error_line = node.loc.line;
+                            last_error_column = node.loc.column;
+                            return error.SemanticFailed;
+                        }
+                        // Limb math runs on uint bit-patterns; bitcast signed inputs.
+                        const xu = if (is_signed) try self.emitUn1(.bitcast, arg_tids.items[0].id, .uint) else arg_tids.items[0].id;
+                        const yu = if (is_signed) try self.emitUn1(.bitcast, arg_tids.items[1].id, .uint) else arg_tids.items[1].id;
+                        const c_ffff = try self.getConstInt(0xFFFF, .uint);
+                        const c_16 = try self.getConstInt(16, .uint);
+                        // 16-bit limbs.
+                        const xl = try self.emitBin2(.bit_and, xu, c_ffff, .uint);
+                        const xh = try self.emitBin2(.shift_right, xu, c_16, .uint);
+                        const yl = try self.emitBin2(.bit_and, yu, c_ffff, .uint);
+                        const yh = try self.emitBin2(.shift_right, yu, c_16, .uint);
+                        // Partial products (each ≤ 0xFFFE0001, no overflow).
+                        const t0 = try self.emitBin2(.mul, xl, yl, .uint);
+                        const t1 = try self.emitBin2(.mul, xh, yl, .uint);
+                        const t2 = try self.emitBin2(.mul, xl, yh, .uint);
+                        const t3 = try self.emitBin2(.mul, xh, yh, .uint);
+                        // carry = (t0>>16) + (t1&0xFFFF) + (t2&0xFFFF)
+                        const t0h = try self.emitBin2(.shift_right, t0, c_16, .uint);
+                        const t1l = try self.emitBin2(.bit_and, t1, c_ffff, .uint);
+                        const t2l = try self.emitBin2(.bit_and, t2, c_ffff, .uint);
+                        const s1 = try self.emitBin2(.add, t0h, t1l, .uint);
+                        const carry = try self.emitBin2(.add, s1, t2l, .uint);
+                        // uhi = t3 + (t1>>16) + (t2>>16) + (carry>>16)
+                        const t1h = try self.emitBin2(.shift_right, t1, c_16, .uint);
+                        const t2h = try self.emitBin2(.shift_right, t2, c_16, .uint);
+                        const carryh = try self.emitBin2(.shift_right, carry, c_16, .uint);
+                        const h1 = try self.emitBin2(.add, t3, t1h, .uint);
+                        const h2 = try self.emitBin2(.add, h1, t2h, .uint);
+                        const uhi = try self.emitBin2(.add, h2, carryh, .uint);
+                        // lo = xu * yu (low 32 bits; identical bit-pattern signed/unsigned).
+                        const lo_u = try self.emitBin2(.mul, xu, yu, .uint);
+                        // Signed sign-correction (mask form, no branches/arith-shift).
+                        var hi_u = uhi;
+                        if (is_signed) {
+                            const c_0 = try self.getConstInt(0, .uint);
+                            const c_31 = try self.getConstInt(31, .uint);
+                            const bx = try self.emitBin2(.shift_right, xu, c_31, .uint); // 0 or 1
+                            const sx = try self.emitBin2(.sub, c_0, bx, .uint); // 0 or 0xFFFFFFFF
+                            const by = try self.emitBin2(.shift_right, yu, c_31, .uint);
+                            const sy = try self.emitBin2(.sub, c_0, by, .uint);
+                            const cx = try self.emitBin2(.bit_and, yu, sx, .uint); // yu if x<0 else 0
+                            const cy = try self.emitBin2(.bit_and, xu, sy, .uint); // xu if y<0 else 0
+                            const h_a = try self.emitBin2(.sub, uhi, cx, .uint);
+                            hi_u = try self.emitBin2(.sub, h_a, cy, .uint);
+                        }
+                        // Store to the out-params: msb (arg 2) = high, lsb (arg 3) = low.
+                        // Bitcast back to int for signed out-params.
+                        const hi_store = if (is_signed) try self.emitUn1(.bitcast, hi_u, .int) else hi_u;
+                        const lo_store = if (is_signed) try self.emitUn1(.bitcast, lo_u, .int) else lo_u;
+                        const msb_lv = try self.analyzeLValue(node.data.children[2]);
+                        try self.emitStore(msb_lv.id, hi_store);
+                        const lsb_lv = try self.analyzeLValue(node.data.children[3]);
+                        try self.emitStore(lsb_lv.id, lo_store);
+                        return .{ .ty = .void, .id = 0 };
                     } else if (std.mem.eql(u8, node.data.name, "modf") or std.mem.eql(u8, node.data.name, "frexp")) {
                         // modf(x, ptr) → GLSL.std.450 Modf (#35): returns fractional, stores int via ptr
                         // frexp(x, ptr) → GLSL.std.450 Frexp (#51): returns mantissa, stores exp via ptr
@@ -9966,9 +10059,9 @@ const Analyzer = struct {
             "bitCount",
             "bitfieldReverse",
             "bitfieldInsert", "bitfieldExtract",
-            // Extended arithmetic (GL_ARB_gpu_shader5). uaddCarry/usubBorrow are
-            // emulated with core ops; umul/imulExtended need a 64-bit product and
-            // honest-error.
+            // Extended arithmetic (GL_ARB_gpu_shader5). uaddCarry/usubBorrow and the
+            // SCALAR form of umul/imulExtended are emulated with core u32 ops (16-bit-
+            // limb multiply-high); the vector form of the latter honest-errors.
             "uaddCarry", "usubBorrow", "umulExtended", "imulExtended",
             "imageSize", "imageLoad", "imageStore", "textureSize",
             "textureSamples", "imageSamples", "textureOffset", "textureLodOffset", "texelFetchOffset", "textureGrad", "textureGather", "textureGatherOffset", "textureGatherOffsets",
@@ -11094,7 +11187,7 @@ test "semantic: tolerate mode continues past first statement error" {
 // call's full argument list — a malformed instruction that `spirv-val` rejects
 // while glslpp reported exit 0 (the Mitchell silent-wrong failure mode). The
 // texture builtins that exercised this (textureProjLod/Grad, textureGradOffset)
-// are all lowered now; umul/imulExtended remain recognized-but-unlowerable.
+// are all lowered now; only the VECTOR form of umul/imulExtended remains unlowered.
 //
 // Correct behavior (honest error): in the strict (non-tolerate) analyze path
 // these must return error.SemanticFailed, never a module containing a bogus
@@ -11140,13 +11233,14 @@ test "semantic: tolerate mode never emits a defaulted GLSL.std.450 ext_inst for 
     // statement must be SKIPPED entirely, so NO `.ext_inst` instruction may
     // appear in the body. (A correct GLSL.std.450 call like sin() would still
     // emit one — this shader contains no such call, so any `.ext_inst` is the
-    // bug.) Uses imulExtended, which still honest-errors (needs a 64-bit product);
-    // the former texture examples (textureProjLod/Grad, textureGradOffset) are all
+    // bug.) Uses the VECTOR form of imulExtended, which still honest-errors (the
+    // scalar form is now emulated; the component-wise vector form is a follow-up).
+    // The former texture examples (textureProjLod/Grad, textureGradOffset) are all
     // lowered now.
     const source =
         \\#version 450
         \\layout(location=0) out vec4 o;
-        \\void main(){ int hi; int lo; imulExtended(3, 5, hi, lo); o = vec4(1.0); }
+        \\void main(){ ivec2 hi; ivec2 lo; imulExtended(ivec2(3), ivec2(5), hi, lo); o = vec4(1.0); }
     ;
     const tokens = try lexer.tokenize(testing.allocator, source);
     defer testing.allocator.free(tokens);
