@@ -7122,6 +7122,11 @@ const Analyzer = struct {
                             // loud rather than route to a NON-proj dref tag (which
                             // would drop the projection = silent-wrong).
                             const is_proj_lod = std.mem.eql(u8, node.data.name, "textureProjLod");
+                            // textureProjGrad: projective sample with EXPLICIT gradients →
+                            // OpImageSampleProjExplicitLod with the Grad image operand (not
+                            // Lod). Shares image_sample_proj_explicit_lod with textureProjLod;
+                            // codegen distinguishes them by operand count (3 = Lod, 4 = Grad).
+                            const is_proj_grad = std.mem.eql(u8, node.data.name, "textureProjGrad");
                             if (is_proj_lod and is_shadow_sample) {
                                 last_error_ctx = "textureProjLod-shadow-unsupported";
                                 last_error_inner = "textureProjLod-shadow-unsupported";
@@ -7129,17 +7134,32 @@ const Analyzer = struct {
                                 last_error_column = node.loc.column;
                                 return error.SemanticFailed;
                             }
-                            // Shadow GRADIENT sampling (textureGrad/textureGradOffset on
-                            // a sampler2DShadow) has no lowering: is_grad ⇒ is_explicit_lod,
-                            // so the shadow branch below would route it to
-                            // image_sample_dref_explicit_lod, whose codegen reads
-                            // operand[2] (here dPdx, a vec2) as the float Lod operand →
-                            // INVALID SPIR-V ("Expected Image Operand Lod to be a 32-bit
-                            // float scalar"). Fail loud rather than mis-compile. (WGSL's
-                            // compare-sample builtins can't carry gradients anyway.) (#170)
-                            if (is_grad and is_shadow_sample) {
+                            // Shadow GRADIENT sampling (textureGrad/textureGradOffset/
+                            // textureProjGrad on a *Shadow sampler) has no lowering: it would
+                            // route to a dref instruction whose codegen reads operand[2]
+                            // (here dPdx, a vec2) as the float Lod operand → INVALID SPIR-V
+                            // ("Expected Image Operand Lod to be a 32-bit float scalar"). Fail
+                            // loud rather than mis-compile. (WGSL's compare-sample builtins
+                            // can't carry gradients anyway.) (#170)
+                            if ((is_grad or is_proj_grad) and is_shadow_sample) {
                                 last_error_ctx = "shadow-textureGrad-unsupported";
                                 last_error_inner = "shadow-textureGrad-unsupported";
+                                last_error_line = node.loc.line;
+                                last_error_column = node.loc.column;
+                                return error.SemanticFailed;
+                            }
+                            // Projective sampling is undefined for a CUBE image: the
+                            // perspective divide needs a homogeneous coordinate, and
+                            // SPIR-V's OpImageSampleProj* require Dim 1D/2D/3D/Rect (not
+                            // Cube). GLSL has no cube textureProj* overload either
+                            // (glslang: "no matching overloaded function"). glslpp used to
+                            // emit invalid SPIR-V ("Expected Image 'Dim' to be 1D, 2D, 3D
+                            // or Rect"); honest-error instead. (#170)
+                            if ((is_proj or is_proj_lod or is_proj_grad) and
+                                arg_tids.items.len > 0 and self.isCubeSamplerType(arg_tids.items[0].ty))
+                            {
+                                last_error_ctx = "projective-sample-on-cube-unsupported";
+                                last_error_inner = "projective-sample-on-cube-unsupported";
                                 last_error_line = node.loc.line;
                                 last_error_column = node.loc.column;
                                 return error.SemanticFailed;
@@ -7149,7 +7169,7 @@ const Analyzer = struct {
                                 if (is_explicit_lod) .image_sample_dref_explicit_lod
                                 else if (is_proj) .image_sample_dref_proj
                                 else .image_sample_dref
-                            ) else if (is_proj_lod) .image_sample_proj_explicit_lod else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else if (is_tex_offset) .image_sample_offset else .image_sample;
+                            ) else if (is_proj_lod or is_proj_grad) .image_sample_proj_explicit_lod else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else if (is_tex_offset) .image_sample_offset else .image_sample;
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                             for (arg_tids.items, 0..) |tid, i| {
                                 operands[i] = .{ .id = tid.id };
@@ -10003,6 +10023,7 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "textureLodOffset") or
             std.mem.eql(u8, name, "textureProj") or
             std.mem.eql(u8, name, "textureProjLod") or
+            std.mem.eql(u8, name, "textureProjGrad") or
             std.mem.eql(u8, name, "texelFetch") or
             std.mem.eql(u8, name, "texelFetchOffset") or
             std.mem.eql(u8, name, "textureOffset") or
@@ -11066,13 +11087,14 @@ test "semantic: tolerate mode continues past first statement error" {
 
 // ── recognized-but-unlowerable builtins must not emit malformed OpExtInst ──
 //
-// `textureGradOffset`, `textureProjLod`, and `textureProjGrad` are all in
-// `isGLSLBuiltin` (so they parse + type-check) but NOT yet lowered to a
-// dedicated image instruction. They fall through to the generic GLSL.std.450
-// ext-inst branch where `glslExtInstruction(name)` returns null. The buggy
-// `orelse 1` there defaulted the opcode to 1 (Round) and emitted an `OpExtInst`
-// with the call's full argument list — a malformed instruction that `spirv-val`
-// rejects while glslpp reported exit 0 (the Mitchell silent-wrong failure mode).
+// A builtin in `isGLSLBuiltin` (parses + type-checks) that is NOT lowered to a
+// dedicated instruction used to fall through to the generic GLSL.std.450 ext-inst
+// branch where `glslExtInstruction(name)` returns null. The buggy `orelse 1`
+// there defaulted the opcode to 1 (Round) and emitted an `OpExtInst` with the
+// call's full argument list — a malformed instruction that `spirv-val` rejects
+// while glslpp reported exit 0 (the Mitchell silent-wrong failure mode). The
+// texture builtins that exercised this (textureProjLod/Grad, textureGradOffset)
+// are all lowered now; umul/imulExtended remain recognized-but-unlowerable.
 //
 // Correct behavior (honest error): in the strict (non-tolerate) analyze path
 // these must return error.SemanticFailed, never a module containing a bogus
@@ -11118,13 +11140,13 @@ test "semantic: tolerate mode never emits a defaulted GLSL.std.450 ext_inst for 
     // statement must be SKIPPED entirely, so NO `.ext_inst` instruction may
     // appear in the body. (A correct GLSL.std.450 call like sin() would still
     // emit one — this shader contains no such call, so any `.ext_inst` is the
-    // bug.) Uses textureProjGrad, which is still unlowerable (textureProjLod is
-    // now lowered, so it no longer exercises the unlowerable-builtin path).
+    // bug.) Uses imulExtended, which still honest-errors (needs a 64-bit product);
+    // the former texture examples (textureProjLod/Grad, textureGradOffset) are all
+    // lowered now.
     const source =
         \\#version 450
-        \\layout(binding=0) uniform sampler2D s;
         \\layout(location=0) out vec4 o;
-        \\void main(){ o = textureProjGrad(s, vec3(0.5), vec2(0.0), vec2(0.0)); }
+        \\void main(){ int hi; int lo; imulExtended(3, 5, hi, lo); o = vec4(1.0); }
     ;
     const tokens = try lexer.tokenize(testing.allocator, source);
     defer testing.allocator.free(tokens);

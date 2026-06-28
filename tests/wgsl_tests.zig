@@ -2892,6 +2892,29 @@ test "wgsl: textureProjLod(sampler2D, vec3) divides by the LAST component (.z)" 
     try nagaValidateOrSkip(wgsl, "textureProjLod-2d-vec3");
 }
 
+// #170: textureProjGrad (projective sample + EXPLICIT gradients) was wrongly
+// rejected. WGSL CAN represent it: perspective-divide the coord, then
+// textureSampleGrad(t, s, coord/divisor, ddx, ddy). It shares the
+// OpImageSampleProjExplicitLod op with textureProjLod, so the WGSL backend arm must
+// branch on the image-operands mask (Lod vs Grad) — not assume Lod.
+test "wgsl: textureProjGrad lowers to textureSampleGrad with the perspective divide" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjGrad(tex, c, vec2(0.1), vec2(0.2)); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleGrad(");
+    try assertContains(wgsl, ".xy / ");
+    try assertContains(wgsl, ".z"); // vec3 coord → .z divisor
+    // The gradients must survive (not be dropped or read as a lod).
+    try assertContains(wgsl, "vec2<f32>(0.1)");
+    try nagaValidateOrSkip(wgsl, "textureProjGrad-2d-vec3");
+}
+
 test "wgsl: projective shadow (sampler2DShadow) lowers to a projective compare" {
     // Projective depth-compare HAS a faithful lowering: textureProj divides both
     // the coordinate and the depth reference by the coordinate's last component,
