@@ -5425,20 +5425,37 @@ const Codegen = struct {
                 try self.emitWord(coord_id);
             },
             .image_sample_proj_explicit_lod => {
-                // textureProjLod → OpImageSampleProjExplicitLod with the Lod image
-                // operand (bit 1). Operands: [sampled_image, coord, lod].
+                // OpImageSampleProjExplicitLod. Two GLSL sources share this tag,
+                // distinguished by operand count:
+                //   textureProjLod  → [sampled_image, coord, lod]      → Lod  (bit 1)
+                //   textureProjGrad → [sampled_image, coord, dPdx, dPdy] → Grad (bit 2)
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const sampled_image_id = self.operandId(resolved, 0);
                 const coord_id = self.operandId(resolved, 1);
-                const lod_id = self.operandId(resolved, 2);
-                try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageSampleProjExplicitLod)));
-                try self.emitWord(result_type_id);
-                try self.emitWord(result_id);
-                try self.emitWord(sampled_image_id);
-                try self.emitWord(coord_id);
-                try self.emitWord(2); // Image Operands Mask: Lod (bit 1)
-                try self.emitWord(lod_id);
+                if (resolved.operands.len > 3) {
+                    // textureProjGrad: Grad with dPdx, dPdy.
+                    const dx_id = self.operandId(resolved, 2);
+                    const dy_id = self.operandId(resolved, 3);
+                    try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleProjExplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(4); // Image Operands Mask: Grad (bit 2)
+                    try self.emitWord(dx_id);
+                    try self.emitWord(dy_id);
+                } else {
+                    // textureProjLod: Lod.
+                    const lod_id = self.operandId(resolved, 2);
+                    try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageSampleProjExplicitLod)));
+                    try self.emitWord(result_type_id);
+                    try self.emitWord(result_id);
+                    try self.emitWord(sampled_image_id);
+                    try self.emitWord(coord_id);
+                    try self.emitWord(2); // Image Operands Mask: Lod (bit 1)
+                    try self.emitWord(lod_id);
+                }
             },
             .image_sample_dref => {
                 // OpImageSampleDrefImplicitLod: result_type(float), result, sampled_image, coordinate_without_dref, Dref
