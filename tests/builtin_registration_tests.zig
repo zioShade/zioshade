@@ -838,17 +838,49 @@ test "usubBorrow: emulated with ISub + ULessThan + Select" {
     try std.testing.expect(countOpcode(spv, OP_SELECT) >= 1);
 }
 
-test "umulExtended/imulExtended honest-error (64-bit product unsupported) — not a misleading UndeclaredIdentifier" {
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+const OP_IMUL: u32 = 132;
+const OP_BITCAST: u32 = 124;
+const OP_UMUL_EXTENDED: u32 = 151;
+const OP_SMUL_EXTENDED: u32 = 152;
+
+test "umulExtended/imulExtended SCALAR: emulated with core u32 ops (16-bit-limb mulhi), not a struct op" {
+    // The full 64-bit product (msb,lsb out-params). Scalar forms are now lowered via
+    // 16-bit-limb multiply-high using ONLY core u32 ops (IMul/BitwiseAnd/
+    // ShiftRightLogical/IAdd, plus ISub/Bitcast for the signed sign-correction) —
+    // NOT the struct-result OpU/SMulExtended, and NOT an honest-error. The algorithm
+    // (and signed correction) is exhaustively verified offline against the true
+    // product for millions of random + edge inputs; here we assert it compiles to
+    // valid SPIR-V via the emulation.
+    const u_spv = try glslpp.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x=1) in;
         \\layout(std430,binding=0) buffer B { uint a, b, hi, lo; };
         \\void main(){ umulExtended(a, b, hi, lo); }
-    , .{ .stage = .compute }));
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    , .{ .stage = .compute });
+    defer alloc.free(u_spv);
+    try std.testing.expect(countOpcode(u_spv, OP_IMUL) >= 5); // 4 limb products + lo
+    try std.testing.expect(countOpcode(u_spv, OP_UMUL_EXTENDED) == 0); // emulated, no struct op
+
+    const i_spv = try glslpp.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x=1) in;
         \\layout(std430,binding=0) buffer B { int a, b, hi, lo; };
         \\void main(){ imulExtended(a, b, hi, lo); }
+    , .{ .stage = .compute });
+    defer alloc.free(i_spv);
+    try std.testing.expect(countOpcode(i_spv, OP_IMUL) >= 5);
+    try std.testing.expect(countOpcode(i_spv, OP_BITCAST) >= 2); // signed in/out bitcasts
+    try std.testing.expect(countOpcode(i_spv, OP_SMUL_EXTENDED) == 0);
+}
+
+test "umulExtended/imulExtended VECTOR form still honest-errors (component-wise emulation is a follow-up)" {
+    // The vector form needs the mask/shift constants splatted to the vector width —
+    // not yet done — so it honest-errors rather than emit invalid (scalar-const vs
+    // vector-operand) SPIR-V.
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430,binding=0) buffer B { uvec2 a, b, hi, lo; };
+        \\void main(){ umulExtended(a, b, hi, lo); }
     , .{ .stage = .compute }));
 }
