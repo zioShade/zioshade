@@ -966,6 +966,18 @@ const Analyzer = struct {
         return id;
     }
 
+    /// A uint constant `val`, splatted to `vec_ty` when `ncomp > 1` (an
+    /// OpCompositeConstruct of `ncomp` copies). Lets a component-wise emulation
+    /// (e.g. umulExtended on uvecN) use the same mask/shift constants for scalar and
+    /// vector operands — a bare scalar const against a vector operand is invalid SPIR-V.
+    fn getConstIntSplat(self: *Analyzer, val: u32, ncomp: u32, vec_ty: ast.Type) !u32 {
+        const scalar = try self.getConstInt(val, .uint);
+        if (ncomp <= 1) return scalar;
+        const ops = try self.alloc.alloc(ir.Instruction.Operand, ncomp);
+        for (0..ncomp) |i| ops[i] = .{ .id = scalar };
+        return self.emitPureOp(.composite_construct, ops, vec_ty);
+    }
+
     /// Get or create a constant float IR node with dedup
     fn getConstFloat(self: *Analyzer, val: f32) !u32 {
         const val_bits: u32 = @bitCast(val);
@@ -7757,65 +7769,60 @@ const Analyzer = struct {
                             return error.SemanticFailed;
                         }
                         const sty = arg_tids.items[0].ty;
-                        // Scalar only for now: the component-wise vector form needs the
-                        // mask/shift CONSTANTS splatted to the vector width — a follow-up.
-                        // Honest-error vectors rather than emit invalid (scalar-const vs
-                        // vector-operand) SPIR-V.
-                        if (sty.numComponents() != 1) {
-                            last_error_ctx = "extended-arith-mul-vector-unsupported";
-                            last_error_inner = node.data.name;
-                            last_error_line = node.loc.line;
-                            last_error_column = node.loc.column;
-                            return error.SemanticFailed;
-                        }
+                        const ncomp = sty.numComponents();
+                        // Component-wise: every op below is vector-aware, so the verified
+                        // scalar mulhi runs independently per component. `uty` is the
+                        // UNSIGNED working type (uint / uvecN); mask/shift constants are
+                        // splatted to it so a scalar const never meets a vector operand.
+                        const uty = unsignedOf(sty);
                         // Limb math runs on uint bit-patterns; bitcast signed inputs.
-                        const xu = if (is_signed) try self.emitUn1(.bitcast, arg_tids.items[0].id, .uint) else arg_tids.items[0].id;
-                        const yu = if (is_signed) try self.emitUn1(.bitcast, arg_tids.items[1].id, .uint) else arg_tids.items[1].id;
-                        const c_ffff = try self.getConstInt(0xFFFF, .uint);
-                        const c_16 = try self.getConstInt(16, .uint);
+                        const xu = if (is_signed) try self.emitUn1(.bitcast, arg_tids.items[0].id, uty) else arg_tids.items[0].id;
+                        const yu = if (is_signed) try self.emitUn1(.bitcast, arg_tids.items[1].id, uty) else arg_tids.items[1].id;
+                        const c_ffff = try self.getConstIntSplat(0xFFFF, ncomp, uty);
+                        const c_16 = try self.getConstIntSplat(16, ncomp, uty);
                         // 16-bit limbs.
-                        const xl = try self.emitBin2(.bit_and, xu, c_ffff, .uint);
-                        const xh = try self.emitBin2(.shift_right, xu, c_16, .uint);
-                        const yl = try self.emitBin2(.bit_and, yu, c_ffff, .uint);
-                        const yh = try self.emitBin2(.shift_right, yu, c_16, .uint);
+                        const xl = try self.emitBin2(.bit_and, xu, c_ffff, uty);
+                        const xh = try self.emitBin2(.shift_right, xu, c_16, uty);
+                        const yl = try self.emitBin2(.bit_and, yu, c_ffff, uty);
+                        const yh = try self.emitBin2(.shift_right, yu, c_16, uty);
                         // Partial products (each ≤ 0xFFFE0001, no overflow).
-                        const t0 = try self.emitBin2(.mul, xl, yl, .uint);
-                        const t1 = try self.emitBin2(.mul, xh, yl, .uint);
-                        const t2 = try self.emitBin2(.mul, xl, yh, .uint);
-                        const t3 = try self.emitBin2(.mul, xh, yh, .uint);
+                        const t0 = try self.emitBin2(.mul, xl, yl, uty);
+                        const t1 = try self.emitBin2(.mul, xh, yl, uty);
+                        const t2 = try self.emitBin2(.mul, xl, yh, uty);
+                        const t3 = try self.emitBin2(.mul, xh, yh, uty);
                         // carry = (t0>>16) + (t1&0xFFFF) + (t2&0xFFFF)
-                        const t0h = try self.emitBin2(.shift_right, t0, c_16, .uint);
-                        const t1l = try self.emitBin2(.bit_and, t1, c_ffff, .uint);
-                        const t2l = try self.emitBin2(.bit_and, t2, c_ffff, .uint);
-                        const s1 = try self.emitBin2(.add, t0h, t1l, .uint);
-                        const carry = try self.emitBin2(.add, s1, t2l, .uint);
+                        const t0h = try self.emitBin2(.shift_right, t0, c_16, uty);
+                        const t1l = try self.emitBin2(.bit_and, t1, c_ffff, uty);
+                        const t2l = try self.emitBin2(.bit_and, t2, c_ffff, uty);
+                        const s1 = try self.emitBin2(.add, t0h, t1l, uty);
+                        const carry = try self.emitBin2(.add, s1, t2l, uty);
                         // uhi = t3 + (t1>>16) + (t2>>16) + (carry>>16)
-                        const t1h = try self.emitBin2(.shift_right, t1, c_16, .uint);
-                        const t2h = try self.emitBin2(.shift_right, t2, c_16, .uint);
-                        const carryh = try self.emitBin2(.shift_right, carry, c_16, .uint);
-                        const h1 = try self.emitBin2(.add, t3, t1h, .uint);
-                        const h2 = try self.emitBin2(.add, h1, t2h, .uint);
-                        const uhi = try self.emitBin2(.add, h2, carryh, .uint);
+                        const t1h = try self.emitBin2(.shift_right, t1, c_16, uty);
+                        const t2h = try self.emitBin2(.shift_right, t2, c_16, uty);
+                        const carryh = try self.emitBin2(.shift_right, carry, c_16, uty);
+                        const h1 = try self.emitBin2(.add, t3, t1h, uty);
+                        const h2 = try self.emitBin2(.add, h1, t2h, uty);
+                        const uhi = try self.emitBin2(.add, h2, carryh, uty);
                         // lo = xu * yu (low 32 bits; identical bit-pattern signed/unsigned).
-                        const lo_u = try self.emitBin2(.mul, xu, yu, .uint);
+                        const lo_u = try self.emitBin2(.mul, xu, yu, uty);
                         // Signed sign-correction (mask form, no branches/arith-shift).
                         var hi_u = uhi;
                         if (is_signed) {
-                            const c_0 = try self.getConstInt(0, .uint);
-                            const c_31 = try self.getConstInt(31, .uint);
-                            const bx = try self.emitBin2(.shift_right, xu, c_31, .uint); // 0 or 1
-                            const sx = try self.emitBin2(.sub, c_0, bx, .uint); // 0 or 0xFFFFFFFF
-                            const by = try self.emitBin2(.shift_right, yu, c_31, .uint);
-                            const sy = try self.emitBin2(.sub, c_0, by, .uint);
-                            const cx = try self.emitBin2(.bit_and, yu, sx, .uint); // yu if x<0 else 0
-                            const cy = try self.emitBin2(.bit_and, xu, sy, .uint); // xu if y<0 else 0
-                            const h_a = try self.emitBin2(.sub, uhi, cx, .uint);
-                            hi_u = try self.emitBin2(.sub, h_a, cy, .uint);
+                            const c_0 = try self.getConstIntSplat(0, ncomp, uty);
+                            const c_31 = try self.getConstIntSplat(31, ncomp, uty);
+                            const bx = try self.emitBin2(.shift_right, xu, c_31, uty); // 0 or 1
+                            const sx = try self.emitBin2(.sub, c_0, bx, uty); // 0 or 0xFFFFFFFF
+                            const by = try self.emitBin2(.shift_right, yu, c_31, uty);
+                            const sy = try self.emitBin2(.sub, c_0, by, uty);
+                            const cx = try self.emitBin2(.bit_and, yu, sx, uty); // yu if x<0 else 0
+                            const cy = try self.emitBin2(.bit_and, xu, sy, uty); // xu if y<0 else 0
+                            const h_a = try self.emitBin2(.sub, uhi, cx, uty);
+                            hi_u = try self.emitBin2(.sub, h_a, cy, uty);
                         }
                         // Store to the out-params: msb (arg 2) = high, lsb (arg 3) = low.
-                        // Bitcast back to int for signed out-params.
-                        const hi_store = if (is_signed) try self.emitUn1(.bitcast, hi_u, .int) else hi_u;
-                        const lo_store = if (is_signed) try self.emitUn1(.bitcast, lo_u, .int) else lo_u;
+                        // Bitcast back to the signed type for signed out-params.
+                        const hi_store = if (is_signed) try self.emitUn1(.bitcast, hi_u, sty) else hi_u;
+                        const lo_store = if (is_signed) try self.emitUn1(.bitcast, lo_u, sty) else lo_u;
                         const msb_lv = try self.analyzeLValue(node.data.children[2]);
                         try self.emitStore(msb_lv.id, hi_store);
                         const lsb_lv = try self.analyzeLValue(node.data.children[3]);
@@ -11233,14 +11240,17 @@ test "semantic: tolerate mode never emits a defaulted GLSL.std.450 ext_inst for 
     // statement must be SKIPPED entirely, so NO `.ext_inst` instruction may
     // appear in the body. (A correct GLSL.std.450 call like sin() would still
     // emit one — this shader contains no such call, so any `.ext_inst` is the
-    // bug.) Uses the VECTOR form of imulExtended, which still honest-errors (the
-    // scalar form is now emulated; the component-wise vector form is a follow-up).
-    // The former texture examples (textureProjLod/Grad, textureGradOffset) are all
-    // lowered now.
+    // bug.) The former texture/extended-arith examples (textureProjLod/Grad,
+    // textureGradOffset, u/imulExtended) are all lowered now, so this uses a still-
+    // honest-erroring builtin — projective sampling on a CUBE sampler, which the
+    // frontend guards (SPIR-V forbids Proj on a Cube image). More broadly this now
+    // verifies the general tolerate-mode invariant: a statement that honest-errors
+    // is SKIPPED cleanly, leaking no malformed instruction (here, no `.ext_inst`).
     const source =
         \\#version 450
+        \\layout(binding=0) uniform samplerCube s;
         \\layout(location=0) out vec4 o;
-        \\void main(){ ivec2 hi; ivec2 lo; imulExtended(ivec2(3), ivec2(5), hi, lo); o = vec4(1.0); }
+        \\void main(){ o = textureProjGrad(s, vec4(0.5), vec3(0.0), vec3(0.0)); }
     ;
     const tokens = try lexer.tokenize(testing.allocator, source);
     defer testing.allocator.free(tokens);

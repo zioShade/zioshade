@@ -873,14 +873,29 @@ test "umulExtended/imulExtended SCALAR: emulated with core u32 ops (16-bit-limb 
     try std.testing.expect(countOpcode(i_spv, OP_SMUL_EXTENDED) == 0);
 }
 
-test "umulExtended/imulExtended VECTOR form still honest-errors (component-wise emulation is a follow-up)" {
-    // The vector form needs the mask/shift constants splatted to the vector width —
-    // not yet done — so it honest-errors rather than emit invalid (scalar-const vs
-    // vector-operand) SPIR-V.
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+test "umulExtended/imulExtended VECTOR form is emulated component-wise (mask/shift constants splatted)" {
+    // The component-wise vector form: every op is vector-aware, so the verified
+    // scalar mulhi runs per component; the mask/shift constants are splatted to the
+    // vector width (OpCompositeConstruct) so no scalar-const-vs-vector-operand
+    // invalid SPIR-V is emitted. Must compile to valid SPIR-V via the emulation.
+    const u_spv = try glslpp.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x=1) in;
         \\layout(std430,binding=0) buffer B { uvec2 a, b, hi, lo; };
         \\void main(){ umulExtended(a, b, hi, lo); }
-    , .{ .stage = .compute }));
+    , .{ .stage = .compute });
+    defer alloc.free(u_spv);
+    try std.testing.expect(countOpcode(u_spv, OP_IMUL) >= 5);
+    try std.testing.expect(countOpcode(u_spv, OP_UMUL_EXTENDED) == 0); // emulated, no struct op
+    try std.testing.expect(countOpcode(u_spv, OP_COMPOSITE_CONSTRUCT) >= 1); // splatted const
+
+    const i_spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430,binding=0) buffer B { ivec4 a, b, hi, lo; };
+        \\void main(){ imulExtended(a, b, hi, lo); }
+    , .{ .stage = .compute });
+    defer alloc.free(i_spv);
+    try std.testing.expect(countOpcode(i_spv, OP_IMUL) >= 5);
+    try std.testing.expect(countOpcode(i_spv, OP_SMUL_EXTENDED) == 0);
 }

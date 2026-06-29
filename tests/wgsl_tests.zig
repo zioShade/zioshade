@@ -1580,6 +1580,32 @@ test "wgsl: scalar umulExtended/imulExtended are emulated and naga-valid (#170)"
     try nagaValidateOrSkip(i_wgsl, "imulExtended-scalar");
 }
 
+// #170: the COMPONENT-WISE vector form. Every emulation op is vector-aware, so the
+// same verified scalar mulhi runs per component; the mask/shift constants are
+// splatted to the vector width (vec2u(65535u) etc.) so no scalar-const-vs-vector
+// invalid SPIR-V is emitted. Must be naga-valid for uvecN and ivecN.
+test "wgsl: vector umulExtended/imulExtended are emulated component-wise and naga-valid (#170)" {
+    const u_wgsl = try compileCompToWgsl(
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430,binding=0) buffer B { uvec2 a, b, hi, lo; };
+        \\void main(){ umulExtended(a, b, hi, lo); }
+    );
+    defer alloc.free(u_wgsl);
+    try assertContains(u_wgsl, "vec2u(65535u)"); // mask splatted to the vector width
+    try nagaValidateOrSkip(u_wgsl, "umulExtended-uvec2");
+
+    const i_wgsl = try compileCompToWgsl(
+        \\#version 450
+        \\layout(local_size_x=1) in;
+        \\layout(std430,binding=0) buffer B { ivec4 a, b, hi, lo; };
+        \\void main(){ imulExtended(a, b, hi, lo); }
+    );
+    defer alloc.free(i_wgsl);
+    try assertContains(i_wgsl, "bitcast<vec4i>"); // ivec4 out-params bitcast back
+    try nagaValidateOrSkip(i_wgsl, "imulExtended-ivec4");
+}
+
 // #170: OpIAddCarry / OpISubBorrow (GLSL uaddCarry/usubBorrow) return a 2-member
 // {result, carry|borrow} struct that is consumed only by OpCompositeExtract. They
 // have no struct-returning WGSL builtin, but each member IS representable: member 0
