@@ -28,7 +28,9 @@ const KNOWN_UNSUPPORTED = [_][]const u8{
     "tests/glslang-430/spv.AofA.frag",
     "tests/glslang-430/spv.double.comp",
     "tests/glslang-430/spv.nvAtomicFp16Vec.frag",
-    "tests/spirv-cross/extended-arithmetic.desktop.comp",
+    // extended-arithmetic.desktop.comp was unsupported only because the 64-bit
+    // umul/imulExtended product wasn't lowered; the scalar AND component-wise vector
+    // forms are now emulated with core u32 ops, so it compiles + spirv-vals.
     "tests/spirv-cross/fp64.desktop.comp",
     "tests/spirv-cross/gcn_shader.comp",
     // image-query.desktop.frag was unsupported only because samplerCubeArray /
