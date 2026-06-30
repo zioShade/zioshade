@@ -790,6 +790,66 @@ test "frontend: textureProjGradOffset cube/shadow/non-const-offset honest-error"
     , .{ .stage = .fragment }));
 }
 
+// #170: GLSL `&&` / `||` MUST short-circuit — the RHS is not evaluated when the LHS
+// determines the result. glslpp used to emit eager OpLogicalAnd/Or, which evaluates
+// both operands and DROPS a side-effecting RHS (e.g. a function mutating an inout
+// arg) = silent-wrong. When the RHS may have side effects, it now lowers to real
+// short-circuit control flow (OpBranchConditional), so the side effect is conditional.
+test "frontend: side-effecting && / || short-circuit (OpBranchConditional, not eager OpLogicalOr)" {
+    const alloc = std.testing.allocator;
+    inline for (.{ "||", "&&" }) |op| {
+        const src = "#version 450\n" ++
+            "layout(location=0) in vec4 iv;\n" ++
+            "layout(location=0) out vec4 o;\n" ++
+            "bool se(inout int c){ c += 1; return true; }\n" ++
+            "void main(){ int c=0; bool a=iv.x>0.0; bool r = a " ++ op ++ " se(c); o=vec4(float(c), r?1.0:0.0, 0, 1); }\n";
+        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        defer alloc.free(spv);
+        try std.testing.expect(spirvHasOpcode(spv, 250)); // OpBranchConditional (short-circuit)
+        try std.testing.expect(!spirvHasOpcode(spv, 166)); // not eager OpLogicalOr
+        try std.testing.expect(!spirvHasOpcode(spv, 167)); // not eager OpLogicalAnd
+        try spirvValOrSkip(spv);
+    }
+}
+
+// The PURE case must KEEP the cheaper eager OpLogicalOr/And (no control flow) — the
+// short-circuit lowering only kicks in for a side-effecting RHS.
+test "frontend: pure && / || keep eager OpLogicalOr/And (no short-circuit overhead)" {
+    const alloc = std.testing.allocator;
+    const spv_or = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec4 iv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ bool r = (iv.x > 0.0) || (iv.y < 1.0); o = vec4(r ? 1.0 : 0.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv_or);
+    try std.testing.expect(spirvHasOpcode(spv_or, 166)); // OpLogicalOr (eager, no branch)
+
+    const spv_and = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec4 iv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ bool r = (iv.x > 0.0) && (iv.y < 1.0); o = vec4(r ? 1.0 : 0.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv_and);
+    try std.testing.expect(spirvHasOpcode(spv_and, 167)); // OpLogicalAnd (eager)
+}
+
+// A side-effecting RHS inside a LOOP CONDITION must NOT emit short-circuit control
+// flow (a selection_merge in the loop header breaks the loop's structured control
+// flow = invalid SPIR-V). It falls back to the eager path there — still VALID SPIR-V.
+test "frontend: && in a loop condition stays valid SPIR-V (no broken back-edge)" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\bool chk(inout int n){ n++; return n < 10; }
+        \\void main(){ int n=0; int s=0; for(int i=0;i<5 && chk(n);i++){ s+=i; } o=vec4(float(s),float(n),0,1); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try spirvValOrSkip(spv); // must be valid (the regression that scan.comp caught)
+}
+
 // #170: textureProjOffset (projective sample + const offset, no lod/grad) was wrongly
 // rejected (UndeclaredIdentifier). It IS representable: OpImageSampleProjImplicitLod
 // with a ConstOffset operand (its own IR tag — image_sample_proj has no operands).
