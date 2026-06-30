@@ -4117,9 +4117,18 @@ fn emitInstruction(
                 }
                 break :blk ".z";
             } else ".z";
-            try w.print("    {s} {s} = {s}.Sample({s}, {s}.xy / {s}{s});\n", .{
-                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle,
-            });
+            // textureProjOffset carries a ConstOffset (mask 0x8 at words[5], offset at
+            // words[6]); HLSL Sample takes the offset as a 3rd arg. Dropping it samples
+            // the un-offset texels.
+            if (inst.words.len > 6 and (inst.words[5] & 0x8) != 0) {
+                try w.print("    {s} {s} = {s}.Sample({s}, {s}.xy / {s}{s}, {s});\n", .{
+                    rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, names.get(inst.words[6]) orelse "int2(0)",
+                });
+            } else {
+                try w.print("    {s} {s} = {s}.Sample({s}, {s}.xy / {s}{s});\n", .{
+                    rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle,
+                });
+            }
         },
         .ImageSampleProjDrefImplicitLod => {
             // Projected shadow: SampleCmp with manual projection

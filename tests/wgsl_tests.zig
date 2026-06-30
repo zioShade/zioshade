@@ -5113,24 +5113,25 @@ test "wgsl: textureGradOffset with a non-constant offset honest-errors (#170)" {
     );
 }
 
-// #170: textureProjOffset has NO faithful WGSL lowering — WGSL has no projective
-// sampler builtin, and the manual perspective-divide path used for textureProj
-// cannot carry a ConstOffset. It is deliberately kept OUT of isTextureBuiltin so
-// it honest-errors (an unrecognized builtin) rather than emitting a wrong sample.
-// (Compile through the native frontend; expect an error.) This is the
-// #170-compliant counterpart to the textureOffset fix: faithful where
-// representable on the target back-end, loud where not — never silent-wrong.
-test "wgsl: textureProjOffset honest-errors (no faithful lowering) (#170)" {
-    try std.testing.expectError(
-        error.SemanticFailed,
-        glslpp.compileToSPIRV(alloc,
-            \\#version 450
-            \\layout(binding = 0) uniform sampler2D s;
-            \\layout(location = 0) in vec4 P;
-            \\layout(location = 0) out vec4 o;
-            \\void main() { o = textureProjOffset(s, P, ivec2(1, 0)); }
-        , .{ .stage = .fragment }),
+// #170: textureProjOffset DOES have a faithful WGSL lowering (the prior comment
+// claiming otherwise was wrong). It is OpImageSampleProjImplicitLod with a
+// ConstOffset operand, and WGSL `textureSample(t, s, coord/divisor, offset)` takes
+// a trailing const offset — so the perspective divide PLUS the offset lower
+// cleanly. The const offset must survive into the WGSL.
+test "wgsl: textureProjOffset keeps the const offset (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec4 P;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureProjOffset(s, P, ivec2(1, 0)); }
     );
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(");
+    try assertContains(wgsl, ".xy / ");
+    // The offset is the trailing arg; its presence proves it survived.
+    try assertContains(wgsl, "vec2<i32>(1, 0))");
+    try nagaValidateOrSkip(wgsl, "textureProjOffset-2d");
 }
 
 // #170: textureOffset with a NON-CONSTANT offset cannot become a SPIR-V

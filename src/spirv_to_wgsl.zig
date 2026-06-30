@@ -7751,7 +7751,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         }
                     }
                 } else {
-                    try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s} / {s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp });
+                    // ImageSampleProjImplicitLod. textureProjOffset carries a ConstOffset
+                    // image operand (mask 0x8 at words[5], offset at words[6]); WGSL
+                    // textureSample takes a trailing const-offset arg. Dropping it would
+                    // silently sample the un-offset texels.
+                    const mask = if (inst.words.len > 5) inst.words[5] else 0;
+                    if (mask & 0x8 != 0) {
+                        if (inst.words.len <= 6) return error.UnsupportedImageOperands;
+                        const off = names.get(inst.words[6]) orelse "vec2<i32>(0)";
+                        try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s} / {s}{s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, off });
+                    } else {
+                        try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s} / {s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp });
+                    }
                 }
             },
 

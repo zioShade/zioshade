@@ -5424,6 +5424,23 @@ const Codegen = struct {
                 try self.emitWord(sampled_image_id);
                 try self.emitWord(coord_id);
             },
+            .image_sample_proj_offset => {
+                // textureProjOffset → OpImageSampleProjImplicitLod with ConstOffset.
+                // Operands: [sampled_image, coord, offset]. Dropping the offset would
+                // silently emit a plain projective sample = wrong texels.
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const offset_id = self.operandId(resolved, 2);
+                try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(spirv.Op.ImageSampleProjImplicitLod)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(8); // Image Operands Mask: ConstOffset (bit 3)
+                try self.emitWord(offset_id);
+            },
             .image_sample_proj_explicit_lod => {
                 // OpImageSampleProjExplicitLod. Two GLSL sources share this tag,
                 // distinguished by operand count:

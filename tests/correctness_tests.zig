@@ -790,6 +790,52 @@ test "frontend: textureProjGradOffset cube/shadow/non-const-offset honest-error"
     , .{ .stage = .fragment }));
 }
 
+// #170: textureProjOffset (projective sample + const offset, no lod/grad) was wrongly
+// rejected (UndeclaredIdentifier). It IS representable: OpImageSampleProjImplicitLod
+// with a ConstOffset operand (its own IR tag — image_sample_proj has no operands).
+test "frontend: textureProjOffset emits valid OpImageSampleProjImplicitLod (ConstOffset)" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjOffset(tex, c, ivec2(2, -1)); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 91)); // OpImageSampleProjImplicitLod
+    try spirvValOrSkip(spv); // the ConstOffset encoding must be well-formed
+}
+
+// #170: textureProjOffset honest-errors (not mis-compile) on the by-design holes:
+// CUBE (ConstOffset illegal on Cube Dim), SHADOW (would route to a dref-proj op that
+// can't carry the offset), and a NON-CONSTANT offset.
+test "frontend: textureProjOffset cube/shadow/non-const-offset honest-error" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform samplerCube s;
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjOffset(s, c, ivec2(1, 0)); }
+    , .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow s;
+        \\layout(location=0) in vec4 c;
+        \\layout(location=0) out float o;
+        \\void main(){ o = textureProjOffset(s, c, ivec2(1, 0)); }
+    , .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=1) flat in ivec2 dyn;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjOffset(s, c, dyn); }
+    , .{ .stage = .fragment }));
+}
+
 // #170: textureProjGrad (projective sample with EXPLICIT gradients) was wrongly
 // rejected — missing from isTextureBuiltin. It IS representable:
 // OpImageSampleProjExplicitLod with the Grad image operand (shares the proj-
