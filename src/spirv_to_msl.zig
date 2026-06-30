@@ -4766,7 +4766,14 @@ fn emitInstruction(
                 var off: usize = 6;
                 if (mask & 0x1 != 0) off += 1;
                 if (mask & 0x2 != 0 and off < inst.words.len) {
-                    try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, level({s}));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, names.get(inst.words[off]) orelse "0"});
+                    // Lod|ConstOffset (textureProjLodOffset): MSL sample takes the const
+                    // offset as a trailing int2 arg after level(). Dropping it samples
+                    // the un-offset texels.
+                    if (mask & 0x8 != 0 and off + 1 < inst.words.len) {
+                        try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, level({s}), {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, names.get(inst.words[off]) orelse "0", names.get(inst.words[off + 1]) orelse "int2(0)"});
+                    } else {
+                        try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, level({s}));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, names.get(inst.words[off]) orelse "0"});
+                    }
                 } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
                     // textureProjGrad: sample with the manual perspective divide and
                     // explicit 2D gradients (gradient2d). Guaranteed 2D here — the

@@ -7065,7 +7065,7 @@ const Analyzer = struct {
                             // texture(sampler, coord) → image_sample (implicit or explicit lod)
                             const is_lod = std.mem.eql(u8, node.data.name, "textureLod") or std.mem.eql(u8, node.data.name, "textureLodOffset");
                             const is_grad = std.mem.eql(u8, node.data.name, "textureGrad") or std.mem.eql(u8, node.data.name, "textureGradOffset");
-                            const is_explicit_lod = is_lod or is_grad or std.mem.eql(u8, node.data.name, "textureProjLod") or std.mem.eql(u8, node.data.name, "textureProjGrad");
+                            const is_explicit_lod = is_lod or is_grad or std.mem.eql(u8, node.data.name, "textureProjLod") or std.mem.eql(u8, node.data.name, "textureProjLodOffset") or std.mem.eql(u8, node.data.name, "textureProjGrad");
                             const is_proj = std.mem.eql(u8, node.data.name, "textureProj");
                             // textureOffset(s, coord, const ivec offset) →
                             // image_sample_offset (see ir.zig) so codegen emits the
@@ -7102,6 +7102,11 @@ const Analyzer = struct {
                                 // the offset is arg 4, carried as a ConstOffset alongside
                                 // the Grad operand (mask Grad|ConstOffset). (#170)
                                 4
+                            else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureProjLodOffset"))
+                                // textureProjLodOffset(s, coord, lod, const ivec offset):
+                                // the offset is arg 3, carried as a ConstOffset alongside
+                                // the Lod operand (mask Lod|ConstOffset). (#170)
+                                3
                             else
                                 null;
                             if (offset_arg_idx) |oi| {
@@ -7156,7 +7161,12 @@ const Analyzer = struct {
                             // Lod). Shares image_sample_proj_explicit_lod with textureProjLod;
                             // codegen distinguishes them by operand count (3 = Lod, 4 = Grad).
                             const is_proj_grad = std.mem.eql(u8, node.data.name, "textureProjGrad");
-                            if (is_proj_lod and is_shadow_sample) {
+                            // textureProjLodOffset: projective + explicit LOD + const
+                            // offset → OpImageSampleProjExplicitLod with Lod|ConstOffset
+                            // (its own IR tag — the count-based Lod/Grad dispatch can't
+                            // tell [coord,lod,offset] from the Grad form [coord,dPdx,dPdy]).
+                            const is_proj_lod_offset = std.mem.eql(u8, node.data.name, "textureProjLodOffset");
+                            if ((is_proj_lod or is_proj_lod_offset) and is_shadow_sample) {
                                 last_error_ctx = "textureProjLod-shadow-unsupported";
                                 last_error_inner = "textureProjLod-shadow-unsupported";
                                 last_error_line = node.loc.line;
@@ -7184,7 +7194,7 @@ const Analyzer = struct {
                             // (glslang: "no matching overloaded function"). glslpp used to
                             // emit invalid SPIR-V ("Expected Image 'Dim' to be 1D, 2D, 3D
                             // or Rect"); honest-error instead. (#170)
-                            if ((is_proj or is_proj_lod or is_proj_grad) and
+                            if ((is_proj or is_proj_lod or is_proj_grad or is_proj_lod_offset) and
                                 arg_tids.items.len > 0 and self.isCubeSamplerType(arg_tids.items[0].ty))
                             {
                                 last_error_ctx = "projective-sample-on-cube-unsupported";
@@ -7198,7 +7208,7 @@ const Analyzer = struct {
                                 if (is_explicit_lod) .image_sample_dref_explicit_lod
                                 else if (is_proj) .image_sample_dref_proj
                                 else .image_sample_dref
-                            ) else if (is_proj_lod or is_proj_grad) .image_sample_proj_explicit_lod else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else if (is_tex_offset) .image_sample_offset else .image_sample;
+                            ) else if (is_proj_lod_offset) .image_sample_proj_lod_offset else if (is_proj_lod or is_proj_grad) .image_sample_proj_explicit_lod else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else if (is_tex_offset) .image_sample_offset else .image_sample;
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                             for (arg_tids.items, 0..) |tid, i| {
                                 operands[i] = .{ .id = tid.id };
@@ -10072,7 +10082,7 @@ const Analyzer = struct {
             "uaddCarry", "usubBorrow", "umulExtended", "imulExtended",
             "imageSize", "imageLoad", "imageStore", "textureSize",
             "textureSamples", "imageSamples", "textureOffset", "textureLodOffset", "texelFetchOffset", "textureGrad", "textureGather", "textureGatherOffset", "textureGatherOffsets",
-            "textureGradOffset", "textureProjLod", "textureProjGrad",
+            "textureGradOffset", "textureProjLod", "textureProjLodOffset", "textureProjGrad",
             // Barrier/memory builtins (void, special handling)
             "barrier", "memoryBarrier", "memoryBarrierShared",
             "memoryBarrierImage", "memoryBarrierBuffer", "groupMemoryBarrier",
@@ -10123,6 +10133,7 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "textureLodOffset") or
             std.mem.eql(u8, name, "textureProj") or
             std.mem.eql(u8, name, "textureProjLod") or
+            std.mem.eql(u8, name, "textureProjLodOffset") or
             std.mem.eql(u8, name, "textureProjGrad") or
             std.mem.eql(u8, name, "texelFetch") or
             std.mem.eql(u8, name, "texelFetchOffset") or
@@ -10212,6 +10223,7 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "textureGatherOffsets") or
             std.mem.eql(u8, name, "texelFetchOffset") or
             std.mem.eql(u8, name, "textureProjLod") or
+            std.mem.eql(u8, name, "textureProjLodOffset") or
             std.mem.eql(u8, name, "textureProjGrad") or
             std.mem.eql(u8, name, "textureGradOffset") or
             std.mem.eql(u8, name, "textureProjOffset");

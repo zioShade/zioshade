@@ -7730,7 +7730,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         try w.print("let {s}: {s} = textureSampleGrad({s}, {s}_sampler, {s}{s} / {s}{s}, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, ddx, ddy });
                     } else {
                         const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-                        try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}{s} / {s}{s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, lod });
+                        if (mask & 0x8 != 0) {
+                            // Lod|ConstOffset (textureProjLodOffset): the const offset
+                            // follows the lod. WGSL textureSampleLevel takes a trailing
+                            // const-offset arg; dropping it would silently ignore it.
+                            if (inst.words.len <= 7) return error.UnsupportedImageOperands;
+                            const off = names.get(inst.words[7]) orelse "vec2<i32>(0)";
+                            try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}{s} / {s}{s}, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, lod, off });
+                        } else {
+                            try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}{s} / {s}{s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, lod });
+                        }
                     }
                 } else {
                     try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s} / {s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp });
