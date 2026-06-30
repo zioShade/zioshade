@@ -7727,7 +7727,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (inst.words.len <= 7) return error.UnsupportedImageOperands;
                         const ddx = names.get(inst.words[6]) orelse "0";
                         const ddy = names.get(inst.words[7]) orelse "0";
-                        try w.print("let {s}: {s} = textureSampleGrad({s}, {s}_sampler, {s}{s} / {s}{s}, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, ddx, ddy });
+                        if (mask & 0x8 != 0) {
+                            // Grad|ConstOffset (textureProjGradOffset): the const offset
+                            // follows BOTH gradients. WGSL textureSampleGrad takes a
+                            // trailing const-offset arg; dropping it = silent-wrong.
+                            if (inst.words.len <= 8) return error.UnsupportedImageOperands;
+                            const off = names.get(inst.words[8]) orelse "vec2<i32>(0)";
+                            try w.print("let {s}: {s} = textureSampleGrad({s}, {s}_sampler, {s}{s} / {s}{s}, {s}, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, ddx, ddy, off });
+                        } else {
+                            try w.print("let {s}: {s} = textureSampleGrad({s}, {s}_sampler, {s}{s} / {s}{s}, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, ddx, ddy });
+                        }
                     } else {
                         const lod = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
                         if (mask & 0x8 != 0) {
