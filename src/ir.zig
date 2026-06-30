@@ -335,6 +335,11 @@ pub const Instruction = struct {
         // 5-operand layout is distinct from the proj-lod-offset / proj-explicit-lod
         // tags above).
         image_sample_proj_grad_offset,
+        // textureProjOffset: projective sample (implicit LOD) with a const offset →
+        // OpImageSampleProjImplicitLod with the ConstOffset image operand. Operands:
+        // [sampled_image, coord, offset]. (image_sample_proj has no operands and
+        // cannot carry the offset.)
+        image_sample_proj_offset,
         image_sample_dref,
         image_sample_dref_explicit_lod,
         image_sample_dref_proj,

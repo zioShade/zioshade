@@ -7081,9 +7081,9 @@ const Analyzer = struct {
                             // textureSampleGrad 6th arg, GLSL textureGradOffset, HLSL
                             // .SampleGrad 5th arg, MSL sample(..., offset)). Its const
                             // offset is the offset_arg_idx=4 case below. textureProjOffset
-                            // is still left as an honest-error (unrecognized identifier):
-                            // WGSL has no projective sampler builtin, and the manual
-                            // perspective-divide path cannot carry a ConstOffset.
+                            // IS now lowered too (image_sample_proj_offset →
+                            // OpImageSampleProjImplicitLod with ConstOffset; WGSL
+                            // textureSample(coord/divisor, offset) carries it).
                             const is_tex_offset = !is_shadow_sample and std.mem.eql(u8, node.data.name, "textureOffset");
                             // The ConstOffset operand MUST be an OpConstantComposite
                             // (SPIR-V requires it constant). For ivec2(1,0) the arg
@@ -7112,6 +7112,10 @@ const Analyzer = struct {
                                 // the offset is arg 4, carried as a ConstOffset alongside
                                 // the Grad operands (mask Grad|ConstOffset). (#170)
                                 4
+                            else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureProjOffset"))
+                                // textureProjOffset(s, coord, const ivec offset): projective
+                                // sample (implicit LOD) + ConstOffset; the offset is arg 2. (#170)
+                                2
                             else
                                 null;
                             if (offset_arg_idx) |oi| {
@@ -7175,9 +7179,26 @@ const Analyzer = struct {
                             // offset → OpImageSampleProjExplicitLod with Grad|ConstOffset
                             // (its own IR tag: [si,coord,dPdx,dPdy,offset]).
                             const is_proj_grad_offset = std.mem.eql(u8, node.data.name, "textureProjGradOffset");
+                            // textureProjOffset: projective sample (implicit LOD) + const
+                            // offset → OpImageSampleProjImplicitLod with ConstOffset
+                            // (its own IR tag: [si,coord,offset]).
+                            const is_proj_offset = std.mem.eql(u8, node.data.name, "textureProjOffset");
                             if ((is_proj_lod or is_proj_lod_offset) and is_shadow_sample) {
                                 last_error_ctx = "textureProjLod-shadow-unsupported";
                                 last_error_inner = "textureProjLod-shadow-unsupported";
+                                last_error_line = node.loc.line;
+                                last_error_column = node.loc.column;
+                                return error.SemanticFailed;
+                            }
+                            // Shadow textureProjOffset (sampler2DShadow) is valid GLSL but
+                            // would route to image_sample_dref_proj, which has no ConstOffset
+                            // path — the offset would be silently dropped. Honest-error rather
+                            // than mis-compile (mirrors the 3-arg shadow textureOffset guard
+                            // below; WGSL's projective compare lowering can't carry an offset
+                            // here). (#170)
+                            if (is_proj_offset and is_shadow_sample) {
+                                last_error_ctx = "shadow-textureProjOffset-unsupported";
+                                last_error_inner = "shadow-textureProjOffset-unsupported";
                                 last_error_line = node.loc.line;
                                 last_error_column = node.loc.column;
                                 return error.SemanticFailed;
@@ -7203,7 +7224,7 @@ const Analyzer = struct {
                             // (glslang: "no matching overloaded function"). glslpp used to
                             // emit invalid SPIR-V ("Expected Image 'Dim' to be 1D, 2D, 3D
                             // or Rect"); honest-error instead. (#170)
-                            if ((is_proj or is_proj_lod or is_proj_grad or is_proj_lod_offset or is_proj_grad_offset) and
+                            if ((is_proj or is_proj_lod or is_proj_grad or is_proj_lod_offset or is_proj_grad_offset or is_proj_offset) and
                                 arg_tids.items.len > 0 and self.isCubeSamplerType(arg_tids.items[0].ty))
                             {
                                 last_error_ctx = "projective-sample-on-cube-unsupported";
@@ -7217,7 +7238,7 @@ const Analyzer = struct {
                                 if (is_explicit_lod) .image_sample_dref_explicit_lod
                                 else if (is_proj) .image_sample_dref_proj
                                 else .image_sample_dref
-                            ) else if (is_proj_grad_offset) .image_sample_proj_grad_offset else if (is_proj_lod_offset) .image_sample_proj_lod_offset else if (is_proj_lod or is_proj_grad) .image_sample_proj_explicit_lod else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else if (is_tex_offset) .image_sample_offset else .image_sample;
+                            ) else if (is_proj_grad_offset) .image_sample_proj_grad_offset else if (is_proj_lod_offset) .image_sample_proj_lod_offset else if (is_proj_lod or is_proj_grad) .image_sample_proj_explicit_lod else if (is_proj_offset) .image_sample_proj_offset else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else if (is_tex_offset) .image_sample_offset else .image_sample;
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
                             for (arg_tids.items, 0..) |tid, i| {
                                 operands[i] = .{ .id = tid.id };
@@ -10091,7 +10112,7 @@ const Analyzer = struct {
             "uaddCarry", "usubBorrow", "umulExtended", "imulExtended",
             "imageSize", "imageLoad", "imageStore", "textureSize",
             "textureSamples", "imageSamples", "textureOffset", "textureLodOffset", "texelFetchOffset", "textureGrad", "textureGather", "textureGatherOffset", "textureGatherOffsets",
-            "textureGradOffset", "textureProjLod", "textureProjLodOffset", "textureProjGrad", "textureProjGradOffset",
+            "textureGradOffset", "textureProjLod", "textureProjLodOffset", "textureProjGrad", "textureProjGradOffset", "textureProjOffset",
             // Barrier/memory builtins (void, special handling)
             "barrier", "memoryBarrier", "memoryBarrierShared",
             "memoryBarrierImage", "memoryBarrierBuffer", "groupMemoryBarrier",
@@ -10145,6 +10166,7 @@ const Analyzer = struct {
             std.mem.eql(u8, name, "textureProjLodOffset") or
             std.mem.eql(u8, name, "textureProjGradOffset") or
             std.mem.eql(u8, name, "textureProjGrad") or
+            std.mem.eql(u8, name, "textureProjOffset") or
             std.mem.eql(u8, name, "texelFetch") or
             std.mem.eql(u8, name, "texelFetchOffset") or
             std.mem.eql(u8, name, "textureOffset") or
