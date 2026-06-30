@@ -4778,7 +4778,15 @@ fn emitInstruction(
                     // textureProjGrad: sample with the manual perspective divide and
                     // explicit 2D gradients (gradient2d). Guaranteed 2D here — the
                     // dim guard above honest-errors 1D/3D (cube is frontend-guarded).
-                    try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, gradient2d({s}, {s}));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, names.get(inst.words[off]) orelse "0", names.get(inst.words[off + 1]) orelse "0"});
+                    const dx = names.get(inst.words[off]) orelse "0";
+                    const dy = names.get(inst.words[off + 1]) orelse "0";
+                    // Grad|ConstOffset (textureProjGradOffset): MSL sample takes the const
+                    // offset as a trailing int2 arg after the gradient.
+                    if (mask & 0x8 != 0 and off + 2 < inst.words.len) {
+                        try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, gradient2d({s}, {s}), {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, dx, dy, names.get(inst.words[off + 2]) orelse "int2(0)"});
+                    } else {
+                        try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, gradient2d({s}, {s}));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, dx, dy});
+                    }
                 } else {
                     try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, level(0));\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs});
                 }

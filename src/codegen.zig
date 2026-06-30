@@ -5477,6 +5477,28 @@ const Codegen = struct {
                 try self.emitWord(lod_id);
                 try self.emitWord(offset_id);
             },
+            .image_sample_proj_grad_offset => {
+                // textureProjGradOffset → OpImageSampleProjExplicitLod with
+                // Grad|ConstOffset. Operands: [sampled_image, coord, dPdx, dPdy, offset].
+                // Image-operand bit order: Grad=0x4 before ConstOffset=0x8, and the
+                // ConstOffset word follows BOTH gradient words.
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const dx_id = self.operandId(resolved, 2);
+                const dy_id = self.operandId(resolved, 3);
+                const offset_id = self.operandId(resolved, 4);
+                try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.ImageSampleProjExplicitLod)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(4 | 8); // Image Operands Mask: Grad (bit 2) | ConstOffset (bit 3)
+                try self.emitWord(dx_id);
+                try self.emitWord(dy_id);
+                try self.emitWord(offset_id);
+            },
             .image_sample_dref => {
                 // OpImageSampleDrefImplicitLod: result_type(float), result, sampled_image, coordinate_without_dref, Dref
                 // GLSL coord has Dref as last component; SPIR-V needs it separate

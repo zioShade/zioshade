@@ -14689,6 +14689,22 @@ test "T31.7: textureProjLodOffset keeps the const offset as SampleLevel 4th arg 
     try assertContains(hlsl, "int2(2, -1)");
 }
 
+// #170: textureProjGradOffset → HLSL SampleGrad with the manual divide + offset (5th arg).
+test "T31.8: textureProjGradOffset keeps the const offset as SampleGrad 5th arg (#170)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjGradOffset(s, c, vec2(0.1), vec2(0.2), ivec2(2, -1)); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "SampleGrad(");
+    try assertContains(hlsl, ".xy / ");
+    try assertContains(hlsl, "int2(2, -1)");
+}
+
 // #170: textureProjGrad → HLSL SampleGrad with the manual perspective divide
 // (coord.xy / divisor) and the explicit gradients. vec3 coord → .z divisor.
 test "T31.7: textureProjGrad uses SampleGrad with the perspective divide (#170)" {

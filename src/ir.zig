@@ -329,6 +329,12 @@ pub const Instruction = struct {
         // operand count, and [si,coord,lod,offset] has the same count (4) as the
         // Grad form [si,coord,dPdx,dPdy] — they would collide.
         image_sample_proj_lod_offset,
+        // textureProjGradOffset: projective sample with EXPLICIT gradients and a
+        // const offset → OpImageSampleProjExplicitLod with Grad|ConstOffset.
+        // Operands: [sampled_image, coord, dPdx, dPdy, offset]. Its own tag (the
+        // 5-operand layout is distinct from the proj-lod-offset / proj-explicit-lod
+        // tags above).
+        image_sample_proj_grad_offset,
         image_sample_dref,
         image_sample_dref_explicit_lod,
         image_sample_dref_proj,
