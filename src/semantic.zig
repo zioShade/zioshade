@@ -600,6 +600,12 @@ const Analyzer = struct {
     scopes: std.ArrayListUnmanaged(Scope),
     globals: std.ArrayListUnmanaged(ir.Global),
     functions: std.ArrayListUnmanaged(ir.Function),
+    // >0 while analyzing a loop CONDITION expression. Short-circuit `&&`/`||`
+    // lowering emits a selection_merge + branches; doing that inside a loop header
+    // breaks the loop's structured control flow (invalid back-edge). In that
+    // position the short-circuit falls back to the eager path (the rare
+    // side-effecting-RHS-in-loop-condition case stays as-is, never invalid). (#170)
+    in_loop_cond: u32 = 0,
     types: std.StringHashMapUnmanaged(ir.TypeDef),
     instructions: std.ArrayListUnmanaged(ir.Instruction),
     errors: std.ArrayListUnmanaged([]const u8),
@@ -3511,7 +3517,12 @@ const Analyzer = struct {
                 try self.emitLabel(header_label);
                 self.cache_globals = true; // Loop header dominates body and continue blocks
                 if (has_cond) {
-                    const cond = try self.analyzeExpression(children[1]);
+                    self.in_loop_cond += 1;
+                    const cond = self.analyzeExpression(children[1]) catch |e| {
+                        self.in_loop_cond -= 1;
+                        return e;
+                    };
+                    self.in_loop_cond -= 1;
                     const cond_id = cond.id;
                     try self.emitLoopMerge(merge_label, continue_label);
                     try self.emitBranchConditional(cond_id, body_label, merge_label);
@@ -3569,7 +3580,12 @@ const Analyzer = struct {
                 // Header: condition check, LoopMerge, branch
                 try self.emitLabel(header_label);
                 self.cache_globals = true; // Loop header dominates body and continue blocks
-                const cond = try self.analyzeExpression(node.data.children[0]);
+                self.in_loop_cond += 1;
+                const cond = self.analyzeExpression(node.data.children[0]) catch |e| {
+                    self.in_loop_cond -= 1;
+                    return e;
+                };
+                self.in_loop_cond -= 1;
                 try self.emitLoopMerge(merge_label, continue_label);
                 try self.emitBranchConditional(cond.id, body_label, merge_label);
 
@@ -3622,7 +3638,12 @@ const Analyzer = struct {
 
                 try self.emitLabel(cond_label);
                 self.cache_globals = true; // do-while cond block dominates back-edge to body
-                const cond = try self.analyzeExpression(node.data.children[1]);
+                self.in_loop_cond += 1;
+                const cond = self.analyzeExpression(node.data.children[1]) catch |e| {
+                    self.in_loop_cond -= 1;
+                    return e;
+                };
+                self.in_loop_cond -= 1;
                 try self.emitBranchConditional(cond.id, body_label, merge_label);
 
                 _ = self.loop_stack.pop();
@@ -4247,6 +4268,134 @@ const Analyzer = struct {
         return @truncate(raw);
     }
 
+    // A builtin that WRITES (an out-param, memory, a barrier, geometry emit) — i.e.
+    // has an observable side effect. Other recognized builtins are pure. Used by
+    // the short-circuit side-effect check below. (#170)
+    fn isSideEffectingBuiltin(name: []const u8) bool {
+        const list = [_][]const u8{
+            "modf",          "frexp",         "uaddCarry",     "usubBorrow",     "umulExtended",  "imulExtended",
+            "imageStore",    "imageAtomicAdd","imageAtomicMin","imageAtomicMax", "imageAtomicAnd","imageAtomicOr",
+            "imageAtomicXor","imageAtomicExchange","imageAtomicCompSwap",
+            "atomicAdd",     "atomicMin",     "atomicMax",     "atomicAnd",      "atomicOr",      "atomicXor",
+            "atomicExchange","atomicCompSwap","atomicCounterIncrement","atomicCounterDecrement","atomicCounterAdd","atomicCounterExchange","atomicCounterCompSwap",
+            "barrier",       "memoryBarrier", "memoryBarrierBuffer","memoryBarrierShared","memoryBarrierImage","memoryBarrierAtomicCounter","groupMemoryBarrier",
+            "EmitVertex",    "EndPrimitive",  "EmitStreamVertex","EndStreamPrimitive",
+            // bool-returning side-effecting builtins (mutate ray-query / report a hit) —
+            // would otherwise be classed pure and take the eager `&&`/`||` path.
+            "rayQueryProceedEXT", "reportIntersectionEXT",
+        };
+        for (list) |b| if (std.mem.eql(u8, name, b)) return true;
+        return false;
+    }
+
+    // True if a call to `name` could have a side effect: an explicit side-effecting
+    // builtin, OR a user-defined function (anything not a recognized GLSL builtin —
+    // we don't track per-function purity, so a user function is assumed impure).
+    // Pure builtins (texture*, length, dot, sin, …) are NOT side-effecting.
+    fn callMayHaveSideEffects(self: *Analyzer, name: []const u8) bool {
+        if (isSideEffectingBuiltin(name)) return true;
+        if (self.isGLSLBuiltin(name)) return false;
+        if (std.mem.eql(u8, name, "length")) return false; // array .length() / length()
+        return true; // user-defined function (or unknown): assume impure
+    }
+
+    // True if evaluating `node` could have an observable side effect — a side-
+    // effecting function call, an assignment, or an increment/decrement. Used to
+    // decide whether `&&`/`||` need true short-circuit lowering; pure operands keep
+    // the cheaper eager OpLogicalAnd/Or (no blast radius, no control flow). (#170)
+    fn exprMayHaveSideEffects(self: *Analyzer, node: ast.Node) bool {
+        switch (node.tag) {
+            .assign_op, .compound_assign, .post_increment, .post_decrement, .pre_increment, .pre_decrement => return true,
+            .func_call => if (self.callMayHaveSideEffects(node.data.name)) return true,
+            else => {},
+        }
+        for (node.data.children) |child| {
+            if (self.exprMayHaveSideEffects(child)) return true;
+        }
+        return false;
+    }
+
+    // Convert a scalar float/int/uint value to bool (x != 0); pass bool through.
+    fn boolify(self: *Analyzer, tid: TypedId) !u32 {
+        switch (tid.ty) {
+            .float, .double => {
+                const z = try self.getConstFloat(0.0);
+                const ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                ops[0] = .{ .id = tid.id };
+                ops[1] = .{ .id = z };
+                return try self.emitPureOp(.compare_fneq, ops, .bool);
+            },
+            .int => {
+                const z = try self.getConstInt(0, .int);
+                const ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                ops[0] = .{ .id = tid.id };
+                ops[1] = .{ .id = z };
+                return try self.emitPureOp(.compare_neq, ops, .bool);
+            },
+            .uint => {
+                const z = try self.getConstInt(0, .uint);
+                const ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                ops[0] = .{ .id = tid.id };
+                ops[1] = .{ .id = z };
+                return try self.emitPureOp(.compare_neq, ops, .bool);
+            },
+            else => return tid.id,
+        }
+    }
+
+    // GLSL mandates that `&&` / `||` SHORT-CIRCUIT: the RHS must NOT be evaluated
+    // when the LHS already determines the result. The eager path emits
+    // OpLogicalAnd/Or which evaluates both operands — dropping any RHS side effect
+    // (e.g. a function call mutating an inout param) = silent-wrong. This lowers
+    // the short-circuit via memory-SSA (no phi — the analyzer is phi-free):
+    //   bool tmp = bool(lhs);
+    //   ||: if (!lhs) tmp = bool(rhs);   &&: if (lhs) tmp = bool(rhs);
+    //   result = tmp
+    // Only used when the RHS may have side effects; pure operands take the eager
+    // path. (#170)
+    fn analyzeShortCircuit(self: *Analyzer, node: ast.Node, op: ast.Op) Error!TypedId {
+        var lhs = try self.analyzeExpression(node.data.children[0]);
+        if (lhs.is_ptr) {
+            const ld = try self.emitLoadCached(lhs.id, lhs.ty);
+            lhs = .{ .ty = lhs.ty, .id = ld };
+        }
+        const lhs_b = try self.boolify(lhs);
+        // Temp bool var. codegen hoists every local_variable to the entry block,
+        // so emitting it here (mid-expression) is fine.
+        const tmp = self.allocId();
+        const vops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+        vops[0] = .{ .literal_int = 7 }; // Function storage class
+        try self.instructions.append(self.alloc, .{ .tag = .local_variable, .result_type = null, .result_id = tmp, .operands = vops, .ty = .bool });
+        try self.emitStore(tmp, lhs_b);
+        // Force all SSA-tracked variables to memory BEFORE the conditional block, so
+        // a variable the RHS modifies (e.g. an inout arg of a called function)
+        // becomes a CONDITIONAL store inside the rhs block — not an unconditional
+        // SSA value. Mirrors the loop/if control-flow handlers. (#170)
+        try self.unssaAllScopes();
+        const rhs_label = self.allocId();
+        const merge_label = self.allocId();
+        try self.emitSelectionMerge(merge_label);
+        // ||: lhs true ⇒ done (tmp already true), skip to merge; lhs false ⇒ eval rhs.
+        // &&: lhs true ⇒ eval rhs; lhs false ⇒ done (tmp already false), skip to merge.
+        if (op == .logical_or) {
+            try self.emitBranchConditional(lhs_b, merge_label, rhs_label);
+        } else {
+            try self.emitBranchConditional(lhs_b, rhs_label, merge_label);
+        }
+        try self.emitLabel(rhs_label);
+        var rhs = try self.analyzeExpression(node.data.children[1]);
+        if (rhs.is_ptr) {
+            const ld = try self.emitLoadCached(rhs.id, rhs.ty);
+            rhs = .{ .ty = rhs.ty, .id = ld };
+        }
+        const rhs_b = try self.boolify(rhs);
+        try self.emitStore(tmp, rhs_b);
+        if (!self.lastInstructionIsBranch()) try self.emitBranch(merge_label);
+        try self.emitLabel(merge_label);
+        const result = try self.emitLoadCached(tmp, .bool);
+        return .{ .ty = .bool, .id = result };
+    }
+
     fn analyzeExpression(self: *Analyzer, node: ast.Node) Error!TypedId {
         errdefer {
             if (last_error_inner.len == 0) {
@@ -4397,6 +4546,19 @@ const Analyzer = struct {
                 if (node.data.children.len < 2) {
                     // Parser produced a malformed binary_op — treat as void expression
                     return .{ .ty = .void, .id = self.allocId() };
+                }
+                // GLSL `&&`/`||` SHORT-CIRCUIT. When the RHS could have a side effect,
+                // the eager OpLogicalAnd/Or path would evaluate it unconditionally and
+                // drop the effect = silent-wrong; lower with real control flow instead.
+                // Pure-RHS `&&`/`||` (the common case) keep the cheaper eager path. (#170)
+                {
+                    const bop = node.data.op orelse .add;
+                    if ((bop == .logical_and or bop == .logical_or) and
+                        self.in_loop_cond == 0 and
+                        self.exprMayHaveSideEffects(node.data.children[1]))
+                    {
+                        return try self.analyzeShortCircuit(node, bop);
+                    }
                 }
                 var left = try self.analyzeExpression(node.data.children[0]);
                 var right = try self.analyzeExpression(node.data.children[1]);
