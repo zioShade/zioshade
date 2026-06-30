@@ -2764,8 +2764,15 @@ fn emitInstruction(
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
-            // Projected: textureProj(sampler, vec4(xy, z, w)) divides xy by w
-            try w.print("    {s} {s} = textureProj({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
+            // Projected: textureProj(sampler, vec4(xy, z, w)) divides xy by w.
+            // textureProjOffset carries a ConstOffset image operand (mask 0x8 at
+            // words[5], offset at words[6]) — emit the native offset form. Dropping
+            // it would silently sample the un-offset texels.
+            if (inst.words.len > 6 and (inst.words[5] & 0x8) != 0) {
+                try w.print("    {s} {s} = textureProjOffset({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[6]) orelse "ivec2(0)" });
+            } else {
+                try w.print("    {s} {s} = textureProj({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
+            }
         },
         .ImageSampleProjDrefImplicitLod => {
             // Projected shadow: textureProj(sampler2DShadow, vec4(xy, depth, w))

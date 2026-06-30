@@ -4729,7 +4729,13 @@ fn emitInstruction(
             if (imageValueDim(m, inst.words[3]) != 1) return error.CrossCompileUnsupported;
             // Projected sample: divide xy by the coord's last component (.z/.w)
             const dvs = projDivisorSwizzle(m, inst.words[4]);
-            try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs});
+            // textureProjOffset carries a ConstOffset (mask 0x8 at words[5], offset at
+            // words[6]); MSL sample takes the offset as a trailing int2 arg.
+            if (inst.words.len > 6 and (inst.words[5] & 0x8) != 0) {
+                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s}, {s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, names.get(inst.words[6]) orelse "int2(0)"});
+            } else {
+                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}.xy / {s}{s});\n", .{rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs});
+            }
         },
         .ImageSampleProjDrefImplicitLod => {
             // Projected shadow: divide xy by the coord's last component, compare depth
