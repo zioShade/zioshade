@@ -2968,6 +2968,25 @@ test "wgsl: textureProjLodOffset keeps the const offset (#170)" {
     try nagaValidateOrSkip(wgsl, "textureProjLodOffset-2d");
 }
 
+// #170: textureProjGradOffset (projective + explicit gradients + const offset) lowers
+// to textureSampleGrad with the perspective divide, both gradients, AND the trailing
+// const offset. Dropping the offset = silent-wrong; it must survive into the WGSL.
+test "wgsl: textureProjGradOffset keeps the const offset (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjGradOffset(tex, c, vec2(0.1), vec2(0.2), ivec2(2, -1)); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleGrad(");
+    try assertContains(wgsl, ".xy / ");
+    try assertContains(wgsl, "vec2<i32>(2, -1)");
+    try nagaValidateOrSkip(wgsl, "textureProjGradOffset-2d");
+}
+
 // #170: textureProjGrad (projective sample + EXPLICIT gradients) was wrongly
 // rejected. WGSL CAN represent it: perspective-divide the coord, then
 // textureSampleGrad(t, s, coord/divisor, ddx, ddy). It shares the

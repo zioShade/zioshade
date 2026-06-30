@@ -2831,7 +2831,15 @@ fn emitInstruction(
                         try w.print("    {s} {s} = textureProjLod({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, lod });
                     }
                 } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
-                    try w.print("    {s} {s} = textureProjGrad({s}, {s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[off]) orelse "0", names.get(inst.words[off + 1]) orelse "0" });
+                    const ddx = names.get(inst.words[off]) orelse "0";
+                    const ddy = names.get(inst.words[off + 1]) orelse "0";
+                    // Grad|ConstOffset (textureProjGradOffset): native textureProjGradOffset
+                    // carries the const offset after both gradients.
+                    if (mask & 0x8 != 0 and off + 2 < inst.words.len) {
+                        try w.print("    {s} {s} = textureProjGradOffset({s}, {s}, {s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, ddx, ddy, names.get(inst.words[off + 2]) orelse "ivec2(0)" });
+                    } else {
+                        try w.print("    {s} {s} = textureProjGrad({s}, {s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, ddx, ddy });
+                    }
                 } else {
                     try w.print("    {s} {s} = textureProjLod({s}, {s}, 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
                 }

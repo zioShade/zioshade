@@ -2368,6 +2368,21 @@ test "glsl: textureProjLodOffset keeps the const offset (#170)" {
     try assertContains(glsl, "ivec2(2, -1)");
 }
 
+// #170: textureProjGradOffset → GLSL native textureProjGradOffset(s, coord, ddx, ddy, offset).
+test "glsl: textureProjGradOffset keeps the const offset (#170)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjGradOffset(s, c, vec2(0.1), vec2(0.2), ivec2(2, -1)); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "textureProjGradOffset(");
+    try assertContains(glsl, "ivec2(2, -1)");
+}
+
 // #170: textureProjGrad → GLSL native textureProjGrad(s, coord, dPdx, dPdy). The
 // proj-explicit-lod arm must spell the Grad form for the Grad mask, not textureProjLod.
 test "glsl: textureProjGrad lowers to native textureProjGrad (#170)" {
