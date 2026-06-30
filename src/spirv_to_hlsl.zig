@@ -4205,9 +4205,19 @@ fn emitInstruction(
                 } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
                     // textureProjGrad: SampleGrad with the manual perspective divide.
                     // Gradients (explicit screen-space derivatives) pass through.
-                    try w.print("    {s} {s} = {s}.SampleGrad({s}, {s}.xy / {s}{s}, {s}, {s});\n", .{
-                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, names.get(inst.words[off]) orelse "0", names.get(inst.words[off + 1]) orelse "0",
-                    });
+                    const dx = names.get(inst.words[off]) orelse "0";
+                    const dy = names.get(inst.words[off + 1]) orelse "0";
+                    // Grad|ConstOffset (textureProjGradOffset): HLSL SampleGrad takes the
+                    // offset as a 5th argument. Dropping it samples the un-offset texels.
+                    if (mask & 0x8 != 0 and off + 2 < inst.words.len) {
+                        try w.print("    {s} {s} = {s}.SampleGrad({s}, {s}.xy / {s}{s}, {s}, {s}, {s});\n", .{
+                            rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, dx, dy, names.get(inst.words[off + 2]) orelse "int2(0)",
+                        });
+                    } else {
+                        try w.print("    {s} {s} = {s}.SampleGrad({s}, {s}.xy / {s}{s}, {s}, {s});\n", .{
+                            rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, dx, dy,
+                        });
+                    }
                 } else {
                     try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}{s}, 0);\n", .{
                         rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle,
