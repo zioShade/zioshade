@@ -322,6 +322,13 @@ pub const Instruction = struct {
         // [sampled_image, coord, lod]. (image_sample_proj is implicit-LOD and
         // would silently sample the wrong mip for textureProjLod.)
         image_sample_proj_explicit_lod,
+        // textureProjLodOffset: projective sample with an EXPLICIT LOD and a const
+        // offset → OpImageSampleProjExplicitLod with Lod|ConstOffset. Operands:
+        // [sampled_image, coord, lod, offset]. A SEPARATE tag from
+        // image_sample_proj_explicit_lod because that tag dispatches Lod-vs-Grad by
+        // operand count, and [si,coord,lod,offset] has the same count (4) as the
+        // Grad form [si,coord,dPdx,dPdy] — they would collide.
+        image_sample_proj_lod_offset,
         image_sample_dref,
         image_sample_dref_explicit_lod,
         image_sample_dref_proj,

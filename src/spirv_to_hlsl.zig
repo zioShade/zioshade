@@ -4191,9 +4191,17 @@ fn emitInstruction(
                 var off: usize = 6;
                 if (mask & 0x1 != 0) off += 1;
                 if (mask & 0x2 != 0 and off < inst.words.len) {
-                    try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}{s}, {s});\n", .{
-                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, names.get(inst.words[off]) orelse "0",
-                    });
+                    // Lod|ConstOffset (textureProjLodOffset): HLSL SampleLevel takes the
+                    // offset as a 4th argument. Dropping it samples the un-offset texels.
+                    if (mask & 0x8 != 0 and off + 1 < inst.words.len) {
+                        try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}{s}, {s}, {s});\n", .{
+                            rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, names.get(inst.words[off]) orelse "0", names.get(inst.words[off + 1]) orelse "int2(0)",
+                        });
+                    } else {
+                        try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}.xy / {s}{s}, {s});\n", .{
+                            rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, names.get(inst.words[off]) orelse "0",
+                        });
+                    }
                 } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
                     // textureProjGrad: SampleGrad with the manual perspective divide.
                     // Gradients (explicit screen-space derivatives) pass through.
