@@ -5457,6 +5457,26 @@ const Codegen = struct {
                     try self.emitWord(lod_id);
                 }
             },
+            .image_sample_proj_lod_offset => {
+                // textureProjLodOffset → OpImageSampleProjExplicitLod with
+                // Lod|ConstOffset. Operands: [sampled_image, coord, lod, offset].
+                // The offset word follows the lod (image-operand bit order: Lod=0x2
+                // before ConstOffset=0x8). Dropping it would silently ignore the offset.
+                const result_type_id = resolved.result_type orelse return;
+                const result_id = resolved.result_id orelse return;
+                const sampled_image_id = self.operandId(resolved, 0);
+                const coord_id = self.operandId(resolved, 1);
+                const lod_id = self.operandId(resolved, 2);
+                const offset_id = self.operandId(resolved, 3);
+                try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleProjExplicitLod)));
+                try self.emitWord(result_type_id);
+                try self.emitWord(result_id);
+                try self.emitWord(sampled_image_id);
+                try self.emitWord(coord_id);
+                try self.emitWord(2 | 8); // Image Operands Mask: Lod (bit 1) | ConstOffset (bit 3)
+                try self.emitWord(lod_id);
+                try self.emitWord(offset_id);
+            },
             .image_sample_dref => {
                 // OpImageSampleDrefImplicitLod: result_type(float), result, sampled_image, coordinate_without_dref, Dref
                 // GLSL coord has Dref as last component; SPIR-V needs it separate

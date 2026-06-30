@@ -2821,7 +2821,15 @@ fn emitInstruction(
                 var off: usize = 6;
                 if (mask & 0x1 != 0) off += 1;
                 if (mask & 0x2 != 0 and off < inst.words.len) {
-                    try w.print("    {s} {s} = textureProjLod({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[off]) orelse "0" });
+                    const lod = names.get(inst.words[off]) orelse "0";
+                    // Lod|ConstOffset (textureProjLodOffset): native textureProjLodOffset
+                    // carries the const offset after the lod. Dropping it would silently
+                    // emit a plain textureProjLod = wrong texels.
+                    if (mask & 0x8 != 0 and off + 1 < inst.words.len) {
+                        try w.print("    {s} {s} = textureProjLodOffset({s}, {s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, lod, names.get(inst.words[off + 1]) orelse "ivec2(0)" });
+                    } else {
+                        try w.print("    {s} {s} = textureProjLod({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, lod });
+                    }
                 } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
                     try w.print("    {s} {s} = textureProjGrad({s}, {s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[off]) orelse "0", names.get(inst.words[off + 1]) orelse "0" });
                 } else {

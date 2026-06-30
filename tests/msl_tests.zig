@@ -3878,6 +3878,22 @@ test "T-gradoff.msl: textureGradOffset carries the const offset (#170)" {
     try assertContains(msl, "int2(1, -1)");
 }
 
+// #170: textureProjLodOffset → MSL sample(coord.xy / divisor, level(lod), int2 offset).
+// The offset is a trailing arg after level(); dropping it samples the un-offset texels.
+test "T-projlodoff.msl: textureProjLodOffset carries the const offset (#170)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D s;
+        \\layout(location=0) in vec3 c;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureProjLodOffset(s, c, 1.0, ivec2(2, -1)); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "level(");
+    try assertContains(msl, "int2(2, -1)");
+}
+
 // #170: textureProjGrad → MSL sample(coord.xy / divisor, gradient2d(dPdx, dPdy)).
 // Shares OpImageSampleProjExplicitLod with textureProjLod; the arm must emit the
 // gradient form (not level()) for the Grad mask, with the vec3 .z divisor.
