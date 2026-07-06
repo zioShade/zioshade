@@ -23,7 +23,7 @@ glslangValidator requires explicit location on user I/O for SPIR-V.
 - full_screen.v.glsl uses gl_VertexID (replaced by gl_VertexIndex in Vulkan)
 
 ## Conclusion
-None of these are bugs in glslpp. All 31 failures are due to:
+None of these are bugs in zioshade. All 31 failures are due to:
 - glslang strictness (layout bindings/locations)
 - SPIR-V version mismatches (need --target-env flag)
 - Deprecated Vulkan identifiers

@@ -1,6 +1,6 @@
 #version 450
 // Regression guard: WGSL textureGather takes the component as the FIRST arg —
-// textureGather(component, texture, sampler, coords). glslpp previously emitted
+// textureGather(component, texture, sampler, coords). zioshade previously emitted
 // GLSL order (tex, sampler, coords, component), so naga read the texture where
 // it expects the integer component ("must resolve to u32 or i32").
 layout(binding = 0) uniform sampler2D uTex;

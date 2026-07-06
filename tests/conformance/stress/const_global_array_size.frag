@@ -1,5 +1,5 @@
 // Tests: a const-qualified integer global used as an array size (#170). GLSL
-// `const int N = 3; float a[N];` is valid and common, but glslpp's array-size
+// `const int N = 3; float a[N];` is valid and common, but zioshade's array-size
 // resolver only handled integer literals and gl_WorkGroupSize — a const-global
 // name failed (SemanticFailed), wrongly rejecting valid GLSL. evalConstInt now
 // folds a const-global identifier, and resolveSizeExpr resolves the name.

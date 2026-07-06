@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-//! Output comparison tests: glslpp vs spirv-cross.
+//! Output comparison tests: zioshade vs spirv-cross.
 //!
 //! For each test shader, compiles GLSL → SPIR-V (via glslangValidator),
-//! then cross-compiles the SAME SPIR-V with both glslpp and spirv-cross.
+//! then cross-compiles the SAME SPIR-V with both zioshade and spirv-cross.
 //! Compares key structural elements to ensure semantic equivalence.
 //!
 //! Requires:
@@ -10,13 +10,13 @@
 //!   - spirv-cross in PATH or VULKAN_SDK
 
 const std = @import("std");
-const glslpp = @import("glslpp");
-const compat = @import("glslpp").compat;
+const zioshade = @import("zioshade");
+const compat = @import("zioshade").compat;
 
 const alloc = std.testing.allocator;
 
 /// Compile GLSL to SPIR-V using glslangValidator, return the SPIR-V words
-fn compileToSpirvViaGlslang(allocator: std.mem.Allocator, source: [:0]const u8, stage: glslpp.Stage) ![]u32 {
+fn compileToSpirvViaGlslang(allocator: std.mem.Allocator, source: [:0]const u8, stage: zioshade.Stage) ![]u32 {
     const io = compat.testIo();
     const dir = compat.cwd();
 
@@ -220,14 +220,14 @@ fn extractOperations(allocator: std.mem.Allocator, glsl: []const u8) !std.String
 }
 
 const CompareResult = struct {
-    glslpp_glsl: []const u8,
+    zioshade_glsl: []const u8,
     sc_glsl: []const u8,
     match: bool,
     mismatches: u32,
 };
 
-/// Compare glslpp vs spirv-cross output for a shader
-fn compareShader(allocator: std.mem.Allocator, name: []const u8, source: [:0]const u8, stage: glslpp.Stage) !CompareResult {
+/// Compare zioshade vs spirv-cross output for a shader
+fn compareShader(allocator: std.mem.Allocator, name: []const u8, source: [:0]const u8, stage: zioshade.Stage) !CompareResult {
     // Step 1: GLSL → SPIR-V via glslang (shared between both)
     const spirv = compileToSpirvViaGlslang(allocator, source, stage) catch |err| {
         std.debug.print("  [{s}] glslang failed: {}\n", .{ name, err });
@@ -235,32 +235,32 @@ fn compareShader(allocator: std.mem.Allocator, name: []const u8, source: [:0]con
     };
     defer allocator.free(spirv);
 
-    // Step 2: SPIR-V → GLSL via glslpp
-    const glslpp_glsl = glslpp.spirvToGLSL(allocator, spirv, .{ .version = 450 }) catch |err| {
-        std.debug.print("  [{s}] glslpp spirvToGLSL failed: {}\n", .{ name, err });
+    // Step 2: SPIR-V → GLSL via zioshade
+    const zioshade_glsl = zioshade.spirvToGLSL(allocator, spirv, .{ .version = 450 }) catch |err| {
+        std.debug.print("  [{s}] zioshade spirvToGLSL failed: {}\n", .{ name, err });
         return err;
     };
 
     // Step 3: SPIR-V → GLSL via spirv-cross
     const sc_glsl = spirvCrossToGlsl(allocator, spirv) catch |err| {
         std.debug.print("  [{s}] spirv-cross failed: {}\n", .{ name, err });
-        allocator.free(glslpp_glsl);
+        allocator.free(zioshade_glsl);
         return err;
     };
 
     // Step 4: Normalize both outputs
-    const norm_gpp = normalizeGlsl(allocator, glslpp_glsl) catch glslpp_glsl;
+    const norm_gpp = normalizeGlsl(allocator, zioshade_glsl) catch zioshade_glsl;
     const norm_sc = normalizeGlsl(allocator, sc_glsl) catch sc_glsl;
     defer {
-        if (norm_gpp.ptr != glslpp_glsl.ptr) allocator.free(norm_gpp);
+        if (norm_gpp.ptr != zioshade_glsl.ptr) allocator.free(norm_gpp);
         if (norm_sc.ptr != sc_glsl.ptr) allocator.free(norm_sc);
     }
 
-    // Step 5: Check for "unhandled" in glslpp output
+    // Step 5: Check for "unhandled" in zioshade output
     var mismatches: u32 = 0;
-    if (std.mem.indexOf(u8, glslpp_glsl, "unhandled") != null) {
+    if (std.mem.indexOf(u8, zioshade_glsl, "unhandled") != null) {
         mismatches += 1;
-        std.debug.print("  [{s}] glslpp output contains 'unhandled'\n", .{name});
+        std.debug.print("  [{s}] zioshade output contains 'unhandled'\n", .{name});
     }
 
     // Step 6: Compare key structural elements
@@ -277,18 +277,18 @@ fn compareShader(allocator: std.mem.Allocator, name: []const u8, source: [:0]con
         const gpp_count = countOccurrences(norm_gpp, pattern);
         const sc_count = countOccurrences(norm_sc, pattern);
         if (gpp_count != sc_count) {
-            // Allow glslpp to have more (extra uniforms from unused vars stripped by spirv-cross)
-            // but flag if glslpp has fewer (missing feature)
+            // Allow zioshade to have more (extra uniforms from unused vars stripped by spirv-cross)
+            // but flag if zioshade has fewer (missing feature)
             if (gpp_count < sc_count) {
                 mismatches += 1;
-                std.debug.print("  [{s}] pattern '{s}': glslpp={} < spirv-cross={} (MISSING)\n", .{ name, pattern, gpp_count, sc_count });
+                std.debug.print("  [{s}] pattern '{s}': zioshade={} < spirv-cross={} (MISSING)\n", .{ name, pattern, gpp_count, sc_count });
             }
         }
     }
 
     const match = mismatches == 0;
     return .{
-        .glslpp_glsl = glslpp_glsl,
+        .zioshade_glsl = zioshade_glsl,
         .sc_glsl = sc_glsl,
         .match = match,
         .mismatches = mismatches,
@@ -322,7 +322,7 @@ test "cross-compare: scalar arithmetic" {
         \\}
     ;
     const result = try compareShader(alloc, "scalar_arith", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -338,7 +338,7 @@ test "cross-compare: vector operations" {
         \\}
     ;
     const result = try compareShader(alloc, "vector_ops", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -359,7 +359,7 @@ test "cross-compare: branching" {
         \\}
     ;
     const result = try compareShader(alloc, "branching", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -378,7 +378,7 @@ test "cross-compare: for loop" {
         \\}
     ;
     const result = try compareShader(alloc, "for_loop", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -395,7 +395,7 @@ test "cross-compare: texture sampling" {
         \\}
     ;
     const result = try compareShader(alloc, "texture", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -418,7 +418,7 @@ test "cross-compare: struct with uniform" {
         \\}
     ;
     const result = try compareShader(alloc, "struct_uniform", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -441,7 +441,7 @@ test "cross-compare: math builtins" {
         \\}
     ;
     const result = try compareShader(alloc, "math_builtins", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -457,7 +457,7 @@ test "cross-compare: matrix operations" {
         \\}
     ;
     const result = try compareShader(alloc, "matrix", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -474,7 +474,7 @@ test "cross-compare: function call" {
         \\}
     ;
     const result = try compareShader(alloc, "func_call", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -496,7 +496,7 @@ test "cross-compare: nested loops with break" {
         \\}
     ;
     const result = try compareShader(alloc, "nested_loops", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -517,7 +517,7 @@ test "cross-compare: branching with multiple conditions" {
         \\}
     ;
     const result = try compareShader(alloc, "branch_multi", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -539,7 +539,7 @@ test "cross-compare: switch statement" {
         \\}
     ;
     const result = try compareShader(alloc, "switch", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -560,7 +560,7 @@ test "cross-compare: while loop with uniform bound" {
         \\}
     ;
     const result = try compareShader(alloc, "while_uniform", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -579,7 +579,7 @@ test "cross-compare: for loop with uniform bound" {
         \\}
     ;
     const result = try compareShader(alloc, "for_uniform", source, .fragment);
-    defer alloc.free(result.glslpp_glsl);
+    defer alloc.free(result.zioshade_glsl);
     defer alloc.free(result.sc_glsl);
     try std.testing.expect(result.match);
 }
@@ -591,7 +591,7 @@ test "cross-compare: for loop with uniform bound" {
 /// Write `glsl` to a temp file and run glslangValidator on it, asserting it
 /// compiles cleanly (exit 0). This is the strongest gate: glslang itself is the
 /// authority on which `#version`/`layout` combinations are legal.
-fn assertGlslangAccepts(allocator: std.mem.Allocator, name: []const u8, glsl: []const u8, stage: glslpp.Stage) !void {
+fn assertGlslangAccepts(allocator: std.mem.Allocator, name: []const u8, glsl: []const u8, stage: zioshade.Stage) !void {
     const io = compat.testIo();
     const dir = compat.cwd();
     compat.dirMakePath(io, dir, ".zig-cache") catch {};
@@ -623,17 +623,17 @@ fn assertGlslangAccepts(allocator: std.mem.Allocator, name: []const u8, glsl: []
 
     const ok = (result.term.exitedCode() orelse 1) == 0;
     if (!ok) {
-        std.debug.print("\n[{s}] glslangValidator REJECTED glslpp output:\n{s}\n--- stdout ---\n{s}\n--- stderr ---\n{s}\n", .{ name, glsl, result.stdout, result.stderr });
+        std.debug.print("\n[{s}] glslangValidator REJECTED zioshade output:\n{s}\n--- stdout ---\n{s}\n--- stderr ---\n{s}\n", .{ name, glsl, result.stdout, result.stderr });
         return error.GlslangRejected;
     }
 }
 
-/// Compile GLSL → SPIR-V (glslang) → GLSL (glslpp at `version`), then assert
+/// Compile GLSL → SPIR-V (glslang) → GLSL (zioshade at `version`), then assert
 /// glslang accepts the round-tripped output.
-fn roundTripAcceptsAt(allocator: std.mem.Allocator, name: []const u8, source: [:0]const u8, stage: glslpp.Stage, version: u32) !void {
+fn roundTripAcceptsAt(allocator: std.mem.Allocator, name: []const u8, source: [:0]const u8, stage: zioshade.Stage, version: u32) !void {
     const spirv = try compileToSpirvViaGlslang(allocator, source, stage);
     defer allocator.free(spirv);
-    const glsl = try glslpp.spirvToGLSL(allocator, spirv, .{ .version = version });
+    const glsl = try zioshade.spirvToGLSL(allocator, spirv, .{ .version = version });
     defer allocator.free(glsl);
     try assertGlslangAccepts(allocator, name, glsl, stage);
 }
@@ -659,7 +659,7 @@ const attrib_vert_src: [:0]const u8 =
 
 // glslangValidator encodes an SSBO (`buffer B { ... } b;`) as a `Uniform`-storage-class
 // variable whose STRUCT TYPE carries the `BufferBlock` decoration (pre-SPIR-V-1.3 style),
-// unlike glslpp's own frontend which uses the `StorageBuffer` storage class. The GLSL
+// unlike zioshade's own frontend which uses the `StorageBuffer` storage class. The GLSL
 // backend used to look for `BufferBlock` on the VARIABLE id — which never matches — so
 // glslang SSBOs were misrouted to the read-only `uniform std140` cbuffer path: member
 // access desynced (`b_m0` undeclared) and stores hit a uniform (`l-value required`). (#296)
@@ -789,7 +789,7 @@ test "ssbo round-trip: anonymous BufferBlock coexists with named UBO" {
     // `B_block.alpha`): the SSBO member must be referenced BARE, never with a leading dot.
     const spirv = try compileToSpirvViaGlslang(alloc, ssbo_anonymous_with_ubo, .compute);
     defer alloc.free(spirv);
-    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 450 });
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 450 });
     defer alloc.free(glsl);
     if (std.mem.indexOf(u8, glsl, ".alpha") != null or std.mem.indexOf(u8, glsl, ".beta") != null) {
         std.debug.print("\nanonymous SSBO member emitted with a leading dot:\n{s}\n", .{glsl});
@@ -804,14 +804,14 @@ test "ssbo round-trip: anonymous BufferBlock coexists with named UBO" {
     }
 }
 
-/// Assert the glslpp GLSL output declares `src`'s SSBO as a writable `buffer` block with
+/// Assert the zioshade GLSL output declares `src`'s SSBO as a writable `buffer` block with
 /// ORIGINAL member names, not the read-only `uniform std140` cbuffer form with synthesized
 /// `_m{idx}` members. This isolates the buffer-block fix from the orthogonal atomic-result
 /// declaration issue (#297), so it holds for the exact atomic repros from the bug report.
 fn assertSSBODeclaredAsBuffer(allocator: std.mem.Allocator, src: [:0]const u8) !void {
     const spirv = try compileToSpirvViaGlslang(allocator, src, .compute);
     defer allocator.free(spirv);
-    const glsl = try glslpp.spirvToGLSL(allocator, spirv, .{ .version = 450 });
+    const glsl = try zioshade.spirvToGLSL(allocator, spirv, .{ .version = 450 });
     defer allocator.free(glsl);
     // Symptom 2: the block must be a `std430 buffer`, never a read-only `std140 uniform`
     // block. These repro shaders have NO real UBO, so any `std140` means the SSBO was
@@ -861,7 +861,7 @@ const ssbo_fragment_read: [:0]const u8 =
 test "ssbo gating: non-compute glslang SSBO is NOT emitted as a buffer block" {
     const spirv = try compileToSpirvViaGlslang(alloc, ssbo_fragment_read, .fragment);
     defer alloc.free(spirv);
-    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 450 });
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 450 });
     defer alloc.free(glsl);
     if (std.mem.indexOf(u8, glsl, "buffer b_block") != null) {
         std.debug.print("\nnon-compute SSBO wrongly routed to buffer path:\n{s}\n", .{glsl});
@@ -897,13 +897,13 @@ test "glsl-version acceptance: vertex attrib+varying valid at 330/410/450/460" {
 }
 
 test "glsl-version structural: 420pack guard present at 330 and 410, absent at 450" {
-    // glslpp must emit the GL_ARB_shading_language_420pack guard at versions < 420
+    // zioshade must emit the GL_ARB_shading_language_420pack guard at versions < 420
     // (so layout(binding=) validates), matching spirv-cross, and NOT at >= 420.
     const guard = "GL_ARB_shading_language_420pack";
     inline for (.{ .{ 330, true }, .{ 410, true }, .{ 420, false }, .{ 450, false } }) |pair| {
         const spirv = try compileToSpirvViaGlslang(alloc, ubo_frag_src, .fragment);
         defer alloc.free(spirv);
-        const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = pair[0] });
+        const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = pair[0] });
         defer alloc.free(glsl);
         const has = std.mem.indexOf(u8, glsl, guard) != null;
         try std.testing.expectEqual(@as(bool, pair[1]), has);
@@ -912,15 +912,15 @@ test "glsl-version structural: 420pack guard present at 330 and 410, absent at 4
 
 test "glsl-version structural: location dropped on frag input below 410, kept at 410+" {
     // Below 410 glslang rejects `layout(location=)` on a fragment INPUT varying, so
-    // glslpp must emit bare `in` at 330 AND 400. At >= 410 the location is kept.
+    // zioshade must emit bare `in` at 330 AND 400. At >= 410 the location is kept.
     // spirv-cross does the same. #169 BLOCKER 1: 400 was previously not dropped.
     const spirv = try compileToSpirvViaGlslang(alloc, varying_frag_src, .fragment);
     defer alloc.free(spirv);
 
     inline for (.{ 330, 400 }) |v| {
-        const g = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = v });
+        const g = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = v });
         defer alloc.free(g);
-        // glslpp must emit a bare `in vec3` (no location) for the fragment input.
+        // zioshade must emit a bare `in vec3` (no location) for the fragment input.
         try std.testing.expect(std.mem.indexOf(u8, g, "in vec3") != null);
         try std.testing.expect(std.mem.indexOf(u8, g, "layout(location = 0) in vec3") == null);
         // spirv-cross agrees: it also drops the location on the fragment input.
@@ -930,7 +930,7 @@ test "glsl-version structural: location dropped on frag input below 410, kept at
     }
 
     inline for (.{ 410, 420, 440 }) |v| {
-        const g = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = v });
+        const g = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = v });
         defer alloc.free(g);
         try std.testing.expect(std.mem.indexOf(u8, g, "layout(location = 0) in vec3") != null);
     }
@@ -943,7 +943,7 @@ test "glsl-version structural: vertex output location dropped below 410, kept at
     // Below 410: vertex INPUT (attribute) keeps location; vertex OUTPUT varying drops
     // it. #169 BLOCKER 1: 400 was previously not dropped.
     inline for (.{ 330, 400 }) |v| {
-        const g = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = v });
+        const g = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = v });
         defer alloc.free(g);
         try std.testing.expect(std.mem.indexOf(u8, g, "layout(location = 0) in vec3") != null);
         try std.testing.expect(std.mem.indexOf(u8, g, "out vec3") != null);
@@ -951,7 +951,7 @@ test "glsl-version structural: vertex output location dropped below 410, kept at
     }
 
     inline for (.{ 410, 420, 440 }) |v| {
-        const g = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = v });
+        const g = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = v });
         defer alloc.free(g);
         try std.testing.expect(std.mem.indexOf(u8, g, "layout(location = 0) out vec3") != null);
     }
@@ -961,7 +961,7 @@ test "glsl-version structural: vertex output location dropped below 410, kept at
 // #173 (items 1+2): frontend const-array folding gaps
 // ============================================================================
 
-/// Run spirv-val on glslpp-produced SPIR-V bytes. Returns true if spirv-val
+/// Run spirv-val on zioshade-produced SPIR-V bytes. Returns true if spirv-val
 /// accepts the module (exit 0), false otherwise. spirv-val is the authority on
 /// whether the OpTypeArray/OpConstantComposite layout is structurally valid.
 /// Skips (error.SkipZigTest) when spirv-val cannot be spawned at all.
@@ -986,7 +986,7 @@ fn spirvValAccepts(allocator: std.mem.Allocator, spirv_words: []const u32) !bool
     defer allocator.free(result.stderr);
     const ok = (result.term.exitedCode() orelse 1) == 0;
     if (!ok) {
-        std.debug.print("\nspirv-val REJECTED glslpp output:\n--- stdout ---\n{s}\n--- stderr ---\n{s}\n", .{ result.stdout, result.stderr });
+        std.debug.print("\nspirv-val REJECTED zioshade output:\n--- stdout ---\n{s}\n--- stderr ---\n{s}\n", .{ result.stdout, result.stderr });
     }
     return ok;
 }
@@ -1006,7 +1006,7 @@ test "#173 item2: sized multi-dim const array folds to spirv-val-valid SPIR-V" {
         \\  FragColor = vec4(m[i][j]);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expect(try spirvValAccepts(alloc, spirv));
 }
@@ -1027,7 +1027,7 @@ test "#173 review: mat3x4 const-array fold stays spirv-val-valid when body folds
         \\const mat3x4 M[2] = mat3x4[2](mat3x4(1.,2.,3.,4.,5.,6.,7.,8.,9.,10.,11.,12.), mat3x4(1.,2.,3.,4.,5.,6.,7.,8.,9.,10.,11.,12.));
         \\void main(){ mat3x4 m = M[idx]; vec4 acc = vec4(0.0); acc += m[0]; o = acc; }
     ;
-    const spirv_folded = try glslpp.compileToSPIRV(alloc, folded, .{ .stage = .fragment });
+    const spirv_folded = try zioshade.compileToSPIRV(alloc, folded, .{ .stage = .fragment });
     defer alloc.free(spirv_folded);
     try std.testing.expect(try spirvValAccepts(alloc, spirv_folded));
 
@@ -1040,7 +1040,7 @@ test "#173 review: mat3x4 const-array fold stays spirv-val-valid when body folds
         \\const mat3x4 M[2] = mat3x4[2](mat3x4(1.,2.,3.,4.,5.,6.,7.,8.,9.,10.,11.,12.), mat3x4(1.,2.,3.,4.,5.,6.,7.,8.,9.,10.,11.,12.));
         \\void main(){ mat3x4 m = M[idx]; o = m[0] + m[1] + m[2]; }
     ;
-    const spirv_survives = try glslpp.compileToSPIRV(alloc, survives, .{ .stage = .fragment });
+    const spirv_survives = try zioshade.compileToSPIRV(alloc, survives, .{ .stage = .fragment });
     defer alloc.free(spirv_survives);
     try std.testing.expect(try spirvValAccepts(alloc, spirv_survives));
 }
@@ -1061,7 +1061,7 @@ test "#173 item1: matrix-element const-array global cross-compiles to glslang-va
     ;
     const spirv = try compileToSpirvViaGlslang(alloc, source, .fragment);
     defer alloc.free(spirv);
-    const g = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    const g = try zioshade.spirvToGLSL(alloc, spirv, .{});
     defer alloc.free(g);
     try assertGlslangAccepts(alloc, "matrix-const-array", g, .fragment);
 }
@@ -1096,7 +1096,7 @@ fn assertResultDeclared(glsl: []const u8, call: []const u8) !void {
 // glslang rejects with "'v7' : undeclared identifier". The result name needs the
 // result-type prefix: `uint v7 = atomicCompSwap(...)`. The existing T-atomic.*
 // tests only assert the call substring and never glslang-validate, so this slipped
-// through. We compile via glslpp's own frontend (as those tests do) so the SSBO
+// through. We compile via zioshade's own frontend (as those tests do) so the SSBO
 // member access stays `b.lock`, then run glslang as the authoritative gate on the
 // emitted GLSL — which previously failed solely on the undeclared atomic results.
 test "#297: SSBO atomic-op results are declared (glslang-valid)" {
@@ -1111,9 +1111,9 @@ test "#297: SSBO atomic-op results are declared (glslang-valid)" {
         \\    b.out_old = a + c + d;
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    const g = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    const g = try zioshade.spirvToGLSL(alloc, spirv, .{});
     defer alloc.free(g);
     // The atomic result must carry a type prefix (RED emitted a bare
     // `v = atomicCompSwap(...)` → undeclared identifier).
@@ -1136,9 +1136,9 @@ test "#297: image atomic-op results are declared (glslang-valid)" {
         \\    b.out_old = a + c;
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    const g = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    const g = try zioshade.spirvToGLSL(alloc, spirv, .{});
     defer alloc.free(g);
     try assertResultDeclared(g, "imageAtomicCompSwap(");
     try assertGlslangAccepts(alloc, "image-atomic-decl", g, .compute);

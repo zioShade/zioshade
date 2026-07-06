@@ -1,7 +1,7 @@
 // Tests: object-like macro chains (#170). The C preprocessor RESCANS a macro's
 // replacement for further macros, so `#define A B` / `#define B 5` expands `A`
 // all the way to `5`, and `#define SQT SQ(2.0)` expands the inner function macro.
-// glslpp emitted object-macro bodies raw (no rescan), so `A` reached the parser
+// zioshade emitted object-macro bodies raw (no rescan), so `A` reached the parser
 // as undefined `B`. Also, `#define H (W/2)` — a SPACE before the `(` — is an OBJECT
 // macro whose body is `(W/2)`, not function-like; the define parser misclassified
 // the spaced form as function-like (keying on the `(` token without checking

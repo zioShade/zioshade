@@ -397,7 +397,7 @@ const Parser = struct {
     }
 
     /// Returns true when `name` is a GLSL 64-bit type keyword that the lexer does not
-    /// map to a dedicated token (because glslpp does not implement 64-bit types).
+    /// map to a dedicated token (because zioshade does not implement 64-bit types).
     /// Recognizing these names lets the parser build a proper var_decl node so that
     /// the semantic layer can emit a clear "unsupported 64-bit type" honest error
     /// instead of a misleading UndeclaredIdentifier for the variable name that follows.
@@ -2108,7 +2108,7 @@ const Parser = struct {
                 // 2^63..2^64-1 band that overflows i64 (e.g. 18446744073709551615u).
                 // @bitCast to i64 for storage in int_val is a lossless reinterpret;
                 // the semantic layer's literalWord @bitCasts back to u64 and rejects
-                // magnitudes > 0xFFFFFFFF, since glslpp has no 64-bit integer type.
+                // magnitudes > 0xFFFFFFFF, since zioshade has no 64-bit integer type.
                 // Parsing as i64 with `catch 0` instead would silently turn such a
                 // literal into the constant 0 before literalWord ever saw the real
                 // value — a silent-wrong constant. A literal that overflows even u64
@@ -2416,7 +2416,7 @@ test "local function prototype does not fail loud (valid GLSL)" {
     // A local prototype `type identifier ( … ) ;` is legal GLSL (glslang
     // accepts `float g(float x);` inside a body). It must NOT trip the
     // nested-function fail-loud — only a `{` body is a (forbidden) definition.
-    // (glslpp doesn't yet parse local prototypes faithfully; it recovers and
+    // (zioshade doesn't yet parse local prototypes faithfully; it recovers and
     // drops the statement. The point here is only that it does NOT fail loud.)
     const alloc = std.testing.allocator;
     const source = "void main() { float g(float x); }";

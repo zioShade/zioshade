@@ -9,7 +9,7 @@
 const std = @import("std");
 const c_abi = @import("c_abi");
 
-// `glslpp_compile_options_t` is an `extern struct` that we have to redeclare
+// `zioshade_compile_options_t` is an `extern struct` that we have to redeclare
 // here because it is private to `src/c_abi.zig`. The shape is fixed by the
 // C header and must match bit-for-bit.
 const CompileOptions = extern struct {
@@ -33,11 +33,11 @@ const BROKEN_MESH: []const u8 =
 
 /// Convert the last-error message to a Zig slice for comparisons.
 fn lastErrorSlice() ?[]const u8 {
-    const ptr = c_abi.glslpp_last_error_message() orelse return null;
+    const ptr = c_abi.zioshade_last_error_message() orelse return null;
     return std.mem.span(ptr);
 }
 
-test "glslpp_compile happy path -> SPIR-V -> HLSL" {
+test "zioshade_compile happy path -> SPIR-V -> HLSL" {
     var words: ?[*]u32 = null;
     var word_count: usize = 0;
 
@@ -48,7 +48,7 @@ test "glslpp_compile happy path -> SPIR-V -> HLSL" {
         .spirv_version_packed = 15,
     };
 
-    const status = c_abi.glslpp_compile(
+    const status = c_abi.zioshade_compile(
         MINIMAL_FRAG.ptr,
         MINIMAL_FRAG.len,
         @ptrCast(&opts),
@@ -63,7 +63,7 @@ test "glslpp_compile happy path -> SPIR-V -> HLSL" {
 
     var hlsl: ?[*]u8 = null;
     var hlsl_len: usize = 0;
-    const hstatus = c_abi.glslpp_to_hlsl(
+    const hstatus = c_abi.zioshade_to_hlsl(
         @ptrCast(words),
         word_count,
         0,
@@ -78,15 +78,15 @@ test "glslpp_compile happy path -> SPIR-V -> HLSL" {
     // Convenience NUL terminator is present.
     try std.testing.expectEqual(@as(u8, 0), hlsl.?[hlsl_len]);
 
-    c_abi.glslpp_free_str(hlsl);
-    c_abi.glslpp_free_u32(words);
+    c_abi.zioshade_free_str(hlsl);
+    c_abi.zioshade_free_u32(words);
 }
 
-test "glslpp_compile with NULL opts uses defaults" {
+test "zioshade_compile with NULL opts uses defaults" {
     var words: ?[*]u32 = null;
     var word_count: usize = 0;
 
-    const status = c_abi.glslpp_compile(
+    const status = c_abi.zioshade_compile(
         MINIMAL_FRAG.ptr,
         MINIMAL_FRAG.len,
         null,
@@ -97,13 +97,13 @@ test "glslpp_compile with NULL opts uses defaults" {
     try std.testing.expect(words != null);
     try std.testing.expect(word_count >= 5);
 
-    c_abi.glslpp_free_u32(words);
+    c_abi.zioshade_free_u32(words);
 }
 
-test "glslpp_to_hlsl with NULL entry_point treats it as \"main\"" {
+test "zioshade_to_hlsl with NULL entry_point treats it as \"main\"" {
     var words: ?[*]u32 = null;
     var word_count: usize = 0;
-    const cstatus = c_abi.glslpp_compile(
+    const cstatus = c_abi.zioshade_compile(
         MINIMAL_FRAG.ptr,
         MINIMAL_FRAG.len,
         null,
@@ -111,11 +111,11 @@ test "glslpp_to_hlsl with NULL entry_point treats it as \"main\"" {
         &word_count,
     );
     try std.testing.expectEqual(STATUS_OK, cstatus);
-    defer c_abi.glslpp_free_u32(words);
+    defer c_abi.zioshade_free_u32(words);
 
     var hlsl: ?[*]u8 = null;
     var hlsl_len: usize = 0;
-    const hstatus = c_abi.glslpp_to_hlsl(
+    const hstatus = c_abi.zioshade_to_hlsl(
         @ptrCast(words),
         word_count,
         0,
@@ -127,10 +127,10 @@ test "glslpp_to_hlsl with NULL entry_point treats it as \"main\"" {
     try std.testing.expectEqual(STATUS_OK, hstatus);
     try std.testing.expect(hlsl != null);
     try std.testing.expect(hlsl_len > 0);
-    c_abi.glslpp_free_str(hlsl);
+    c_abi.zioshade_free_str(hlsl);
 }
 
-test "glslpp_compile rejects out-of-range stage" {
+test "zioshade_compile rejects out-of-range stage" {
     var words: ?[*]u32 = null;
     var word_count: usize = 0;
     const opts: CompileOptions = .{
@@ -139,7 +139,7 @@ test "glslpp_compile rejects out-of-range stage" {
         .is_essl = 0,
         .spirv_version_packed = 15,
     };
-    const status = c_abi.glslpp_compile(
+    const status = c_abi.zioshade_compile(
         MINIMAL_FRAG.ptr,
         MINIMAL_FRAG.len,
         @ptrCast(&opts),
@@ -151,7 +151,7 @@ test "glslpp_compile rejects out-of-range stage" {
     try std.testing.expectEqual(@as(usize, 0), word_count);
 }
 
-test "glslpp_compile rejects bad SPIR-V version" {
+test "zioshade_compile rejects bad SPIR-V version" {
     var words: ?[*]u32 = null;
     var word_count: usize = 0;
     const opts: CompileOptions = .{
@@ -160,7 +160,7 @@ test "glslpp_compile rejects bad SPIR-V version" {
         .is_essl = 0,
         .spirv_version_packed = 99,
     };
-    const status = c_abi.glslpp_compile(
+    const status = c_abi.zioshade_compile(
         MINIMAL_FRAG.ptr,
         MINIMAL_FRAG.len,
         @ptrCast(&opts),
@@ -170,20 +170,20 @@ test "glslpp_compile rejects bad SPIR-V version" {
     try std.testing.expectEqual(STATUS_INVALID_INPUT, status);
 }
 
-test "glslpp_compile rejects NULL source with non-zero length" {
+test "zioshade_compile rejects NULL source with non-zero length" {
     var words: ?[*]u32 = null;
     var word_count: usize = 0;
-    const status = c_abi.glslpp_compile(null, 16, null, &words, &word_count);
+    const status = c_abi.zioshade_compile(null, 16, null, &words, &word_count);
     try std.testing.expectEqual(STATUS_INVALID_INPUT, status);
 }
 
-test "glslpp_compile accepts NULL source with zero length" {
+test "zioshade_compile accepts NULL source with zero length" {
     // Zero-length input should be accepted at the boundary. It will almost
     // certainly fail somewhere in the compilation pipeline (no entry point,
     // etc.) but that's a SEMANTIC/CODEGEN failure, not INVALID_INPUT.
     var words: ?[*]u32 = null;
     var word_count: usize = 0;
-    const status = c_abi.glslpp_compile(null, 0, null, &words, &word_count);
+    const status = c_abi.zioshade_compile(null, 0, null, &words, &word_count);
     try std.testing.expect(status != STATUS_INVALID_INPUT);
 }
 
@@ -197,7 +197,7 @@ test "failed compile populates last_error_message" {
         .is_essl = 0,
         .spirv_version_packed = 13,
     };
-    const status = c_abi.glslpp_compile(
+    const status = c_abi.zioshade_compile(
         BROKEN_MESH.ptr,
         BROKEN_MESH.len,
         @ptrCast(&opts),
@@ -226,12 +226,12 @@ test "second compile after failure succeeds (no sticky error state)" {
         .is_essl = 0,
         .spirv_version_packed = 13,
     };
-    _ = c_abi.glslpp_compile(BROKEN_MESH.ptr, BROKEN_MESH.len, @ptrCast(&bad_opts), &words, &word_count);
-    if (words) |w| c_abi.glslpp_free_u32(w);
+    _ = c_abi.zioshade_compile(BROKEN_MESH.ptr, BROKEN_MESH.len, @ptrCast(&bad_opts), &words, &word_count);
+    if (words) |w| c_abi.zioshade_free_u32(w);
     words = null;
     word_count = 0;
 
-    const status = c_abi.glslpp_compile(
+    const status = c_abi.zioshade_compile(
         MINIMAL_FRAG.ptr,
         MINIMAL_FRAG.len,
         null,
@@ -241,22 +241,22 @@ test "second compile after failure succeeds (no sticky error state)" {
     try std.testing.expectEqual(STATUS_OK, status);
     try std.testing.expect(word_count >= 5);
     // After a clean compile the error message should have been cleared.
-    try std.testing.expectEqual(@as(?[*:0]const u8, null), c_abi.glslpp_last_error_message());
-    try std.testing.expectEqual(@as(u32, 0), c_abi.glslpp_last_error_line());
+    try std.testing.expectEqual(@as(?[*:0]const u8, null), c_abi.zioshade_last_error_message());
+    try std.testing.expectEqual(@as(u32, 0), c_abi.zioshade_last_error_line());
 
-    c_abi.glslpp_free_u32(words);
+    c_abi.zioshade_free_u32(words);
 }
 
-test "glslpp_free_str / glslpp_free_u32 NULL is a no-op" {
-    c_abi.glslpp_free_str(null);
-    c_abi.glslpp_free_u32(null);
+test "zioshade_free_str / zioshade_free_u32 NULL is a no-op" {
+    c_abi.zioshade_free_str(null);
+    c_abi.zioshade_free_u32(null);
     // If we got here without crashing the contract holds.
 }
 
 test "cross-compile to all four backends" {
     var words: ?[*]u32 = null;
     var word_count: usize = 0;
-    const cstatus = c_abi.glslpp_compile(
+    const cstatus = c_abi.zioshade_compile(
         MINIMAL_FRAG.ptr,
         MINIMAL_FRAG.len,
         null,
@@ -264,58 +264,58 @@ test "cross-compile to all four backends" {
         &word_count,
     );
     try std.testing.expectEqual(STATUS_OK, cstatus);
-    defer c_abi.glslpp_free_u32(words);
+    defer c_abi.zioshade_free_u32(words);
 
     // HLSL
     {
         var buf: ?[*]u8 = null;
         var n: usize = 0;
-        const s = c_abi.glslpp_to_hlsl(@ptrCast(words), word_count, 0, 60, null, &buf, &n);
+        const s = c_abi.zioshade_to_hlsl(@ptrCast(words), word_count, 0, 60, null, &buf, &n);
         try std.testing.expectEqual(STATUS_OK, s);
         try std.testing.expect(n > 0);
-        c_abi.glslpp_free_str(buf);
+        c_abi.zioshade_free_str(buf);
     }
     // GLSL
     {
         var buf: ?[*]u8 = null;
         var n: usize = 0;
-        const s = c_abi.glslpp_to_glsl(@ptrCast(words), word_count, 330, 0, null, &buf, &n);
+        const s = c_abi.zioshade_to_glsl(@ptrCast(words), word_count, 330, 0, null, &buf, &n);
         try std.testing.expectEqual(STATUS_OK, s);
         try std.testing.expect(n > 0);
-        c_abi.glslpp_free_str(buf);
+        c_abi.zioshade_free_str(buf);
     }
     // MSL
     {
         var buf: ?[*]u8 = null;
         var n: usize = 0;
-        const s = c_abi.glslpp_to_msl(@ptrCast(words), word_count, 21, 0, null, &buf, &n);
+        const s = c_abi.zioshade_to_msl(@ptrCast(words), word_count, 21, 0, null, &buf, &n);
         try std.testing.expectEqual(STATUS_OK, s);
         try std.testing.expect(n > 0);
-        c_abi.glslpp_free_str(buf);
+        c_abi.zioshade_free_str(buf);
     }
     // WGSL
     {
         var buf: ?[*]u8 = null;
         var n: usize = 0;
-        const s = c_abi.glslpp_to_wgsl(@ptrCast(words), word_count, null, &buf, &n);
+        const s = c_abi.zioshade_to_wgsl(@ptrCast(words), word_count, null, &buf, &n);
         try std.testing.expectEqual(STATUS_OK, s);
         try std.testing.expect(n > 0);
-        c_abi.glslpp_free_str(buf);
+        c_abi.zioshade_free_str(buf);
     }
 }
 
-test "glslpp_to_hlsl rejects NULL spirv_words" {
+test "zioshade_to_hlsl rejects NULL spirv_words" {
     var hlsl: ?[*]u8 = null;
     var hlsl_len: usize = 0;
-    const status = c_abi.glslpp_to_hlsl(null, 0, 0, 60, null, &hlsl, &hlsl_len);
+    const status = c_abi.zioshade_to_hlsl(null, 0, 0, 60, null, &hlsl, &hlsl_len);
     try std.testing.expectEqual(STATUS_INVALID_INPUT, status);
     try std.testing.expectEqual(@as(?[*]u8, null), hlsl);
 }
 
-test "glslpp_to_hlsl rejects too-small SPIR-V" {
+test "zioshade_to_hlsl rejects too-small SPIR-V" {
     const stub = [_]u32{ 0, 0 };
     var hlsl: ?[*]u8 = null;
     var hlsl_len: usize = 0;
-    const status = c_abi.glslpp_to_hlsl(&stub, stub.len, 0, 60, null, &hlsl, &hlsl_len);
+    const status = c_abi.zioshade_to_hlsl(&stub, stub.len, 0, 60, null, &hlsl, &hlsl_len);
     try std.testing.expectEqual(STATUS_INVALID_INPUT, status);
 }

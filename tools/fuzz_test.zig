@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -32,7 +32,7 @@ pub fn main() !void {
     var fail_seeds: std.ArrayList(u64) = .{};
     defer fail_seeds.deinit(alloc);
 
-    std.debug.print("glslpp fuzzer: {} iterations, seed={}, validate={}\n", .{ count, seed, do_validate });
+    std.debug.print("zioshade fuzzer: {} iterations, seed={}, validate={}\n", .{ count, seed, do_validate });
 
     for (0..count) |iter| {
         const iter_seed = seed + @as(u64, @intCast(iter));
@@ -45,7 +45,7 @@ pub fn main() !void {
         };
 
         // Detect stage from generated source
-        const stage: glslpp.Stage = if (std.mem.indexOf(u8, source, "EmitVertex") != null or std.mem.indexOf(u8, source, "EndPrimitive") != null)
+        const stage: zioshade.Stage = if (std.mem.indexOf(u8, source, "EmitVertex") != null or std.mem.indexOf(u8, source, "EndPrimitive") != null)
             .geometry
         else if (std.mem.indexOf(u8, source, "gl_InvocationID") != null or std.mem.indexOf(u8, source, "gl_TessLevelOuter") != null)
             .tessellation_control
@@ -53,7 +53,7 @@ pub fn main() !void {
             .tessellation_evaluation
         else
             .fragment;
-        const result = glslpp.compileToSPIRV(alloc, source, .{ .stage = stage }) catch {
+        const result = zioshade.compileToSPIRV(alloc, source, .{ .stage = stage }) catch {
             pass_count += 1;
             continue;
         };
@@ -68,13 +68,13 @@ pub fn main() !void {
 
         if (do_validate) {
             const spv_bytes = std.mem.sliceAsBytes(result);
-            const tmp_file = std.fs.cwd().createFileZ("/tmp/glslpp_fuzz.spv", .{}) catch {
+            const tmp_file = std.fs.cwd().createFileZ("/tmp/zioshade_fuzz.spv", .{}) catch {
                 skip_count += 1;
                 continue;
             };
             defer {
                 tmp_file.close();
-                std.fs.cwd().deleteFileZ("/tmp/glslpp_fuzz.spv") catch {};
+                std.fs.cwd().deleteFileZ("/tmp/zioshade_fuzz.spv") catch {};
             }
             tmp_file.writeAll(spv_bytes) catch {
                 skip_count += 1;
@@ -83,7 +83,7 @@ pub fn main() !void {
 
             const val_result = std.process.Child.run(.{
                 .allocator = alloc,
-                .argv = &.{ "spirv-val", "/tmp/glslpp_fuzz.spv" },
+                .argv = &.{ "spirv-val", "/tmp/zioshade_fuzz.spv" },
             }) catch {
                 skip_count += 1;
                 continue;

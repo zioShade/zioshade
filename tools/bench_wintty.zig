@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     const alloc = std.heap.page_allocator; // short-lived CLI; OS reclaims on exit
@@ -22,9 +22,9 @@ pub fn main() !void {
 
     // Warmup
     {
-        const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+        const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
         defer alloc.free(spirv);
-        const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
+        const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
         defer alloc.free(hlsl);
     }
 
@@ -36,9 +36,9 @@ pub fn main() !void {
 
     for (0..iterations) |_| {
         var timer = std.time.Timer.start() catch unreachable;
-        const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+        const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
         defer alloc.free(spirv);
-        const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
+        const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
         defer alloc.free(hlsl);
         const elapsed: u64 = timer.read();
         total_ns += elapsed;
@@ -52,7 +52,7 @@ pub fn main() !void {
     const min_us = @divFloor(min_ns, 1000);
     const max_us = @divFloor(max_ns, 1000);
 
-    std.debug.print("glslpp benchmark ({d} iterations, ReleaseFast)\n", .{iterations});
+    std.debug.print("zioshade benchmark ({d} iterations, ReleaseFast)\n", .{iterations});
     std.debug.print("  Avg total: {d} us\n", .{avg_us});
     std.debug.print("  Min total: {d} us\n", .{min_us});
     std.debug.print("  Max total: {d} us\n", .{max_us});

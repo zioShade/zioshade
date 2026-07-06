@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 /// SPIR-V execution model → stage classification.
 const SpvStage = enum {
@@ -64,7 +64,7 @@ fn detectStage(spv: []const u32) SpvStage {
 }
 
 /// Return the DXC target profile (e.g. "ps_6_0") for a given stage and
-/// shader-model. Stages glslpp does not yet emit valid HLSL for return
+/// shader-model. Stages zioshade does not yet emit valid HLSL for return
 /// null, which the driver treats as a SKIP. Caller owns the returned
 /// buffer and must free it via the supplied allocator.
 fn dxcProfile(alloc: std.mem.Allocator, stage: SpvStage, sm: u32) !?[]u8 {
@@ -80,7 +80,7 @@ fn dxcProfile(alloc: std.mem.Allocator, stage: SpvStage, sm: u32) !?[]u8 {
         .task => if (sm < 65) null else try std.fmt.allocPrint(alloc, "as_{d}_{d}", .{ major, minor }),
         // M5.0 (vertex signature emission) shipped, so vertex maps to vs_*.
         .vertex => try std.fmt.allocPrint(alloc, "vs_{d}_{d}", .{ major, minor }),
-        // Stages we know glslpp doesn't yet emit valid HLSL for. They are
+        // Stages we know zioshade doesn't yet emit valid HLSL for. They are
         // tracked as deferred roadmap items (M5.2 v2 mesh)
         // or simply unimplemented (raytracing, geometry, tess).
         .geometry,
@@ -161,7 +161,7 @@ pub fn main() !void {
 
     // Default the dxc path from $VULKAN_SDK/Bin/dxc[.exe] (or bare `dxc` on PATH)
     // so the tool stays portable; an explicit `<dxc>` arg overrides it.
-    const dxc_resolved: ?[]const u8 = if (args.len > 1) null else glslpp.compat.resolveVulkanTool(alloc, "dxc") catch null;
+    const dxc_resolved: ?[]const u8 = if (args.len > 1) null else zioshade.compat.resolveVulkanTool(alloc, "dxc") catch null;
     defer if (dxc_resolved) |p| alloc.free(p);
     const dxc_path = if (args.len > 1) args[1] else (dxc_resolved orelse "dxc");
     const spv_dir = if (args.len > 2) args[2] else "tests/spirv_bins";
@@ -220,11 +220,11 @@ pub fn main() !void {
         defer alloc.free(profile);
 
         // Convert to HLSL.
-        const hlsl = glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = sm }) catch |err| {
+        const hlsl = zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = sm }) catch |err| {
             std.debug.print("FAIL {s} ({s}): cross-compile error {}\n", .{ name, stage.name(), err });
             bucket.fail += 1;
             total_fail += 1;
-            const key = try std.fmt.allocPrint(alloc, "glslpp cross-compile error: {}", .{err});
+            const key = try std.fmt.allocPrint(alloc, "zioshade cross-compile error: {}", .{err});
             // Insert or increment.
             const gop = try fail_hist.getOrPut(key);
             if (gop.found_existing) {

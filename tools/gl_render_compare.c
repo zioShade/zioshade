@@ -1,5 +1,5 @@
 // OpenGL GLSL Rendering Comparison Tool (using glad from wintty)
-// Compares rendering of glslpp vs spirv-cross GLSL output.
+// Compares rendering of zioshade vs spirv-cross GLSL output.
 //
 // Build:
 //   gcc -o gl_render_compare.exe tools/gl_render_compare.c \
@@ -8,7 +8,7 @@
 //       -lopengl32 -lgdi32 -luser32
 //
 // Usage:
-//   gl_render_compare.exe <glslpp.glsl> <spirvcross.glsl> [W] [H]
+//   gl_render_compare.exe <zioshade.glsl> <spirvcross.glsl> [W] [H]
 
 #include <windows.h>
 #include <glad/glad.h>
@@ -84,7 +84,7 @@ static void* wgl_load_func(const char* name) {
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        printf("Usage: gl_render_compare <glslpp.glsl> <spirvcross.glsl> [W] [H]\n");
+        printf("Usage: gl_render_compare <zioshade.glsl> <spirvcross.glsl> [W] [H]\n");
         return 1;
     }
     int W = argc > 3 ? atoi(argv[3]) : 256;
@@ -96,7 +96,7 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "ERROR: Could not read shader files\n");
         return 1;
     }
-    printf("glslpp GLSL: %zu bytes\n", strlen(frag1));
+    printf("zioshade GLSL: %zu bytes\n", strlen(frag1));
     printf("spirv-cross GLSL: %zu bytes\n", strlen(frag2));
 
     // Create hidden OpenGL window
@@ -135,9 +135,9 @@ int main(int argc, char* argv[]) {
     }
 
     // Compile shaders
-    printf("Compiling glslpp GLSL...\n");
+    printf("Compiling zioshade GLSL...\n");
     GLuint prog1 = create_program(vertex_shader, frag1);
-    if (!prog1) { fprintf(stderr, "glslpp GLSL compilation failed\n"); return 1; }
+    if (!prog1) { fprintf(stderr, "zioshade GLSL compilation failed\n"); return 1; }
     printf("Compiling spirv-cross GLSL...\n");
     GLuint prog2 = create_program(vertex_shader, frag2);
     if (!prog2) { fprintf(stderr, "spirv-cross GLSL compilation failed\n"); return 1; }
@@ -220,8 +220,8 @@ int main(int argc, char* argv[]) {
     unsigned char* px1 = (unsigned char*)malloc(W*H*4);
     unsigned char* px2 = (unsigned char*)malloc(W*H*4);
 
-    // Render glslpp
-    printf("Rendering glslpp...\n");
+    // Render zioshade
+    printf("Rendering zioshade...\n");
     glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(prog1);
     glActiveTexture(GL_TEXTURE0);
@@ -264,7 +264,7 @@ int main(int argc, char* argv[]) {
     }
     printf("\n=== Results ===\n");
     printf("Resolution: %dx%d\n", W, H);
-    printf("glslpp non-black: %d/%d\n", nb1, W*H);
+    printf("zioshade non-black: %d/%d\n", nb1, W*H);
     printf("spirv-cross non-black: %d/%d\n", nb2, W*H);
     printf("Different pixels: %d/%d\n", diffPixels, W*H);
     printf("Max channel diff: %d\n", maxDiff);

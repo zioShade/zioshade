@@ -56,7 +56,7 @@ limitations under the License.
 ## Shadertoy content (NOT included)
 
 No content from shadertoy.com is included in this repository. The fixtures in
-`tests/shadertoy_style/` are original works written for glslpp that only mimic
+`tests/shadertoy_style/` are original works written for zioshade that only mimic
 the Shadertoy uniform conventions (`iTime`, `iResolution`); they are covered by
 the repository's MIT/Apache-2.0 dual license. The `fetch_shadertoy.py` helper
 can download real Shadertoy shaders for local testing, but its output directory

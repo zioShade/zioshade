@@ -1,6 +1,6 @@
 // Tests: integer/uint-base multi-component swizzle compound-assignment (#170).
 // GLSL `ivec.xy += ivec2` / `uvec.xy *= uvec2` / `uvec.xy /= uvec2` are valid,
-// but glslpp's swizzle compound-assign path emitted the FLOAT op tags
+// but zioshade's swizzle compound-assign path emitted the FLOAT op tags
 // (OpFAdd/OpFMul/OpFDiv) unconditionally → invalid SPIR-V on integer operands
 // ("Expected floating scalar or vector type"). The op must be the INTEGER form
 // (OpIAdd/OpIMul/OpISub/OpSDiv — the project's `.div` tag emits OpSDiv for both

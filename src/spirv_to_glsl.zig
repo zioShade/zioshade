@@ -61,7 +61,7 @@ fn structHasBufferBlock(m: *const ParsedModule, struct_id: u32) bool {
 }
 
 /// True if `id` is an old-style SSBO variable: `Uniform` storage class whose pointee struct
-/// type carries `BufferBlock` (glslangValidator's SSBO encoding). glslpp's own frontend uses
+/// type carries `BufferBlock` (glslangValidator's SSBO encoding). zioshade's own frontend uses
 /// the `StorageBuffer` storage class instead, so this only catches glslang-produced SPIR-V.
 fn isOldStyleSSBOVar(m: *const ParsedModule, id: u32) bool {
     if (!isUniformVar(m, id)) return false;
@@ -171,7 +171,7 @@ fn isBuiltinBlockVar(m: *const ParsedModule, var_id: u32) bool {
 }
 
 /// Map a gl_PerVertex-style BuiltIn member to its predefined GLSL name. Returns
-/// null for builtins glslpp doesn't lower to a bare gl_* (caller falls back to the
+/// null for builtins zioshade doesn't lower to a bare gl_* (caller falls back to the
 /// OpMemberName, which glslang also names gl_*).
 fn builtinBlockMemberName(bi: spirv.BuiltIn) ?[]const u8 {
     return switch (bi) {
@@ -546,7 +546,7 @@ pub const GlslCompileOptions = struct {
 };
 
 // Use shared parse cache from root (avoids circular import — cache is passed via allocator context)
-/// Single source of truth for the desktop GLSL versions glslpp can emit. ESSL is
+/// Single source of truth for the desktop GLSL versions zioshade can emit. ESSL is
 /// intentionally excluded (#169). Referenced by both the honest-error gate and the
 /// `GlslCompileOptions.version` doc comment so the two cannot drift apart.
 pub const supported_glsl_versions = [_]u32{ 330, 400, 410, 420, 430, 440, 450, 460 };
@@ -664,7 +664,7 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
 
     for (cbuffers.items) |cb| {
         // A plain non-opaque global uniform (`uniform int n;` — a default-uniform-block
-        // member glslpp supports as a desktop-GLSL extension) is a BARE scalar/vector/
+        // member zioshade supports as a desktop-GLSL extension) is a BARE scalar/vector/
         // matrix Uniform var, not a Block-decorated struct. Emit it as a plain
         // `uniform TYPE name;` (#286) — the body references the var name directly — rather
         // than an empty `uniform name {} name_1;` block that drops the value.
@@ -1726,7 +1726,7 @@ fn emitBody(
                 // No OpSelectionMerge on an OpBranchConditional = unstructured
                 // control flow. The previous convergence-guessing if/else
                 // reconstruction was a heuristic that can silently mis-nest or
-                // drop branches (same lossy class as the switch path). glslpp's
+                // drop branches (same lossy class as the switch path). zioshade's
                 // own frontend always emits merge info; refuse external/optimized
                 // unstructured SPIR-V loudly rather than emit a lossy
                 // reconstruction. Full CFG structurization is backlog #4 (G2).
@@ -1758,7 +1758,7 @@ fn emitBody(
                 if (label_map.get(mval)) |mi| { idx = mi; }
             } else {
                 // No OpSelectionMerge on an OpSwitch = unstructured control flow
-                // (e.g. externally-optimized / hand-authored SPIR-V; glslpp's own
+                // (e.g. externally-optimized / hand-authored SPIR-V; zioshade's own
                 // frontend always emits merge info). The previous convergence-
                 // guessing heuristic was SILENT-WRONG — it dropped the `default`
                 // case (and elided the whole switch when no convergence was

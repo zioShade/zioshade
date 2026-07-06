@@ -81,10 +81,10 @@ N. The "~45+" figure from the prior one-off experiment is treated as an upper bo
 fixed task count.
 
 **The classification rule (the safety mechanism).** For each newly-failing shader, the oracle is
-`glslangValidator.exe -V` (Vulkan SPIR-V target = what glslpp emits;
+`glslangValidator.exe -V` (Vulkan SPIR-V target = what zioshade emits;
 `C:/VulkanSDK/1.4.341.1/Bin/`):
 
-| glslang `-V` verdict | glslpp can represent? | Action |
+| glslang `-V` verdict | zioshade can represent? | Action |
 |---|---|---|
 | **accepts** | yes | **FALSE-POSITIVE** → model it (analyzer accepts **and** codegen emits spirv-val-clean output) |
 | **accepts** | no (e.g. fp64/int64) | **honest "unsupported" error** — strictly better than today's silently-invalid SPIR-V |
@@ -143,7 +143,7 @@ The flip ships only when **all four** are clean:
    pin the live value at plan time, it moves as tests land).
 2. `just test-hlsl` green (793/793 as of 2026-05-31).
 3. Conformance = 2,080 PASS + 7 expected-XFAIL honest rejections (no unexpected FAIL).
-4. **`glslang -V` differential sweep over the corpus shows ZERO cases where glslpp rejects what
+4. **`glslang -V` differential sweep over the corpus shows ZERO cases where zioshade rejects what
    glslang accepts** (the operational definition of "no false-positives *within the corpus*"), AND
    wintty's real production shaders still compile.
 
@@ -154,7 +154,7 @@ silent pass — it is either modeled (false-positive) or honest-errored (unrepre
 *within the four corpora* — valid GLSL outside them can still hit a post-flip `error.SemanticFailed`
 where today it got (possibly-valid) SPIR-V. This is acceptable and strictly safer than silent-wrong,
 but the flip MUST land with two mitigations: (a) every honest-error path **names the construct +
-line/col** so a post-flip false-positive is an obvious, reportable "glslpp rejects valid X" bug
+line/col** so a post-flip false-positive is an obvious, reportable "zioshade rejects valid X" bug
 (never a silent miscompile); (b) keep `compileToSPIRVNoOpt` (or a documented escape hatch) so a
 consumer hitting a novel false-positive can bisect/work around it until it's modeled.
 
@@ -173,7 +173,7 @@ consumer hitting a novel false-positive can bisect/work around it until it's mod
 - **Task 0 harness** is itself a tool with a regression test asserting it enumerates a known
   seeded false-positive.
 - **Per-construct:** strict TDD, RED valid-GLSL fixture → GREEN model → spirv-val + glslang-oracle.
-- **Strict-mode regression test:** asserts the corpus yields **zero** glslpp-rejects-glslang-accepts
+- **Strict-mode regression test:** asserts the corpus yields **zero** zioshade-rejects-glslang-accepts
   (wire into `just` so the Done-bar #4 is continuously enforced after the flip).
 - **No silent caps:** if Task 0 bounds the corpus (sampling, top-N), `log` what was dropped.
 

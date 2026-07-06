@@ -1111,7 +1111,7 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
 /// the function's entry block, and the loop back-edge then branches to it.
 /// SPIR-V forbids the entry block of a function from being the target of any
 /// branch (spirv-val: "First block '%N' of function is targeted by block '%M'").
-/// glslpp's `deadLoopElim` used to mask this by deleting such loops; now that
+/// zioshade's `deadLoopElim` used to mask this by deleting such loops; now that
 /// live early-return loops survive, this surfaces as invalid SPIR-V.
 ///
 /// Fix: for each function whose entry block is a branch target, splice in a new

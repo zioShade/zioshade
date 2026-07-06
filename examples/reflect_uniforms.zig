@@ -1,8 +1,8 @@
 //! Compile a fragment shader and enumerate its uniforms.
-//! Build with: `zig run examples/reflect_uniforms.zig --mod glslpp::src/root.zig --deps glslpp`
+//! Build with: `zig run examples/reflect_uniforms.zig --mod zioshade::src/root.zig --deps zioshade`
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const SOURCE =
     \\#version 430
@@ -28,13 +28,13 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const spirv = try glslpp.compileToSPIRV(alloc, SOURCE, .{
+    const spirv = try zioshade.compileToSPIRV(alloc, SOURCE, .{
         .stage = .fragment,
         .version = 430,
     });
     defer alloc.free(spirv);
 
-    var resources = try glslpp.reflectSPIRV(alloc, spirv);
+    var resources = try zioshade.reflectSPIRV(alloc, spirv);
     defer resources.deinit(alloc);
 
     std.debug.print("Uniform buffers ({d}):\n", .{resources.uniform_buffers.len});

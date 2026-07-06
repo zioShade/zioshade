@@ -2,7 +2,7 @@
 //! spirv-cross reference correctness tests.
 //!
 //! Uses GLSL shaders from the spirv-cross test suite (Apache-2.0) to validate
-//! glslpp's compilation pipeline end-to-end. Each test:
+//! zioshade's compilation pipeline end-to-end. Each test:
 //!   1. Reads a .frag shader from tests/spirv_cross_shaders/
 //!   2. Compiles GLSL → SPIR-V
 //!   3. Cross-compiles SPIR-V → HLSL, GLSL, MSL
@@ -12,7 +12,7 @@
 //! See: https://github.com/KhronosGroup/SPIRV-Cross
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const alloc = std.testing.allocator;
 
@@ -36,28 +36,28 @@ fn assertNotContains(haystack: []const u8, needle: []const u8) !void {
 /// Compile a GLSL fragment shader through the full pipeline and validate all backends.
 fn testShader(name: []const u8, source: [:0]const u8) !void {
     // Step 1: GLSL → SPIR-V
-    const spirv = glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch |err| {
+    const spirv = zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch |err| {
         std.debug.print("FAIL [{s}]: compileToSPIRV failed: {}\n", .{ name, err });
         return err;
     };
     defer alloc.free(spirv);
 
     // Step 2: SPIR-V → HLSL
-    const hlsl = glslpp.spirvToHLSL(alloc, spirv, .{}) catch |err| {
+    const hlsl = zioshade.spirvToHLSL(alloc, spirv, .{}) catch |err| {
         std.debug.print("FAIL [{s}]: spirvToHLSL failed: {}\n", .{ name, err });
         return err;
     };
     defer alloc.free(hlsl);
 
     // Step 3: SPIR-V → GLSL
-    const glsl = glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 }) catch |err| {
+    const glsl = zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 }) catch |err| {
         std.debug.print("FAIL [{s}]: spirvToGLSL failed: {}\n", .{ name, err });
         return err;
     };
     defer alloc.free(glsl);
 
     // Step 4: SPIR-V → MSL
-    const msl = glslpp.spirvToMSL(alloc, spirv, .{}) catch |err| {
+    const msl = zioshade.spirvToMSL(alloc, spirv, .{}) catch |err| {
         std.debug.print("FAIL [{s}]: spirvToMSL failed: {}\n", .{ name, err });
         return err;
     };

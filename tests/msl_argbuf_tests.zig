@@ -11,7 +11,7 @@
 // by the legacy MSL test suite continuing to pass with argbuf=false.
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const FIXTURE =
     \\#version 450
@@ -24,18 +24,18 @@ const FIXTURE =
 
 test "msl argbuf: emits spvDescriptorSetBuffer0 struct" {
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRV(alloc, FIXTURE, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, FIXTURE, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
     defer alloc.free(msl);
     try std.testing.expect(std.mem.indexOf(u8, msl, "struct spvDescriptorSetBuffer0") != null);
 }
 
 test "msl argbuf: main signature takes [[buffer(0)]] argument buffer" {
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRV(alloc, FIXTURE, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, FIXTURE, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
     defer alloc.free(msl);
     // Look for the per-set arg-buffer parameter in the entry signature.
     try std.testing.expect(std.mem.indexOf(u8, msl, "constant spvDescriptorSetBuffer0&") != null);
@@ -44,9 +44,9 @@ test "msl argbuf: main signature takes [[buffer(0)]] argument buffer" {
 
 test "msl argbuf: emits [[id]] qualifiers inside the set struct" {
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRV(alloc, FIXTURE, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, FIXTURE, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
     defer alloc.free(msl);
     try std.testing.expect(std.mem.indexOf(u8, msl, "[[id(0)]]") != null);
     try std.testing.expect(std.mem.indexOf(u8, msl, "[[id(1)]]") != null);
@@ -55,9 +55,9 @@ test "msl argbuf: emits [[id]] qualifiers inside the set struct" {
 test "msl argbuf: default false preserves per-resource binding" {
     // Negative-control: legacy output unchanged when argument_buffers is false.
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRV(alloc, FIXTURE, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, FIXTURE, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = false });
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{ .argument_buffers = false });
     defer alloc.free(msl);
     try std.testing.expect(std.mem.indexOf(u8, msl, "spvDescriptorSetBuffer0") == null);
     try std.testing.expect(std.mem.indexOf(u8, msl, "[[buffer(0)]]") != null); // per-resource binding stays
@@ -76,9 +76,9 @@ const FIXTURE_TWO_SETS_FRAG =
 
 test "msl argbuf v2.a: two-set fragment emits two set structs" {
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRV(alloc, FIXTURE_TWO_SETS_FRAG, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, FIXTURE_TWO_SETS_FRAG, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
     defer alloc.free(msl);
     // Two per-set structs.
     try std.testing.expect(std.mem.indexOf(u8, msl, "struct spvDescriptorSetBuffer0") != null);
@@ -102,9 +102,9 @@ const FIXTURE_SSBO_COMPUTE =
 
 test "msl argbuf v2.b: SSBO emits inside set struct, no standalone param" {
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRV(alloc, FIXTURE_SSBO_COMPUTE, .{ .stage = .compute, .version = 450 });
+    const spirv = try zioshade.compileToSPIRV(alloc, FIXTURE_SSBO_COMPUTE, .{ .stage = .compute, .version = 450 });
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
     defer alloc.free(msl);
     // SSBO appears as `device <Name>* <Name>` inside the set struct at [[id(0)]].
     // (The struct type name and variable name are both derived from the SSBO
@@ -129,9 +129,9 @@ const FIXTURE_MIXED_COMPUTE =
 
 test "msl argbuf v2.a+v2.b: SSBO in set 0, UBO in set 1" {
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRV(alloc, FIXTURE_MIXED_COMPUTE, .{ .stage = .compute, .version = 450 });
+    const spirv = try zioshade.compileToSPIRV(alloc, FIXTURE_MIXED_COMPUTE, .{ .stage = .compute, .version = 450 });
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
     defer alloc.free(msl);
     // Two set structs.
     try std.testing.expect(std.mem.indexOf(u8, msl, "struct spvDescriptorSetBuffer0") != null);

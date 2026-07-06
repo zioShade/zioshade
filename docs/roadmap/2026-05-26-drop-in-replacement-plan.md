@@ -1,8 +1,8 @@
-# glslpp Drop-In Replacement Roadmap (2026-05-26, revised)
+# zioshade Drop-In Replacement Roadmap (2026-05-26, revised)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close the genuinely-remaining gaps between glslpp and the glslang + SPIRV-Cross C++ toolchain so glslpp can be picked up by general Vulkan/WebGPU/D3D projects.
+**Goal:** Close the genuinely-remaining gaps between zioshade and the glslang + SPIRV-Cross C++ toolchain so zioshade can be picked up by general Vulkan/WebGPU/D3D projects.
 
 **Architecture:** Eight tightly-scoped milestones, each independently shippable. Tasks within a milestone follow strict TDD (red → green → commit).
 
@@ -36,7 +36,7 @@ The 8 revised milestones below. Total estimated effort: **~1 week of focused wor
 | 4 | **WGSL final opcode coverage** | Add the 9 still-missing handlers (packing + bitfield). | 2 |
 | 5 | **HLSL polish** | SM 5.0 differentiated output, mesh `[OutputTopology]`. | 3 |
 | 6 | **MSL argument buffers** | `argument_buffers: bool` option + implementation. | 2 |
-| 7 | **C ABI surface** | `glslpp.h` + `extern fn` exports + C consumer + CI smoke. | 3 |
+| 7 | **C ABI surface** | `zioshade.h` + `extern fn` exports + C consumer + CI smoke. | 3 |
 | 8 | **Closing the loop** | Scalar block layout, buffer-reference extension, descriptor remap for non-HLSL, library-vs-library bench, `tests/external/` corpus. | 5 |
 
 ---
@@ -47,7 +47,7 @@ The 8 revised milestones below. Total estimated effort: **~1 week of focused wor
 
 A surprising amount of the audit's confusion came from the fact that **`tests/diagnostic_tests.zig`, `tests/reflection_tests.zig`, and `tests/correctness_tests.zig` are not in the default `test` step**. They're behind named steps (`test-diagnostic`, `test-reflection`, `test-correctness`) that nobody runs by default. CI silently misses regressions in shipped G-work. Fixing this is high-leverage.
 
-### Task 1.1: Make `glslpp.semantic` public so tests can compile
+### Task 1.1: Make `zioshade.semantic` public so tests can compile
 
 **Files:**
 - Modify: `src/root.zig` line 15
@@ -55,7 +55,7 @@ A surprising amount of the audit's confusion came from the fact that **`tests/di
 - [ ] **Step 1: Reproduce the failure**
 
   ```bash
-  cd C:/Users/Alessandro/CODE/OSS/glslpp/.claude/worktrees/amazing-ride-e4d37a
+  cd C:/Users/Alessandro/CODE/OSS/zioshade/.claude/worktrees/amazing-ride-e4d37a
   mise exec -- zig build test-diagnostic 2>&1 | head -10
   ```
 
@@ -78,7 +78,7 @@ A surprising amount of the audit's confusion came from the fact that **`tests/di
   ```bash
   git add src/root.zig
   git -c user.email='alex@deblasis.net' -c user.name='Alessandro De Blasis' \
-      commit -m "expose glslpp.semantic for test-internals use; unbreaks tests/diagnostic_tests.zig"
+      commit -m "expose zioshade.semantic for test-internals use; unbreaks tests/diagnostic_tests.zig"
   ```
 
 ### Task 1.2: Wire orphaned test files into default `test` step
@@ -141,7 +141,7 @@ A surprising amount of the audit's confusion came from the fact that **`tests/di
   void main() { fragColor = vec4(undef_var, 0.0, 0.0, 1.0); }
   EOF
   mise exec -- zig build cli
-  zig-out/bin/glslpp.exe compile /tmp/bad.frag -o /tmp/out.spv 2>&1
+  zig-out/bin/zioshade.exe compile /tmp/bad.frag -o /tmp/out.spv 2>&1
   ```
 
   Expected: a vague error string with no line/column.
@@ -151,12 +151,12 @@ A surprising amount of the audit's confusion came from the fact that **`tests/di
   Replace the `try compileToSPIRV(...)` call (or wrap it) with:
 
   ```zig
-  var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
+  var diags = std.ArrayListUnmanaged(zioshade.diagnostic.Diagnostic).empty;
   defer {
       for (diags.items) |d| alloc.free(d.message);
       diags.deinit(alloc);
   }
-  const spirv_words = glslpp.compileToSPIRVWithDiagnostics(alloc, source, opts, &diags) catch |err| {
+  const spirv_words = zioshade.compileToSPIRVWithDiagnostics(alloc, source, opts, &diags) catch |err| {
       for (diags.items) |d| {
           var buf: [512]u8 = undefined;
           var writer = std.Io.Writer.fixed(&buf);
@@ -171,7 +171,7 @@ A surprising amount of the audit's confusion came from the fact that **`tests/di
 
   ```bash
   mise exec -- zig build cli
-  zig-out/bin/glslpp.exe compile /tmp/bad.frag -o /tmp/out.spv 2>&1
+  zig-out/bin/zioshade.exe compile /tmp/bad.frag -o /tmp/out.spv 2>&1
   ```
 
   Expected: now prints `4:?: error: ... undef_var ... undeclared identifier` style output.
@@ -224,9 +224,9 @@ Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default va
           \\layout(set=0, binding=0, rgba8) uniform image2D destImg;
           \\void main() { imageStore(destImg, ivec2(0), vec4(1.0)); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .compute });
       defer alloc.free(spirv);
-      var res = try glslpp.reflectSPIRV(alloc, spirv);
+      var res = try zioshade.reflectSPIRV(alloc, spirv);
       defer res.deinit(alloc);
       try std.testing.expect(res.storage_images.len == 1);
       try std.testing.expectEqualStrings("destImg", res.storage_images[0].name);
@@ -267,9 +267,9 @@ Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default va
           \\layout(location=0) out vec4 fragColor;
           \\void main() { fragColor = subpassLoad(depthInput); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
       defer alloc.free(spirv);
-      var res = try glslpp.reflectSPIRV(alloc, spirv);
+      var res = try zioshade.reflectSPIRV(alloc, spirv);
       defer res.deinit(alloc);
       try std.testing.expect(res.subpass_inputs.len == 1);
   }
@@ -316,9 +316,9 @@ Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default va
           \\layout(location=0) out vec4 fragColor;
           \\void main() { fragColor = vec4(float(SIZE)); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
       defer alloc.free(spirv);
-      var res = try glslpp.reflectSPIRV(alloc, spirv);
+      var res = try zioshade.reflectSPIRV(alloc, spirv);
       defer res.deinit(alloc);
       try std.testing.expectEqual(@as(usize, 1), res.specialization_constants.len);
       try std.testing.expectEqual(@as(u32, 7), res.specialization_constants[0].spec_id);
@@ -345,12 +345,12 @@ Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default va
           \\layout(set=0, binding=0, rgba8) uniform image2D destImg;
           \\void main() { imageStore(destImg, ivec2(0), vec4(1.0)); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .compute });
       defer alloc.free(spirv);
-      var res = try glslpp.reflectSPIRV(alloc, spirv);
+      var res = try zioshade.reflectSPIRV(alloc, spirv);
       defer res.deinit(alloc);
       try std.testing.expect(res.storage_images.len == 1);
-      try std.testing.expectEqual(@as(?glslpp.reflection.ImageFormat, .rgba8), res.storage_images[0].image_format);
+      try std.testing.expectEqual(@as(?zioshade.reflection.ImageFormat, .rgba8), res.storage_images[0].image_format);
   }
   ```
 
@@ -396,9 +396,9 @@ Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default va
           \\layout(location=0) out vec4 fragColor;
           \\void main() { fragColor = texture(sampler2D(myTex, mySamp), uv); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
       defer alloc.free(spirv);
-      var res = try glslpp.reflectSPIRV(alloc, spirv);
+      var res = try zioshade.reflectSPIRV(alloc, spirv);
       defer res.deinit(alloc);
       try std.testing.expect(res.separate_images.len == 1);
       try std.testing.expect(res.separate_samplers.len == 1);
@@ -417,9 +417,9 @@ Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default va
           \\layout(location=0) rayPayloadInEXT vec3 hitValue;
           \\void main() { hitValue = vec3(1.0); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .raygen });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .raygen });
       defer alloc.free(spirv);
-      var res = try glslpp.reflectSPIRV(alloc, spirv);
+      var res = try zioshade.reflectSPIRV(alloc, spirv);
       defer res.deinit(alloc);
       try std.testing.expect(res.acceleration_structures.len == 1);
   }
@@ -448,9 +448,9 @@ Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default va
           \\layout(location=0) out vec4 fragColor;
           \\void main() { fragColor = vec4(float(N)); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
       defer alloc.free(spirv);
-      const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+      const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
       defer alloc.free(wgsl);
       try std.testing.expect(std.mem.indexOf(u8, wgsl, "override") != null);
       try std.testing.expect(std.mem.indexOf(u8, wgsl, "@id(3)") != null);
@@ -480,9 +480,9 @@ Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default va
           \\layout(location=0) out vec4 fragColor;
           \\void main() { fragColor = vec4(float(LEVEL)); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
       defer alloc.free(spirv);
-      const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
+      const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
       defer alloc.free(hlsl);
       // DXC accepts [[vk::constant_id(N)]] attribute on a static const declaration:
       try std.testing.expect(std.mem.indexOf(u8, hlsl, "[[vk::constant_id(2)]]") != null);
@@ -524,7 +524,7 @@ Per audit: `storage_images` empty, `subpass_inputs` empty, spec-const default va
           \\layout(location=0) out vec4 fragColor;
           \\void main() { fragColor = ENABLE_FX ? vec4(1.0) : vec4(0.0); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
       defer alloc.free(spirv);
       // Walk SPIR-V looking for OpSpecConstantTrue (48):
       var found = false;
@@ -610,7 +610,7 @@ each scalar component via its own SpecId.
           \\layout(location=0) out vec4 fragColor;
           \\void main() { fragColor = vec4(float(DOUBLE)); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
       defer alloc.free(spirv);
       // OpSpecConstantOp = 52
       var found = false;
@@ -651,10 +651,10 @@ each scalar component via its own SpecId.
           \\layout(location=0) out vec4 fragColor;
           \\void main() { fragColor = vec4(float(SIZE)); }
           ;
-      var overrides = [_]glslpp.SpecOverride{
+      var overrides = [_]zioshade.SpecOverride{
           .{ .spec_id = 5, .value_u32 = 99 },
       };
-      const spirv = try glslpp.compileToSPIRVWithSpecOverrides(
+      const spirv = try zioshade.compileToSPIRVWithSpecOverrides(
           alloc, src, .{ .stage = .fragment }, overrides[0..],
       );
       defer alloc.free(spirv);
@@ -794,9 +794,9 @@ This is roughly the same scope as M5.2's mesh signature work — probably 1–2 
           \\layout(location=0) in vec3 in_pos;
           \\void main() { gl_Position = vec4(in_pos, 1.0); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .vertex });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .vertex });
       defer alloc.free(spirv);
-      const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{
+      const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{
           .binding_shift = -1, .shader_model = 50,
       });
       defer alloc.free(hlsl);
@@ -831,9 +831,9 @@ This is roughly the same scope as M5.2's mesh signature work — probably 1–2 
           \\layout(location=0) out vec4 v_color[];
           \\void main() { SetMeshOutputsEXT(3, 1); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .mesh });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .mesh });
       defer alloc.free(spirv);
-      const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
+      const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
       defer alloc.free(hlsl);
       try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"triangle\")]") != null);
       try std.testing.expect(std.mem.indexOf(u8, hlsl, "out vertices") != null);
@@ -863,7 +863,7 @@ M5.2 v1 shipped (`6a0e5982` + `e732055f`) with the `[OutputTopology("...")]` att
   After v2.a and v2.b land, the mesh entry-point *body* still emits SPIR-V Output-storage-class stores as generic global writes. Re-route them to write into the `verts[i].field` / `prims_data[i].field` slots so the per-thread mesh-shader writes correctly populate the output arrays. This is the load-bearing piece — without it the mesh output is structurally correct but semantically empty.
 
 - [x] **Task 5.2.v2.d — CLI `--stage mesh|task|raygen|...`**
-  Shipped as part of finishing M5.2 v1 follow-ups. `src/cli.zig` now accepts every stage in the `glslpp.Stage` enum.
+  Shipped as part of finishing M5.2 v1 follow-ups. `src/cli.zig` now accepts every stage in the `zioshade.Stage` enum.
 
 **Acceptance for v2:** the mesh shader fixture from M5.2's test:
 ```glsl
@@ -874,7 +874,7 @@ layout(triangles, max_vertices=3, max_primitives=1) out;
 layout(location=0) out vec4 v_color[];
 void main() { SetMeshOutputsEXT(3, 1); }
 ```
-should round-trip through `glslpp hlsl --stage mesh` and then pass `dxc -T ms_6_5 -E main` without errors. Today it doesn't because of v2.a/b/c.
+should round-trip through `zioshade hlsl --stage mesh` and then pass `dxc -T ms_6_5 -E main` without errors. Today it doesn't because of v2.a/b/c.
 
 ### Task 5.3: Validate via DXC on Windows — SHIPPED
 
@@ -886,7 +886,7 @@ should round-trip through `glslpp hlsl --stage mesh` and then pass `dxc -T ms_6_
 Shipped in this commit. `tools/dxc_batch_test.zig` now detects each
 fixture's execution model from its SPIR-V `OpEntryPoint` (opcode 15) and
 selects the matching DXC target profile (`ps_*` / `cs_*` / `ms_*` /
-`as_*`). Stages glslpp doesn't yet emit valid HLSL for (vertex, raygen,
+`as_*`). Stages zioshade doesn't yet emit valid HLSL for (vertex, raygen,
 geometry, tess, mesh-without-v2) are reported as **SKIP** with a roadmap
 reference, so adding fixtures for those stages later requires no tool
 changes. Per-stage tallies and a top-N failure histogram (extracted from
@@ -932,7 +932,7 @@ shape, sequential `[[id]]` slots, default-false negative control).
 
 ### Task 6.2: CLI flag for `--msl-argument-buffers` — SHIPPED
 
-Shipped in this commit. `glslpp msl <input> --msl-argument-buffers` plumbs
+Shipped in this commit. `zioshade msl <input> --msl-argument-buffers` plumbs
 through to `spirvToMSL({ .argument_buffers = true, ... })`. Help text updated.
 
 ### Task 6.v2 — Argument buffers v2 (DEFERRED from M6 v1)
@@ -981,14 +981,14 @@ Confirmed entirely missing. This is the biggest single unlock for non-Zig adopte
 ### Task 7.1: Define the C header
 
 **Files:**
-- Create: `include/glslpp.h`
+- Create: `include/zioshade.h`
 
 - [ ] **Step 1: Write the header by hand**
 
   ```c
   // SPDX-License-Identifier: MIT OR Apache-2.0
-  #ifndef GLSLPP_H
-  #define GLSLPP_H
+  #ifndef ZIOSHADE_H
+  #define ZIOSHADE_H
   #include <stddef.h>
   #include <stdint.h>
   #ifdef __cplusplus
@@ -996,68 +996,68 @@ Confirmed entirely missing. This is the biggest single unlock for non-Zig adopte
   #endif
 
   typedef enum {
-      GLSLPP_OK = 0,
-      GLSLPP_ERR_OOM = 1,
-      GLSLPP_ERR_LEX = 2,
-      GLSLPP_ERR_PREPROCESS = 3,
-      GLSLPP_ERR_PARSE = 4,
-      GLSLPP_ERR_SEMANTIC = 5,
-      GLSLPP_ERR_CODEGEN = 6,
-      GLSLPP_ERR_INVALID_INPUT = 7,
-  } glslpp_status_t;
+      ZIOSHADE_OK = 0,
+      ZIOSHADE_ERR_OOM = 1,
+      ZIOSHADE_ERR_LEX = 2,
+      ZIOSHADE_ERR_PREPROCESS = 3,
+      ZIOSHADE_ERR_PARSE = 4,
+      ZIOSHADE_ERR_SEMANTIC = 5,
+      ZIOSHADE_ERR_CODEGEN = 6,
+      ZIOSHADE_ERR_INVALID_INPUT = 7,
+  } zioshade_status_t;
 
   typedef enum {
-      GLSLPP_STAGE_VERTEX = 0,
-      GLSLPP_STAGE_FRAGMENT = 1,
-      GLSLPP_STAGE_COMPUTE = 2,
-      GLSLPP_STAGE_GEOMETRY = 3,
-      GLSLPP_STAGE_TESS_CONTROL = 4,
-      GLSLPP_STAGE_TESS_EVAL = 5,
-      GLSLPP_STAGE_MESH = 6,
-      GLSLPP_STAGE_TASK = 7,
-  } glslpp_stage_t;
+      ZIOSHADE_STAGE_VERTEX = 0,
+      ZIOSHADE_STAGE_FRAGMENT = 1,
+      ZIOSHADE_STAGE_COMPUTE = 2,
+      ZIOSHADE_STAGE_GEOMETRY = 3,
+      ZIOSHADE_STAGE_TESS_CONTROL = 4,
+      ZIOSHADE_STAGE_TESS_EVAL = 5,
+      ZIOSHADE_STAGE_MESH = 6,
+      ZIOSHADE_STAGE_TASK = 7,
+  } zioshade_stage_t;
 
   typedef struct {
-      glslpp_stage_t stage;
+      zioshade_stage_t stage;
       uint32_t version;
       int is_essl;
-  } glslpp_compile_options_t;
+  } zioshade_compile_options_t;
 
-  glslpp_status_t glslpp_compile(
+  zioshade_status_t zioshade_compile(
       const char* glsl_source, size_t glsl_len,
-      const glslpp_compile_options_t* opts,
+      const zioshade_compile_options_t* opts,
       uint32_t** spirv_words, size_t* spirv_word_count);
 
-  glslpp_status_t glslpp_to_hlsl(
+  zioshade_status_t zioshade_to_hlsl(
       const uint32_t* spirv_words, size_t spirv_word_count,
       int shader_model,
       char** hlsl, size_t* hlsl_len);
 
-  glslpp_status_t glslpp_to_glsl(
+  zioshade_status_t zioshade_to_glsl(
       const uint32_t* spirv_words, size_t spirv_word_count,
       int glsl_version,
       char** glsl, size_t* glsl_len);
 
-  glslpp_status_t glslpp_to_msl(
+  zioshade_status_t zioshade_to_msl(
       const uint32_t* spirv_words, size_t spirv_word_count,
       int msl_version, int argument_buffers,
       char** msl, size_t* msl_len);
 
-  glslpp_status_t glslpp_to_wgsl(
+  zioshade_status_t zioshade_to_wgsl(
       const uint32_t* spirv_words, size_t spirv_word_count,
       char** wgsl, size_t* wgsl_len);
 
-  const char* glslpp_last_error_message(void);
-  uint32_t    glslpp_last_error_line(void);
-  uint32_t    glslpp_last_error_column(void);
+  const char* zioshade_last_error_message(void);
+  uint32_t    zioshade_last_error_line(void);
+  uint32_t    zioshade_last_error_column(void);
 
-  void glslpp_free_str(char* s);
-  void glslpp_free_u32(uint32_t* p);
+  void zioshade_free_str(char* s);
+  void zioshade_free_u32(uint32_t* p);
 
   #ifdef __cplusplus
   }
   #endif
-  #endif // GLSLPP_H
+  #endif // ZIOSHADE_H
   ```
 
 - [ ] **Step 2: Commit**
@@ -1074,18 +1074,18 @@ Confirmed entirely missing. This is the biggest single unlock for non-Zig adopte
 
 - [ ] **Step 2: Implement c_abi.zig**
 
-  Use a length-prefix trick to make `glslpp_free_u32` work with bare pointers: allocate `8 + n*4` bytes, store `n` at offset 0, return pointer at offset 8. Free by reading the length-prefix and freeing the original allocation.
+  Use a length-prefix trick to make `zioshade_free_u32` work with bare pointers: allocate `8 + n*4` bytes, store `n` at offset 0, return pointer at offset 8. Free by reading the length-prefix and freeing the original allocation.
 
   ```zig
   // SPDX-License-Identifier: MIT OR Apache-2.0
   const std = @import("std");
-  const glslpp = @import("root.zig");
+  const zioshade = @import("root.zig");
 
   threadlocal var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
   fn alloc() std.mem.Allocator { return gpa.allocator(); }
 
-  pub const glslpp_status_t = c_int;
-  pub const GLSLPP_OK: glslpp_status_t = 0;
+  pub const zioshade_status_t = c_int;
+  pub const ZIOSHADE_OK: zioshade_status_t = 0;
   // ... (mirror header)
 
   // Implementation detail: store [length:u64][bytes...] so caller can free
@@ -1105,8 +1105,8 @@ Confirmed entirely missing. This is the biggest single unlock for non-Zig adopte
       }
   }
 
-  export fn glslpp_compile(...) callconv(.C) glslpp_status_t { ... }
-  export fn glslpp_to_hlsl(...) callconv(.C) glslpp_status_t { ... }
+  export fn zioshade_compile(...) callconv(.C) zioshade_status_t { ... }
+  export fn zioshade_to_hlsl(...) callconv(.C) zioshade_status_t { ... }
   // ... etc.
   ```
 
@@ -1123,7 +1123,7 @@ Confirmed entirely missing. This is the biggest single unlock for non-Zig adopte
 - Modify: `build.zig` to add `c-example` step that compiles and links the C file
 - Modify: `.github/workflows/ci.yml` to run the C example on every PR
 
-- [ ] **Step 1: Write `examples/c/main.c`** that calls `glslpp_compile` + `glslpp_to_hlsl`, prints SPIR-V word count and HLSL output, frees both.
+- [ ] **Step 1: Write `examples/c/main.c`** that calls `zioshade_compile` + `zioshade_to_hlsl`, prints SPIR-V word count and HLSL output, frees both.
 
 - [ ] **Step 2: Build it via Zig (using `b.addExecutable` with `.files = &.{ "examples/c/main.c" }` and `.link_libc = true`, linking the shared C lib).**
 
@@ -1227,7 +1227,7 @@ mise exec -- zig build test-hlsl --summary all     # 793+ pass
 mise exec -- zig build conformance                 # 2,080 PASS / 7 known feature-gap FAIL (2,087 runnable)
 mise exec -- zig build fuzz -- --count 5000        # 5000 pass, 0 crashes
 mise exec -- zig build examples                    # builds
-mise exec -- env GLSLPP_BENCH_GLSLANG=... GLSLPP_BENCH_SPIRVX=... zig build bench-compare
+mise exec -- env ZIOSHADE_BENCH_GLSLANG=... ZIOSHADE_BENCH_SPIRVX=... zig build bench-compare
 ```
 
 Any regression in those numbers is a **STOP**: roll back and investigate.
@@ -1251,7 +1251,7 @@ Any regression in those numbers is a **STOP**: roll back and investigate.
 
 - **Spec coverage:** every genuine gap from the second-pass audit has a task. Items already shipped have been removed.
 - **No placeholders:** every step lists either exact code, exact bash, or exact files. Task 8.4 (library-vs-library benchmark) intentionally leaves the C++ build details flexible because they depend on platform; a fallback path is named.
-- **Type consistency:** `SpecOverride`, `glslpp_status_t`, `glslpp_compile_options_t`, `ImageFormat`, `expectDiagnostic` are consistent across tasks.
+- **Type consistency:** `SpecOverride`, `zioshade_status_t`, `zioshade_compile_options_t`, `ImageFormat`, `expectDiagnostic` are consistent across tasks.
 
 ## Execution handoff
 

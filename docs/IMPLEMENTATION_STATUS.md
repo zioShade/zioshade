@@ -1,4 +1,4 @@
-# glslpp — Implementation Status
+# zioshade — Implementation Status
 
 **Honest scope and known limitations as of the current release.**
 
@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-glslpp is a **pure-Zig GLSL→SPIR-V compiler and SPIR-V cross-compiler** (HLSL / MSL / GLSL / WGSL). It was extracted from [wintty](https://github.com/deblasis/wintty) to replace ~60 MB of glslang + SPIRV-Cross C++ dependencies in a single Zig module.
+zioshade is a **pure-Zig GLSL→SPIR-V compiler and SPIR-V cross-compiler** (HLSL / MSL / GLSL / WGSL). It was extracted from [wintty](https://github.com/deblasis/wintty) to replace ~60 MB of glslang + SPIRV-Cross C++ dependencies in a single Zig module.
 
 **What works today:**
 - **wintty production use** — every shader wintty ships through GLSL → SPIR-V → HLSL / MSL / WGSL.
@@ -44,7 +44,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 
 ### 1.2 Frontend (replaces glslang)
 
-| Capability | glslang | glslpp | Status |
+| Capability | glslang | zioshade | Status |
 |------------|---------|--------|--------|
 | GLSL versions | 100–460, ESSL 100/300/310/320 | Parses `#version`, validates 430 | ⚠️ Partial |
 | Preprocessor directives | Full | `#define`, `#if`/`#ifdef`/`#elif`, `#else`, `#endif`, `#include`, `#extension`, `#pragma`, `#line`, `#error`, `#warning`, `#undef` | ✅ Complete for wintty |
@@ -63,13 +63,13 @@ If your shaders fall inside the validated set, this should work. If you need ful
 
 ### 1.3 Cross-Compiler (replaces SPIRV-Cross)
 
-| Capability | SPIRV-Cross | glslpp | Status |
+| Capability | SPIRV-Cross | zioshade | Status |
 |------------|-------------|--------|--------|
 | HLSL output | SM 5.0+ | SM 6.0 | ✅ DXC validates 47/51 |
 | MSL output | 2.0+ | Metal 2.0+ | ✅ |
 | GLSL output | 110, 140, 150, 300 es, 330, 410, 430, 450, 460 | 330, 400, 410, 420, 430 (default), 440, 450, 460 | ✅ Selectable desktop range; 420pack guard + location gating at < 420 / 330; honest-error on unsupported version & ESSL (#169) |
 | WGSL output | ✅ | ✅ | ✅ naga-validated; stage I/O **interface blocks** (in + out), cross-function I/O, frexp/modf struct-return, loop phi, passthrough-return, scalar geometric builtins, vector shifts, array-element/struct construction all naga-clean. Honest-errors the genuinely-unrepresentable: recursion, multisample/sampler arrays, layer/viewport/clip-cull/point-size built-ins, dual-source blending, ARM tensors, ray queries, geometry/tess stages |
-| SPIR-V input (pre-compiled) | ✅ Full | ✅ Partial (best-effort) | ⚠️ Assumes glslpp structure |
+| SPIR-V input (pre-compiled) | ✅ Full | ✅ Partial (best-effort) | ⚠️ Assumes zioshade structure |
 | Opcode handler coverage | ~400 opcodes | HLSL: 180, GLSL: 132, MSL: 130, WGSL: ~65 (deepening under #170) | ✅ HLSL strong, ⚠️ WGSL narrower but never silent-wrong (catch-all fails loud) |
 | Reflection API | ✅ Full | ✅ Resources + bindings + members + array/matrix strides + block_size + readonly/writeonly + nested-struct recursion + access quals + **JSON serialization** (`reflect --json`) | ✅ #171 + #177 done (`toJson` mirrors `spirv-cross --reflect`) |
 | Descriptor set management | ✅ Full | `binding_shift` + per-resource `resource_bindings` remap (HLSL/MSL, CLI `--bind`); no UBO flatten | ⚠️ Partial |
@@ -133,12 +133,12 @@ If your shaders fall inside the validated set, this should work. If you need ful
 
 ### 2.1 Migration Status
 
-The wintty `feat/glslpp-integration` branch has fully migrated from C++ to pure Zig:
+The wintty `feat/zioshade-integration` branch has fully migrated from C++ to pure Zig:
 
 | Component | Before | After | Savings |
 |-----------|--------|-------|---------|
-| GLSL→SPIR-V | glslang (C++, ~30MB) | `glslpp.compileToSPIRV()` | 30MB removed |
-| SPIR-V→HLSL/MSL/GLSL | SPIRV-Cross (C++, ~30MB) | `glslpp.spirvToHLSL/MSL/GLSL()` | 30MB removed |
+| GLSL→SPIR-V | glslang (C++, ~30MB) | `zioshade.compileToSPIRV()` | 30MB removed |
+| SPIR-V→HLSL/MSL/GLSL | SPIRV-Cross (C++, ~30MB) | `zioshade.spirvToHLSL/MSL/GLSL()` | 30MB removed |
 | pkg/glslang/ directory | ~30MB | Removed (cf845724) | ✅ |
 | pkg/spirv-cross/ directory | ~30MB | Removed (cf845724) | ✅ |
 | **Total C++ dependencies** | **~60MB** | **0 bytes** | **60MB saved** |
@@ -149,12 +149,12 @@ The wintty `feat/glslpp-integration` branch has fully migrated from C++ to pure 
 wintty shader compilation (all platforms):
 
 GLSL source
-  ├── DX12:  glslpp.compileGlslToHlsl()  → HLSL → DXC → DXIL bytecode
-  ├── Metal: glslpp.compileGlslToMsl()    → MSL  → Metal compiler → metallib
-  └── GL:    glslpp.compileGlslToGlsl()   → GLSL → OpenGL driver (runtime)
+  ├── DX12:  zioshade.compileGlslToHlsl()  → HLSL → DXC → DXIL bytecode
+  ├── Metal: zioshade.compileGlslToMsl()    → MSL  → Metal compiler → metallib
+  └── GL:    zioshade.compileGlslToGlsl()   → GLSL → OpenGL driver (runtime)
 
 Shadertoy custom shaders:
-  └── glslpp.compileShadertoyToHlsl() / compileGlslToMsl() / compileGlslToGlsl()
+  └── zioshade.compileShadertoyToHlsl() / compileGlslToMsl() / compileGlslToGlsl()
 ```
 
 ### 2.3 What Cannot Be Replaced
@@ -175,7 +175,7 @@ DXC and the Metal compiler are **platform SDK tools** that produce GPU-specific 
 - 3 barycentric tests: `SV_Barycentrics` requires SM 6.1+; DXC also doesn't support two barycentric semantics in one shader
 - 1 complex-expression: structured buffer exceeds DXC's 2,048-byte limit (actual: 16,384 bytes)
 
-All 4 are DXC toolchain constraints, not glslpp bugs.
+All 4 are DXC toolchain constraints, not zioshade bugs.
 
 ### 3.3 Cross-Compilation Validation
 
@@ -210,11 +210,11 @@ The structured-GLSL fuzzer is clean over **1,000,000** iterations (reproduce wit
 
 ## 4. Performance
 
-> **Caveat:** the per-call latency numbers below compare in-process glslpp against `glslangValidator` invoked as a subprocess. This favours glslpp because glslang is paying process-startup cost on every shader. A library-vs-library benchmark against glslang's `libglslang.a` + libspirv-cross has **not** been published yet and is on the roadmap — see [Other gaps](#other-gaps-flagged-during-pre-release-audit). Until that exists, treat the speedup numbers as *workflow* comparisons (CLI tool vs in-process library) rather than algorithm comparisons.
+> **Caveat:** the per-call latency numbers below compare in-process zioshade against `glslangValidator` invoked as a subprocess. This favours zioshade because glslang is paying process-startup cost on every shader. A library-vs-library benchmark against glslang's `libglslang.a` + libspirv-cross has **not** been published yet and is on the roadmap — see [Other gaps](#other-gaps-flagged-during-pre-release-audit). Until that exists, treat the speedup numbers as *workflow* comparisons (CLI tool vs in-process library) rather than algorithm comparisons.
 
-### 4.1 GLSL→SPIR-V Compile Time (in-process glslpp vs `glslangValidator` subprocess)
+### 4.1 GLSL→SPIR-V Compile Time (in-process zioshade vs `glslangValidator` subprocess)
 
-| Shader | glslang CLI (process) | glslpp (library) | Workflow speedup |
+| Shader | glslang CLI (process) | zioshade (library) | Workflow speedup |
 |--------|-----------------------|-------------------|------------------|
 | simple_frag | ~178 ms | ~755 µs | ~235× |
 | noise_func | ~178 ms | ~790 µs | ~225× |
@@ -242,7 +242,7 @@ The structured-GLSL fuzzer is clean over **1,000,000** iterations (reproduce wit
 
 wintty compiles ~10 shaders at startup:
 - **glslang (process spawn)**: 10 × 178ms = ~1.8 seconds
-- **glslpp (library)**: 10 × 900µs = ~9ms
+- **zioshade (library)**: 10 × 900µs = ~9ms
 - **Savings**: ~1.8 seconds faster startup
 
 ---
@@ -254,7 +254,7 @@ wintty compiles ~10 shaders at startup:
 | # | Gap | Impact | Effort |
 |---|-----|--------|--------|
 | G1 | **Reflection API** | Without this, consumers must hardcode bindings/inputs/outputs. SPIRV-Cross's most-used feature after cross-compilation. **Done (#171 Batch A + #177):** array/matrix strides, row/col-major, runtime arrays, `block_size`, readonly/writeonly, nested-struct recursion, per-member/-resource Coherent/Volatile/Restrict, and JSON serialization (`reflect --json` / `reflection.toJson`, mirroring `spirv-cross --reflect`) — all read back from decorations, never recomputed. | Large (new module, ~2,000 lines) |
-| G2 | **Robust pre-compiled SPIR-V consumption** | Backends assume glslpp-generated SPIR-V structure. Need to handle arbitrary SPIR-V from glslang, DXC, etc. | Medium (defensive parsing, edge cases) |
+| G2 | **Robust pre-compiled SPIR-V consumption** | Backends assume zioshade-generated SPIR-V structure. Need to handle arbitrary SPIR-V from glslang, DXC, etc. | Medium (defensive parsing, edge cases) |
 | G3 | **Diagnostic quality** | Line/column tracking through the pipeline. Currently errors are opaque enums. | Medium (source mapping throughout) |
 
 ### Tier 2: Important (needed for projects beyond wintty)
@@ -263,7 +263,7 @@ wintty compiles ~10 shaders at startup:
 |---|-----|--------|--------|
 | ~~G4~~ | ~~**GLSL version flexibility**~~ | ✅ **DONE (#169).** Selectable desktop version 330–460 (default 430). 420pack extension guard at < 420; `layout(location=)` gating on varyings at 330; honest-error (`UnsupportedGlslVersion` / `EsslUnsupported`) on unsupported version / ESSL. glslangValidator-acceptance + spirv-cross structural tests. | ~~Small~~ |
 | G5 | **WGSL backend depth** (Pass 1 + Pass 2 + Pass 3 landed, #170 open) | ⏳ **IN PROGRESS (#170, iterative).** WGSL opcode breadth is still narrower than the other backends, but the principle is now enforced everywhere: every handler is naga-validated and unrepresentable constructs are NAMED honest-errors, never silent-wrong. **Pass 1:** `findMSB`/`findLSB`/`findUMsb` → `firstLeadingBit`/`firstTrailingBit` (+ signed-result wrap), NMin/NMax/NClamp → min/max/clamp; honest-errored projective sampling (`textureProj*`) and fragment-shader interlock; **closed the silent-wrong main-path `else`** (was an uninitialised `var` placeholder → now `error.UnsupportedOp`). **Pass 2 (corpus `naga PASS` 1945 → 1960, `REJECT` 34 → 27, `honest-unsupported` 64 → 56):** `inverse()` → generated emit-once `spvInverse2/3/4` cofactor helpers; `outerProduct()` → explicit `matCxR` construction; abstract scalar-float literals typed with an `f` suffix (fixes all-constant `smoothstep`/`mix`); **two silent-wrong AUDIT FIXES → honest-error:** subgroup ops (naga 29.0.3 rejects subgroups entirely) and image atomics (`atomicAdd(&textureLoad(…))`, WGSL has no image atomics). **Pass 3 (corpus `REJECT` 32 → 31, `honest-unsupported` 56 → 57):** **A1 — push-constant blocks** (SPIR-V `StorageClass.PushConstant`) were dropped (fell into the global-var `switch` `else`) → `push.value0` dangling (naga "no definition in scope"); WGSL has no push_constant address space, so they now lower to a **uniform buffer** (`struct PushConstants {…}` + `var<uniform> push`, naga-validated). **H AUDIT FIX — texel buffers** (`OpTypeImage Dim=Buffer`, GLSL `samplerBuffer`/`imageBuffer`) were spelled `texture_buffer<f32>` (not real WGSL, naga-rejected) → now honest-error (no WGSL texel-buffer type). Remaining (Pass 4+): **A2 array-member-in-UBO stride** (per-member `array<vec4f,N>` + `.x`-injection, the prime +3 REJECT lever — deferred as materially risky), A3 struct redefinition, A4 forward-decl, ~~A5 enhanced-layouts~~ (**DONE** — uniform blocks now emit `@align`/`@size` reproducing SPIR-V member offsets via `collectOffsetStructsRec`, removing `enhanced-layouts.comp` from the naga-sweep rejects, REJECT 4→3), A6 ssbo array-of-struct, A7 spec-const-op; SSA def-drop, signedness; f64 pack-unpack / interpolateAt* stay honest-error by design. **#187 part B — non-depth ARRAY textures now supported (DONE):** `sampler2DArray`/`samplerCubeArray`/`sampler1DArray` now spell `texture_2d_array`/`texture_cube_array`/`texture_1d_array<f32>` (reading the `OpTypeImage` Arrayed operand) AND split the array layer into a separate `i32` argument for sample/textureLod/texelFetch/textureGather (`arrayedSampleShape`, mirroring the depth-array `depthCompareShape` path); `separate-sampler-texture.vk.frag` moved corpus REJECT→PASS. MS-array stays honest-error; depth-array variants were already correct (#176). | Medium (fill missing handlers, iterative) |
-| G6 | **Descriptor set / binding management** | SPIRV-Cross can remap descriptor sets, flatten UBOs, merge sets. glslpp has `binding_shift` only. | Large (new subsystem) |
+| G6 | **Descriptor set / binding management** | SPIRV-Cross can remap descriptor sets, flatten UBOs, merge sets. zioshade has `binding_shift` only. | Large (new subsystem) |
 | G7 | **Specialization constants** | Required for Vulkan pipeline caching and optimization. | Medium (new codegen path) |
 | G8 | **Separate sampler/image** | Vulkan best practice (separate samplers and images). Currently combined-only. | Medium (SPIR-V type tracking) |
 
@@ -312,11 +312,11 @@ A comprehensive plan to close the remaining gaps and reach drop-in parity with g
 
 ## Other gaps flagged during pre-release audit
 
-These are tracked openly so consumers can decide whether glslpp fits their use case today.
+These are tracked openly so consumers can decide whether zioshade fits their use case today.
 
 - **CI workflow committed, not yet green.** A 3-OS GitHub Actions matrix (`.github/workflows/ci.yml`: build/test, spirv-val conformance, fuzz smoke, C-ABI smoke) is committed but has not yet been observed passing in CI due to a GitHub Actions billing block; conformance is currently verified locally via `zig build conformance` / `just`.
-- **Lib-vs-lib benchmark (cross-compiler) published:** `just lib-bench` links **SPIRV-Cross in-process** (its C API, from the Vulkan SDK static libs) and times glslpp vs SPIRV-Cross on the *same* SPIR-V → GLSL/HLSL/MSL. Honest result (no subprocess): glslpp is ~**1.4–1.6× faster** on the median cell — roughly at parity on a trivial GLSL shader (~0.6×) and up to ~2.6× faster on math/control-flow-heavy MSL. (Numbers are machine-relative; rerun locally.) A glslpp-vs-glslang in-process comparison for the **GLSL→SPIR-V** direction (`glslang_c_interface.h`) is not yet wired — the front-end half of the bench remains.
-- **`spirv-val` is the conformance oracle, not glslang reference output.** Some test fixtures in `tests/spirv-cross/` are known to fail reference compilation with `glslangValidator` even though glslpp accepts them — see `docs/REFERENCE_FAILURE_ANALYSIS.md`.
+- **Lib-vs-lib benchmark (cross-compiler) published:** `just lib-bench` links **SPIRV-Cross in-process** (its C API, from the Vulkan SDK static libs) and times zioshade vs SPIRV-Cross on the *same* SPIR-V → GLSL/HLSL/MSL. Honest result (no subprocess): zioshade is ~**1.4–1.6× faster** on the median cell — roughly at parity on a trivial GLSL shader (~0.6×) and up to ~2.6× faster on math/control-flow-heavy MSL. (Numbers are machine-relative; rerun locally.) A zioshade-vs-glslang in-process comparison for the **GLSL→SPIR-V** direction (`glslang_c_interface.h`) is not yet wired — the front-end half of the bench remains.
+- **`spirv-val` is the conformance oracle, not glslang reference output.** Some test fixtures in `tests/spirv-cross/` are known to fail reference compilation with `glslangValidator` even though zioshade accepts them — see `docs/REFERENCE_FAILURE_ANALYSIS.md`.
 - **Cross-compiler control flow (G2 partial).** A module-level structurization pre-pass (`src/cfg_structurize.zig`, run by every backend) recovers missing `OpSelectionMerge`s for unstructured-but-reducible `if`/`switch` headers via dominator/post-dominator analysis, so externally-optimized SPIR-V with stripped selection merges compiles faithfully (byte-identical no-op on already-structured input). Unstructured **loops** (missing `OpLoopMerge`) and irreducible CFGs still **fail loud** (`error.UnstructuredControlFlow`) — never miscompiled. Loop-merge recovery primitives exist (`recoverLoopMerges`/`spliceLoopMerges`, unit-tested) but composing them with selection recovery is future work; valid Shader SPIR-V is always structured, so this only affects malformed/hand-authored input.
-- **C ABI is provided.** A C header (`include/glslpp.h`) plus shared and static libraries are built with `zig build c-lib`; a runnable C consumer example lives in `examples/c/main.c` (`zig build c-example` / `zig build run-c-example`). The public C surface is smoke-tested across Linux / macOS / Windows by the `c-abi` job in `.github/workflows/ci.yml`.
+- **C ABI is provided.** A C header (`include/zioshade.h`) plus shared and static libraries are built with `zig build c-lib`; a runnable C consumer example lives in `examples/c/main.c` (`zig build c-example` / `zig build run-c-example`). The public C surface is smoke-tested across Linux / macOS / Windows by the `c-abi` job in `.github/workflows/ci.yml`.
 - **Single-contributor project.** No formal release cadence yet; treat as alpha if you are not the wintty project.
