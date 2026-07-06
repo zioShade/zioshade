@@ -1,6 +1,6 @@
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -13,8 +13,8 @@ pub fn main() !void {
     defer alloc.free(raw);
     const input: [:0]const u8 = try alloc.dupeZ(u8, raw);
     defer alloc.free(input);
-    const stage: glslpp.Stage = if (std.mem.endsWith(u8, args[1], ".vert")) .vertex else .fragment;
-    const spv = try glslpp.compileToSPIRVNoOpt(alloc, input, .{ .stage = stage });
+    const stage: zioshade.Stage = if (std.mem.endsWith(u8, args[1], ".vert")) .vertex else .fragment;
+    const spv = try zioshade.compileToSPIRVNoOpt(alloc, input, .{ .stage = stage });
     defer alloc.free(spv);
     const file = try std.fs.cwd().createFile(args[2], .{});
     try file.writeAll(std.mem.sliceAsBytes(spv));

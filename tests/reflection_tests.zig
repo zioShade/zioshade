@@ -1,9 +1,9 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 test "reflectSPIRV finds uniform buffer" {
     const alloc = std.testing.allocator;
-    const spv_refl = try glslpp.compileToSPIRV(alloc,
+    const spv_refl = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(std140, binding = 0) uniform MyUB {
         \\    vec4 color;
@@ -13,7 +13,7 @@ test "reflectSPIRV finds uniform buffer" {
         \\void main() { FragColor = color * intensity; }
     , .{ .stage = .fragment });
     defer alloc.free(spv_refl);
-    var res = try glslpp.reflectSPIRV(alloc, spv_refl);
+    var res = try zioshade.reflectSPIRV(alloc, spv_refl);
     defer res.deinit(alloc);
     try std.testing.expect(res.uniform_buffers.len == 1);
     try std.testing.expect(res.uniform_buffers[0].binding == 0);
@@ -22,14 +22,14 @@ test "reflectSPIRV finds uniform buffer" {
 
 test "reflectSPIRV finds inputs and outputs" {
     const alloc = std.testing.allocator;
-    const spv_io = try glslpp.compileToSPIRV(alloc,
+    const spv_io = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(location = 0) in vec2 vUV;
         \\layout(location = 0) out vec4 FragColor;
         \\void main() { FragColor = vec4(vUV, 0.0, 1.0); }
     , .{ .stage = .fragment });
     defer alloc.free(spv_io);
-    var res = try glslpp.reflectSPIRV(alloc, spv_io);
+    var res = try zioshade.reflectSPIRV(alloc, spv_io);
     defer res.deinit(alloc);
     try std.testing.expect(res.inputs.len >= 1);
     try std.testing.expect(res.outputs.len >= 1);
@@ -37,14 +37,14 @@ test "reflectSPIRV finds inputs and outputs" {
 
 test "reflectSPIRV finds sampled image" {
     const alloc = std.testing.allocator;
-    const spv_tex = try glslpp.compileToSPIRV(alloc,
+    const spv_tex = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(binding = 0) uniform sampler2D myTex;
         \\layout(location = 0) out vec4 FragColor;
         \\void main() { FragColor = texture(myTex, vec2(0.5)); }
     , .{ .stage = .fragment });
     defer alloc.free(spv_tex);
-    var res = try glslpp.reflectSPIRV(alloc, spv_tex);
+    var res = try zioshade.reflectSPIRV(alloc, spv_tex);
     defer res.deinit(alloc);
     try std.testing.expect(res.sampled_images.len == 1);
     try std.testing.expect(res.sampled_images[0].binding == 0);
@@ -52,13 +52,13 @@ test "reflectSPIRV finds sampled image" {
 
 test "reflectSPIRV finds entry point" {
     const alloc = std.testing.allocator;
-    const spv_ep = try glslpp.compileToSPIRV(alloc,
+    const spv_ep = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(location = 0) out vec4 FragColor;
         \\void main() { FragColor = vec4(1.0); }
     , .{ .stage = .fragment });
     defer alloc.free(spv_ep);
-    var res = try glslpp.reflectSPIRV(alloc, spv_ep);
+    var res = try zioshade.reflectSPIRV(alloc, spv_ep);
     defer res.deinit(alloc);
     try std.testing.expect(res.entry_points.len == 1);
     try std.testing.expect(res.entry_points[0].stage == .fragment);
@@ -66,7 +66,7 @@ test "reflectSPIRV finds entry point" {
 
 test "reflectGLSL convenience function" {
     const alloc = std.testing.allocator;
-    var res = try glslpp.reflectGLSL(alloc,
+    var res = try zioshade.reflectGLSL(alloc,
         \\#version 430
         \\layout(std140, binding = 2) uniform Data { mat4 mvp; };
         \\layout(location = 0) out vec4 FragColor;
@@ -79,7 +79,7 @@ test "reflectGLSL convenience function" {
 
 test "reflectSPIRV finds UBO members" {
     const alloc = std.testing.allocator;
-    const spv_mem = try glslpp.compileToSPIRV(alloc,
+    const spv_mem = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(std140, binding = 0) uniform MyUB {
         \\    vec4 color;
@@ -90,7 +90,7 @@ test "reflectSPIRV finds UBO members" {
         \\void main() { FragColor = color * intensity; }
     , .{ .stage = .fragment });
     defer alloc.free(spv_mem);
-    var res = try glslpp.reflectSPIRV(alloc, spv_mem);
+    var res = try zioshade.reflectSPIRV(alloc, spv_mem);
     defer res.deinit(alloc);
     try std.testing.expect(res.uniform_buffers.len == 1);
     const ubo = res.uniform_buffers[0];
@@ -99,7 +99,7 @@ test "reflectSPIRV finds UBO members" {
 
 test "reflectSPIRV finds push constants" {
     const alloc = std.testing.allocator;
-    const spv_pc = try glslpp.compileToSPIRV(alloc,
+    const spv_pc = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(push_constant) uniform PushConsts {
         \\    vec4 data;
@@ -108,21 +108,21 @@ test "reflectSPIRV finds push constants" {
         \\void main() { FragColor = data; }
     , .{ .stage = .fragment });
     defer alloc.free(spv_pc);
-    var res = try glslpp.reflectSPIRV(alloc, spv_pc);
+    var res = try zioshade.reflectSPIRV(alloc, spv_pc);
     defer res.deinit(alloc);
     try std.testing.expect(res.push_constants.len == 1);
 }
 
 test "reflectSPIRV finds storage buffer" {
     const alloc = std.testing.allocator;
-    const spv_ssbo = try glslpp.compileToSPIRV(alloc,
+    const spv_ssbo = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(std430, binding = 0) buffer InputBuf { float input_data[]; };
         \\layout(std430, binding = 1) buffer OutputBuf { float output_data[]; };
         \\void main() { output_data[0] = input_data[0] * 2.0; }
     , .{ .stage = .compute });
     defer alloc.free(spv_ssbo);
-    var res = try glslpp.reflectSPIRV(alloc, spv_ssbo);
+    var res = try zioshade.reflectSPIRV(alloc, spv_ssbo);
     defer res.deinit(alloc);
     try std.testing.expect(res.storage_buffers.len == 2);
 }
@@ -131,14 +131,14 @@ test "reflectSPIRV finds storage buffer" {
 
 test "reflection M2.1: storage_images populated for writable image2D" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(local_size_x = 1) in;
         \\layout(set = 0, binding = 0, rgba8) uniform image2D destImg;
         \\void main() { imageStore(destImg, ivec2(0), vec4(1.0)); }
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.storage_images.len);
     try std.testing.expectEqualStrings("destImg", res.storage_images[0].name);
@@ -150,105 +150,105 @@ test "reflection M2.4: storage_image exposes rgba8 format via real GLSL compile"
     // End-to-end: GLSL `layout(rgba8) image2D` -> codegen emits Format=Rgba8
     // on `OpTypeImage` -> reflection exposes `image_format = .rgba8`.
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(local_size_x=1) in;
         \\layout(set=0, binding=0, rgba8) uniform image2D destImg;
         \\void main() { imageStore(destImg, ivec2(0), vec4(1.0)); }
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.storage_images.len);
-    try std.testing.expectEqual(@as(?glslpp.reflection.ImageFormat, .rgba8), res.storage_images[0].image_format);
+    try std.testing.expectEqual(@as(?zioshade.reflection.ImageFormat, .rgba8), res.storage_images[0].image_format);
 }
 
 test "reflection M2.4: storage_image format rgba32f" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(local_size_x=1) in;
         \\layout(set=0, binding=0, rgba32f) uniform image2D destImg;
         \\void main() { imageStore(destImg, ivec2(0), vec4(1.0)); }
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.storage_images.len);
-    try std.testing.expectEqual(@as(?glslpp.reflection.ImageFormat, .rgba32f), res.storage_images[0].image_format);
+    try std.testing.expectEqual(@as(?zioshade.reflection.ImageFormat, .rgba32f), res.storage_images[0].image_format);
 }
 
 test "reflection M2.4: storage_image format r32i" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(local_size_x=1) in;
         \\layout(set=0, binding=0, r32i) uniform iimage2D destImg;
         \\void main() { imageStore(destImg, ivec2(0), ivec4(1)); }
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.storage_images.len);
-    try std.testing.expectEqual(@as(?glslpp.reflection.ImageFormat, .r32i), res.storage_images[0].image_format);
+    try std.testing.expectEqual(@as(?zioshade.reflection.ImageFormat, .r32i), res.storage_images[0].image_format);
 }
 
 test "reflection M2.4: storage_image format r32ui" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(local_size_x=1) in;
         \\layout(set=0, binding=0, r32ui) uniform uimage2D destImg;
         \\void main() { imageStore(destImg, ivec2(0), uvec4(1)); }
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.storage_images.len);
-    try std.testing.expectEqual(@as(?glslpp.reflection.ImageFormat, .r32ui), res.storage_images[0].image_format);
+    try std.testing.expectEqual(@as(?zioshade.reflection.ImageFormat, .r32ui), res.storage_images[0].image_format);
 }
 
 test "reflection M2.4: storage_image without format qualifier reports null" {
     // Sanity: when GLSL omits the format qualifier, codegen emits
     // `ImageFormat=Unknown` and reflection surfaces `null`.
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(local_size_x=1) in;
         \\layout(set=0, binding=0) uniform image2D destImg;
         \\void main() { imageStore(destImg, ivec2(0), vec4(1.0)); }
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.storage_images.len);
-    try std.testing.expectEqual(@as(?glslpp.reflection.ImageFormat, null), res.storage_images[0].image_format);
+    try std.testing.expectEqual(@as(?zioshade.reflection.ImageFormat, null), res.storage_images[0].image_format);
 }
 
 test "reflection M2.2: subpass_inputs populated for subpassInput" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput depthInput;
         \\layout(location = 0) out vec4 fragColor;
         \\void main() { fragColor = subpassLoad(depthInput); }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.subpass_inputs.len);
 }
 
 test "reflection M2.3: spec constant default value extracted" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(constant_id = 7) const int SIZE = 42;
         \\layout(location = 0) out vec4 fragColor;
         \\void main() { fragColor = vec4(float(SIZE)); }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.specialization_constants.len);
     try std.testing.expectEqual(@as(u32, 7), res.specialization_constants[0].spec_id);
@@ -259,7 +259,7 @@ test "reflection M2.3: spec constant default value extracted" {
 
 test "reflection M2.5: separate_images populated for texture2D + sampler" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(set = 0, binding = 0) uniform texture2D myTex;
         \\layout(set = 0, binding = 1) uniform sampler mySamp;
@@ -268,7 +268,7 @@ test "reflection M2.5: separate_images populated for texture2D + sampler" {
         \\void main() { fragColor = texture(sampler2D(myTex, mySamp), uv); }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.separate_images.len);
     try std.testing.expectEqual(@as(usize, 1), res.separate_samplers.len);
@@ -278,7 +278,7 @@ test "reflection M2.5: separate_images populated for texture2D + sampler" {
 
 test "reflection M2.5: acceleration_structures populated for accelerationStructureEXT" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 460
         \\#extension GL_KHR_ray_tracing : require
         \\layout(set = 0, binding = 0) uniform accelerationStructureEXT topLevel;
@@ -288,7 +288,7 @@ test "reflection M2.5: acceleration_structures populated for accelerationStructu
         \\}
     , .{ .stage = .raygen, .spirv_version = .@"1.4" });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.acceleration_structures.len);
     try std.testing.expectEqualStrings("topLevel", res.acceleration_structures[0].name);
@@ -296,7 +296,7 @@ test "reflection M2.5: acceleration_structures populated for accelerationStructu
 
 test "reflectSPIRV reports descriptor array_size (sampler2D tex[4])" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding = 0) uniform sampler2D tex[4];
         \\layout(location = 0) in vec2 uv;
@@ -304,7 +304,7 @@ test "reflectSPIRV reports descriptor array_size (sampler2D tex[4])" {
         \\void main() { o = texture(tex[2], uv); }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     // Array sampler classified by its ELEMENT type (sampled image), with the
     // fixed dimension reported in array_size.
@@ -326,7 +326,7 @@ test "reflection G1: UBO matrix + array member strides and block_size" {
     //   Xforms.exposure:  offset 176
     //   block_size 180
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(std140, binding = 0) uniform Xforms {
         \\    mat4 mvp;
@@ -338,7 +338,7 @@ test "reflection G1: UBO matrix + array member strides and block_size" {
         \\void main() { FragColor = mvp * colors[0] * normalMat[0].xyzz * exposure; }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
@@ -383,7 +383,7 @@ test "reflection G1: SSBO runtime tail array + readonly/writeonly + block_size" 
     //   OutBuf writeonly, block_size 0
     //     results:   offset 0, runtime array (array[0]), array_stride 16
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x = 1) in;
         \\struct Particle { vec4 pos; vec4 vel; };
@@ -399,14 +399,14 @@ test "reflection G1: SSBO runtime tail array + readonly/writeonly + block_size" 
         \\}
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 2), res.storage_buffers.len);
 
     // Find by name (declaration order in SPIR-V is not guaranteed).
-    var in_buf: ?glslpp.reflection.Resource = null;
-    var out_buf: ?glslpp.reflection.Resource = null;
+    var in_buf: ?zioshade.reflection.Resource = null;
+    var out_buf: ?zioshade.reflection.Resource = null;
     for (res.storage_buffers) |sb| {
         if (std.mem.eql(u8, sb.name, "InBuf")) in_buf = sb;
         if (std.mem.eql(u8, sb.name, "OutBuf")) out_buf = sb;
@@ -451,14 +451,14 @@ test "reflection #171: UBO block_size with trailing sized array (float tail[4])"
     //   tail: offset 16, array[4], array_stride 16
     //   block_size 80  (16 + 16*4)
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(std140, binding = 0) uniform A { vec4 head; float tail[4]; };
         \\layout(location = 0) out vec4 o;
         \\void main() { o = head + vec4(tail[0]); }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
     try std.testing.expectEqual(@as(u32, 80), res.uniform_buffers[0].block_size);
@@ -470,14 +470,14 @@ test "reflection #171: SSBO block_size with trailing sized array (float tail[5])
     //   tail: offset 16, array[5], array_stride 4
     //   block_size 36  (16 + 4*5)
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x = 1) in;
         \\layout(std430, binding = 0) buffer B { vec4 head; float tail[5]; };
         \\void main() { tail[0] = head.x; }
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.storage_buffers.len);
     try std.testing.expectEqual(@as(u32, 36), res.storage_buffers[0].block_size);
@@ -489,14 +489,14 @@ test "reflection #171: UBO block_size with trailing mat3" {
     //   m:    offset 16, matrix_stride 16  (mat3 occupies 3 cols * 16-byte stride)
     //   block_size 64  (16 + 16*3)
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(std140, binding = 0) uniform D { vec4 head; mat3 m; };
         \\layout(location = 0) out vec4 o;
         \\void main() { o = head + vec4(m[0], 1.0); }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
     try std.testing.expectEqual(@as(u32, 64), res.uniform_buffers[0].block_size);
@@ -510,14 +510,14 @@ test "reflection #171: UBO block_size with trailing multidim array (float md[2][
     // The member's SPIR-V type is the OUTER OpTypeArray: array_dim = 2 (outer
     // count), array_stride = 48 (outer stride). extent = stride * outer_count.
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(std140, binding = 0) uniform C { vec4 head; float md[2][3]; };
         \\layout(location = 0) out vec4 o;
         \\void main() { o = head + vec4(md[0][0]); }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
     try std.testing.expectEqual(@as(u32, 112), res.uniform_buffers[0].block_size);
@@ -525,7 +525,7 @@ test "reflection #171: UBO block_size with trailing multidim array (float md[2][
 
 // ── #177 Item 1: nested-struct member recursion ──
 // Nested-struct member offsets derived from `spirv-cross <fixture>.spv
-// --reflect` on glslpp's OWN SPIR-V (the oracle), which for the NESTED members
+// --reflect` on zioshade's OWN SPIR-V (the oracle), which for the NESTED members
 // matches glslang exactly. std140 (offsets RELATIVE to each struct):
 //   Scene.mat:  offset 0   (struct Material)
 //     Material.albedo: offset 0
@@ -539,7 +539,7 @@ test "reflection #171: UBO block_size with trailing multidim array (float md[2][
 // block_size 112 (48 + mat4 64) — matching glslang/spirv-cross exactly.
 test "reflection #177: nested-struct members recurse with relative offsets" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\struct Light { vec4 pos; float intensity; };
         \\struct Material { vec4 albedo; Light l; };
@@ -551,7 +551,7 @@ test "reflection #177: nested-struct members recurse with relative offsets" {
         \\void main() { FragColor = mat.albedo * mat.l.pos * mat.l.intensity * (mvp * vec4(1.0)); }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
@@ -565,7 +565,7 @@ test "reflection #177: nested-struct members recurse with relative offsets" {
     const mat = ubo.members[0];
     try std.testing.expectEqualStrings("mat", mat.name);
     try std.testing.expectEqual(@as(u32, 0), mat.offset);
-    try std.testing.expectEqual(glslpp.reflection.TypeKind.struct_type, mat.type_kind);
+    try std.testing.expectEqual(zioshade.reflection.TypeKind.struct_type, mat.type_kind);
     const mat_members = mat.members orelse return error.MissingMatMembers;
     try std.testing.expectEqual(@as(usize, 2), mat_members.len);
 
@@ -577,7 +577,7 @@ test "reflection #177: nested-struct members recurse with relative offsets" {
     const l = mat_members[1];
     try std.testing.expectEqualStrings("l", l.name);
     try std.testing.expectEqual(@as(u32, 16), l.offset);
-    try std.testing.expectEqual(glslpp.reflection.TypeKind.struct_type, l.type_kind);
+    try std.testing.expectEqual(zioshade.reflection.TypeKind.struct_type, l.type_kind);
     const l_members = l.members orelse return error.MissingLightMembers;
     try std.testing.expectEqual(@as(usize, 2), l_members.len);
 
@@ -593,17 +593,17 @@ test "reflection #177: nested-struct members recurse with relative offsets" {
     try std.testing.expectEqualStrings("mvp", mvp.name);
     try std.testing.expectEqual(@as(u32, 48), mvp.offset);
     try std.testing.expectEqual(@as(u32, 16), mvp.matrix_stride);
-    try std.testing.expectEqual(@as(?[]const glslpp.reflection.Member, null), mvp.members);
+    try std.testing.expectEqual(@as(?[]const zioshade.reflection.Member, null), mvp.members);
 }
 
 // ── #177 Item 3: per-member / per-resource access qualifiers ──
-// glslpp emits Coherent/Restrict/Volatile on the VARIABLE (like
+// zioshade emits Coherent/Restrict/Volatile on the VARIABLE (like
 // readonly/writeonly via NonWritable/NonReadable), so they surface at the
-// Resource level. The enum fix (Coherent 0→23) is what makes glslpp emit a
+// Resource level. The enum fix (Coherent 0→23) is what makes zioshade emit a
 // real `OpDecorate ... Coherent` instead of `RelaxedPrecision`.
 test "reflection #177: buffer coherent / restrict / readonly flags" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x = 1) in;
         \\layout(std430, binding = 0) coherent buffer B { float data[]; };
@@ -611,13 +611,13 @@ test "reflection #177: buffer coherent / restrict / readonly flags" {
         \\void main() { data[0] = src[0]; }
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 2), res.storage_buffers.len);
 
-    var b_buf: ?glslpp.reflection.Resource = null;
-    var c_buf: ?glslpp.reflection.Resource = null;
+    var b_buf: ?zioshade.reflection.Resource = null;
+    var c_buf: ?zioshade.reflection.Resource = null;
     for (res.storage_buffers) |sb| {
         if (std.mem.eql(u8, sb.name, "B")) b_buf = sb;
         if (std.mem.eql(u8, sb.name, "C")) c_buf = sb;
@@ -640,7 +640,7 @@ test "reflection #171: per-member row_major / column_major flags" {
     // Adversarial review confirmed the path works; this locks it in.
     // Oracle (spirv-cross --reflect): rm member is row-major, cm is column-major.
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(std140, binding = 0) uniform M {
         \\    layout(row_major) mat4 rm;
@@ -650,14 +650,14 @@ test "reflection #171: per-member row_major / column_major flags" {
         \\void main() { o = rm[0] + cm[0]; }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
     const ubo = res.uniform_buffers[0];
     try std.testing.expectEqual(@as(usize, 2), ubo.members.len);
 
-    var rm: ?glslpp.reflection.Member = null;
-    var cm: ?glslpp.reflection.Member = null;
+    var rm: ?zioshade.reflection.Member = null;
+    var cm: ?zioshade.reflection.Member = null;
     for (ubo.members) |m| {
         if (std.mem.eql(u8, m.name, "rm")) rm = m;
         if (std.mem.eql(u8, m.name, "cm")) cm = m;
@@ -675,7 +675,7 @@ test "toJson: nested-struct UBO mirrors spirv-cross schema" {
     //                                       light@64 (type "_11"), intensity@96 float]}
     //   ubos[0] = {type:"_12", name:"Scene", block_size:100, set:0, binding:0}
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\struct Light { vec4 pos; vec4 color; };
         \\layout(std140, binding = 0) uniform Scene {
@@ -687,10 +687,10 @@ test "toJson: nested-struct UBO mirrors spirv-cross schema" {
         \\void main() { FragColor = mvp * light.pos * intensity * light.color; }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
 
-    const json = try glslpp.reflection.toJson(alloc, &res);
+    const json = try zioshade.reflection.toJson(alloc, &res);
     defer alloc.free(json);
 
     // 2) JSON is valid (round-trips through std.json parse without error).
@@ -758,7 +758,7 @@ test "toJson: runtime-array SSBO shows array [0]" {
     // Oracle: particles member -> "array":[0], "array_size_is_literal":[true],
     //         "array_stride":32, references struct "_9" (Particle).
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x = 64) in;
         \\struct Particle { vec4 pos; vec4 vel; };
@@ -769,10 +769,10 @@ test "toJson: runtime-array SSBO shows array [0]" {
         \\void main() { particles[gl_GlobalInvocationID.x].pos.x += float(count); }
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
 
-    const json = try glslpp.reflection.toJson(alloc, &res);
+    const json = try zioshade.reflection.toJson(alloc, &res);
     defer alloc.free(json);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
@@ -809,7 +809,7 @@ test "toJson: runtime-array SSBO shows array [0]" {
 
 test "toJson: ubo + texture, valid JSON with escaped names" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(std140, binding = 0) uniform Xform { mat4 mvp; vec4 tint; };
         \\layout(binding = 1) uniform sampler2D albedo;
@@ -818,17 +818,17 @@ test "toJson: ubo + texture, valid JSON with escaped names" {
         \\void main() { FragColor = texture(albedo, uv) * tint * mvp[0]; }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
 
-    const json = try glslpp.reflection.toJson(alloc, &res);
+    const json = try zioshade.reflection.toJson(alloc, &res);
     defer alloc.free(json);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
     defer parsed.deinit();
     const root = parsed.value.object;
 
-    // textures key (= glslpp sampled_images)
+    // textures key (= zioshade sampled_images)
     const textures = root.get("textures").?.array;
     try std.testing.expectEqual(@as(usize, 1), textures.items.len);
     const tex = textures.items[0].object;
@@ -844,7 +844,7 @@ test "toJson: ubo + texture, valid JSON with escaped names" {
 }
 
 // ── #177 review: sampler array / shadow JSON spelling fidelity ──────────────
-// Oracle = `spirv-cross <glslpp-binary>.spv --reflect` (the SAME binary this
+// Oracle = `spirv-cross <zioshade-binary>.spv --reflect` (the SAME binary this
 // test reflects):
 //   texArr       -> "sampler2DArray"
 //   texShadow    -> "sampler2DShadow"
@@ -856,14 +856,14 @@ test "toJson: ubo + texture, valid JSON with escaped names" {
 // OpTypeImage `arrayed`/`depth` operands.
 //
 // #183 (tightened): `samplerCubeArray` is now asserted as `samplerCubeArray`.
-// Previously glslpp's CODEGEN emitted a cube-array as a plain cube (arrayed==0)
+// Previously zioshade's CODEGEN emitted a cube-array as a plain cube (arrayed==0)
 // so this was scoped out; #183 fixed the parser/codegen to set Arrayed=1, and
-// spirv-cross on the SAME glslpp binary now also reports `samplerCubeArray`,
+// spirv-cross on the SAME zioshade binary now also reports `samplerCubeArray`,
 // confirmed against the oracle. The 2D Array/Shadow cases exercise the full
 // Array+Shadow suffix logic.
 test "toJson #177-review: sampler array/shadow type spelling matches oracle" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding = 0) uniform sampler2DArray texArr;
         \\layout(binding = 1) uniform sampler2DShadow texShadow;
@@ -881,10 +881,10 @@ test "toJson #177-review: sampler array/shadow type spelling matches oracle" {
         \\}
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
 
-    const json = try glslpp.reflection.toJson(alloc, &res);
+    const json = try zioshade.reflection.toJson(alloc, &res);
     defer alloc.free(json);
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
     defer parsed.deinit();
@@ -904,11 +904,11 @@ test "toJson #177-review: sampler array/shadow type spelling matches oracle" {
 }
 
 // ── #177 review MINOR 1: images section emits format + array_size_is_literal ──
-// Oracle = `spirv-cross <glslpp-binary>.spv --reflect` (reflecting glslpp's OWN
+// Oracle = `spirv-cross <zioshade-binary>.spv --reflect` (reflecting zioshade's OWN
 // SPIR-V, the same binary this test reflects):
 //   destImg -> image2D, format "rgba8"
 //   arr     -> image2D, format "rgba8", array [3], array_size_is_literal [true]
-// #183 (tightened): glslpp's CODEGEN now preserves EACH storage image's own
+// #183 (tightened): zioshade's CODEGEN now preserves EACH storage image's own
 // `layout(rgbaN)` Format — both for multiple distinct scalar images AND for an
 // array element. Previously the format-blind type dedup made every image reuse
 // the first one's Format (all rgba8); the array element fell through to an
@@ -918,7 +918,7 @@ test "toJson #177-review: sampler array/shadow type spelling matches oracle" {
 //   arr     -> image2D, format "rgba32f", array [3], array_size_is_literal [true]
 test "toJson #177-review: storage images carry format + array_size_is_literal" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x = 1) in;
         \\layout(set = 0, binding = 0, rgba8) uniform image2D destImg;
@@ -931,10 +931,10 @@ test "toJson #177-review: storage images carry format + array_size_is_literal" {
         \\}
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
 
-    const json = try glslpp.reflection.toJson(alloc, &res);
+    const json = try zioshade.reflection.toJson(alloc, &res);
     defer alloc.free(json);
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
     defer parsed.deinit();
@@ -977,7 +977,7 @@ test "toJson #177-review: storage images carry format + array_size_is_literal" {
 //   COUNT  id 2, type "int",   default_value 7
 test "toJson #177-review: spec constants typed + decoded default_value" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(constant_id = 0) const float SCALE = 2.5;
         \\layout(constant_id = 1) const bool ENABLE = true;
@@ -986,10 +986,10 @@ test "toJson #177-review: spec constants typed + decoded default_value" {
         \\void main() { o = vec4(SCALE * float(COUNT) * (ENABLE ? 1.0 : 0.0)); }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
 
-    const json = try glslpp.reflection.toJson(alloc, &res);
+    const json = try zioshade.reflection.toJson(alloc, &res);
     defer alloc.free(json);
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
     defer parsed.deinit();
@@ -1018,17 +1018,17 @@ test "toJson #177-review: spec constants typed + decoded default_value" {
 // reports the block TYPE name ("Scene"), not "".
 test "toJson #177-review: anonymous block name falls back to type name" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(std140, binding = 0) uniform Scene { mat4 mvp; vec4 tint; };
         \\layout(location = 0) out vec4 o;
         \\void main() { o = mvp * tint; }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
 
-    const json = try glslpp.reflection.toJson(alloc, &res);
+    const json = try zioshade.reflection.toJson(alloc, &res);
     defer alloc.free(json);
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
     defer parsed.deinit();

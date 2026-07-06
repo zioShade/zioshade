@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{ .never_unmap = true, .retain_metadata = false }){};
@@ -125,7 +125,7 @@ pub fn main() !void {
     const iterations = 100;
     const warmup = 10;
 
-    std.debug.print("glslpp Performance Benchmark ({d} iterations per shader)\n", .{iterations});
+    std.debug.print("zioshade Performance Benchmark ({d} iterations per shader)\n", .{iterations});
     std.debug.print("={s}\n", .{"=" ** 60});
     std.debug.print("{s:<16} {s:>12} {s:>12} {s:>12} {s:>10} {s:>10}\n", .{ "Shader", "Avg (µs)", "Min (µs)", "SPIR-V→HLSL", "SPV words", "HLSL bytes" });
     std.debug.print("{s}\n", .{"-" ** 76});
@@ -135,9 +135,9 @@ pub fn main() !void {
     for (&test_shaders) |*shader| {
         // Warmup
         for (0..warmup) |_| {
-            const spirv = glslpp.compileToSPIRV(alloc, shader.source, .{ .stage = .fragment }) catch break;
+            const spirv = zioshade.compileToSPIRV(alloc, shader.source, .{ .stage = .fragment }) catch break;
             defer alloc.free(spirv);
-            const hlsl = glslpp.spirvToHLSL(alloc, spirv, .{}) catch break;
+            const hlsl = zioshade.spirvToHLSL(alloc, spirv, .{}) catch break;
             defer alloc.free(hlsl);
         }
 
@@ -149,11 +149,11 @@ pub fn main() !void {
 
         for (0..iterations) |_| {
             const start = std.time.Instant.now() catch continue;
-            const spirv = glslpp.compileToSPIRV(alloc, shader.source, .{ .stage = .fragment }) catch {
+            const spirv = zioshade.compileToSPIRV(alloc, shader.source, .{ .stage = .fragment }) catch {
                 compile_errors += 1;
                 continue;
             };
-            const hlsl = glslpp.spirvToHLSL(alloc, spirv, .{}) catch {
+            const hlsl = zioshade.spirvToHLSL(alloc, spirv, .{}) catch {
                 alloc.free(spirv);
                 compile_errors += 1;
                 continue;
@@ -189,12 +189,12 @@ pub fn main() !void {
         var cross_ns: u64 = 0;
         var cross_count: u32 = 0;
         {
-            const spirv = glslpp.compileToSPIRV(alloc, shader.source, .{ .stage = .fragment }) catch continue;
+            const spirv = zioshade.compileToSPIRV(alloc, shader.source, .{ .stage = .fragment }) catch continue;
             defer alloc.free(spirv);
 
             for (0..iterations) |_| {
                 const start = std.time.Instant.now() catch continue;
-                const hlsl = glslpp.spirvToHLSL(alloc, spirv, .{}) catch continue;
+                const hlsl = zioshade.spirvToHLSL(alloc, spirv, .{}) catch continue;
                 defer alloc.free(hlsl);
                 const end = std.time.Instant.now() catch continue;
                 cross_ns += @as(u64, @intCast(end.since(start)));
@@ -219,13 +219,13 @@ pub fn main() !void {
     for (0..iterations) |_| {
         const source = test_shaders[0].source; // Use the simple shader
         const start = std.time.Instant.now() catch continue;
-        const spirv = glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch continue;
+        const spirv = zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch continue;
         defer alloc.free(spirv);
-        const hlsl = glslpp.spirvToHLSL(alloc, spirv, .{}) catch { alloc.free(spirv); continue; };
+        const hlsl = zioshade.spirvToHLSL(alloc, spirv, .{}) catch { alloc.free(spirv); continue; };
         defer alloc.free(hlsl);
-        const glsl = glslpp.spirvToGLSL(alloc, spirv, .{}) catch { alloc.free(spirv); continue; };
+        const glsl = zioshade.spirvToGLSL(alloc, spirv, .{}) catch { alloc.free(spirv); continue; };
         defer alloc.free(glsl);
-        const msl = glslpp.spirvToMSL(alloc, spirv, .{}) catch { alloc.free(spirv); continue; };
+        const msl = zioshade.spirvToMSL(alloc, spirv, .{}) catch { alloc.free(spirv); continue; };
         defer alloc.free(msl);
         const end = std.time.Instant.now() catch continue;
 

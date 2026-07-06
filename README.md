@@ -1,12 +1,12 @@
-# glslpp
+# zioshade
+
+**zioshade** (formerly glslpp), a pure-Zig shading-language compiler: GLSL to SPIR-V to HLSL / MSL / GLSL / WGSL.
 
 [![Sponsor](https://img.shields.io/github/sponsors/deblasis)](https://github.com/sponsors/deblasis)
 
-A pure-Zig GLSL → SPIR-V compiler and SPIR-V cross-compiler (HLSL / MSL / GLSL / WGSL).
-
 Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated terminal emulator, to replace ~60 MB of glslang + SPIRV-Cross C++ dependencies in a single Zig module. No C++ runtime. No system dependencies. No DLL isolation hacks.
 
-> **Scope:** glslpp is **not** a full Khronos drop-in. It is a focused replacement for the shader-compilation surface wintty needs (GLSL 430-class shaders → SPIR-V → backend), validated on the full [`spirv-cross`](https://github.com/KhronosGroup/SPIRV-Cross) and `glslang` reference suites. If you need full GLSL ES, descriptor-set reflection, or SPIRV-Cross-grade WGSL output, **use upstream**. See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the full gap analysis.
+> **Scope:** zioshade is **not** a full Khronos drop-in. It is a focused replacement for the shader-compilation surface wintty needs (GLSL 430-class shaders → SPIR-V → backend), validated on the full [`spirv-cross`](https://github.com/KhronosGroup/SPIRV-Cross) and `glslang` reference suites. If you need full GLSL ES, descriptor-set reflection, or SPIRV-Cross-grade WGSL output, **use upstream**. See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the full gap analysis.
 
 ## Features
 
@@ -20,7 +20,7 @@ Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated t
 - **Shadertoy support**: One-shot API for Shadertoy-style fragment shaders
 - **Zero C++ dependency**: Pure Zig, builds with `zig build`
 - **In-process, threadlocal state only**: Safe to call from multiple threads; no process-wide init/finalize
-- **C ABI**: A C header (`include/glslpp.h`) and shared/static libraries are provided for non-Zig consumers (`zig build c-lib`)
+- **C ABI**: A C header (`include/zioshade.h`) and shared/static libraries are provided for non-Zig consumers (`zig build c-lib`)
 
 ## Status
 
@@ -41,31 +41,31 @@ Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated t
 zig build cli
 
 # GLSL → SPIR-V
-zig-out/bin/glslpp compile shader.frag -o shader.spv
+zig-out/bin/zioshade compile shader.frag -o shader.spv
 
 # Cross-compile to a backend
-zig-out/bin/glslpp hlsl shader.frag -o shader.hlsl
-zig-out/bin/glslpp glsl shader.frag -o shader.glsl
-zig-out/bin/glslpp msl  shader.frag -o shader.msl
-zig-out/bin/glslpp wgsl shader.frag -o shader.wgsl
+zig-out/bin/zioshade hlsl shader.frag -o shader.hlsl
+zig-out/bin/zioshade glsl shader.frag -o shader.glsl
+zig-out/bin/zioshade msl  shader.frag -o shader.msl
+zig-out/bin/zioshade wgsl shader.frag -o shader.wgsl
 
 # With preprocessor defines and include paths
-zig-out/bin/glslpp wgsl shader.frag -DDEBUG=1 -DQUALITY=3 -I src/shaders/
+zig-out/bin/zioshade wgsl shader.frag -DDEBUG=1 -DQUALITY=3 -I src/shaders/
 
 # Select entry point for multi-kernel SPIR-V
-zig-out/bin/glslpp wgsl module.spv --entry-point compute_blur
+zig-out/bin/zioshade wgsl module.spv --entry-point compute_blur
 
 # Read from stdin
-cat shader.frag | zig-out/bin/glslpp wgsl --stdin
+cat shader.frag | zig-out/bin/zioshade wgsl --stdin
 
 # HLSL with a specific shader model
-zig-out/bin/glslpp hlsl shader.frag --shader-model 50
+zig-out/bin/zioshade hlsl shader.frag --shader-model 50
 
 # Reflect a SPIR-V binary
-zig-out/bin/glslpp reflect shader.spv
+zig-out/bin/zioshade reflect shader.spv
 
 # Validate via spirv-val (if installed on PATH)
-zig-out/bin/glslpp validate shader.spv
+zig-out/bin/zioshade validate shader.spv
 ```
 
 ### As a Zig dependency
@@ -73,8 +73,8 @@ zig-out/bin/glslpp validate shader.spv
 ```zig
 // build.zig.zon
 .dependencies = .{
-    .glslpp = .{
-        .url = "https://github.com/deblasis/glslpp/archive/<commit>.tar.gz",
+    .zioshade = .{
+        .url = "https://github.com/deblasis/zioshade/archive/<commit>.tar.gz",
         .hash = "<run zig fetch to get the hash>",
     },
 },
@@ -82,46 +82,46 @@ zig-out/bin/glslpp validate shader.spv
 
 ```zig
 // build.zig
-const glslpp_dep = b.dependency("glslpp", .{
+const zioshade_dep = b.dependency("zioshade", .{
     .target = target,
     .optimize = optimize,
 });
-exe.root_module.addImport("glslpp", glslpp_dep.module("glslpp"));
+exe.root_module.addImport("zioshade", zioshade_dep.module("zioshade"));
 ```
 
 ```zig
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 // GLSL → SPIR-V
-const spirv = try glslpp.compileToSPIRV(alloc, source, .{
+const spirv = try zioshade.compileToSPIRV(alloc, source, .{
     .stage = .fragment,
     .version = 430,
 });
 defer alloc.free(spirv);
 
 // SPIR-V → any backend
-const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
-const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
+const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
 
 // One-shot: GLSL → backend
-const hlsl_one = try glslpp.compileGlslToHlsl(alloc, source, .fragment);
-const msl_one  = try glslpp.compileGlslToMsl(alloc, source, .fragment);
-const wgsl_one = try glslpp.compileGlslToWgsl(alloc, source, .fragment);
+const hlsl_one = try zioshade.compileGlslToHlsl(alloc, source, .fragment);
+const msl_one  = try zioshade.compileGlslToMsl(alloc, source, .fragment);
+const wgsl_one = try zioshade.compileGlslToWgsl(alloc, source, .fragment);
 
 // Reflection
-const resources = try glslpp.reflectSPIRV(alloc, spirv);
+const resources = try zioshade.reflectSPIRV(alloc, spirv);
 defer resources.deinit(alloc);
 for (resources.uniform_buffers) |ubo| {
     std.debug.print("UBO: {s} (set={d}, binding={d})\n", .{ ubo.name, ubo.set, ubo.binding });
 }
 
 // Error handling with diagnostics
-var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
+var diags = std.ArrayListUnmanaged(zioshade.diagnostic.Diagnostic).empty;
 defer {
     for (diags.items) |d| alloc.free(d.message);
     diags.deinit(alloc);
 }
-_ = glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags) catch |err| {
+_ = zioshade.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags) catch |err| {
     for (diags.items) |d| {
         std.debug.print("{d}:{d}: {s}: {s}\n", .{ d.line, d.column, @tagName(d.kind), d.message });
     }
@@ -187,7 +187,7 @@ See [`examples/`](examples/) for runnable end-to-end programs.
 
 - **GLSL output is 430 only** — other versions are not generated.
 - **WGSL backend is shallow** vs SPIRV-Cross — common opcodes only.
-- **Cross-compiler control flow:** structured SPIR-V works on every backend; unstructured-but-reducible `if`/`switch` (missing `OpSelectionMerge`) is structurized transparently by a pre-pass. Unstructured loops (missing `OpLoopMerge`) and irreducible CFGs **fail loud** with `error.UnstructuredControlFlow` rather than miscompile. glslpp's own SPIR-V is always structured; this only affects externally-optimized/hand-authored input.
+- **Cross-compiler control flow:** structured SPIR-V works on every backend; unstructured-but-reducible `if`/`switch` (missing `OpSelectionMerge`) is structurized transparently by a pre-pass. Unstructured loops (missing `OpLoopMerge`) and irreducible CFGs **fail loud** with `error.UnstructuredControlFlow` rather than miscompile. zioshade's own SPIR-V is always structured; this only affects externally-optimized/hand-authored input.
 - **Single contributor.** Treat as alpha if you are not the wintty project.
 
 See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the complete feature-by-feature comparison against glslang / SPIRV-Cross.
@@ -196,21 +196,21 @@ See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the compl
 
 Head-to-head against `glslangValidator` + `spirv-cross` invoked as subprocesses (the typical build-pipeline integration), on Windows 11 / Zig 0.15.2 / Vulkan SDK 1.4.341.1, 50 iterations each, `ReleaseFast`:
 
-| Shader | glslpp avg | reference avg | **speedup** | HLSL bytes glslpp / ref |
+| Shader | zioshade avg | reference avg | **speedup** | HLSL bytes zioshade / ref |
 |---|---:|---:|---:|---:|
 | `trivial_frag` | 732 µs | 194 ms | **265×** | 175 / 332 |
 | `typical_frag` (UBO + math) | 986 µs | 181 ms | **184×** | 701 / 746 |
 | `raymarch` (loop + SDF) | 1.17 ms | 181 ms | **154×** | 1316 / 1562 |
 | `simple_compute` (SSBO) | 1.04 ms | 190 ms | **183×** | 516 / 650 |
 
-glslpp is consistently **150–265× faster** for this workflow and produces **5–47% smaller HLSL output**.
+zioshade is consistently **150–265× faster** for this workflow and produces **5–47% smaller HLSL output**.
 
-> **Caveat:** this compares **in-process glslpp** to **subprocess `glslangValidator` + `spirv-cross`**. Most of the gap is Windows process-spawn overhead — a true library-vs-library comparison (linking `libglslang.a` + `libspirv-cross.a`) is on the roadmap but not yet published. See [BENCHMARKS.md](BENCHMARKS.md) for methodology and how to reproduce.
+> **Caveat:** this compares **in-process zioshade** to **subprocess `glslangValidator` + `spirv-cross`**. Most of the gap is Windows process-spawn overhead — a true library-vs-library comparison (linking `libglslang.a` + `libspirv-cross.a`) is on the roadmap but not yet published. See [BENCHMARKS.md](BENCHMARKS.md) for methodology and how to reproduce.
 
 Reproduce locally:
 
 ```bash
-zig build bench-compare   # both tools must be on PATH (or set GLSLPP_BENCH_GLSLANG / _SPIRVX)
+zig build bench-compare   # both tools must be on PATH (or set ZIOSHADE_BENCH_GLSLANG / _SPIRVX)
 ```
 
 ## Building

@@ -2,7 +2,7 @@
 // std430/std140 matrix layout: MatrixStride must be consistent with the member
 // offsets the layout reserves, and must match glslangValidator -V.
 //
-// Regression for: glslpp emitted an INCONSISTENT MatrixStride for matrices in
+// Regression for: zioshade emitted an INCONSISTENT MatrixStride for matrices in
 // std430 storage buffers (e.g. mat4 -> MatrixStride 8 while reserving 64 bytes,
 // i.e. a 16-byte column stride). The reserved size (offset of the next member)
 // and the declared column stride must agree: stride * columns == reserved size.
@@ -10,7 +10,7 @@
 // Every expected value below was VERIFIED against `glslangValidator -V` (Vulkan
 // SDK 1.4.341.1) — glslang is the oracle. See the per-row comments.
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const OpDecorate: u32 = 71;
 const OpMemberDecorate: u32 = 72;
@@ -114,7 +114,7 @@ test "std430/std140 matrix MatrixStride matches glslang and is consistent with r
         , .{ c.layout, c.mt }, 0);
         defer alloc.free(src);
 
-        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
         defer alloc.free(spv);
 
         const stride = findMemberMatrixStride(spv, 0);
@@ -163,7 +163,7 @@ test "std430 matrix member alignment matches glslang (2-row matrices align to 8)
         , .{c.mt}, 0);
         defer alloc.free(src);
 
-        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
         defer alloc.free(spv);
 
         const mat_off = findMemberOffset(spv, 1);
@@ -206,7 +206,7 @@ test "std430 row_major matrix MatrixStride/size matches glslang (row span keys o
         , .{ c.layout, c.mt }, 0);
         defer alloc.free(src);
 
-        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
         defer alloc.free(spv);
 
         const stride = findMemberMatrixStride(spv, 0);
@@ -252,7 +252,7 @@ test "std430 matrix-array ArrayStride stays consistent with element MatrixStride
         , .{c.mt}, 0);
         defer alloc.free(src);
 
-        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
         defer alloc.free(spv);
 
         const arr_stride = findFirstArrayStride(spv);
@@ -294,9 +294,9 @@ test "std430 matrix maps to correct MSL matrix type (downstream of MatrixStride)
         , .{c.mt}, 0);
         defer alloc.free(src);
 
-        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
         defer alloc.free(spv);
-        const msl = try glslpp.spirvToMSL(alloc, spv, .{});
+        const msl = try zioshade.spirvToMSL(alloc, spv, .{});
         defer alloc.free(msl);
 
         if (std.mem.indexOf(u8, msl, c.msl_type) == null) {

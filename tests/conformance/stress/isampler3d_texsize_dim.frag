@@ -1,6 +1,6 @@
 // Tests: textureSize on int/uint 3D samplers — issue #193.
 // A 3D texture's size is ivec3 (glslang -> OpImageQuerySizeLod %v3int).
-// Pre-fix glslpp listed .isampler3d/.usampler3d under the ivec2 result-dim arm
+// Pre-fix zioshade listed .isampler3d/.usampler3d under the ivec2 result-dim arm
 // of the textureSize switch, producing OpImageQuerySizeLod %v2int — spirv-val
 // "Result Type has 2 components, but 3 expected" (or a semantic TypeMismatch
 // when assigned to an ivec3). Regression-guard: float sampler3D was already

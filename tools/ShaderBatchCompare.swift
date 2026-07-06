@@ -139,12 +139,12 @@ guard args.count >= 3 else {
     Usage: ShaderBatchCompare <mode> [args...]
     
     Modes:
-      pair <glslpp.msl> <spirvcross.msl> [prefix]
+      pair <zioshade.msl> <spirvcross.msl> [prefix]
         Compare two MSL files side-by-side
       
       list <file_with_shader_pairs>
         Batch compare from a list of shader pair paths
-        Format: <glslpp.msl> <spirvcross.msl> per line
+        Format: <zioshade.msl> <spirvcross.msl> per line
     """)
     exit(1)
 }
@@ -161,35 +161,35 @@ let vertLib = try! device.makeLibrary(source: vertexMSL, options: nil)
 let texture = createTestTexture(device: device, w: W, h: H)
 
 // Detect which uniform buffer to use based on shader source
-func makeUniformBuffer(device: MTLDevice, glslppMSL: String, w: Int, h: Int) -> MTLBuffer {
-    if glslppMSL.contains("Globals_m0") || glslppMSL.contains("iResolution") {
+func makeUniformBuffer(device: MTLDevice, zioshadeMSL: String, w: Int, h: Int) -> MTLBuffer {
+    if zioshadeMSL.contains("Globals_m0") || zioshadeMSL.contains("iResolution") {
         return makeWinttyGlobalsBuffer(device: device, screenW: w, screenH: h)
     }
     return makeSimpleUniformBuffer(device: device, w: w, h: h)
 }
 
 func comparePair(device: MTLDevice, vertLib: MTLLibrary, texture: MTLTexture,
-                 glslppPath: String, spirvcrossPath: String, prefix: String) -> Bool {
+                 zioshadePath: String, spirvcrossPath: String, prefix: String) -> Bool {
     do {
-        let msl1 = try String(contentsOfFile: glslppPath, encoding: .utf8)
+        let msl1 = try String(contentsOfFile: zioshadePath, encoding: .utf8)
         let msl2 = try String(contentsOfFile: spirvcrossPath, encoding: .utf8)
         
-        print("\n--- \(glslppPath) vs \(spirvcrossPath) ---")
+        print("\n--- \(zioshadePath) vs \(spirvcrossPath) ---")
         
         // Compile
         guard let lib1 = try? device.makeLibrary(source: msl1, options: nil) else {
-            print("  SKIP: glslpp MSL failed to compile"); return false
+            print("  SKIP: zioshade MSL failed to compile"); return false
         }
         guard let lib2 = try? device.makeLibrary(source: msl2, options: nil) else {
             print("  SKIP: spirv-cross MSL failed to compile"); return false
         }
         
-        let uniformBuf = makeUniformBuffer(device: device, glslppMSL: msl1, w: W, h: H)
+        let uniformBuf = makeUniformBuffer(device: device, zioshadeMSL: msl1, w: W, h: H)
         
         // Render
         guard let px1 = renderShader(device: device, vertLib: vertLib, fragLib: lib1,
                                      texture: texture, uniformBuf: uniformBuf, w: W, h: H) else {
-            print("  SKIP: glslpp render failed"); return false
+            print("  SKIP: zioshade render failed"); return false
         }
         guard let px2 = renderShader(device: device, vertLib: vertLib, fragLib: lib2,
                                      texture: texture, uniformBuf: uniformBuf, w: W, h: H) else {
@@ -201,7 +201,7 @@ func comparePair(device: MTLDevice, vertLib: MTLLibrary, texture: MTLTexture,
         let r = comparePixels(px1, px2, w: W, h: H)
         
         let status = r.maxDiff <= 1 ? "✅ MATCH" : "❌ DIFFER"
-        print("  glslpp non-black: \(nb1)/\(W*H), spirv-cross: \(nb2)/\(W*H)")
+        print("  zioshade non-black: \(nb1)/\(W*H), spirv-cross: \(nb2)/\(W*H)")
         print("  Different pixels: \(r.diffPixels)/\(W*H), max diff: \(r.maxDiff), avg: \(String(format:"%.4f", r.avgDiff))")
         print("  \(status)")
         
@@ -214,11 +214,11 @@ func comparePair(device: MTLDevice, vertLib: MTLLibrary, texture: MTLTexture,
 switch mode {
 case "pair":
     guard args.count >= 4 else { print("Need 2 MSL files"); exit(1) }
-    let glslppPath = args[2]
+    let zioshadePath = args[2]
     let spirvcrossPath = args[3]
     let prefix = args.count > 4 ? args[4] : "/tmp/batch_compare"
     let ok = comparePair(device: device, vertLib: vertLib, texture: texture,
-                         glslppPath: glslppPath, spirvcrossPath: spirvcrossPath, prefix: prefix)
+                         zioshadePath: zioshadePath, spirvcrossPath: spirvcrossPath, prefix: prefix)
     exit(ok ? 0 : 1)
 
 case "list":
@@ -232,7 +232,7 @@ case "list":
         let parts = line.components(separatedBy: " ").filter { !$0.isEmpty }
         guard parts.count >= 2 else { continue }
         let ok = comparePair(device: device, vertLib: vertLib, texture: texture,
-                             glslppPath: parts[0], spirvcrossPath: parts[1], prefix: "/tmp/batch_\(match+differ+skip)")
+                             zioshadePath: parts[0], spirvcrossPath: parts[1], prefix: "/tmp/batch_\(match+differ+skip)")
         if ok { match += 1 } else { differ += 1 }
     }
     

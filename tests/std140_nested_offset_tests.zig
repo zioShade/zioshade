@@ -15,7 +15,7 @@
 // 1.4.341.1). The fix is a dual-lookup fallback in codegen.zig matching the
 // existing pattern at the nested-struct recursion sites.
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const OpDecorate: u32 = 71;
 const OpMemberDecorate: u32 = 72;
@@ -171,7 +171,7 @@ const cases = [_]Case{
     // its size likewise rounds to 16, so a FLOAT `tail` (align 4) follows at
     // Offset 16 — NOT 4. A vec4 tail would mask this (its own 16-alignment pulls
     // it up regardless), so we use a float tail to isolate the struct base-align
-    // rule. glslang oracle = 16. (Pre-fix glslpp gave 4.)
+    // rule. glslang oracle = 16. (Pre-fix zioshade gave 4.)
     .{
         .name = "std140 scalar-only struct base-align -> float tail 16",
         .src =
@@ -185,7 +185,7 @@ const cases = [_]Case{
     },
     // std140 STRUCT base alignment rounds UP to 16: V2{vec2 a} has max-member
     // alignment 8, but roundUp(8,16)=16, so a FLOAT `tail` follows at Offset 16
-    // — NOT 8. glslang oracle = 16. (Pre-fix glslpp gave 8.)
+    // — NOT 8. glslang oracle = 16. (Pre-fix zioshade gave 8.)
     .{
         .name = "std140 vec2-only struct base-align -> float tail 16",
         .src =
@@ -221,7 +221,7 @@ test "std140/std430 member offset after a nested struct matches glslang (#181)" 
         const src = try alloc.dupeZ(u8, c.src);
         defer alloc.free(src);
 
-        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
         defer alloc.free(spv);
 
         const block_id = findBlockTypeId(spv) orelse {

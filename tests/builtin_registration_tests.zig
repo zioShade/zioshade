@@ -9,8 +9,8 @@
 //! decorations and the lowered column-decomposition ops — so an empty/dropped
 //! body fails loudly.
 const std = @import("std");
-const glslpp = @import("glslpp");
-const diagnostic = glslpp.diagnostic;
+const zioshade = @import("zioshade");
+const diagnostic = zioshade.diagnostic;
 
 const alloc = std.testing.allocator;
 
@@ -134,7 +134,7 @@ test "gl_PointCoord: fragment shader emits BuiltIn PointCoord and non-empty body
         \\layout(location=0) out vec4 o;
         \\void main() { o = vec4(gl_PointCoord, 0.0, 1.0); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     // The store to `o` must survive — tolerate mode would otherwise drop the
@@ -159,7 +159,7 @@ test "matrixCompMult: lowers to per-column FMul + matrix CompositeConstruct" {
         \\    o = vec4(c[0], 1.0);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     // Body must survive — tolerate mode would otherwise drop the statements
@@ -194,7 +194,7 @@ test "matrixCompMult + gl_PointCoord: compileToSPIRVWithDiagnostics succeeds wit
         for (diags.items) |d| alloc.free(d.message);
         diags.deinit(alloc);
     }
-    const words = try glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags);
+    const words = try zioshade.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags);
     defer alloc.free(words);
 
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
@@ -221,7 +221,7 @@ test "interpolateAtCentroid: OpExtInst 76 with Input-pointer interpolant + Inter
         \\layout(location=0) out vec4 o;
         \\void main() { o = interpolateAtCentroid(v_color); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     const interpolant = extInstFirstOperand(spv, EXT_INTERPOLATE_AT_CENTROID) orelse
@@ -238,7 +238,7 @@ test "interpolateAtSample: OpExtInst 77 with Input-pointer interpolant + Interpo
         \\layout(location=0) out vec4 o;
         \\void main() { o = interpolateAtSample(v_color, 0); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     const interpolant = extInstFirstOperand(spv, EXT_INTERPOLATE_AT_SAMPLE) orelse
@@ -255,7 +255,7 @@ test "interpolateAtOffset: OpExtInst 78 with Input-pointer interpolant + Interpo
         \\layout(location=0) out vec4 o;
         \\void main() { o = interpolateAtOffset(v_color, vec2(0.25, 0.25)); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     const interpolant = extInstFirstOperand(spv, EXT_INTERPOLATE_AT_OFFSET) orelse
@@ -282,7 +282,7 @@ test "interpolateAt*: compileToSPIRVWithDiagnostics succeeds with zero diagnosti
         for (diags.items) |d| alloc.free(d.message);
         diags.deinit(alloc);
     }
-    const words = try glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags);
+    const words = try zioshade.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags);
     defer alloc.free(words);
 
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
@@ -323,7 +323,7 @@ test "interpolateAtCentroid: rejects a function-local (Function-storage) interpo
     }
     try std.testing.expectError(
         error.SemanticFailed,
-        glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
+        zioshade.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
     );
 }
 
@@ -343,7 +343,7 @@ test "interpolateAtSample: rejects a function-local (Function-storage) interpola
     }
     try std.testing.expectError(
         error.SemanticFailed,
-        glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
+        zioshade.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
     );
 }
 
@@ -363,7 +363,7 @@ test "interpolateAtOffset: rejects a function-local (Function-storage) interpola
     }
     try std.testing.expectError(
         error.SemanticFailed,
-        glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
+        zioshade.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
     );
 }
 
@@ -384,7 +384,7 @@ test "interpolateAtCentroid: rejects an r-value (non-addressable) interpolant" {
     }
     try std.testing.expectError(
         error.SemanticFailed,
-        glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
+        zioshade.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
     );
 }
 
@@ -406,7 +406,7 @@ test "interpolateAtOffset: accepts an Input interface-block member (no over-reje
         for (diags.items) |d| alloc.free(d.message);
         diags.deinit(alloc);
     }
-    const words = try glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags);
+    const words = try zioshade.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags);
     defer alloc.free(words);
 
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
@@ -502,7 +502,7 @@ test "swizzle compound-assign write-back: partial swizzle on vec4 (v.xy *= 2.0)"
         \\layout(location = 0) out vec4 o;
         \\void main() { vec4 v = vin; v.xy *= 2.0; o = v; }
     ;
-    const spv = try glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
     const comps = mergeShuffleSelectors(spv, 4) orelse return error.NoWriteBackShuffle;
     try std.testing.expectEqualSlices(u32, &[_]u32{ 4, 5, 2, 3 }, comps);
@@ -518,7 +518,7 @@ test "swizzle compound-assign write-back: partial swizzle on vec4 (col.rgb *= 0.
         \\layout(location = 0) out vec4 o;
         \\void main() { vec4 col = vin; col.rgb *= 0.8; o = col; }
     ;
-    const spv = try glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
     const comps = mergeShuffleSelectors(spv, 4) orelse return error.NoWriteBackShuffle;
     try std.testing.expectEqualSlices(u32, &[_]u32{ 4, 5, 6, 3 }, comps);
@@ -547,7 +547,7 @@ test "textureGatherOffsets: OpImageGather carries ConstOffsets (0x20) + const-ar
         \\  o = textureGatherOffsets(s, vec2(0.5), offs, 1);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     // Exactly one OpImageGather, no Dref form.
@@ -580,7 +580,7 @@ test "textureGatherOffsets: omitted component defaults to const int 0 (Component
         \\  o = textureGatherOffsets(s, vec2(0.5), offs);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     try std.testing.expectEqual(@as(usize, 1), countOpcode(spv, OP_IMAGE_GATHER));
@@ -599,7 +599,7 @@ test "textureGather (non-offset) stays a plain 6-word OpImageGather, no regressi
         \\layout(location=0) out vec4 o;
         \\void main(){ o = textureGather(s, uv, 1); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     try std.testing.expectEqual(@as(usize, 1), countOpcode(spv, OP_IMAGE_GATHER));
@@ -618,7 +618,7 @@ test "textureGatherOffset (singular): OpImageGather carries ConstOffset (0x8) + 
         \\layout(location=0) out vec4 o;
         \\void main(){ o = textureGatherOffset(s, uv, ivec2(1,1), 2); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     try std.testing.expectEqual(@as(usize, 1), countOpcode(spv, OP_IMAGE_GATHER));
@@ -650,7 +650,7 @@ test "textureGatherOffset (singular): omitted component defaults to const int 0 
         \\layout(location=0) out vec4 o;
         \\void main(){ o = textureGatherOffset(s, uv, ivec2(1,0)); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     try std.testing.expectEqual(@as(usize, 1), countOpcode(spv, OP_IMAGE_GATHER));
@@ -673,7 +673,7 @@ test "textureGatherOffset (singular): NON-const offset is an honest error (not i
         \\layout(location=0) out vec4 o;
         \\void main(){ o = textureGatherOffset(s, uv, ivec2(k, k)); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
 }
 
 test "textureGatherOffsets: NON-const offsets array is an honest error (not silent-drop)" {
@@ -694,7 +694,7 @@ test "textureGatherOffsets: NON-const offsets array is an honest error (not sile
     }
     try std.testing.expectError(
         error.SemanticFailed,
-        glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
+        zioshade.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
     );
     // The recorded diagnostic message carries the specific reason
     // (last_error_inner) so the failure is named, not generic.
@@ -718,7 +718,7 @@ fn expectOffsetsNotConstant(source: [:0]const u8) !void {
     }
     try std.testing.expectError(
         error.SemanticFailed,
-        glslpp.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
+        zioshade.compileToSPIRVWithDiagnostics(alloc, source, .{ .stage = .fragment }, &diags),
     );
     var found_reason = false;
     for (diags.items) |d| {
@@ -733,7 +733,7 @@ test "textureGatherOffsets: const-init-then-MUTATED offsets is an honest error (
     // glslang -V rejects this ("must be a compile-time constant: offsets
     // argument", exit 2): `offs` is NOT const-qualified and is mutated at
     // runtime, so it is not a compile-time constant. Before the const-qualifier
-    // gate, glslpp recovered the FIRST (constant) store to `offs` and emitted
+    // gate, zioshade recovered the FIRST (constant) store to `offs` and emitted
     // OpImageGather + ConstOffsets using the STALE original constant array,
     // SILENTLY DROPPING the `offs[0] = ivec2(k,k)` mutation (exit 0) —
     // silent-wrong. It must honest-error with the named reason.
@@ -755,7 +755,7 @@ test "textureGatherOffsets: NON-const-qualified (constant-init, unmutated) offse
     // glslang -V requires `const` qualification specifically: a non-const array
     // with a constant initializer that is never mutated is STILL rejected
     // ("must be a compile-time constant: offsets argument", exit 2) because the
-    // declaration itself is mutable. glslpp must match — the const-qualifier
+    // declaration itself is mutable. zioshade must match — the const-qualifier
     // gate rejects the un-const-qualified declaration even though the value
     // would constant-fold identically.
     const source: [:0]const u8 =
@@ -784,7 +784,7 @@ test "textureGatherOffsets: valid const offsets still lowers to OpImageGather+Co
         \\  o = textureGatherOffsets(s, vec2(0.5), offs);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     try std.testing.expectEqual(@as(usize, 1), countOpcode(spv, OP_IMAGE_GATHER));
@@ -817,7 +817,7 @@ test "uaddCarry: emulated with IAdd + ULessThan + Select (no longer rejected); s
         \\layout(std430,binding=0) buffer B { uvec4 a, b, s, c; };
         \\void main(){ uvec4 cc; s = uaddCarry(a, b, cc); c = cc; }
     }) |src| {
-        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute });
+        const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .compute });
         defer alloc.free(spv);
         try std.testing.expect(countOpcode(spv, OP_IADD) >= 1); // sum = a + b
         try std.testing.expect(countOpcode(spv, OP_ULESSTHAN) >= 1); // carry = sum < a (unsigned)
@@ -826,7 +826,7 @@ test "uaddCarry: emulated with IAdd + ULessThan + Select (no longer rejected); s
 }
 
 test "usubBorrow: emulated with ISub + ULessThan + Select" {
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x=1) in;
         \\layout(std430,binding=0) buffer B { uint a, b, d, bo; };
@@ -851,7 +851,7 @@ test "umulExtended/imulExtended SCALAR: emulated with core u32 ops (16-bit-limb 
     // (and signed correction) is exhaustively verified offline against the true
     // product for millions of random + edge inputs; here we assert it compiles to
     // valid SPIR-V via the emulation.
-    const u_spv = try glslpp.compileToSPIRV(alloc,
+    const u_spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x=1) in;
         \\layout(std430,binding=0) buffer B { uint a, b, hi, lo; };
@@ -861,7 +861,7 @@ test "umulExtended/imulExtended SCALAR: emulated with core u32 ops (16-bit-limb 
     try std.testing.expect(countOpcode(u_spv, OP_IMUL) >= 5); // 4 limb products + lo
     try std.testing.expect(countOpcode(u_spv, OP_UMUL_EXTENDED) == 0); // emulated, no struct op
 
-    const i_spv = try glslpp.compileToSPIRV(alloc,
+    const i_spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x=1) in;
         \\layout(std430,binding=0) buffer B { int a, b, hi, lo; };
@@ -878,7 +878,7 @@ test "umulExtended/imulExtended VECTOR form is emulated component-wise (mask/shi
     // scalar mulhi runs per component; the mask/shift constants are splatted to the
     // vector width (OpCompositeConstruct) so no scalar-const-vs-vector-operand
     // invalid SPIR-V is emitted. Must compile to valid SPIR-V via the emulation.
-    const u_spv = try glslpp.compileToSPIRV(alloc,
+    const u_spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x=1) in;
         \\layout(std430,binding=0) buffer B { uvec2 a, b, hi, lo; };
@@ -889,7 +889,7 @@ test "umulExtended/imulExtended VECTOR form is emulated component-wise (mask/shi
     try std.testing.expect(countOpcode(u_spv, OP_UMUL_EXTENDED) == 0); // emulated, no struct op
     try std.testing.expect(countOpcode(u_spv, OP_COMPOSITE_CONSTRUCT) >= 1); // splatted const
 
-    const i_spv = try glslpp.compileToSPIRV(alloc,
+    const i_spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(local_size_x=1) in;
         \\layout(std430,binding=0) buffer B { ivec4 a, b, hi, lo; };

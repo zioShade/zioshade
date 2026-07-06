@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const alloc = std.testing.allocator;
 
@@ -17,7 +17,7 @@ test "SetMeshOutputsEXT uses uint operands (not signed int)" {
         \\    SetMeshOutputsEXT(1, 1);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .mesh, .spirv_version = .@"1.4" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .mesh, .spirv_version = .@"1.4" });
     defer alloc.free(spirv);
     // Verify OpSetMeshOutputsEXT (5295) exists with valid operands
     var found = false;
@@ -43,12 +43,12 @@ test "EmitMeshTasksEXT passes payload variable pointer" {
         \\    EmitMeshTasksEXT(1, 1, 1, sharedData);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .task, .spirv_version = .@"1.4" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .task, .spirv_version = .@"1.4" });
     defer alloc.free(spirv);
     // Find payload variable (OpVariable with TaskPayloadWorkgroupEXT=5402)
     var payload_var_id: ?u32 = null;
     for (spirv, 0..) |word, i| {
-        if ((word & 0xFFFF) == @intFromEnum(glslpp.spirv.Op.Variable)) {
+        if ((word & 0xFFFF) == @intFromEnum(zioshade.spirv.Op.Variable)) {
             const wc = word >> 16;
             if (wc >= 4 and i + 3 < spirv.len and spirv[i + 3] == 5402) {
                 payload_var_id = spirv[i + 2];
@@ -76,7 +76,7 @@ test "no OpReturn after EmitMeshTasksEXT terminator" {
         \\    EmitMeshTasksEXT(1, 1, 1, data);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .task, .spirv_version = .@"1.4" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .task, .spirv_version = .@"1.4" });
     defer alloc.free(spirv);
     var emit_found = false;
     var return_after_emit = false;
@@ -89,25 +89,25 @@ test "no OpReturn after EmitMeshTasksEXT terminator" {
 }
 
 test "mesh shader opcode enum values correct" {
-    try std.testing.expectEqual(@as(u32, 5294), @intFromEnum(glslpp.spirv.Op.EmitMeshTasksEXT));
-    try std.testing.expectEqual(@as(u32, 5295), @intFromEnum(glslpp.spirv.Op.SetMeshOutputsEXT));
-    try std.testing.expectEqual(@as(u32, 27), @intFromEnum(glslpp.spirv.ExecutionMode.OutputPoints));
-    try std.testing.expectEqual(@as(u32, 5269), @intFromEnum(glslpp.spirv.ExecutionMode.OutputLinesEXT));
-    try std.testing.expectEqual(@as(u32, 5298), @intFromEnum(glslpp.spirv.ExecutionMode.OutputTrianglesEXT));
+    try std.testing.expectEqual(@as(u32, 5294), @intFromEnum(zioshade.spirv.Op.EmitMeshTasksEXT));
+    try std.testing.expectEqual(@as(u32, 5295), @intFromEnum(zioshade.spirv.Op.SetMeshOutputsEXT));
+    try std.testing.expectEqual(@as(u32, 27), @intFromEnum(zioshade.spirv.ExecutionMode.OutputPoints));
+    try std.testing.expectEqual(@as(u32, 5269), @intFromEnum(zioshade.spirv.ExecutionMode.OutputLinesEXT));
+    try std.testing.expectEqual(@as(u32, 5298), @intFromEnum(zioshade.spirv.ExecutionMode.OutputTrianglesEXT));
 }
 
 test "ray tracing opcode enum values correct" {
-    try std.testing.expectEqual(@as(u32, 4445), @intFromEnum(glslpp.spirv.Op.TraceRayKHR));
-    try std.testing.expectEqual(@as(u32, 4448), @intFromEnum(glslpp.spirv.Op.IgnoreIntersectionKHR));
-    try std.testing.expectEqual(@as(u32, 4449), @intFromEnum(glslpp.spirv.Op.TerminateRayKHR));
-    try std.testing.expectEqual(@as(u32, 4446), @intFromEnum(glslpp.spirv.Op.ExecuteCallableKHR));
+    try std.testing.expectEqual(@as(u32, 4445), @intFromEnum(zioshade.spirv.Op.TraceRayKHR));
+    try std.testing.expectEqual(@as(u32, 4448), @intFromEnum(zioshade.spirv.Op.IgnoreIntersectionKHR));
+    try std.testing.expectEqual(@as(u32, 4449), @intFromEnum(zioshade.spirv.Op.TerminateRayKHR));
+    try std.testing.expectEqual(@as(u32, 4446), @intFromEnum(zioshade.spirv.Op.ExecuteCallableKHR));
 }
 
 test "GroupNonUniform opcode values correct after audit fix" {
     // Were off by 2 due to non-standard InclusiveBitCount/ExclusiveBitCount entries
-    try std.testing.expectEqual(@as(u32, 365), @intFromEnum(glslpp.spirv.Op.GroupNonUniformQuadBroadcast));
-    try std.testing.expectEqual(@as(u32, 366), @intFromEnum(glslpp.spirv.Op.GroupNonUniformQuadSwap));
+    try std.testing.expectEqual(@as(u32, 365), @intFromEnum(zioshade.spirv.Op.GroupNonUniformQuadBroadcast));
+    try std.testing.expectEqual(@as(u32, 366), @intFromEnum(zioshade.spirv.Op.GroupNonUniformQuadSwap));
     // All/Any were swapped
-    try std.testing.expectEqual(@as(u32, 155), @intFromEnum(glslpp.spirv.Op.All));
-    try std.testing.expectEqual(@as(u32, 154), @intFromEnum(glslpp.spirv.Op.Any));
+    try std.testing.expectEqual(@as(u32, 155), @intFromEnum(zioshade.spirv.Op.All));
+    try std.testing.expectEqual(@as(u32, 154), @intFromEnum(zioshade.spirv.Op.Any));
 }

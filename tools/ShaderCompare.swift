@@ -43,7 +43,7 @@ func createTestTexture(device: MTLDevice, w: Int, h: Int) -> MTLTexture {
     return texture
 }
 
-// Globals buffer — now that glslpp struct layout matches spirv-cross
+// Globals buffer — now that zioshade struct layout matches spirv-cross
 // (float4[4] for iChannelTime, float3[4] for iChannelResolution),
 // a single buffer works for both.
 func makeGlobalsBuffer(device: MTLDevice, screenW: Int, screenH: Int) -> MTLBuffer {
@@ -107,7 +107,7 @@ func renderFrame(device: MTLDevice, vertLib: MTLLibrary, fragLib: MTLLibrary, te
     encoder.setFragmentSamplerState(device.makeSamplerState(descriptor: sampDesc)!, index: 0)
 
     encoder.setFragmentBuffer(globalsBuf, offset: 0, index: 0)
-    encoder.setFragmentBuffer(globalsBuf, offset: 0, index: 1)  // glslpp uses binding=1 from wintty shaders
+    encoder.setFragmentBuffer(globalsBuf, offset: 0, index: 1)  // zioshade uses binding=1 from wintty shaders
     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     encoder.endEncoding()
 
@@ -147,11 +147,11 @@ func savePPM(_ px: [UInt8], w: Int, h: Int, path: String) throws {
 // ---- Main ----
 let args = CommandLine.arguments
 guard args.count >= 3 else {
-    print("Usage: ShaderCompare <glslpp.msl> <spirvcross.msl> [output_prefix]")
+    print("Usage: ShaderCompare <zioshade.msl> <spirvcross.msl> [output_prefix]")
     exit(1)
 }
 
-let glslppPath = args[1]
+let zioshadePath = args[1]
 let spirvcrossPath = args[2]
 let prefix = args.count > 3 ? args[3] : "/tmp/shader_compare"
 let W = 256, H = 256
@@ -161,12 +161,12 @@ guard let device = MTLCreateSystemDefaultDevice() else {
 }
 print("Metal: \(device.name)")
 
-let msl1 = try readMSL(glslppPath)
+let msl1 = try readMSL(zioshadePath)
 let msl2 = try readMSL(spirvcrossPath)
 
 let vertLib = makeVertexLibrary(device: device)
 
-print("Compiling glslpp MSL (\(msl1.count) bytes)...")
+print("Compiling zioshade MSL (\(msl1.count) bytes)...")
 let lib1 = try device.makeLibrary(source: msl1, options: nil)
 print("  Functions: \(lib1.functionNames)")
 
@@ -177,13 +177,13 @@ print("  Functions: \(lib2.functionNames)")
 let texture = createTestTexture(device: device, w: W, h: H)
 let globals = makeGlobalsBuffer(device: device, screenW: W, screenH: H)
 
-print("Rendering glslpp...")
+print("Rendering zioshade...")
 let px1 = renderFrame(device: device, vertLib: vertLib, fragLib: lib1, texture: texture, globalsBuf: globals, w: W, h: H)
 
 print("Rendering spirv-cross...")
 let px2 = renderFrame(device: device, vertLib: vertLib, fragLib: lib2, texture: texture, globalsBuf: globals, w: W, h: H)
 
-try savePPM(px1, w: W, h: H, path: "\(prefix)_glslpp.ppm")
+try savePPM(px1, w: W, h: H, path: "\(prefix)_zioshade.ppm")
 try savePPM(px2, w: W, h: H, path: "\(prefix)_spirvcross.ppm")
 
 let r = comparePixels(px1, px2, count: W*H*4)
@@ -207,4 +207,4 @@ for i in 0..<W*H {
     diffPx[j] = UInt8(s); diffPx[j+2] = UInt8(s); diffPx[j+3] = 255
 }
 try savePPM(diffPx, w: W, h: H, path: "\(prefix)_diff.ppm")
-print("Saved: \(prefix)_glslpp.ppm  \(prefix)_spirvcross.ppm  \(prefix)_diff.ppm")
+print("Saved: \(prefix)_zioshade.ppm  \(prefix)_spirvcross.ppm  \(prefix)_diff.ppm")

@@ -350,7 +350,7 @@ pub fn hasOpaqueArrayResourceSlices(instructions: anytype, id_defs: anytype, inc
 /// (`%c = OpAccessChain %p %var ...; OpStore %c`). Used to keep the
 /// const-initializer aliasing below from touching a mutable global. Detects only
 /// direct + one-level-chain stores (and not pass-by-pointer to a storing
-/// callee); sufficient because glslpp never emits either for a `const` global —
+/// callee); sufficient because zioshade never emits either for a `const` global —
 /// a const global is never written at all. Arbitrary ingested SPIR-V with a
 /// mutated const-initialised Private global via a deeper chain is the only blind
 /// spot.

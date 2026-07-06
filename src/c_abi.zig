@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// glslpp C ABI — Zig export wrappers that satisfy `include/glslpp.h`.
+// zioshade C ABI — Zig export wrappers that satisfy `include/zioshade.h`.
 //
 // Each `export fn` here matches a declaration in the public C header
 // bit-for-bit (calling convention, parameter types, ordering, return type).
@@ -10,10 +10,10 @@
 // Memory ownership
 // ----------------
 // Heap buffers handed back to the caller via out-parameters (SPIR-V word
-// buffers from `glslpp_compile`, source strings from `glslpp_to_*`) use a
+// buffers from `zioshade_compile`, source strings from `zioshade_to_*`) use a
 // length-prefix layout: the underlying allocator block is `[u64 length in
 // bytes][payload...]`, but the caller sees a pointer to the payload. The
-// matching `glslpp_free_*` helper reads the length back from the 8 bytes
+// matching `zioshade_free_*` helper reads the length back from the 8 bytes
 // preceding the visible pointer and releases the whole block. Calling C
 // `free()` on these pointers is undefined behaviour.
 //
@@ -22,23 +22,23 @@
 // The allocator and the last-error state are both `threadlocal`. Concurrent
 // calls from different threads each see their own GeneralPurposeAllocator
 // instance and their own error buffer. The error getters
-// (`glslpp_last_error_*`) read state owned by the calling thread.
+// (`zioshade_last_error_*`) read state owned by the calling thread.
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 // ---------------------------------------------------------------------------
-// Status codes — mirror `glslpp_status_t` in include/glslpp.h.
+// Status codes — mirror `zioshade_status_t` in include/zioshade.h.
 // ---------------------------------------------------------------------------
 
-const GLSLPP_OK: c_int = 0;
-const GLSLPP_ERR_OOM: c_int = 1;
-const GLSLPP_ERR_LEX: c_int = 2;
-const GLSLPP_ERR_PREPROCESS: c_int = 3;
-const GLSLPP_ERR_PARSE: c_int = 4;
-const GLSLPP_ERR_SEMANTIC: c_int = 5;
-const GLSLPP_ERR_CODEGEN: c_int = 6;
-const GLSLPP_ERR_INVALID_INPUT: c_int = 7;
+const ZIOSHADE_OK: c_int = 0;
+const ZIOSHADE_ERR_OOM: c_int = 1;
+const ZIOSHADE_ERR_LEX: c_int = 2;
+const ZIOSHADE_ERR_PREPROCESS: c_int = 3;
+const ZIOSHADE_ERR_PARSE: c_int = 4;
+const ZIOSHADE_ERR_SEMANTIC: c_int = 5;
+const ZIOSHADE_ERR_CODEGEN: c_int = 6;
+const ZIOSHADE_ERR_INVALID_INPUT: c_int = 7;
 
 // ---------------------------------------------------------------------------
 // Threadlocal allocator
@@ -46,7 +46,7 @@ const GLSLPP_ERR_INVALID_INPUT: c_int = 7;
 //
 // Each thread that touches the C ABI gets its own GeneralPurposeAllocator.
 // We never reset or deinit it — C callers manage the lifetime of returned
-// buffers via the `glslpp_free_*` helpers, and the GPA itself lives until
+// buffers via the `zioshade_free_*` helpers, and the GPA itself lives until
 // process exit. This matches what consumers of a typical C library expect.
 
 threadlocal var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
@@ -95,8 +95,8 @@ fn freeBytes(p: ?[*]u8) void {
 // Threadlocal error state
 // ---------------------------------------------------------------------------
 //
-// The header says `glslpp_last_error_message`'s returned pointer is
-// "overwritten by the next failing glslpp_* call on the same thread", so a
+// The header says `zioshade_last_error_message`'s returned pointer is
+// "overwritten by the next failing zioshade_* call on the same thread", so a
 // fixed-size threadlocal buffer is the right shape. We hold a NUL-terminated
 // formatted string plus the 1-based line/column when available.
 
@@ -115,13 +115,13 @@ fn setLastError(err: anyerror) c_int {
     const status = statusFromErr(err);
 
     // Capture source location captured by the compiler pipeline.
-    last_error_line_tl = glslpp.semantic.last_error_line;
-    last_error_column_tl = glslpp.semantic.last_error_column;
+    last_error_line_tl = zioshade.semantic.last_error_line;
+    last_error_column_tl = zioshade.semantic.last_error_column;
 
     // Format "<error tag>: <inner-or-ctx>". Falls back gracefully if either
     // piece is missing.
-    const inner = glslpp.lastErrorInner() orelse "";
-    const ctx = glslpp.lastErrorCtx() orelse "";
+    const inner = zioshade.lastErrorInner() orelse "";
+    const ctx = zioshade.lastErrorCtx() orelse "";
     const detail: []const u8 = if (inner.len > 0) inner else ctx;
 
     const written = std.fmt.bufPrint(last_error_buf[0 .. last_error_buf.len - 1], "{s}: {s}", .{
@@ -147,20 +147,20 @@ fn setInvalidInputError(message: []const u8) c_int {
     last_error_len = written.len;
     last_error_buf[last_error_len] = 0;
 
-    return GLSLPP_ERR_INVALID_INPUT;
+    return ZIOSHADE_ERR_INVALID_INPUT;
 }
 
 fn statusFromErr(err: anyerror) c_int {
     return switch (err) {
-        error.OutOfMemory => GLSLPP_ERR_OOM,
-        error.LexFailed => GLSLPP_ERR_LEX,
-        error.PreprocessFailed => GLSLPP_ERR_PREPROCESS,
-        error.ParseFailed => GLSLPP_ERR_PARSE,
-        error.SemanticFailed => GLSLPP_ERR_SEMANTIC,
-        error.CodegenFailed, error.EntryPointNotFound => GLSLPP_ERR_CODEGEN,
+        error.OutOfMemory => ZIOSHADE_ERR_OOM,
+        error.LexFailed => ZIOSHADE_ERR_LEX,
+        error.PreprocessFailed => ZIOSHADE_ERR_PREPROCESS,
+        error.ParseFailed => ZIOSHADE_ERR_PARSE,
+        error.SemanticFailed => ZIOSHADE_ERR_SEMANTIC,
+        error.CodegenFailed, error.EntryPointNotFound => ZIOSHADE_ERR_CODEGEN,
         // Backend cross-compile errors (CrossCompileUnsupported, etc.) and
         // anything else we haven't categorised gets bucketed as codegen.
-        else => GLSLPP_ERR_CODEGEN,
+        else => ZIOSHADE_ERR_CODEGEN,
     };
 }
 
@@ -168,7 +168,7 @@ fn statusFromErr(err: anyerror) c_int {
 // Enum mapping
 // ---------------------------------------------------------------------------
 
-fn stageFromC(c_stage: c_int) ?glslpp.Stage {
+fn stageFromC(c_stage: c_int) ?zioshade.Stage {
     return switch (c_stage) {
         0 => .vertex,
         1 => .fragment,
@@ -188,7 +188,7 @@ fn stageFromC(c_stage: c_int) ?glslpp.Stage {
     };
 }
 
-fn spirvVersionFromPacked(packed_ver: u32) ?glslpp.SPIRVVersion {
+fn spirvVersionFromPacked(packed_ver: u32) ?zioshade.SPIRVVersion {
     return switch (packed_ver) {
         10 => .@"1.0",
         11 => .@"1.1",
@@ -205,11 +205,11 @@ fn spirvVersionFromPacked(packed_ver: u32) ?glslpp.SPIRVVersion {
 // C struct mirrors
 // ---------------------------------------------------------------------------
 //
-// `glslpp_compile_options_t` is laid out to match the C header. Because the
+// `zioshade_compile_options_t` is laid out to match the C header. Because the
 // C enum on every supported target is at least int-sized, we use `c_int` for
 // the stage field — that matches what a C compiler emits for an enum.
 
-const glslpp_compile_options_t = extern struct {
+const zioshade_compile_options_t = extern struct {
     stage: c_int,
     version: u32,
     is_essl: c_int,
@@ -222,11 +222,11 @@ const glslpp_compile_options_t = extern struct {
 
 /// Compile GLSL source to a SPIR-V module. On success, `*spirv_words`
 /// receives a length-prefixed buffer owned by the caller (release via
-/// `glslpp_free_u32`).
-pub export fn glslpp_compile(
+/// `zioshade_free_u32`).
+pub export fn zioshade_compile(
     glsl_source: ?[*]const u8,
     glsl_len: usize,
-    opts: ?*const glslpp_compile_options_t,
+    opts: ?*const zioshade_compile_options_t,
     spirv_words: ?*?[*]u32,
     spirv_word_count: ?*usize,
 ) callconv(.c) c_int {
@@ -248,9 +248,9 @@ pub export fn glslpp_compile(
     // Resolve options (NULL means defaults). The `is_essl` C field is
     // accepted at the boundary but currently informational only — the
     // preprocessor detects ESSL from the `#version` line.
-    var stage: glslpp.Stage = .fragment;
+    var stage: zioshade.Stage = .fragment;
     var version: u32 = 430;
-    var spirv_ver: glslpp.SPIRVVersion = .@"1.5";
+    var spirv_ver: zioshade.SPIRVVersion = .@"1.5";
     if (opts) |o| {
         stage = stageFromC(o.stage) orelse return setInvalidInputError("stage value out of range");
         version = o.version;
@@ -268,19 +268,19 @@ pub export fn glslpp_compile(
     src_buf[glsl_len] = 0;
     const src_z: [:0]const u8 = src_buf[0..glsl_len :0];
 
-    const compile_opts: glslpp.CompileOptions = .{
+    const compile_opts: zioshade.CompileOptions = .{
         .stage = stage,
         .version = version,
         .spirv_version = spirv_ver,
     };
 
-    const words = glslpp.compileToSPIRV(a, src_z, compile_opts) catch |err| {
+    const words = zioshade.compileToSPIRV(a, src_z, compile_opts) catch |err| {
         return setLastError(err);
     };
     defer a.free(words);
 
     // Copy into a length-prefixed buffer the caller will free via
-    // `glslpp_free_u32`.
+    // `zioshade_free_u32`.
     const byte_len = words.len * @sizeOf(u32);
     const payload = allocBytes(byte_len) orelse return setLastError(error.OutOfMemory);
     @memcpy(payload[0..byte_len], std.mem.sliceAsBytes(words));
@@ -288,7 +288,7 @@ pub export fn glslpp_compile(
     out_words.* = @as([*]u32, @ptrCast(@alignCast(payload)));
     out_count.* = words.len;
 
-    return GLSLPP_OK;
+    return ZIOSHADE_OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +312,7 @@ fn finishString(out_buf: *?[*]u8, out_len: *usize, source: []const u8) c_int {
     payload[source.len] = 0;
     out_buf.* = payload;
     out_len.* = source.len;
-    return GLSLPP_OK;
+    return ZIOSHADE_OK;
 }
 
 fn resolveEntryPoint(entry_point: ?[*:0]const u8) []const u8 {
@@ -321,7 +321,7 @@ fn resolveEntryPoint(entry_point: ?[*:0]const u8) []const u8 {
 }
 
 /// Cross-compile SPIR-V to HLSL source.
-pub export fn glslpp_to_hlsl(
+pub export fn zioshade_to_hlsl(
     spirv_words: ?[*]const u32,
     spirv_word_count: usize,
     binding_shift: i32,
@@ -341,7 +341,7 @@ pub export fn glslpp_to_hlsl(
     const words = spirv_words.?[0..spirv_word_count];
     const ep_name = resolveEntryPoint(entry_point);
 
-    const result = glslpp.spirvToHLSL(alloc(), words, .{
+    const result = zioshade.spirvToHLSL(alloc(), words, .{
         .binding_shift = binding_shift,
         .shader_model = shader_model,
         .entry_point_name = ep_name,
@@ -352,7 +352,7 @@ pub export fn glslpp_to_hlsl(
 }
 
 /// Cross-compile SPIR-V to GLSL source.
-pub export fn glslpp_to_glsl(
+pub export fn zioshade_to_glsl(
     spirv_words: ?[*]const u32,
     spirv_word_count: usize,
     glsl_version: u32,
@@ -372,7 +372,7 @@ pub export fn glslpp_to_glsl(
     const words = spirv_words.?[0..spirv_word_count];
     const ep_name = resolveEntryPoint(entry_point);
 
-    const result = glslpp.spirvToGLSL(alloc(), words, .{
+    const result = zioshade.spirvToGLSL(alloc(), words, .{
         .version = glsl_version,
         .es = es != 0,
         .entry_point_name = ep_name,
@@ -387,7 +387,7 @@ pub export fn glslpp_to_glsl(
 /// `argument_buffers` is accepted for forward-compat with M6 but the
 /// underlying Zig MSL backend does not yet expose an argument-buffers
 /// option, so the parameter is currently ignored.
-pub export fn glslpp_to_msl(
+pub export fn zioshade_to_msl(
     spirv_words: ?[*]const u32,
     spirv_word_count: usize,
     metal_version: u32,
@@ -409,7 +409,7 @@ pub export fn glslpp_to_msl(
     const words = spirv_words.?[0..spirv_word_count];
     const ep_name = resolveEntryPoint(entry_point);
 
-    const result = glslpp.spirvToMSL(alloc(), words, .{
+    const result = zioshade.spirvToMSL(alloc(), words, .{
         .metal_version = metal_version,
         .entry_point_name = ep_name,
     }) catch |err| return setLastError(err);
@@ -419,7 +419,7 @@ pub export fn glslpp_to_msl(
 }
 
 /// Cross-compile SPIR-V to WGSL source.
-pub export fn glslpp_to_wgsl(
+pub export fn zioshade_to_wgsl(
     spirv_words: ?[*]const u32,
     spirv_word_count: usize,
     entry_point: ?[*:0]const u8,
@@ -437,7 +437,7 @@ pub export fn glslpp_to_wgsl(
     const words = spirv_words.?[0..spirv_word_count];
     const ep_name = resolveEntryPoint(entry_point);
 
-    const result = glslpp.spirvToWGSL(alloc(), words, .{
+    const result = zioshade.spirvToWGSL(alloc(), words, .{
         .entry_point_name = ep_name,
     }) catch |err| return setLastError(err);
     defer alloc().free(result);
@@ -451,20 +451,20 @@ pub export fn glslpp_to_wgsl(
 
 /// Returns the threadlocal error message, or NULL if no error has been
 /// recorded since the last successful call.
-pub export fn glslpp_last_error_message() callconv(.c) ?[*:0]const u8 {
+pub export fn zioshade_last_error_message() callconv(.c) ?[*:0]const u8 {
     if (last_error_len == 0) return null;
     return @as([*:0]const u8, @ptrCast(&last_error_buf[0]));
 }
 
 /// Returns the 1-based source line of the most recent error, or 0 if not
 /// available.
-pub export fn glslpp_last_error_line() callconv(.c) u32 {
+pub export fn zioshade_last_error_line() callconv(.c) u32 {
     return last_error_line_tl;
 }
 
 /// Returns the 1-based source column of the most recent error, or 0 if not
 /// available.
-pub export fn glslpp_last_error_column() callconv(.c) u32 {
+pub export fn zioshade_last_error_column() callconv(.c) u32 {
     return last_error_column_tl;
 }
 
@@ -472,14 +472,14 @@ pub export fn glslpp_last_error_column() callconv(.c) u32 {
 // Buffer release
 // ---------------------------------------------------------------------------
 
-/// Free a string buffer previously returned by `glslpp_to_*`. NULL-safe.
-pub export fn glslpp_free_str(s: ?[*]u8) callconv(.c) void {
+/// Free a string buffer previously returned by `zioshade_to_*`. NULL-safe.
+pub export fn zioshade_free_str(s: ?[*]u8) callconv(.c) void {
     freeBytes(s);
 }
 
-/// Free a SPIR-V word buffer previously returned by `glslpp_compile`.
+/// Free a SPIR-V word buffer previously returned by `zioshade_compile`.
 /// NULL-safe.
-pub export fn glslpp_free_u32(p: ?[*]u32) callconv(.c) void {
+pub export fn zioshade_free_u32(p: ?[*]u32) callconv(.c) void {
     if (p) |ptr| {
         freeBytes(@as([*]u8, @ptrCast(@alignCast(ptr))));
     }
@@ -488,14 +488,14 @@ pub export fn glslpp_free_u32(p: ?[*]u32) callconv(.c) void {
 test {
     // Ensure the export functions get type-checked when running unit tests
     // that touch this module.
-    _ = &glslpp_compile;
-    _ = &glslpp_to_hlsl;
-    _ = &glslpp_to_glsl;
-    _ = &glslpp_to_msl;
-    _ = &glslpp_to_wgsl;
-    _ = &glslpp_last_error_message;
-    _ = &glslpp_last_error_line;
-    _ = &glslpp_last_error_column;
-    _ = &glslpp_free_str;
-    _ = &glslpp_free_u32;
+    _ = &zioshade_compile;
+    _ = &zioshade_to_hlsl;
+    _ = &zioshade_to_glsl;
+    _ = &zioshade_to_msl;
+    _ = &zioshade_to_wgsl;
+    _ = &zioshade_last_error_message;
+    _ = &zioshade_last_error_line;
+    _ = &zioshade_last_error_column;
+    _ = &zioshade_free_str;
+    _ = &zioshade_free_u32;
 }

@@ -5,7 +5,7 @@
 // (vec3-padded-to-vec4, 16-byte array stride) to scalar (every type aligned to
 // its scalar component, tight packing).
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 /// Walk SPIR-V words and return the Offset literal for the given member of
 /// the first OpMemberDecorate ... Offset instruction matching member_index.
@@ -54,7 +54,7 @@ test "scalar layout: float+vec3 packs vec3 at offset 4 with GL_EXT_scalar_block_
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(u.b, u.a); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     const offset_b = findMemberOffset(spv, 1) orelse {
         try std.testing.expect(false);
@@ -73,7 +73,7 @@ test "scalar layout: float+vec3 pads to offset 16 without extension (std140 defa
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(u.b, u.a); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     const offset_b = findMemberOffset(spv, 1) orelse {
         try std.testing.expect(false);
@@ -91,7 +91,7 @@ test "scalar layout: vec3 runtime array gets ArrayStride 12" {
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(b.data[0], 1.0); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     const stride = findFirstArrayStride(spv) orelse {
         try std.testing.expect(false);
@@ -184,7 +184,7 @@ test "block dedup keeps row_major and column_major UBO blocks as distinct struct
         \\layout(location=0) out vec4 o;
         \\void main() { o = a.m[0] + b.m[0]; }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     // RowMajor (4) comes from block A, ColMajor (5) from block B. If the blocks
@@ -209,7 +209,7 @@ test "block dedup still merges two UBO blocks identical in members and layout" {
         \\layout(location=0) out vec4 o;
         \\void main() { o = a.m[0] + b.m[0]; }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     // Identical column-major std140 blocks → exactly one shared struct type.
@@ -236,7 +236,7 @@ test "block dedup: std140 and std430 array members keep distinct ArrayStride 16 
         \\layout(location=0) out vec4 o;
         \\void main() { o = vec4(a.arr[0], a.arr[1], b.arr[0], b.arr[1]); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     // The std140 element stride (16) AND the std430 element stride (4) must both
@@ -273,7 +273,7 @@ test "block dedup: plain struct and identical UBO block stay distinct (needs_blo
         \\  o = vec4(s.x, s.y, 0.0, 0.0);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     // The uniform block must carry a Block decoration; the wrong merge dropped it.

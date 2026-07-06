@@ -1,4 +1,4 @@
-# glslpp Polish & Real-World Testing — Design Spec
+# zioshade Polish & Real-World Testing — Design Spec
 
 **Date:** 2026-05-22
 **Status:** Draft
@@ -6,7 +6,7 @@
 
 ## Background
 
-glslpp is functionally complete: 1811/1811 conformance, 180/180 WGSL, 51/51 cross-validation, 50K fuzz iterations crash-free. But it has the rough edges of a project built through rapid iteration — stale docs, no CLI, weak error reporting, leaking internal APIs, and no real-world validation beyond synthetic tests.
+zioshade is functionally complete: 1811/1811 conformance, 180/180 WGSL, 51/51 cross-validation, 50K fuzz iterations crash-free. But it has the rough edges of a project built through rapid iteration — stale docs, no CLI, weak error reporting, leaking internal APIs, and no real-world validation beyond synthetic tests.
 
 This spec covers six workstreams, ordered by impact on a new user encountering the project for the first time.
 
@@ -58,7 +58,7 @@ Keep as `pub` in root.zig only what users need:
 - ✅ Keep: `diagnostic.Diagnostic` (used by `compileToSPIRVWithDiagnostics`)
 - ✅ Keep: `reflection.ShaderResources`, `reflection.Resource`, `reflection.EntryPoint` (returned by reflect functions)
 - 🔒 Make internal: `lexer`, `preprocessor`, `ast`, `ir`, `spirv`, `parser`, `semantic`, `codegen`, `compat`, `kernel_fusion`
-- ⚠️ `reflection` and `diagnostic` — keep the types public, but consider whether re-exporting them from root.zig is cleaner than requiring `glslpp.reflection.Resource`
+- ⚠️ `reflection` and `diagnostic` — keep the types public, but consider whether re-exporting them from root.zig is cleaner than requiring `zioshade.reflection.Resource`
 
 **Implementation:** Change `pub const lexer = @import("lexer.zig")` to `const lexer = @import("lexer.zig")` for internal modules. If any downstream code (wintty) uses these, coordinate the migration.
 
@@ -86,7 +86,7 @@ The `last_compile_detail` threadlocal is a code smell. Long-term, errors should 
 
 ## Workstream 3: CLI Tool
 
-**Problem:** There is no way to use glslpp from the command line. A new user who just wants to compile a shader has to write Zig code. This is a significant adoption barrier.
+**Problem:** There is no way to use zioshade from the command line. A new user who just wants to compile a shader has to write Zig code. This is a significant adoption barrier.
 
 ### Architecture
 
@@ -96,25 +96,25 @@ A single `src/cli.zig` file, built as an executable via `build.zig`. The CLI is 
 
 ```bash
 # Compile GLSL to SPIR-V binary
-glslpp compile shader.frag -o shader.spv
+zioshade compile shader.frag -o shader.spv
 
 # Cross-compile to HLSL
-glslpp hlsl shader.frag -o shader.hlsl
+zioshade hlsl shader.frag -o shader.hlsl
 
 # Cross-compile to GLSL (round-trip)
-glslpp glsl shader.frag -o shader.glsl --glsl-version 450
+zioshade glsl shader.frag -o shader.glsl --glsl-version 450
 
 # Cross-compile to MSL
-glslpp msl shader.frag -o shader.msl
+zioshade msl shader.frag -o shader.msl
 
 # Cross-compile to WGSL
-glslpp wgsl shader.frag -o shader.wgsl
+zioshade wgsl shader.frag -o shader.wgsl
 
 # Reflect on SPIR-V binary
-glslpp reflect shader.spv
+zioshade reflect shader.spv
 
 # Validate SPIR-V binary (via spirv-val)
-glslpp validate shader.spv
+zioshade validate shader.spv
 
 # Auto-detect stage from extension
 # .frag → fragment, .vert → vertex, .comp → compute, .geom → geometry, .tesc/.tese → tessellation
@@ -130,7 +130,7 @@ glslpp validate shader.spv
 
 ### Files
 - `src/cli.zig` — new file (~200-300 lines)
-- `build.zig` — add `glslpp-cli` executable target
+- `build.zig` — add `zioshade-cli` executable target
 
 ---
 
@@ -165,12 +165,12 @@ This is purely internal work in `src/semantic.zig`, `src/parser.zig`, and the cr
 
 Add a section to README showing how to handle errors properly:
 ```zig
-const result = glslpp.compileToSPIRV(alloc, source, .{.stage = .fragment});
+const result = zioshade.compileToSPIRV(alloc, source, .{.stage = .fragment});
 if (result) |words| {
     // success
 } else |err| {
-    std.debug.print("Error: {} ({s})\n", .{err, @tagName(glslpp.last_compile_detail orelse .codegen_failed)});
-    if (glslpp.last_compile_detail) |d| {
+    std.debug.print("Error: {} ({s})\n", .{err, @tagName(zioshade.last_compile_detail orelse .codegen_failed)});
+    if (zioshade.last_compile_detail) |d| {
         // check semantic.last_error_line for location
     }
 }
@@ -186,13 +186,13 @@ if (result) |words| {
 
 ## Workstream 5: Real-World WGSL Validation Pipeline
 
-**Problem:** All 180 WGSL tests are synthetic (hand-written stress tests). We need to validate that glslpp produces *valid* WGSL when fed real shaders from real projects.
+**Problem:** All 180 WGSL tests are synthetic (hand-written stress tests). We need to validate that zioshade produces *valid* WGSL when fed real shaders from real projects.
 
 ### Architecture
 
 A test runner script (`tools/realworld_wgsl_test.sh` or Zig test) that:
 1. Fetches GLSL shader collections from known repos
-2. Compiles each through glslpp: GLSL → SPIR-V → WGSL
+2. Compiles each through zioshade: GLSL → SPIR-V → WGSL
 3. Validates WGSL output through naga/tint
 4. Reports pass/fail with categorization of failures
 
@@ -218,10 +218,10 @@ A test runner script (`tools/realworld_wgsl_test.sh` or Zig test) that:
 ### Categorization of failures
 
 When a shader fails validation, categorize the failure:
-- **Frontend gap**: glslpp can't parse the GLSL (e.g., unsupported extension)
-- **SPIR-V gap**: glslpp can't generate valid SPIR-V for a construct
+- **Frontend gap**: zioshade can't parse the GLSL (e.g., unsupported extension)
+- **SPIR-V gap**: zioshade can't generate valid SPIR-V for a construct
 - **WGSL backend gap**: SPIR-V is valid but WGSL output has errors (our primary target)
-- **Known limitation**: Feature glslpp intentionally doesn't support (e.g., OpSwitch complex cases)
+- **Known limitation**: Feature zioshade intentionally doesn't support (e.g., OpSwitch complex cases)
 
 ### Files
 - `tools/realworld_wgsl_test.zig` — new test runner (~300 lines)

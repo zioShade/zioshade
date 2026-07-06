@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // GL_EXT_scalar_block_layout: UBO with vec3 + float packed tightly (M8.1).
 // Expected: SPIR-V compiles with scalar packing; cross-compile backends may
-// emit standard layouts and still pass naga / glslpp validation.
+// emit standard layouts and still pass naga / zioshade validation.
 #version 450
 #extension GL_EXT_scalar_block_layout : require
 

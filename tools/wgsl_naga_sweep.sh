@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Large-corpus WGSL <-> naga differential.
 #
-# Compiles every conformance GLSL fixture to WGSL via glslpp and validates the
+# Compiles every conformance GLSL fixture to WGSL via zioshade and validates the
 # result with naga (the WGSL reference). Reports:
-#   naga PASS            glslpp WGSL accepted by naga
-#   naga REJECT          glslpp emitted WGSL that naga rejects  <-- a divergence
+#   naga PASS            zioshade WGSL accepted by naga
+#   naga REJECT          zioshade emitted WGSL that naga rejects  <-- a divergence
 #                        (silent-wrong) to fix; the goal is ZERO of these.
-#   honest-unsupported   glslpp returned a named error.Unsupported* (acceptable —
+#   honest-unsupported   zioshade returned a named error.Unsupported* (acceptable —
 #                        an honest refusal, not silent-wrong)
 #   GLSL compile-fail    GLSL->SPIR-V failed before WGSL (pre-existing / unrelated)
 #
@@ -17,17 +17,17 @@
 # (.asm SPIR-V-assembly, .error validation tests, link.* multi-file, .nocompat).
 set -uo pipefail
 
-CLI="${CLI:-zig-out/bin/glslpp.exe}"
+CLI="${CLI:-zig-out/bin/zioshade.exe}"
 NAGA="${NAGA:-naga}"
 TMP=".zig-cache/wgsl-naga-sweep.wgsl"
 # WGSL only has vertex/fragment/compute entry points (no geometry/tessellation/
 # mesh/ray), so the sweep covers only those stages — counting WGSL-impossible
-# stages as "REJECT" would be meaningless noise. (glslpp emitting WGSL for an
+# stages as "REJECT" would be meaningless noise. (zioshade emitting WGSL for an
 # unsupported stage instead of honest-erroring is a separate issue, tracked.)
 SUITES="${SUITES:-tests/spirv-cross tests/glslang-430 tests/ghostty tests/compute tests/conformance/stress tests/external}"
 
 if [ ! -x "$CLI" ] && [ ! -f "$CLI" ]; then
-  echo "error: glslpp CLI not found at $CLI — run \`mise exec -- zig build\` first" >&2
+  echo "error: zioshade CLI not found at $CLI — run \`mise exec -- zig build\` first" >&2
   exit 2
 fi
 
@@ -79,7 +79,7 @@ echo "GLSL compile-fail:   $cfail"
 echo "skipped:             $skip"
 if [ -n "$fails" ]; then
   echo ""
-  echo "--- naga rejections (glslpp WGSL that naga rejects — divergences to fix) ---"
+  echo "--- naga rejections (zioshade WGSL that naga rejects — divergences to fix) ---"
   printf "%s" "$fails"
 fi
 rm -f "$TMP" 2>/dev/null || true

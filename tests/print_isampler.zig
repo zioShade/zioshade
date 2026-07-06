@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     const source =
@@ -11,9 +11,9 @@ pub fn main() !void {
         \    fragColor = c;
         \}
     ;
-    const spirv = try glslpp.compileToSPIRV(std.testing.allocator, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(std.testing.allocator, source, .{ .stage = .fragment });
     defer std.testing.allocator.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(std.testing.allocator, spirv, .{ .binding_shift = -1, .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(std.testing.allocator, spirv, .{ .binding_shift = -1, .shader_model = 60 });
     defer std.testing.allocator.free(hlsl);
     const stdout = std.io.getStdOut().writer();
     try stdout.print("{s}\n", .{hlsl});

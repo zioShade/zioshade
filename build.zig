@@ -4,35 +4,35 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const glslpp_mod = b.createModule(.{
+    const zioshade_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     // Expose as named module for consumers (e.g., wintty)
-    _ = b.addModule("glslpp", .{
+    _ = b.addModule("zioshade", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     const lib = b.addLibrary(.{
-        .name = "glslpp",
-        .root_module = glslpp_mod,
+        .name = "zioshade",
+        .root_module = zioshade_mod,
     });
     b.installArtifact(lib);
 
     // CLI tool — build with: zig build cli
-    const cli_step = b.step("cli", "Build the glslpp CLI tool");
+    const cli_step = b.step("cli", "Build the zioshade CLI tool");
     const cli_mod = b.createModule(.{
         .root_source_file = b.path("src/cli.zig"),
         .target = target,
         .optimize = optimize,
     });
-    cli_mod.addImport("glslpp", glslpp_mod);
+    cli_mod.addImport("zioshade", zioshade_mod);
     const cli_exe = b.addExecutable(.{
-        .name = "glslpp",
+        .name = "zioshade",
         .root_module = cli_mod,
     });
     b.installArtifact(cli_exe);
@@ -45,30 +45,30 @@ pub fn build(b: *std.Build) void {
     // a `_shared` suffix because on Windows both linkages emit a `.lib` file
     // (the shared one is the import library beside its `.dll`), and the two
     // would otherwise clobber each other in `zig-out/lib`. On ELF platforms
-    // the static would be `libglslpp_c.a` and the shared
-    // `libglslpp_c_shared.so`. Consumers pick the artifact they want.
+    // the static would be `libzioshade_c.a` and the shared
+    // `libzioshade_c_shared.so`. Consumers pick the artifact they want.
     const c_abi_mod = b.createModule(.{
         .root_source_file = b.path("src/c_abi.zig"),
         .target = target,
         .optimize = optimize,
     });
-    c_abi_mod.addImport("glslpp", glslpp_mod);
+    c_abi_mod.addImport("zioshade", zioshade_mod);
 
     const c_abi_shared_mod = b.createModule(.{
         .root_source_file = b.path("src/c_abi.zig"),
         .target = target,
         .optimize = optimize,
     });
-    c_abi_shared_mod.addImport("glslpp", glslpp_mod);
+    c_abi_shared_mod.addImport("zioshade", zioshade_mod);
 
-    const c_lib_step = b.step("c-lib", "Build glslpp C ABI shared + static libraries");
+    const c_lib_step = b.step("c-lib", "Build zioshade C ABI shared + static libraries");
     const c_static = b.addLibrary(.{
-        .name = "glslpp_c",
+        .name = "zioshade_c",
         .root_module = c_abi_mod,
         .linkage = .static,
     });
     const c_shared = b.addLibrary(.{
-        .name = "glslpp_c_shared",
+        .name = "zioshade_c_shared",
         .root_module = c_abi_shared_mod,
         .linkage = .dynamic,
     });
@@ -90,8 +90,8 @@ pub fn build(b: *std.Build) void {
     // Compiles `examples/c/main.c` against the public C header and links it
     // against the static C ABI library. We pick the static handle so the
     // resulting executable runs without runtime DLL search-path concerns on
-    // Windows (no need to copy `glslpp_c_shared.dll` next to the .exe).
-    const c_example_step = b.step("c-example", "Build the C consumer example demonstrating the glslpp C ABI");
+    // Windows (no need to copy `zioshade_c_shared.dll` next to the .exe).
+    const c_example_step = b.step("c-example", "Build the C consumer example demonstrating the zioshade C ABI");
     const c_example_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
@@ -118,8 +118,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
 
     const run_unit_tests = b.addRunArtifact(b.addTest(.{
-        .name = "glslpp-tests",
-        .root_module = glslpp_mod,
+        .name = "zioshade-tests",
+        .root_module = zioshade_mod,
     }));
     test_step.dependOn(&run_unit_tests.step);
 
@@ -164,7 +164,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    runner_mod.addImport("glslpp", glslpp_mod);
+    runner_mod.addImport("zioshade", zioshade_mod);
     const runner_exe = b.addExecutable(.{
         .name = "conformance-runner",
         .root_module = runner_mod,
@@ -204,7 +204,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    hlsl_test_mod.addImport("glslpp", glslpp_mod);
+    hlsl_test_mod.addImport("zioshade", zioshade_mod);
 
     // Reflection tests — run with: zig build test-reflection
     const refl_test_step = b.step("test-reflection", "Run SPIR-V reflection API tests");
@@ -213,7 +213,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    refl_test_mod.addImport("glslpp", glslpp_mod);
+    refl_test_mod.addImport("zioshade", zioshade_mod);
     const run_refl_tests = b.addRunArtifact(b.addTest(.{
         .root_module = refl_test_mod,
     }));
@@ -227,7 +227,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    corr_test_mod.addImport("glslpp", glslpp_mod);
+    corr_test_mod.addImport("zioshade", zioshade_mod);
     const run_corr_tests = b.addRunArtifact(b.addTest(.{
         .root_module = corr_test_mod,
     }));
@@ -241,7 +241,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    analyzer_strict_mod.addImport("glslpp", glslpp_mod);
+    analyzer_strict_mod.addImport("zioshade", zioshade_mod);
     const run_analyzer_strict = b.addRunArtifact(b.addTest(.{
         .root_module = analyzer_strict_mod,
     }));
@@ -255,7 +255,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    diag_test_mod.addImport("glslpp", glslpp_mod);
+    diag_test_mod.addImport("zioshade", zioshade_mod);
     const run_diag_tests = b.addRunArtifact(b.addTest(.{
         .root_module = diag_test_mod,
     }));
@@ -269,7 +269,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    c_abi_test_mod.addImport("glslpp", glslpp_mod);
+    c_abi_test_mod.addImport("zioshade", zioshade_mod);
     // The tests need access to the c_abi module by name so they can call
     // the exported wrappers directly.
     const c_abi_test_inner_mod = b.createModule(.{
@@ -277,7 +277,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    c_abi_test_inner_mod.addImport("glslpp", glslpp_mod);
+    c_abi_test_inner_mod.addImport("zioshade", zioshade_mod);
     c_abi_test_mod.addImport("c_abi", c_abi_test_inner_mod);
     const run_c_abi_tests = b.addRunArtifact(b.addTest(.{
         .name = "c-abi-tests",
@@ -293,7 +293,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    spec_test_mod.addImport("glslpp", glslpp_mod);
+    spec_test_mod.addImport("zioshade", zioshade_mod);
     const run_spec_tests = b.addRunArtifact(b.addTest(.{
         .root_module = spec_test_mod,
     }));
@@ -307,7 +307,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    wpack_test_mod.addImport("glslpp", glslpp_mod);
+    wpack_test_mod.addImport("zioshade", zioshade_mod);
     const run_wpack_tests = b.addRunArtifact(b.addTest(.{
         .root_module = wpack_test_mod,
     }));
@@ -324,7 +324,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    bitfield_test_mod.addImport("glslpp", glslpp_mod);
+    bitfield_test_mod.addImport("zioshade", zioshade_mod);
     const run_bitfield_tests = b.addRunArtifact(b.addTest(.{
         .root_module = bitfield_test_mod,
     }));
@@ -350,7 +350,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    dxc_test_mod.addImport("glslpp", glslpp_mod);
+    dxc_test_mod.addImport("zioshade", zioshade_mod);
     const dxc_exe = b.addExecutable(.{
         .name = "dxc-batch-test",
         .root_module = dxc_test_mod,
@@ -369,7 +369,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    glsl_test_mod.addImport("glslpp", glslpp_mod);
+    glsl_test_mod.addImport("zioshade", zioshade_mod);
     const run_glsl_tests = b.addRunArtifact(b.addTest(.{
         .name = "glsl-tests",
         .root_module = glsl_test_mod,
@@ -384,7 +384,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    msl_test_mod.addImport("glslpp", glslpp_mod);
+    msl_test_mod.addImport("zioshade", zioshade_mod);
     const run_msl_tests = b.addRunArtifact(b.addTest(.{
         .name = "msl-tests",
         .root_module = msl_test_mod,
@@ -399,7 +399,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    wgsl_test_mod.addImport("glslpp", glslpp_mod);
+    wgsl_test_mod.addImport("zioshade", zioshade_mod);
     const wgsl_test_filter = b.option([]const u8, "wgsl-filter", "Substring filter for test-wgsl test names");
     const run_wgsl_tests = b.addRunArtifact(b.addTest(.{
         .name = "wgsl-tests",
@@ -417,7 +417,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    reference_test_mod.addImport("glslpp", glslpp_mod);
+    reference_test_mod.addImport("zioshade", zioshade_mod);
     const run_reference_tests = b.addRunArtifact(b.addTest(.{
         .name = "reference-tests",
         .root_module = reference_test_mod,
@@ -425,16 +425,16 @@ pub fn build(b: *std.Build) void {
     reference_test_step.dependOn(&run_reference_tests.step);
     test_step.dependOn(&run_reference_tests.step);
 
-    // Cross-comparison tests: glslpp vs spirv-cross output
+    // Cross-comparison tests: zioshade vs spirv-cross output
     // Run with: zig build test-cross-compare
     // Requires glslangValidator and spirv-cross in PATH
-    const cross_compare_step = b.step("test-cross-compare", "Run cross-comparison tests (glslpp vs spirv-cross)");
+    const cross_compare_step = b.step("test-cross-compare", "Run cross-comparison tests (zioshade vs spirv-cross)");
     const cross_compare_mod = b.createModule(.{
         .root_source_file = b.path("tests/cross_compare_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
-    cross_compare_mod.addImport("glslpp", glslpp_mod);
+    cross_compare_mod.addImport("zioshade", zioshade_mod);
     const run_cross_compare = b.addRunArtifact(b.addTest(.{
         .name = "cross-compare-tests",
         .root_module = cross_compare_mod,
@@ -448,7 +448,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    opt_test_mod.addImport("glslpp", glslpp_mod);
+    opt_test_mod.addImport("zioshade", zioshade_mod);
     const run_opt_tests = b.addRunArtifact(b.addTest(.{
         .name = "optimizer-tests",
         .root_module = opt_test_mod,
@@ -463,7 +463,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    loopphi_test_mod.addImport("glslpp", glslpp_mod);
+    loopphi_test_mod.addImport("zioshade", zioshade_mod);
     const run_loopphi_tests = b.addRunArtifact(b.addTest(.{
         .name = "loop-phi-tests",
         .root_module = loopphi_test_mod,
@@ -479,7 +479,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    mesh_task_test_mod.addImport("glslpp", glslpp_mod);
+    mesh_task_test_mod.addImport("zioshade", zioshade_mod);
     const run_mesh_task_tests = b.addRunArtifact(b.addTest(.{
         .name = "mesh-task-tests",
         .root_module = mesh_task_test_mod,
@@ -493,7 +493,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    mesh_reg_test_mod.addImport("glslpp", glslpp_mod);
+    mesh_reg_test_mod.addImport("zioshade", zioshade_mod);
     const run_mesh_reg_tests = b.addRunArtifact(b.addTest(.{
         .name = "mesh-reg-tests",
         .root_module = mesh_reg_test_mod,
@@ -506,7 +506,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    mesh_codegen_test_mod.addImport("glslpp", glslpp_mod);
+    mesh_codegen_test_mod.addImport("zioshade", zioshade_mod);
     const run_mesh_codegen_tests = b.addRunArtifact(b.addTest(.{
         .name = "mesh-codegen-tests",
         .root_module = mesh_codegen_test_mod,
@@ -520,7 +520,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    hlsl_mesh_test_mod.addImport("glslpp", glslpp_mod);
+    hlsl_mesh_test_mod.addImport("zioshade", zioshade_mod);
     const run_hlsl_mesh_tests = b.addRunArtifact(b.addTest(.{
         .name = "hlsl-mesh-tests",
         .root_module = hlsl_mesh_test_mod,
@@ -536,7 +536,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    hlsl_vertex_test_mod.addImport("glslpp", glslpp_mod);
+    hlsl_vertex_test_mod.addImport("zioshade", zioshade_mod);
     const run_hlsl_vertex_tests = b.addRunArtifact(b.addTest(.{
         .name = "hlsl-vertex-tests",
         .root_module = hlsl_vertex_test_mod,
@@ -551,7 +551,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    msl_argbuf_test_mod.addImport("glslpp", glslpp_mod);
+    msl_argbuf_test_mod.addImport("zioshade", zioshade_mod);
     const run_msl_argbuf_tests = b.addRunArtifact(b.addTest(.{
         .name = "msl-argbuf-tests",
         .root_module = msl_argbuf_test_mod,
@@ -566,7 +566,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    binding_shift_test_mod.addImport("glslpp", glslpp_mod);
+    binding_shift_test_mod.addImport("zioshade", zioshade_mod);
     const run_binding_shift_tests = b.addRunArtifact(b.addTest(.{
         .name = "binding-shift-tests",
         .root_module = binding_shift_test_mod,
@@ -581,7 +581,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    buffer_ref_test_mod.addImport("glslpp", glslpp_mod);
+    buffer_ref_test_mod.addImport("zioshade", zioshade_mod);
     const run_buffer_ref_tests = b.addRunArtifact(b.addTest(.{
         .name = "buffer-ref-tests",
         .root_module = buffer_ref_test_mod,
@@ -596,7 +596,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    scalar_layout_test_mod.addImport("glslpp", glslpp_mod);
+    scalar_layout_test_mod.addImport("zioshade", zioshade_mod);
     const run_scalar_layout_tests = b.addRunArtifact(b.addTest(.{
         .name = "scalar-layout-tests",
         .root_module = scalar_layout_test_mod,
@@ -612,7 +612,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    std430_matrix_test_mod.addImport("glslpp", glslpp_mod);
+    std430_matrix_test_mod.addImport("zioshade", zioshade_mod);
     const run_std430_matrix_tests = b.addRunArtifact(b.addTest(.{
         .name = "std430-matrix-layout-tests",
         .root_module = std430_matrix_test_mod,
@@ -629,7 +629,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    std140_nested_test_mod.addImport("glslpp", glslpp_mod);
+    std140_nested_test_mod.addImport("zioshade", zioshade_mod);
     const run_std140_nested_tests = b.addRunArtifact(b.addTest(.{
         .name = "std140-nested-offset-tests",
         .root_module = std140_nested_test_mod,
@@ -645,7 +645,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    builtin_reg_test_mod.addImport("glslpp", glslpp_mod);
+    builtin_reg_test_mod.addImport("zioshade", zioshade_mod);
     const run_builtin_reg_tests = b.addRunArtifact(b.addTest(.{
         .name = "builtin-reg-tests",
         .root_module = builtin_reg_test_mod,
@@ -660,7 +660,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    ray_tracing_test_mod.addImport("glslpp", glslpp_mod);
+    ray_tracing_test_mod.addImport("zioshade", zioshade_mod);
     const run_ray_tracing_tests = b.addRunArtifact(b.addTest(.{
         .name = "ray-tracing-tests",
         .root_module = ray_tracing_test_mod,
@@ -676,7 +676,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    dump_shader_mod.addImport("glslpp", glslpp_mod);
+    dump_shader_mod.addImport("zioshade", zioshade_mod);
     const dump_shader_exe = b.addExecutable(.{
         .name = "dump-shader",
         .root_module = dump_shader_mod,
@@ -714,7 +714,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
     });
-    bench_mod.addImport("glslpp", glslpp_mod);
+    bench_mod.addImport("zioshade", zioshade_mod);
     const bench_exe = b.addExecutable(.{
         .name = "bench-quick",
         .root_module = bench_mod,
@@ -722,12 +722,12 @@ pub fn build(b: *std.Build) void {
     const run_bench = b.addRunArtifact(bench_exe);
     bench_step.dependOn(&run_bench.step);
 
-    // Library-vs-library benchmark: glslpp vs SPIRV-Cross, both in-process,
+    // Library-vs-library benchmark: zioshade vs SPIRV-Cross, both in-process,
     // cross-compiling the same SPIR-V. Requires the Vulkan SDK's spirv-cross
     // static C-API libs; the prebuilt .libs are MSVC, so this exe targets the
-    // msvc ABI (glslpp is pure Zig and recompiles cleanly for it).
+    // msvc ABI (zioshade is pure Zig and recompiles cleanly for it).
     //   zig build lib-bench [-Dvulkan-sdk=<path>] -- --iters 2000
-    const lib_bench_step = b.step("lib-bench", "Benchmark glslpp vs SPIRV-Cross (in-process, SPIR-V→GLSL/HLSL/MSL)");
+    const lib_bench_step = b.step("lib-bench", "Benchmark zioshade vs SPIRV-Cross (in-process, SPIR-V→GLSL/HLSL/MSL)");
     // Default the SDK root from $VULKAN_SDK when `-Dvulkan-sdk` isn't passed, so we
     // don't pin a machine-specific version path. Treat a set-but-empty value as
     // unset; fall back to a last-resort hardcoded path only if the env var is gone.
@@ -739,7 +739,7 @@ pub fn build(b: *std.Build) void {
     const spvc_inc = b.fmt("{s}/Include/spirv_cross", .{vk_sdk});
     const spvc_lib = b.fmt("{s}/Lib", .{vk_sdk});
     const msvc_target = b.resolveTargetQuery(.{ .os_tag = .windows, .abi = .msvc });
-    const glslpp_msvc = b.createModule(.{
+    const zioshade_msvc = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = msvc_target,
         .optimize = .ReleaseFast,
@@ -749,7 +749,7 @@ pub fn build(b: *std.Build) void {
         .target = msvc_target,
         .optimize = .ReleaseFast,
     });
-    lib_bench_mod.addImport("glslpp", glslpp_msvc);
+    lib_bench_mod.addImport("zioshade", zioshade_msvc);
     lib_bench_mod.addIncludePath(.{ .cwd_relative = spvc_inc });
     const lib_bench_exe = b.addExecutable(.{ .name = "lib-bench", .root_module = lib_bench_mod });
     lib_bench_exe.linkLibC();
@@ -769,7 +769,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    dump_spv_mod.addImport("glslpp", glslpp_mod);
+    dump_spv_mod.addImport("zioshade", zioshade_mod);
     const dump_spv_exe = b.addExecutable(.{
         .name = "dump-spv",
         .root_module = dump_spv_mod,
@@ -781,14 +781,14 @@ pub fn build(b: *std.Build) void {
     dump_spv_step.dependOn(&run_dump_spv.step);
 
     // Tools migrated to Zig 0.15.2 + wired so they stay buildable (regression
-    // guard): cross-validate (glslpp vs SPIRV-Cross dumps) and bench-wintty.
+    // guard): cross-validate (zioshade vs SPIRV-Cross dumps) and bench-wintty.
     inline for (.{
-        .{ "cross-validate", "tools/cross_validate.zig", "Dump glslpp HLSL/GLSL/MSL/SPIR-V for a shader" },
+        .{ "cross-validate", "tools/cross_validate.zig", "Dump zioshade HLSL/GLSL/MSL/SPIR-V for a shader" },
         .{ "bench-wintty", "tools/bench_wintty.zig", "Benchmark the wintty CRT shader (50 iters)" },
     }) |t| {
         const step = b.step(t[0], t[2]);
         const mod = b.createModule(.{ .root_source_file = b.path(t[1]), .target = target, .optimize = optimize });
-        mod.addImport("glslpp", glslpp_mod);
+        mod.addImport("zioshade", zioshade_mod);
         const exe = b.addExecutable(.{ .name = t[0], .root_module = mod });
         const run = b.addRunArtifact(exe);
         if (b.args) |a| for (a) |arg| run.addArg(arg);
@@ -832,13 +832,13 @@ pub fn build(b: *std.Build) void {
     validate_all_step.dependOn(&glsl_val_focus.step);
 
     // Tool: SPIR-V to GLSL — run with: zig build spv-to-glsl -- <input.spv> <output.glsl>
-    const spv_to_glsl_step = b.step("spv-to-glsl", "Convert SPIR-V to GLSL via glslpp");
+    const spv_to_glsl_step = b.step("spv-to-glsl", "Convert SPIR-V to GLSL via zioshade");
     const spv_to_glsl_mod = b.createModule(.{
         .root_source_file = b.path("tools/spv_to_glsl.zig"),
         .target = target,
         .optimize = optimize,
     });
-    spv_to_glsl_mod.addImport("glslpp", glslpp_mod);
+    spv_to_glsl_mod.addImport("zioshade", zioshade_mod);
     const spv_to_glsl_exe = b.addExecutable(.{
         .name = "spv-to-glsl",
         .root_module = spv_to_glsl_mod,
@@ -850,13 +850,13 @@ pub fn build(b: *std.Build) void {
     spv_to_glsl_step.dependOn(&run_spv_to_glsl.step);
 
     // Tool: SPIR-V to HLSL — run with: zig build spv-to-hlsl -- <input.spv> <output.hlsl>
-    const spv_to_hlsl_step = b.step("spv-to-hlsl", "Convert SPIR-V to HLSL via glslpp");
+    const spv_to_hlsl_step = b.step("spv-to-hlsl", "Convert SPIR-V to HLSL via zioshade");
     const spv_to_hlsl_mod = b.createModule(.{
         .root_source_file = b.path("tools/spv_to_hlsl.zig"),
         .target = target,
         .optimize = optimize,
     });
-    spv_to_hlsl_mod.addImport("glslpp", glslpp_mod);
+    spv_to_hlsl_mod.addImport("zioshade", zioshade_mod);
     const spv_to_hlsl_exe = b.addExecutable(.{
         .name = "spv-to-hlsl",
         .root_module = spv_to_hlsl_mod,
@@ -867,14 +867,14 @@ pub fn build(b: *std.Build) void {
     }
     spv_to_hlsl_step.dependOn(&run_spv_to_hlsl.step);
 
-    // Tool: SPIR-V dump — compile GLSL through glslpp and dump SPIR-V binary
-    const spv_dump_step = b.step("spv-dump", "Compile GLSL to SPIR-V via glslpp and dump binary");
+    // Tool: SPIR-V dump — compile GLSL through zioshade and dump SPIR-V binary
+    const spv_dump_step = b.step("spv-dump", "Compile GLSL to SPIR-V via zioshade and dump binary");
     const spv_dump_mod = b.createModule(.{
         .root_source_file = b.path("tools/spv_dump.zig"),
         .target = target,
         .optimize = optimize,
     });
-    spv_dump_mod.addImport("glslpp", glslpp_mod);
+    spv_dump_mod.addImport("zioshade", zioshade_mod);
     const spv_dump_exe = b.addExecutable(.{
         .name = "spv-dump",
         .root_module = spv_dump_mod,
@@ -892,7 +892,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    spv_noopt_mod.addImport("glslpp", glslpp_mod);
+    spv_noopt_mod.addImport("zioshade", zioshade_mod);
     const spv_noopt_exe = b.addExecutable(.{
         .name = "spv-noopt",
         .root_module = spv_noopt_mod,
@@ -903,14 +903,14 @@ pub fn build(b: *std.Build) void {
     }
     spv_noopt_step.dependOn(&run_spv_noopt.step);
 
-    // Tool: Fuzz test — generate random GLSL and validate through glslpp
+    // Tool: Fuzz test — generate random GLSL and validate through zioshade
     const fuzz_step = b.step("fuzz", "Run structured GLSL fuzzer");
     const fuzz_mod = b.createModule(.{
         .root_source_file = b.path("tools/fuzz_test.zig"),
         .target = target,
         .optimize = optimize,
     });
-    fuzz_mod.addImport("glslpp", glslpp_mod);
+    fuzz_mod.addImport("zioshade", zioshade_mod);
     const fuzz_exe = b.addExecutable(.{
         .name = "fuzz-test",
         .root_module = fuzz_mod,
@@ -928,7 +928,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    realworld_mod.addImport("glslpp", glslpp_mod);
+    realworld_mod.addImport("zioshade", zioshade_mod);
     const realworld_exe = b.addExecutable(.{
         .name = "realworld-tests",
         .root_module = realworld_mod,
@@ -939,15 +939,15 @@ pub fn build(b: *std.Build) void {
     }
     realworld_step.dependOn(&run_realworld.step);
 
-    // Head-to-head benchmark — runs glslpp vs glslang+spirv-cross subprocess.
+    // Head-to-head benchmark — runs zioshade vs glslang+spirv-cross subprocess.
     // Build/run with: zig build bench-compare
-    const bench_compare_step = b.step("bench-compare", "Run glslpp vs glslang+spirv-cross head-to-head benchmark");
+    const bench_compare_step = b.step("bench-compare", "Run zioshade vs glslang+spirv-cross head-to-head benchmark");
     const bench_compare_mod = b.createModule(.{
         .root_source_file = b.path("tools/bench_compare.zig"),
         .target = target,
         .optimize = .ReleaseFast,
     });
-    bench_compare_mod.addImport("glslpp", glslpp_mod);
+    bench_compare_mod.addImport("zioshade", zioshade_mod);
     const bench_compare_exe = b.addExecutable(.{
         .name = "bench-compare",
         .root_module = bench_compare_mod,
@@ -959,7 +959,7 @@ pub fn build(b: *std.Build) void {
     bench_compare_step.dependOn(&run_bench_compare.step);
 
     // Examples — build with: zig build examples
-    // Each example is a real installable executable that imports the glslpp
+    // Each example is a real installable executable that imports the zioshade
     // module so it cannot drift out of sync with the library API.
     const examples_step = b.step("examples", "Build the example programs in examples/");
     const example_names = .{ "glsl_to_hlsl", "reflect_uniforms" };
@@ -969,7 +969,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        ex_mod.addImport("glslpp", glslpp_mod);
+        ex_mod.addImport("zioshade", zioshade_mod);
         const ex_exe = b.addExecutable(.{
             .name = b.fmt("example-{s}", .{name}),
             .root_module = ex_mod,

@@ -16,7 +16,7 @@ test "T24.2c: debug HLSL loop output" {
     // Check if SPIR-V has LoopMerge
     var has_loop = false;
     for (spirv) |word| {
-        if ((word & 0xFFFF) == @intFromEnum(glslpp.spirv.Op.LoopMerge)) {
+        if ((word & 0xFFFF) == @intFromEnum(zioshade.spirv.Op.LoopMerge)) {
             has_loop = true;
         }
     }
