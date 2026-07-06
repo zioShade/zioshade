@@ -198,6 +198,36 @@ fn nagaValidateOrSkip(wgsl: []const u8, label: []const u8) !void {
     return error.NagaValidationFailed;
 }
 
+// Validate SPIR-V with spirv-val, skipping when the binary is not on PATH
+// (mirrors nagaValidateOrSkip). glslpp.validateSPIRV returns false when
+// spirv-val is missing, so asserting on it directly fails spuriously on
+// machines without the Vulkan SDK and `zig build test` stops being hermetic.
+fn spirvValValidateOrSkip(spirv: []const u32, label: []const u8) !void {
+    const probe = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ "spirv-val", "--version" },
+    }) catch return error.SkipZigTest;
+    alloc.free(probe.stdout);
+    alloc.free(probe.stderr);
+    if (!(probe.term == .Exited and probe.term.Exited == 0)) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "out.spv", .data = std.mem.sliceAsBytes(spirv) });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp.dir.realpath("out.spv", &path_buf);
+
+    const result = try std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &.{ "spirv-val", tmp_path },
+    });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if (result.term == .Exited and result.term.Exited == 0) return;
+    std.debug.print("spirv-val REJECTED SPIR-V for [{s}]:\n{s}\n{s}\n", .{ label, result.stdout, result.stderr });
+    return error.SpirvValValidationFailed;
+}
+
 /// Compile GLSL → SPIR-V → WGSL via glslpp's own frontend (mirrors the MSL/HLSL
 /// test helpers). Caller frees the result.
 fn compileToWgsl(source: [:0]const u8) ![]const u8 {
@@ -4250,7 +4280,7 @@ test "wgsl: loop-as-first-statement emits valid SPIR-V (entry not a branch targe
     ;
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    try std.testing.expect(try glslpp.validateSPIRV(alloc, spirv));
+    try spirvValValidateOrSkip(spirv, "loop-as-first-statement");
 }
 
 // An ESCAPING condition variable (read after the loop) with a mid-body `break`
@@ -4342,7 +4372,7 @@ test "wgsl: mutated in-parameter is copied to a local at entry (increment preser
     ;
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expect(try glslpp.validateSPIRV(alloc, spirv));
+    try spirvValValidateOrSkip(spirv, "mutable-in-param");
     const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The mutated param must be promoted to a mutable local initialised from the
@@ -4377,7 +4407,7 @@ test "wgsl: read-only param shadowed by a mutated inner local is not promoted" {
     ;
     const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expect(try glslpp.validateSPIRV(alloc, spirv));
+    try spirvValValidateOrSkip(spirv, "shadowed-readonly-param");
     const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "shadowed-readonly-param");
