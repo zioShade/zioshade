@@ -722,7 +722,7 @@ pub fn spirvToHLSL(
         while (oit.next()) |entry| entry.value_ptr.deinit(aa);
         out_param_info.deinit();
     }
-    detectOutParams(&module, entry_id, &out_param_info, aa);
+    common.detectOutParams(module.instructions, module.id_defs, entry_id, &out_param_info, aa);
 
     // Emit specialization constants as HLSL [[vk::constant_id(N)]] const declarations.
     // DXC's SPIR-V code path turns these into real OpSpecConstants; for DXIL (pure
@@ -1557,69 +1557,6 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
 // Function emission
 // ---------------------------------------------------------------------------
 
-/// Detect out-parameters by scanning function calls in the entry function.
-/// If a call passes an Output storage class variable as an argument,
-/// that parameter position is recorded as out for the called function.
-fn detectOutParams(
-    module: *const ParsedModule,
-    entry_id: u32,
-    out_param_info: *std.AutoHashMap(u32, std.ArrayList(usize)),
-    alloc: std.mem.Allocator,
-) void {
-    const func_idx = if (entry_id < module.id_defs.len) module.id_defs[entry_id] orelse return else return;
-
-    // Collect all Output storage class variable IDs
-    var output_vars = std.AutoHashMap(u32, void).init(alloc);
-    defer output_vars.deinit();
-    for (module.instructions) |inst| {
-        if (inst.op == .Variable and inst.words.len >= 4) {
-            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-            if (sc == .Output) {
-                output_vars.put(inst.words[2], {}) catch {};
-            }
-        }
-    }
-
-    // Also check loads from Output variables — these get aliased to the var name
-    // In our backend, loads from Output vars are aliased to the var name directly.
-    // So we also need to check if a Load result was aliased from an Output var.
-    // Build a map: load_result_id → was_from_output
-    var load_from_output = std.AutoHashMap(u32, void).init(alloc);
-    defer load_from_output.deinit();
-    {
-        var scan_idx: usize = 0;
-        while (scan_idx < module.instructions.len) : (scan_idx += 1) {
-            const inst = module.instructions[scan_idx];
-            if (inst.op == .Load and inst.words.len >= 4) {
-                const ptr_id = inst.words[3];
-                if (output_vars.contains(ptr_id)) {
-                    load_from_output.put(inst.words[2], {}) catch {};
-                }
-            }
-        }
-    }
-
-    // Scan entry function body for FunctionCall instructions
-    var idx = func_idx + 1;
-    while (idx < module.instructions.len) : (idx += 1) {
-        const inst = module.instructions[idx];
-        if (inst.op == .FunctionEnd) break;
-        if (inst.op != .FunctionCall or inst.words.len < 4) continue;
-
-        const called_func_id = inst.words[3];
-        // For each argument, check if it's an Output variable or a load of one
-        for (inst.words[4..], 0..) |arg_id, param_idx| {
-            if (output_vars.contains(arg_id) or load_from_output.contains(arg_id)) {
-                const gop = out_param_info.getOrPut(called_func_id) catch continue;
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = std.ArrayList(usize).initCapacity(alloc, 4) catch continue;
-                }
-                gop.value_ptr.append(alloc, param_idx) catch {};
-            }
-        }
-    }
-}
-
 /// Returns the HLSL semantic to use for `gl_Position` in the vertex-shader
 /// output struct: `POSITION` for Shader Model < 6.0 (HLSL 5.x / D3D11
 /// down-compile path) and `SV_Position` for SM 6.0+. (M5.1)
@@ -1715,91 +1652,16 @@ fn emitFunction(
         }
     }
 
-    // Detect out-parameter pattern: Variable + Store(param_id, value)
-    // When a function parameter is immediately stored into a local variable,
-    // it indicates an out/inout parameter from the GLSL source.
-    // We map the param name to the local variable and add 'out' qualifier.
-    var out_param_var_ids = std.AutoHashMap(u32, u32).init(alloc); // param_id → var_id
-    var out_param_skip_vars = std.AutoHashMap(u32, void).init(alloc); // var_id to skip in body
-    defer out_param_var_ids.deinit();
-    defer out_param_skip_vars.deinit();
-    {
-        var scan_idx = func_idx + 1;
-        while (scan_idx < module.instructions.len) : (scan_idx += 1) {
-            const scan_inst = module.instructions[scan_idx];
-            if (scan_inst.op == .FunctionEnd) break;
-            if (scan_inst.op == .Label) continue;
-            if (scan_inst.op == .FunctionParameter) continue;
-            // Look for Variable (Function storage class) followed by Store
-            if (scan_inst.op == .Variable and scan_inst.words.len >= 4) {
-                const sc: spirv.StorageClass = @enumFromInt(scan_inst.words[3]);
-                if (sc == .Function) {
-                    const var_id = scan_inst.words[2];
-                    // Check if next instruction is Store to this var from a param
-                    if (scan_idx + 1 < module.instructions.len) {
-                        const next = module.instructions[scan_idx + 1];
-                        if (next.op == .Store and next.words.len >= 3 and next.words[1] == var_id) {
-                            const stored_val = next.words[2];
-                            // Check if stored value is one of the params
-                            for (param_ids.items) |pid| {
-                                if (pid == stored_val) {
-                                    out_param_var_ids.put(pid, var_id) catch {};
-                                    out_param_skip_vars.put(var_id, {}) catch {};
-                                    // Alias: the param name should resolve to the var
-                                    const pname = names.get(pid) orelse "p";
-                                    const palias = alloc.dupe(u8, pname) catch continue;
-                                    if (names.fetchPut(var_id, palias) catch null) |old| alloc.free(old.value);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if (scan_inst.op != .Variable and scan_inst.op != .Store) break;
-        }
-    }
-
-    // Phase 2: For params detected as out via call-site analysis (out_param_info),
-    // find the first Function-scoped Variable with matching type and alias it.
-    // This handles the case where DCE removed the initial Variable+Store(param) copy.
-    if (out_param_info.get(func_id)) |out_indices| {
-        for (out_indices.items) |param_idx| {
-            if (param_idx >= param_ids.items.len) continue;
-            const pid = param_ids.items[param_idx];
-            if (out_param_var_ids.contains(pid)) continue; // already handled above
-
-            const p_inst = getDef(module, pid) orelse continue;
-            const param_type_id = p_inst.words[1]; // type of the FunctionParameter
-
-            // Find the first Function-scoped Variable whose type matches
-            var scan_idx2 = func_idx + 1;
-            while (scan_idx2 < module.instructions.len) : (scan_idx2 += 1) {
-                const si = module.instructions[scan_idx2];
-                if (si.op == .FunctionEnd) break;
-                if (si.op != .Variable or si.words.len < 4) continue;
-                const sc: spirv.StorageClass = @enumFromInt(si.words[3]);
-                if (sc != .Function) continue;
-
-                const var_id = si.words[2];
-                // The Variable's type is a pointer; check if pointee matches param type
-                const var_type_inst = getDef(module, si.words[1]);
-                if (var_type_inst) |vti| {
-                    if (vti.op == .TypePointer and vti.words.len > 3) {
-                        if (vti.words[3] == param_type_id) {
-                            // Match! Alias this variable to the param name
-                            out_param_var_ids.put(pid, var_id) catch {};
-                            out_param_skip_vars.put(var_id, {}) catch {};
-                            const pname = names.get(pid) orelse "p";
-                            const palias = alloc.dupe(u8, pname) catch continue;
-                            if (names.fetchPut(var_id, palias) catch null) |old| alloc.free(old.value);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // #414: out/inout params are recognized by their SPIR-V type ONLY (a
+    // pointer FunctionParameter, the frontend's GLSL out/inout lowering). The
+    // former `Variable + Store(param)` prologue heuristic misread GLSL's
+    // by-value copy of an `in` param into a mutable local (`float d = p;`) as
+    // an out param: the param was emitted as `out` (so the argument value never
+    // arrived), the local was aliased to the param name (a redefinition dxc
+    // rejects), and the entry copy degenerated into a self-assign of an
+    // undefined value. A by-value param can never write back to the caller, so
+    // that promotion (and its call-site "first matching Variable" alias twin)
+    // was silent-wrong by construction; both are gone.
 
     // Emit signature
     const is_compute = is_entry and module.execution_model == .GLCompute;
@@ -2193,21 +2055,20 @@ fn emitFunction(
         const p_name = names.get(pid) orelse "p";
 
         // Check if parameter is a pointer type (out/inout param)
-        // Also check if parameter was detected as out via the Variable+Store pattern
         const param_type_inst = getDef(module, p_inst.words[1]);
         var is_out_param = false;
+        var is_pointer_param = false;
         var inner_type_id = p_inst.words[1];
         if (param_type_inst) |pti| {
             if (pti.op == .TypePointer and pti.words.len > 3) {
                 inner_type_id = pti.words[3]; // pointee type
+                is_pointer_param = true;
             }
         }
-        if (out_param_var_ids.contains(pid)) {
-            is_out_param = true;
-            inner_type_id = p_inst.words[1];
-        }
-        // Check if this param was detected as out via call-site analysis
-        if (!is_out_param) {
+        // Check if this param was detected as out via call-site analysis.
+        // #414: only a POINTER param can be an out param; a by-value param is a
+        // read-only copy and must keep its plain value signature.
+        if (is_pointer_param) {
             if (out_param_info.get(func_id)) |out_indices| {
                 for (out_indices.items) |oidx| {
                     if (oidx == i) {
