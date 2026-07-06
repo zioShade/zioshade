@@ -230,6 +230,83 @@ pub fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
     return module.instructions[idx];
 }
 
+/// #414: whether a function parameter can carry a result back to its caller.
+/// In logical SPIR-V that is possible ONLY for a pointer parameter (the GLSL
+/// out/inout lowering, as the frontend emits it). A by-value parameter is a
+/// read-only copy: promoting it to out / inout / thread& in a text backend is
+/// always wrong. In particular, a `Variable + Store(param)` function prologue
+/// is NOT evidence of an out param; it is just GLSL's by-value copy of an `in`
+/// param into a mutable local (`float d = p;`).
+pub fn paramIsPointer(instructions: anytype, id_defs: anytype, param_id: u32) bool {
+    const p = localGetDef(instructions, id_defs, param_id) orelse return false;
+    if (p.op != .FunctionParameter or p.words.len < 3) return false;
+    const t = localGetDef(instructions, id_defs, p.words[1]) orelse return false;
+    return t.op == .TypePointer;
+}
+
+/// True if `func_id`'s parameter at position `param_idx` is a pointer param.
+pub fn functionParamIsPointer(instructions: anytype, id_defs: anytype, func_id: u32, param_idx: usize) bool {
+    const f = localGetDef(instructions, id_defs, func_id) orelse return false;
+    if (f.op != .Function) return false;
+    const fidx = if (func_id < id_defs.len) id_defs[func_id] orelse return false else return false;
+    var i: usize = fidx + 1;
+    var pi: usize = 0;
+    while (i < instructions.len) : (i += 1) {
+        const inst = instructions[i];
+        if (inst.op == .FunctionParameter and inst.words.len > 2) {
+            if (pi == param_idx) return paramIsPointer(instructions, id_defs, inst.words[2]);
+            pi += 1;
+        } else if (inst.op != .Label) break;
+    }
+    return false;
+}
+
+/// Detect out-parameters by scanning function calls in the entry function:
+/// records (called function id -> param positions) for every call argument
+/// that is a stage Output variable, i.e. the frontend passed the out/inout
+/// destination by pointer (`mainImage(_fragColor, ...)`). #414: only positions
+/// whose callee parameter is itself a POINTER are recorded; a by-value
+/// parameter is a read-only copy and can never write back to the caller, so
+/// marking it `out` corrupts the call (the argument value never arrives).
+/// Shared by the HLSL, GLSL and MSL backends (previously triplicated).
+pub fn detectOutParams(
+    instructions: anytype,
+    id_defs: anytype,
+    entry_id: u32,
+    out_param_info: *std.AutoHashMap(u32, std.ArrayList(usize)),
+    alloc: std.mem.Allocator,
+) void {
+    const func_idx = if (entry_id < id_defs.len) id_defs[entry_id] orelse return else return;
+
+    // Collect all Output storage class variable IDs.
+    var output_vars = std.AutoHashMap(u32, void).init(alloc);
+    defer output_vars.deinit();
+    for (instructions) |inst| {
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Output) output_vars.put(inst.words[2], {}) catch {};
+        }
+    }
+
+    // Scan entry function body for FunctionCall instructions.
+    var idx = func_idx + 1;
+    while (idx < instructions.len) : (idx += 1) {
+        const inst = instructions[idx];
+        if (inst.op == .FunctionEnd) break;
+        if (inst.op != .FunctionCall or inst.words.len < 4) continue;
+        const called_func_id = inst.words[3];
+        for (inst.words[4..], 0..) |arg_id, param_idx| {
+            if (!output_vars.contains(arg_id)) continue;
+            if (!functionParamIsPointer(instructions, id_defs, called_func_id, param_idx)) continue;
+            const gop = out_param_info.getOrPut(called_func_id) catch continue;
+            if (!gop.found_existing) {
+                gop.value_ptr.* = std.ArrayList(usize).initCapacity(alloc, 4) catch continue;
+            }
+            gop.value_ptr.append(alloc, param_idx) catch {};
+        }
+    }
+}
+
 /// True if the module declares an opaque (sampler / texture / sampled-image) array
 /// resource — a GLSL `sampler2D tex[N]` / `tex[]` descriptor array. `include_runtime`
 /// also matches the UNBOUNDED form (`OpTypeRuntimeArray`, from `tex[]` /

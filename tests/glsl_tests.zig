@@ -2413,3 +2413,64 @@ test "glsl: textureProjGrad lowers to native textureProjGrad (#170)" {
     try assertContains(glsl, "textureProjGrad(");
     try assertNotContains(glsl, "textureProjLod(");
 }
+
+// #414: an `in` parameter whose value seeds a written-then-read local (the
+// classic `float d = p; loop { d = ... }` shape) was misdetected as an out
+// param: the Variable+Store(param) prologue is just GLSL's by-value copy of
+// the param INTO the local, not a write-back. The param was emitted as `out`
+// (argument value never arrives), the local was aliased to the param name
+// (redeclaration = hard compile error on glslang), and the entry copy
+// degenerated to a self-assign of an undefined value.
+test "glsl: in param seeding a written-then-read local stays a value param (#414)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float t; } ub;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float map(float p) {
+        \\    float d = p;
+        \\    for (int m = 0; m < 4; m++) {
+        \\        d = max(d, sin(d * float(m)));
+        \\    }
+        \\    return d;
+        \\}
+        \\void main() { fragColor = vec4(map(ub.t)); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "float map(float ");
+    try assertNotContains(glsl, "map(out ");
+    const open = (std.mem.indexOf(u8, glsl, "float map(float ") orelse return error.TestExpectedFind) + "float map(float ".len;
+    const close = std.mem.indexOfScalarPos(u8, glsl, open, ')') orelse return error.TestExpectedFind;
+    const param = std.mem.trim(u8, glsl[open..close], " ");
+    const redecl = try std.fmt.allocPrint(alloc, "float {s};", .{param});
+    defer alloc.free(redecl);
+    try assertNotContains(glsl, redecl);
+    const selfassign = try std.fmt.allocPrint(alloc, "{s} = {s};", .{ param, param });
+    defer alloc.free(selfassign);
+    try assertNotContains(glsl, selfassign);
+    const copy = try std.fmt.allocPrint(alloc, " = {s};", .{param});
+    defer alloc.free(copy);
+    try assertContains(glsl, copy);
+}
+
+// #414 scope guard (mirrors the WGSL negative test): a read-only param whose
+// name is shadowed by a mutated inner-block local must not be promoted to an
+// out param either: the entry copy `float r = p;` is the exact
+// Variable+Store(param) shape the misdetection keyed on.
+test "glsl: read-only param shadowed by a mutated inner local is not promoted (#414)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float t; } ub;
+        \\layout(location = 0) out vec4 o;
+        \\float f(float p) {
+        \\    float r = p;
+        \\    for (int i = 0; i < 3; i++) { float p = ub.t; p += float(i); r += p; }
+        \\    return r + p;
+        \\}
+        \\void main() { o = vec4(f(ub.t)); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "float f(float ");
+    try assertNotContains(glsl, "f(out ");
+}
