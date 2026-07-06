@@ -26,7 +26,7 @@ Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated t
 
 | Metric | Value |
 |---|---|
-| `spirv-val` conformance | **2076 PASS, 0 spirv-val failures** (`zig build conformance`); 14 known-unsupported constructs honest-error as XFAIL (documented rejections, not failures — `tests/known-conformance-fails.txt`), 8 skipped, 2098 total — see [docs/STATUS.md](docs/STATUS.md) (generated source of truth) |
+| `spirv-val` conformance | **2076 PASS, 0 spirv-val failures** (`zig build conformance`); 14 known-unsupported constructs honest-error as XFAIL (documented rejections, not failures — see `KNOWN_UNSUPPORTED` in `tests/runner.zig`), 8 skipped, 2098 total — see [docs/STATUS.md](docs/STATUS.md) (generated source of truth) |
 | External DXC SPIR-V fixtures | **47 / 51** compile to DXIL (4 limited by DXC's SM 6.1+ / 2 KB structured-buffer cap) |
 | WGSL stress tests | **470 / 470** |
 | Fuzzer iterations | Structured-GLSL fuzzer clean over **1,000,000** iterations — reproduce with `just fuzz-million` (ad-hoc runs: `zig build fuzz -- --count N`) |

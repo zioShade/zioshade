@@ -52,3 +52,13 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+## Shadertoy content (NOT included)
+
+No content from shadertoy.com is included in this repository. The fixtures in
+`tests/shadertoy_style/` are original works written for glslpp that only mimic
+the Shadertoy uniform conventions (`iTime`, `iResolution`); they are covered by
+the repository's MIT/Apache-2.0 dual license. The `fetch_shadertoy.py` helper
+can download real Shadertoy shaders for local testing, but its output directory
+(`shadertoy_test_cache/`) is gitignored: Shadertoy shaders default to
+CC BY-NC-SA 3.0 (non-commercial) and must never be committed here.
