@@ -25,6 +25,16 @@ const LoopInfo = struct { merge: u32, cont: u32 };
 /// at the back-edge, else the counter freezes at its init value (#gaps: phi-loop).
 const PhiInfo = struct { result_id: u32, type_id: u32, init_id: u32, update_id: u32 };
 
+// #413: loop-phi update temps defined INSIDE the loop have their declaration
+// hoisted above the loop header (declare-then-assign split) — the top-of-loop
+// carry copy (#237) otherwise reads them before their declaration and out of
+// scope. Threadlocal so emitWhileLoopHLSL/emitBlock/emitInstruction see the
+// state without threading two more params through every call site (same
+// pattern as the GLSL/MSL backends' g_loop_phis). See spirv_cross_common.zig.
+threadlocal var g_loop_hoists: ?*const std.AutoHashMap(usize, std.ArrayList(common.HoistedPhiSrc)) = null;
+threadlocal var g_hoisted_ids: ?*const std.AutoHashMap(u32, void) = null;
+threadlocal var g_hoist_stripping: bool = false;
+
 /// HLSL type name for a loop-phi variable declaration. Returns STATIC strings
 /// only (no allocation, so no free management) for the scalar/vector types loop
 /// phis realistically carry. Falls back to "int" for exotic (matrix/struct) phis.
@@ -2530,6 +2540,16 @@ fn emitBody(
     defer phi_hdr.deinit();
     var deferred_hdr = std.AutoHashMap(usize, void).init(alloc); // header cond instr idx -> skip & replay
     defer deferred_hdr.deinit();
+    var loop_hoists = std.AutoHashMap(usize, std.ArrayList(common.HoistedPhiSrc)).init(alloc);
+    var hoisted_ids = std.AutoHashMap(u32, void).init(alloc);
+    defer {
+        var lhit = loop_hoists.valueIterator();
+        while (lhit.next()) |list| list.deinit(alloc);
+        loop_hoists.deinit();
+        hoisted_ids.deinit();
+        g_loop_hoists = null;
+        g_hoisted_ids = null;
+    }
     {
         var li = func_idx + 1;
         while (li < module.instructions.len) : (li += 1) {
@@ -2573,6 +2593,37 @@ fn emitBody(
         }
     }
 
+    // #413 second pass (after loop_phis/deferred_hdr are complete): find phi
+    // update values whose defining instruction lives INSIDE the loop — they
+    // are declared after the top-of-loop carry copy that reads them, and in
+    // the while-body scope, so their declaration must be hoisted above the
+    // loop. Scanning loops in instruction order puts a value shared by nested
+    // loops with the OUTERMOST loop, whose scope covers the inner one.
+    {
+        var li = func_idx + 1;
+        while (li < module.instructions.len) : (li += 1) {
+            const minst = module.instructions[li];
+            if (minst.op == .FunctionEnd) break;
+            if (minst.op != .LoopMerge or minst.words.len < 3) continue;
+            const plist = loop_phis.get(li) orelse continue;
+            var hlist = std.ArrayList(common.HoistedPhiSrc).initCapacity(alloc, plist.items.len) catch continue;
+            for (plist.items) |pi| {
+                if (pi.update_id == pi.result_id) continue; // self-carry, no copy emitted
+                if (hoisted_ids.contains(pi.update_id)) continue;
+                if (!common.loopPhiUpdateNeedsHoist(module.instructions, module.id_defs, &label_map, &deferred_hdr, li, pi.update_id)) continue;
+                hoisted_ids.put(pi.update_id, {}) catch continue;
+                hlist.append(alloc, .{ .id = pi.update_id, .type_id = pi.type_id }) catch {};
+            }
+            if (hlist.items.len > 0) {
+                loop_hoists.put(li, hlist) catch hlist.deinit(alloc);
+            } else {
+                hlist.deinit(alloc);
+            }
+        }
+    }
+    g_loop_hoists = &loop_hoists;
+    g_hoisted_ids = &hoisted_ids;
+
     // Structured emission
     idx = func_idx + 1;
     while (idx < module.instructions.len) : (idx += 1) {
@@ -2596,7 +2647,15 @@ fn emitBody(
                         }
                         const vname = names.get(pi.result_id) orelse "vphi";
                         const init_name = names.get(pi.init_id) orelse "0";
-                        try w.print("    {s} {s} = {s};\n", .{ tyname, vname, init_name });
+                        // #413: an inner loop's phi variable can be an OUTER
+                        // loop's carry source; its declaration was hoisted
+                        // above the outer loop, so only assign here.
+                        const hoisted = if (g_hoisted_ids) |h| h.contains(pi.result_id) else false;
+                        if (hoisted) {
+                            try w.print("    {s} = {s};\n", .{ vname, init_name });
+                        } else {
+                            try w.print("    {s} {s} = {s};\n", .{ tyname, vname, init_name });
+                        }
                     }
                 }
                 continue;
@@ -2789,6 +2848,25 @@ fn emitWhileLoopHLSL(
     is_vertex: bool,
     output_var_id: ?u32,
 ) !usize {
+    // #413: declare loop-carried phi update temps ABOVE the loop. The top-of-
+    // loop carry copy (#237) reads them on every iteration after the first;
+    // without the hoist the declaration sits later in the body (and in the
+    // while-body scope), so the copy read an undeclared identifier. Emitted
+    // before the early-out paths below because the defining instructions
+    // strip their declaration unconditionally once an id is in the hoist set.
+    if (g_loop_hoists) |lh| {
+        if (lh.get(loop_idx)) |hlist| {
+            for (hlist.items) |h| {
+                if (names.get(h.id) == null) {
+                    const nm = std.fmt.allocPrint(alloc, "v{d}", .{h.id}) catch "vhoist";
+                    if (names.fetchPut(h.id, nm) catch null) |old| alloc.free(old.value);
+                }
+                const tyname = try hlslType(module, h.type_id, names, alloc);
+                try w.print("    {s} {s};\n", .{ tyname, names.get(h.id) orelse "vhoist" });
+            }
+        }
+    }
+
     // Three patterns after LoopMerge:
     // Pattern A: LoopMerge; Branch cond_label; ...; BranchConditional cond, body, merge
     // Pattern B: LoopMerge; BranchConditional cond, body, merge (merged condition)
@@ -3082,7 +3160,13 @@ fn emitWhileLoopHLSL(
                             }
                             const vname = names.get(pi.result_id) orelse "vphi";
                             const init_name = names.get(pi.init_id) orelse "0";
-                            try w.print("        {s} {s} = {s};\n", .{ tyname, vname, init_name });
+                            // #413: hoisted above the outer loop — assign only.
+                            const hoisted = if (g_hoisted_ids) |h| h.contains(pi.result_id) else false;
+                            if (hoisted) {
+                                try w.print("        {s} = {s};\n", .{ vname, init_name });
+                            } else {
+                                try w.print("        {s} {s} = {s};\n", .{ tyname, vname, init_name });
+                            }
                         }
                     }
                     continue;
@@ -3280,6 +3364,25 @@ fn emitInstruction(
     is_vertex: bool,
     output_var_id: ?u32,
 ) !void {
+    // #413: this instruction defines a loop-carried phi update temp whose
+    // declaration was hoisted above the loop — re-render it with the type
+    // stripped so it assigns the hoisted variable instead of redeclaring it
+    // in an inner scope.
+    if (!g_hoist_stripping) {
+        if (g_hoisted_ids) |h| {
+            if (resultIdFromOp(inst.op, inst.words)) |rid| {
+                if (h.contains(rid)) {
+                    g_hoist_stripping = true;
+                    defer g_hoist_stripping = false;
+                    var hbuf: std.ArrayList(u8) = .empty;
+                    defer hbuf.deinit(alloc);
+                    try emitInstruction(module, names, decorations, inst, hbuf.writer(alloc), alloc, is_fragment, is_vertex, output_var_id);
+                    try common.writeHoistedAssign(w, hbuf.items, names.get(rid) orelse "");
+                    return;
+                }
+            }
+        }
+    }
     switch (inst.op) {
         .Variable => {
             if (inst.words.len < 4) return;
