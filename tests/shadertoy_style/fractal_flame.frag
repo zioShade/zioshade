@@ -1,3 +1,8 @@
+// Original work, written for glslpp. Shadertoy-STYLE only: it mimics the
+// iTime/iResolution uniform shape but is not derived from any shadertoy.com
+// shader. Real Shadertoy content (CC BY-NC-SA 3.0) is never committed to this
+// repository; fetch_shadertoy.py downloads into the gitignored
+// shadertoy_test_cache/ directory.
 #version 430 core
 layout(location = 0) out vec4 fragColor;
 uniform vec2 iResolution;
