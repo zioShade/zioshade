@@ -1051,3 +1051,90 @@ test "applyBindingShift: negative shift" {
 test "applyBindingShift: positive shift" {
     try std.testing.expectEqual(@as(u32, 7), applyBindingShift(2, 5));
 }
+
+// ---------------------------------------------------------------------------
+// #413: loop-carried phi declaration hoisting (HLSL/GLSL/MSL text backends)
+// ---------------------------------------------------------------------------
+//
+// The rotated-loop emission (#237) runs the phi carry copies at the TOP of
+// the `while (true)` body, guarded by a first-iteration flag, so a `continue`
+// still advances the carried values. When a phi's UPDATE value is defined
+// inside the loop (body, condition block, or a Pattern-B header replayed
+// inside the loop), that copy reads the update temp before its declaration
+// and outside its scope — dxc/glslang/Metal reject the output with an
+// undeclared-identifier error (#413). The fix is a declare-then-assign split:
+// the update temp's declaration is hoisted just above the loop header and its
+// defining instruction emits a plain assignment.
+
+/// A phi update temp whose declaration is hoisted above its loop.
+pub const HoistedPhiSrc = struct { id: u32, type_id: u32 };
+
+/// Whether the update value `update_id` of a loop-header phi of the loop
+/// whose OpLoopMerge sits at `loop_idx` needs its declaration hoisted above
+/// the loop: true when the defining instruction is emitted INSIDE the loop.
+/// Continue-block instructions are excluded — they are emitted inside the
+/// top-of-loop guard BEFORE the carry copies, so they are already declared
+/// (and in scope) when read.
+pub fn loopPhiUpdateNeedsHoist(
+    instructions: anytype,
+    id_defs: anytype,
+    label_map: *const std.AutoHashMap(u32, usize),
+    deferred_hdr: *const std.AutoHashMap(usize, void),
+    loop_idx: usize,
+    update_id: u32,
+) bool {
+    if (loop_idx >= instructions.len) return false;
+    const minst = instructions[loop_idx];
+    if (minst.words.len < 3) return false;
+    const def_idx = if (update_id < id_defs.len) (id_defs[update_id] orelse return false) else return false;
+    // Pattern-B loop headers are skipped at their original position and
+    // replayed inside their loop — an update defined there is body-scoped too.
+    if (deferred_hdr.contains(def_idx)) return true;
+    if (def_idx <= loop_idx) return false;
+    if (label_map.get(minst.words[2])) |cs| {
+        var ce = cs + 1;
+        while (ce < instructions.len) : (ce += 1) {
+            const t = instructions[ce];
+            if (t.op == .Label or t.op == .FunctionEnd or t.op == .Branch or t.op == .BranchConditional) break;
+        }
+        if (def_idx > cs and def_idx < ce) return false;
+    }
+    return true;
+}
+
+/// Re-print a rendered `<indent><type> <name> = <expr>;` declaration with the
+/// leading type stripped (the declaration was hoisted above the loop). Lines
+/// before the declaration line pass through unchanged; if the pattern is not
+/// found the buffer passes through verbatim (fail-safe: worst case is the
+/// pre-hoist output, never corrupted text).
+pub fn writeHoistedAssign(w: anytype, rendered: []const u8, name: []const u8) !void {
+    if (name.len > 0 and name.len <= 56) {
+        var nbuf: [64]u8 = undefined;
+        const needle = std.fmt.bufPrint(&nbuf, " {s} = ", .{name}) catch {
+            try w.writeAll(rendered);
+            return;
+        };
+        if (std.mem.indexOf(u8, rendered, needle)) |pos| {
+            const line_start = if (std.mem.lastIndexOfScalar(u8, rendered[0..pos], '\n')) |nl| nl + 1 else 0;
+            try w.writeAll(rendered[0..line_start]);
+            try w.writeAll("    ");
+            try w.writeAll(rendered[pos + 1 ..]);
+            return;
+        }
+    }
+    try w.writeAll(rendered);
+}
+
+test "writeHoistedAssign strips the type from a declaration line" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try writeHoistedAssign(buf.writer(std.testing.allocator), "    float v106 = v98 + v103;\n", "v106");
+    try std.testing.expectEqualStrings("    v106 = v98 + v103;\n", buf.items);
+}
+
+test "writeHoistedAssign passes unknown shapes through verbatim" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    try writeHoistedAssign(buf.writer(std.testing.allocator), "    foo(v106);\n", "v106");
+    try std.testing.expectEqualStrings("    foo(v106);\n", buf.items);
+}
