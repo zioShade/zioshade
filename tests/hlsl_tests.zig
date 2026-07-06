@@ -14831,3 +14831,137 @@ test "hlsl: read-only param shadowed by a mutated inner local is not promoted (#
     try assertContains(hlsl, "float f(float ");
     try assertNotContains(hlsl, "f(out ");
 }
+
+
+// ---------------------------------------------------------------------------
+// #413: loop-carried phi read before declaration
+// ---------------------------------------------------------------------------
+
+/// #413: assert no SSA temp (`v<digits>`) is referenced textually before the
+/// statement that declares it. The rotated-loop emission (#237) copies phi
+/// carries at the loop TOP (`v98 = v106;`) while the temp carrying the value
+/// was declared later in the body (`float v106 = v98 + v103;`) — the dxc/glslang
+/// compiler rejects the output with an undeclared-identifier error. A
+/// declaration site is an occurrence whose previous token is another
+/// identifier (its type); statement keywords are excluded so `return v5;`
+/// counts as a use.
+fn assertNoUseBeforeDecl(src: []const u8) !void {
+    const keywords = [_][]const u8{ "return", "else", "if", "while", "for", "do", "case", "in", "out", "inout", "const", "break", "continue", "discard" };
+    var seen = std.StringHashMap(void).init(alloc);
+    defer {
+        var it = seen.keyIterator();
+        while (it.next()) |k| alloc.free(k.*);
+        seen.deinit();
+    }
+    var i: usize = 0;
+    while (i < src.len) {
+        if (!(std.ascii.isAlphanumeric(src[i]) or src[i] == '_')) {
+            i += 1;
+            continue;
+        }
+        var j = i;
+        while (j < src.len and (std.ascii.isAlphanumeric(src[j]) or src[j] == '_')) j += 1;
+        const tok = src[i..j];
+        const start = i;
+        i = j;
+        // Only SSA temps: v<digits>
+        if (tok.len < 2 or tok[0] != 'v') continue;
+        var all_digits = true;
+        for (tok[1..]) |ch| {
+            if (!std.ascii.isDigit(ch)) {
+                all_digits = false;
+                break;
+            }
+        }
+        if (!all_digits) continue;
+        // Declaration = previous token (skipping spaces) is a type-like identifier.
+        var k = start;
+        while (k > 0 and (src[k - 1] == ' ' or src[k - 1] == '\t')) k -= 1;
+        var is_decl = false;
+        if (k > 0 and (std.ascii.isAlphanumeric(src[k - 1]) or src[k - 1] == '_')) {
+            var t0 = k;
+            while (t0 > 0 and (std.ascii.isAlphanumeric(src[t0 - 1]) or src[t0 - 1] == '_')) t0 -= 1;
+            const prev = src[t0..k];
+            is_decl = true;
+            for (keywords) |kw| {
+                if (std.mem.eql(u8, prev, kw)) {
+                    is_decl = false;
+                    break;
+                }
+            }
+        }
+        if (is_decl and seen.contains(tok)) {
+            std.debug.print("#413: `{s}` is referenced before its declaration in output:\n{s}\n", .{ tok, src });
+            return error.UseBeforeDeclaration;
+        }
+        if (!seen.contains(tok)) {
+            const dup = try alloc.dupe(u8, tok);
+            try seen.put(dup, {});
+        }
+    }
+}
+
+// #413: a function whose loop updates its carried locals at the END of the
+// body (the classic fbm / raymarch accumulator shape) has those locals
+// promoted to loop phis whose update value is DEFINED IN THE BODY. The
+// top-of-loop carry copy then read the update temp before its declaration.
+test "hlsl: loop-carried phi update defined in the body is declared before the loop top reads it (#413)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 res; float time; } ub;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float fbm(vec2 p) {
+        \\    float v = 0.0;
+        \\    float a = 0.5;
+        \\    for (int i = 0; i < 5; i++) {
+        \\        v += a * fract(sin(dot(floor(p), vec2(12.9898, 78.233))) * 43758.5453);
+        \\        p = p * 2.03 + vec2(1.7, 9.2);
+        \\        a *= 0.5;
+        \\    }
+        \\    return v;
+        \\}
+        \\void main() {
+        \\    fragColor = vec4(fbm(gl_FragCoord.xy / ub.res.xy));
+        \\}
+    ;
+    const out = try compileToHlsl(source);
+    defer alloc.free(out);
+    try assertContains(out, "while (true)");
+    try assertNoUseBeforeDecl(out);
+}
+
+// #413 raymarcher shape from the issue: inlined mainImage with a marching
+// loop (conditional breaks + trailing `t += d`) calling a map() that itself
+// loops. Guards the whole-program shape, not just the minimal trigger.
+test "hlsl: raymarcher with inlined-function loops has no use-before-declaration (#413)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 res; float time; } ub;
+        \\layout(location = 0) out vec4 _fragColor;
+        \\float map(vec3 p) {
+        \\    float d = length(p) - 1.0;
+        \\    for (int i = 0; i < 3; i++) {
+        \\        d = min(d, length(p - vec3(float(i))) - 0.5);
+        \\    }
+        \\    return d;
+        \\}
+        \\void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+        \\    vec3 ro = vec3(0.0, 0.0, -3.0);
+        \\    vec3 rd = normalize(vec3(fragCoord / ub.res.xy - 0.5, 1.0));
+        \\    float t = 0.0;
+        \\    int hit = 0;
+        \\    for (int i = 0; i < 64; i++) {
+        \\        float d = map(ro + rd * t);
+        \\        if (d < 0.001) { hit = 1; break; }
+        \\        if (t > 20.0) break;
+        \\        t += d;
+        \\    }
+        \\    fragColor = vec4(vec3(1.0 - t * 0.05), 1.0) + float(hit);
+        \\}
+        \\void main() { mainImage(_fragColor, gl_FragCoord.xy); }
+    ;
+    const out = try compileToHlsl(source);
+    defer alloc.free(out);
+    try assertContains(out, "while (true)");
+    try assertNoUseBeforeDecl(out);
+}
