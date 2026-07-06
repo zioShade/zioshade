@@ -96,6 +96,12 @@ void main() { mainImage (_fragColor, gl_FragCoord.xy); }
 
 GLSLPP_RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.zig-cache', 'bin', 'conformance-runner.exe')
 SPIRV_VAL = 'C:/VulkanSDK/1.4.341.1/Bin/spirv-val.exe'
+# LICENSE WARNING: shaders downloaded from shadertoy.com default to
+# CC BY-NC-SA 3.0 (non-commercial), and the Shadertoy API terms restrict
+# redistribution. Fetched files land in shadertoy_test_cache/, which is
+# gitignored, and must NEVER be committed to this MIT/Apache-2.0 repository.
+# Committed shadertoy-style fixtures live in tests/shadertoy_style/ and are
+# original works.
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'shadertoy_test_cache')
 
 
